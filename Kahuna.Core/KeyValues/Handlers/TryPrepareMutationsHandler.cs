@@ -9,6 +9,7 @@ using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Nixie;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
@@ -189,31 +190,46 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         KeyValueRequestType proposalType = proposal.State == KeyValueState.Deleted
             ? KeyValueRequestType.TryDelete
             : KeyValueRequestType.TrySet;
-        (bool success, HLCTimestamp proposalTicket) = await PrepareKeyValueMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey, message.EmbeddedDecision);
-        if (!success)
+
+        // Persistent prepare. When not joined to a Raft cluster (embedded single-node) the proposal is an
+        // immediate success. Otherwise build the committed message once and dispatch the ReplicateLogs
+        // round trip to the off-mailbox worker so this actor is free while it runs; the completion resolves
+        // Prepared(ticket) on success or Errored on replication failure. When no worker is wired (bare test
+        // contexts) replicate inline. The write intent set above pins the entry across the window.
+        if (!context.Raft.Joined)
+            return new(KeyValueResponseType.Prepared, HLCTimestamp.Zero);
+
+        byte[] serialized = BuildPreparedMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey, message.EmbeddedDecision);
+        int partitionId = ResolvePartition(message.Key);
+
+        if (context.PhaseTwoRouter is null)
         {
-            context.Logger.LogWarning("Failed to propose logs for {TransactionId}", message.TransactionId);
-            
-            return KeyValueStaticResponses.ErroredResponse;
+            (bool success, HLCTimestamp proposalTicket) = await ReplicatePreparedInline(partitionId, serialized, message.Key);
+            return success
+                ? new(KeyValueResponseType.Prepared, proposalTicket)
+                : KeyValueStaticResponses.ErroredResponse;
         }
 
-        return new(KeyValueResponseType.Prepared, proposalTicket);
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForPrepare(message.TransactionId, message.Key, message.Durability);
+
+        context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForPrepare(
+            phaseTwoId, partitionId, serialized, actorContext.Self, actorContext.Reply.Value.Promise));
+
+        actorContext.ByPassReply = true;
+
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
-    
+
     /// <summary>
-    /// Proposes a key value message to the partition
+    /// Builds and serializes the committed key/value message for a prepared mutation.
     /// </summary>
-    /// <param name="type"></param>
-    /// <param name="proposal"></param>
-    /// <param name="currentTime"></param>
-    /// <returns></returns>
-    private async Task<(bool, HLCTimestamp)> PrepareKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+    private static byte[] BuildPreparedMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
     {
-        if (!context.Raft.Joined)
-            return (true, HLCTimestamp.Zero);
-
-        int partitionId = ResolvePartition(proposal.Key);
-
         KeyValueMessage kvm = new()
         {
             Type = (int)type,
@@ -251,22 +267,31 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 
+        return ReplicationSerializer.Serialize(kvm);
+    }
+
+    /// <summary>
+    /// Replicates a prepared message inline (used only when no off-mailbox worker is wired). Returns
+    /// success and the proposal ticket, or failure on a replication error.
+    /// </summary>
+    private async Task<(bool, HLCTimestamp)> ReplicatePreparedInline(int partitionId, byte[] serialized, string key)
+    {
         RaftReplicationResult result = await context.Raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.KeyValues,
-            ReplicationSerializer.Serialize(kvm),
+            serialized,
             autoCommit: false
         );
 
         if (!result.Success)
         {
-            context.Logger.LogWarning("Failed to propose key/value {Key} Partition={Partition} Status={Status}", proposal.Key, partitionId, result.Status);
-            
+            context.Logger.LogWarning("Failed to propose key/value {Key} Partition={Partition} Status={Status}", key, partitionId, result.Status);
+
             return (false, HLCTimestamp.Zero);
         }
-        
-        context.Logger.LogSuccessfullyProposedKeyValue(proposal.Key, partitionId, result.LogIndex);
 
-        return (result.Success, result.TicketId);
+        context.Logger.LogSuccessfullyProposedKeyValue(key, partitionId, result.LogIndex);
+
+        return (true, result.TicketId);
     }
 }

@@ -1282,6 +1282,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>Partition-scoped durable coordinator decision records. Diagnostic/test access.</summary>
     internal CoordinatorDecisionStore CoordinatorDecisionStore => keyValues.CoordinatorDecisionStore;
 
+    /// <summary>The first phase-two worker instance, for test injection of
+    /// <see cref="Server.KeyValues.KeyValuePhaseTwoActor.BeforeRaftCallHook"/>.</summary>
+    internal Server.KeyValues.KeyValuePhaseTwoActor? FirstPhaseTwoWorker => keyValues.FirstPhaseTwoWorker;
+
     /// <summary>
     /// Runs one per-partition-leader recovery sweep over outstanding decision records (normally driven by the
     /// periodic recovery actor and data-partition leadership acquisition). Exposed for deterministic testing.

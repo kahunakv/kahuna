@@ -6,7 +6,6 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Utils;
 using Kommander;
-using Kommander.Data;
 using Kommander.Time;
 using Nixie;
 
@@ -106,86 +105,38 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            RemoveMvccEntry(entry, message.TransactionId);
-            TrimExpiredMvccEntries(entry, currentTime);
-            entry.WriteIntent = null;
-
-            context.RecordRolledBack(message.TransactionId);
+            ApplyConfirmedRollback(entry, message.TransactionId, currentTime);
             return new(KeyValueResponseType.RolledBack);
         }
 
-        (bool success, long rollbackIndex, RaftOperationStatus raftStatus) = await RollbackKeyValueMessage(message.Key, message.ProposalTicketId);
+        // Persistent rollback. When not joined to a Raft cluster (embedded single-node), or when no
+        // phase-two worker is wired (bare test contexts), the rollback is an immediate success — apply
+        // inline. Otherwise dispatch the RollbackLogs Raft round trip to the off-mailbox worker so this
+        // actor is free while it runs; the completion applies the confirmed rollback back on the mailbox.
+        int partitionId = context.Raft.Joined ? ResolvePartition(message.Key) : -1;
 
-        // Transient Raft failure (e.g. NodeIsNotLeader): preserve MVCC + write intent so the
-        // coordinator can retry the rollback against the newly elected leader.
-        if (!success && IsTransientRaftStatus(raftStatus))
-            return KeyValueStaticResponses.MustRetryResponse;
-
-        // Post-await: write intent may have been cleared by a concurrent idempotent rollback.
-        if (entry.WriteIntent is null)
+        if (!context.Raft.Joined || context.PhaseTwoRouter is null)
         {
-            return success
-                ? new(KeyValueResponseType.RolledBack, rollbackIndex)
-                : KeyValueStaticResponses.ErroredResponse;
+            ApplyConfirmedRollback(entry, message.TransactionId, currentTime);
+            return new(KeyValueResponseType.RolledBack, 0);
         }
 
-        // Permanent Raft failure: preserve state so the coordinator can retry later. Propagate error.
-        if (!success)
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+        if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        // Confirmed terminal rollback: clear MVCC + write intent.
-        RemoveMvccEntry(entry, message.TransactionId);
-        TrimExpiredMvccEntries(entry, currentTime);
-        entry.WriteIntent = null;
+        // Park the after-Raft context on the actor, keyed by a monotonic id the completion carries back.
+        // The entry stays pinned by its live write intent across the window, so it cannot be evicted.
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForRollback(
+            message.TransactionId, message.Key, message.Durability, currentTime,
+            message.ProposalTicketId, partitionId);
 
-        context.RecordRolledBack(message.TransactionId);
-        return new(KeyValueResponseType.RolledBack, rollbackIndex);
-    }
+        context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForRollback(
+            phaseTwoId, partitionId, message.ProposalTicketId, actorContext.Self, actorContext.Reply.Value.Promise));
 
-    /// <summary>
-    /// Returns true when the Raft status represents a transient condition that warrants preserving
-    /// participant state and returning MustRetry.
-    /// </summary>
-    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
-        RaftOperationStatus.NodeIsNotLeader or
-        RaftOperationStatus.ProposalQueueFull or
-        RaftOperationStatus.RestoreInProgress or
-        RaftOperationStatus.ProposalTimeout or
-        RaftOperationStatus.ReplicationFailed or
-        RaftOperationStatus.OperationCancelled;
+        actorContext.ByPassReply = true;
 
-    /// <summary>
-    /// Rollbacks a previously proposed key value message
-    /// </summary>
-    private async Task<(bool, long, RaftOperationStatus)> RollbackKeyValueMessage(string key, HLCTimestamp proposalTicketId)
-    {
-        if (!context.Raft.Joined)
-            return (true, 0, RaftOperationStatus.Success);
-
-        int partitionId = ResolvePartition(key);
-
-        // Bound the phase-two Raft wait so a stuck partition cannot park this actor indefinitely.
-        // On the deadline the rollback returns the retryable OperationCancelled (classified transient
-        // below), and the coordinator re-drives the same ticket — idempotent once it rolls back.
-        // A non-positive timeout disables the bound.
-        int timeoutMs = context.Configuration.Phase2CommitTimeout;
-        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
-
-        (bool success, RaftOperationStatus status, long logIndex) = await context.Raft.RollbackLogs(
-            partitionId,
-            proposalTicketId,
-            cts?.Token ?? CancellationToken.None
-        );
-
-        if (!success)
-        {
-            context.Logger.LogWarning("Failed to rollback key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
-
-            return (false, 0, status);
-        }
-
-        context.Logger.LogSuccessfullyRolledBackKeyValue(key, partitionId, logIndex);
-
-        return (success, logIndex, status);
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
 }

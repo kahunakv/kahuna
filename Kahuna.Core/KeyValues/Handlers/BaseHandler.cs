@@ -389,4 +389,89 @@ internal abstract class BaseHandler
         foreach (HLCTimestamp txId in stale)
             RemoveMvccEntry(entry, txId);
     }
+
+    /// <summary>
+    /// Applies a confirmed persistent commit to a resident entry: clears the transaction's MVCC snapshot
+    /// and write intent, archives the superseded revision, advances the entry to the proposal, enqueues
+    /// the durable write, records the completion receipt, and — for the anchor key of a Durable
+    /// transaction — installs the initial coordinator decision atomically. Shared by the inline commit
+    /// path and the off-mailbox completion so both apply identically. The caller is responsible for the
+    /// idempotency guards (write intent present and owned by <paramref name="txId"/>) before calling.
+    /// </summary>
+    protected void ApplyConfirmedCommit(
+        KeyValueEntry entry,
+        KeyValueProposal proposal,
+        HLCTimestamp txId,
+        HLCTimestamp currentTime,
+        int partitionId,
+        string? recordAnchorKey,
+        Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+    {
+        RemoveMvccEntry(entry, txId);
+        TrimExpiredMvccEntries(entry, currentTime);
+        entry.WriteIntent = null;
+
+        if (entry.Revisions is not null)
+            RemoveExpiredRevisions(entry, proposal.Revision);
+
+        if (!proposal.NoRevision)
+        {
+            bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
+            entry.Revisions ??= new();
+            // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
+            // key. Dictionary.Add throws on a duplicate key; overwriting is safe (same revision, same value).
+            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
+            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+        }
+
+        int previousValueLength = entry.Value?.Length ?? 0;
+
+        entry.Value = proposal.Value;
+        entry.Expires = proposal.Expires;
+        entry.Revision = proposal.Revision;
+        context.TouchEntry(entry, proposal.LastUsed);
+        entry.LastModified = proposal.LastModified;
+        entry.State = proposal.State;
+
+        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
+        context.EnqueueExpiry(proposal.Key, proposal.Expires);
+        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            context.EnqueueTombstone(proposal.Key);
+
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
+            partitionId,
+            proposal.Key,
+            proposal.Value,
+            proposal.Revision,
+            proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
+            (int)proposal.State,
+            proposal.NoRevision
+        ));
+
+        context.RecordCommitted(txId);
+        context.CompletionReceiptStore.Record(txId, proposal.Key, recordAnchorKey, KeyValueDurability.Persistent);
+
+        // Atomic with the anchor value + receipt: install the initial CommitDecided record so no node
+        // exposes the committed anchor value without the decision that authorizes the rest of the tx.
+        if (embeddedDecision is not null)
+            context.CoordinatorDecisionStore?.InstallFromAnchorCommit(embeddedDecision);
+    }
+
+    /// <summary>
+    /// Applies a confirmed rollback to a resident entry: clears the transaction's MVCC snapshot and write
+    /// intent and records the rolled-back decision. Shared by the inline rollback path and the off-mailbox
+    /// completion. The caller is responsible for the idempotency guards (write intent present and owned by
+    /// <paramref name="txId"/>) before calling.
+    /// </summary>
+    protected void ApplyConfirmedRollback(KeyValueEntry entry, HLCTimestamp txId, HLCTimestamp currentTime)
+    {
+        RemoveMvccEntry(entry, txId);
+        TrimExpiredMvccEntries(entry, currentTime);
+        entry.WriteIntent = null;
+
+        context.RecordRolledBack(txId);
+    }
 }

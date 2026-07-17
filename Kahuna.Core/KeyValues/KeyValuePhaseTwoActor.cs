@@ -24,6 +24,14 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// Test seam: null in production. When set, the worker awaits it immediately before running the
+    /// phase-two Raft call, letting a test hold the op "in flight" deterministically so a
+    /// mailbox-not-parked assertion is not timing-dependent. Mirrors
+    /// <see cref="Persistence.BackgroundWriterActor.BeforePruneSampleHook"/>.
+    /// </summary>
+    internal Func<Task>? BeforeRaftCallHook;
+
     public KeyValuePhaseTwoActor(
         IActorContext<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> context,
         IRaft raft,
@@ -45,6 +53,10 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
             SendCompletion(message, success: true, RaftOperationStatus.Success, commitIndex: 0, HLCTimestamp.Zero);
             return;
         }
+
+        // Test seam (null in production): hold the op in flight before the Raft call.
+        if (BeforeRaftCallHook is { } gate)
+            await gate();
 
         // Bound the Raft wait so a stuck partition (no leader, quorum loss, WAL stall) cannot park
         // the worker indefinitely. On the deadline the call surfaces OperationCancelled, classified

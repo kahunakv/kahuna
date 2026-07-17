@@ -128,8 +128,6 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             message.Durability
         );
 
-        int previousValueLength = 0;
-
         if (message.Durability != KeyValueDurability.Persistent)
         {
             if (entry.Revisions is not null)
@@ -145,7 +143,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
                 context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
             }
 
-            previousValueLength = entry.Value?.Length ?? 0;
+            int previousValueLength = entry.Value?.Length ?? 0;
 
             entry.Value = proposal.Value;
             entry.Expires = proposal.Expires;
@@ -167,133 +165,35 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             return new(KeyValueResponseType.Committed, 0);
         }
 
-        (bool success, int partitionId, long commitIndex, RaftOperationStatus raftStatus) = await CommitKeyValueMessage(message.Key, message.ProposalTicketId);
+        // Persistent commit. When not joined to a Raft cluster (embedded single-node), or when no
+        // phase-two worker is wired (bare test contexts), the commit is an immediate success — apply
+        // inline. Otherwise dispatch the CommitLogs Raft round trip to the off-mailbox worker so this
+        // actor is free while it runs; the completion applies the confirmed commit back on the mailbox.
+        int partitionId = context.Raft.Joined ? ResolvePartition(message.Key) : -1;
 
-        // Transient Raft failure (e.g. NodeIsNotLeader, ProposalQueueFull): preserve MVCC + write intent
-        // so the coordinator can retry the commit against the newly elected leader.
-        if (!success && IsTransientRaftStatus(raftStatus))
-            return KeyValueStaticResponses.MustRetryResponse;
-
-        // Post-await: write intent may have been cleared by an idempotent re-commit that completed
-        // while this handler was suspended at the Raft call. Return Committed for idempotency;
-        // return Errored if success is false (unexpected — Raft returned success=false but no transient).
-        if (entry.WriteIntent is null)
+        if (!context.Raft.Joined || context.PhaseTwoRouter is null)
         {
-            return success
-                ? new(KeyValueResponseType.Committed, commitIndex)
-                : KeyValueStaticResponses.ErroredResponse;
+            ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, partitionId, recordAnchorKey, embeddedDecision);
+
+            return new(KeyValueResponseType.Committed, 0);
         }
 
-        // Permanent Raft failure: MVCC + write intent are preserved so the coordinator can issue a
-        // rollback to clean up. Propagate the error to abort the transaction.
-        if (!success)
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+        if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        // Confirmed terminal commit: clear MVCC + write intent, then advance the entry.
-        RemoveMvccEntry(entry, message.TransactionId);
-        TrimExpiredMvccEntries(entry, currentTime);
-        entry.WriteIntent = null;
+        // Park the after-Raft context on the actor, keyed by a monotonic id the completion carries back.
+        // The entry stays pinned by its live write intent across the window, so it cannot be evicted.
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForCommit(
+            message.TransactionId, message.Key, message.Durability, proposal, currentTime,
+            message.ProposalTicketId, partitionId, recordAnchorKey, embeddedDecision);
 
-        if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);
+        context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForCommit(
+            phaseTwoId, partitionId, message.ProposalTicketId, actorContext.Self, actorContext.Reply.Value.Promise));
 
-        if (!proposal.NoRevision)
-        {
-            bool revisionsCreatedPersistent = entry.Revisions is null || entry.Revisions.Count == 0;
-            entry.Revisions ??= new();
-            // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
-            // key. Dictionary.Add throws on a duplicate key, and that exception used to abort the index
-            // entry's commit while the row commit had already succeeded — leaving the row persisted but
-            // its unique-index entry stuck in the Deleted state (orphaned row → broken PK lookups and
-            // duplicate inserts). Overwriting is safe: the same revision carries the same value.
-            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedPersistent, entry.Value));
-        }
+        actorContext.ByPassReply = true;
 
-        previousValueLength = entry.Value?.Length ?? 0;
-
-        entry.Value = proposal.Value;
-        entry.Expires = proposal.Expires;
-        entry.Revision = proposal.Revision;
-        context.TouchEntry(entry, proposal.LastUsed);
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
-
-        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        context.EnqueueExpiry(proposal.Key, proposal.Expires);
-        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
-            context.EnqueueTombstone(proposal.Key);
-
-        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-            BackgroundWriteType.QueueStoreKeyValue,
-            partitionId,
-            proposal.Key,
-            proposal.Value,
-            proposal.Revision,
-            proposal.Expires,
-            proposal.LastUsed,
-            proposal.LastModified,
-            (int)proposal.State,
-            proposal.NoRevision
-        ));
-
-        context.RecordCommitted(message.TransactionId);
-        context.CompletionReceiptStore.Record(message.TransactionId, message.Key, recordAnchorKey, KeyValueDurability.Persistent);
-
-        // Atomic with the anchor value + receipt above: install the initial CommitDecided record so no
-        // node ever exposes the committed anchor value without the decision record that authorizes the
-        // rest of the transaction. Followers and restore install the equivalent copy from the envelope.
-        if (embeddedDecision is not null)
-            context.CoordinatorDecisionStore?.InstallFromAnchorCommit(embeddedDecision);
-
-        return new(KeyValueResponseType.Committed, commitIndex);
-    }
-
-    /// <summary>
-    /// Returns true when the Raft status represents a transient condition that warrants preserving
-    /// participant state and returning MustRetry so the coordinator can drive the same decision
-    /// against the newly elected leader.
-    /// </summary>
-    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
-        RaftOperationStatus.NodeIsNotLeader or
-        RaftOperationStatus.ProposalQueueFull or
-        RaftOperationStatus.RestoreInProgress or
-        RaftOperationStatus.ProposalTimeout or
-        RaftOperationStatus.ReplicationFailed or
-        RaftOperationStatus.OperationCancelled;
-
-    /// <summary>
-    /// Commits a previously proposed key value message
-    /// </summary>
-    private async Task<(bool, int, long, RaftOperationStatus)> CommitKeyValueMessage(string key, HLCTimestamp proposalTicketId)
-    {
-        if (!context.Raft.Joined)
-            return (true, -1, 0, RaftOperationStatus.Success);
-
-        int partitionId = ResolvePartition(key);
-
-        // Bound the phase-two Raft wait so a stuck partition (no leader, quorum loss, WAL stall)
-        // cannot park this actor indefinitely. On the deadline the commit returns the retryable
-        // OperationCancelled (classified transient below), and the coordinator re-drives the same
-        // ticket — an idempotent no-op once it commits. A non-positive timeout disables the bound.
-        int timeoutMs = context.Configuration.Phase2CommitTimeout;
-        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
-
-        (bool success, RaftOperationStatus status, long commitLogId) = await context.Raft.CommitLogs(
-            partitionId,
-            proposalTicketId,
-            cts?.Token ?? CancellationToken.None
-        );
-
-        if (!success)
-        {
-            context.Logger.LogWarning("Failed to commit key/value {Key} Partition={Partition} Status={Status}", key, partitionId, status);
-
-            return (false, -1, 0, status);
-        }
-
-        context.Logger.LogSuccessfullyCommittedKeyValue(key, partitionId, commitLogId);
-
-        return (success, partitionId, commitLogId, status);
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
 }

@@ -90,6 +90,19 @@ internal sealed class KeyValueContext
     public Dictionary<int, KeyValueProposal> Proposals { get; }
 
     /// <summary>
+    /// In-flight two-phase-commit dispatches whose Raft round trip is running off the mailbox, keyed by
+    /// a monotonic <c>phaseTwoId</c>. The completion handler removes an entry on the first completion
+    /// for its id; a duplicate completion then finds nothing and no-ops. Mutated only on the actor
+    /// thread — no synchronisation required.
+    /// </summary>
+    internal Dictionary<int, PendingPhaseTwo> PendingPhaseTwos { get; } = new();
+
+    private int phaseTwoIdCounter;
+
+    /// <summary>Allocates the next monotonic <c>phaseTwoId</c> for a phase-two dispatch. Actor-thread only.</summary>
+    internal int NextPhaseTwoId() => ++phaseTwoIdCounter;
+
+    /// <summary>
     /// Per-actor map of in-flight backend reads. The key is <c>(key, revision, isExists)</c>,
     /// where negative revisions are sentinels distinguishing the read shape:
     /// <list type="bullet">

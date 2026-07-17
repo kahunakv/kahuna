@@ -60,6 +60,8 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest> phaseTwoRouter;
 
+    private readonly List<IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>> phaseTwoWorkers = [];
+
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
     
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
@@ -738,18 +740,24 @@ internal sealed class KeyValuesManager : IDisposable
         KahunaConfiguration configuration
     )
     {
-        List<IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>> phaseTwoInstances = new(configuration.KeyValueWorkers);
-
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
-            phaseTwoInstances.Add(actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>(
+            phaseTwoWorkers.Add(actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>(
                 "phasetwo-keyvalue-" + i,
                 raft,
                 configuration,
                 logger
             ));
 
-        return actorSystem.Spawn<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>(null, phaseTwoInstances);
+        return actorSystem.Spawn<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>(null, phaseTwoWorkers);
     }
+
+    /// <summary>
+    /// The first phase-two worker instance, for test injection (e.g. setting
+    /// <see cref="KeyValuePhaseTwoActor.BeforeRaftCallHook"/>). With <c>KeyValueWorkers = 1</c> it is the
+    /// only worker, so a gated commit is deterministic. Null before the router is built.
+    /// </summary>
+    internal KeyValuePhaseTwoActor? FirstPhaseTwoWorker =>
+        phaseTwoWorkers.Count > 0 ? phaseTwoWorkers[0].Runner.Actor as KeyValuePhaseTwoActor : null;
 
     /// <summary>
     /// Creates the ephemeral key/values router
