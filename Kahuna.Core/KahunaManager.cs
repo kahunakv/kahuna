@@ -1192,11 +1192,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>
     /// Attempts to execute a transaction script with the provided parameters and returns the result.
     /// </summary>
-    /// <param name="script">The transaction script to execute, represented as a byte array.</param>
+    /// <param name="script">The transaction script to execute, as read-only memory over the script bytes.</param>
     /// <param name="hash">An optional hash representing the script for validation or identification purposes.</param>
     /// <param name="parameters">An optional list of parameters to be passed into the script during execution.</param>
     /// <returns>A task that represents the asynchronous operation and resolves to the result of the transaction execution.</returns>
-    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters)
+    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
     {
         return keyValues.TryExecuteTx(script, hash, parameters);
     }

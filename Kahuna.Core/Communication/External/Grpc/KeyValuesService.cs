@@ -1367,17 +1367,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        
-        byte[] script;
-        
-        if (MemoryMarshal.TryGetArray(request.Script.Memory, out ArraySegment<byte> segment))
-            script = segment.Array ?? request.Script.ToByteArray();
-        else
-            script = request.Script.ToByteArray();
-            
+
+        // Forward the protobuf payload memory directly; it carries offset and length and is
+        // parsed synchronously downstream, so no owned copy is materialized here.
         KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(
-            script, 
-            request.Hash, 
+            request.Script.Memory,
+            request.Hash,
             GetParameters(request.Parameters)
         );
 

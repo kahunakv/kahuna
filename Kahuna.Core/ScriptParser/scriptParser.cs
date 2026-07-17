@@ -10,7 +10,6 @@ using System.Collections.Concurrent;
 using System.Text;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
-using Microsoft.IO;
 
 namespace Kahuna.Server.ScriptParser;
 
@@ -20,8 +19,6 @@ namespace Kahuna.Server.ScriptParser;
 /// </summary>
 internal sealed partial class scriptParser
 {
-    private static readonly RecyclableMemoryStreamManager manager = new();
-
     private readonly KahunaConfiguration configuration;
 
     private readonly ILogger<IKahuna> logger;
@@ -57,9 +54,11 @@ internal sealed partial class scriptParser
             return cached.Ast;
         }
         
-        using RecyclableMemoryStream stream = manager.GetStream(inputBuffer); 
-        
-        scriptScanner scanner = new(stream);
+        // Decode the UTF-8 script into a string and scan it directly. Every caller supplies
+        // UTF-8 (SDK, protobuf payload, REST body), so a fixed decode is correct and avoids the
+        // stream + StreamReader + StringBuilder buffering the stream-based scanner would use.
+        scriptScanner scanner = new();
+        scanner.SetSource(Encoding.UTF8.GetString(inputBuffer), 0);
 
         Scanner = scanner;
         

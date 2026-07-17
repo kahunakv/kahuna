@@ -50,11 +50,13 @@ internal sealed class ScriptTransactionExecutor
     /// <summary>
     /// Executes a single or multi-command transaction in an atomic manner.
     /// </summary>
-    public async Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
+    public async Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
     {
         try
         {
-            NodeAst ast = scriptParserProcessor.Parse(script, hash);
+            // Parse synchronously before the first await; the AST owns everything needed
+            // afterwards, so the script memory does not have to survive later command awaits.
+            NodeAst ast = scriptParserProcessor.Parse(script.Span, hash);
 
             switch (ast.nodeType)
             {

@@ -5061,7 +5061,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="hash"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    public Task<KeyValueTransactionResult> TryExecuteTx(byte[] script, string? hash, List<KeyValueParameter>? parameters)
+    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
     {
         return scriptExecutor.TryExecuteTx(script, hash, parameters);
     }
