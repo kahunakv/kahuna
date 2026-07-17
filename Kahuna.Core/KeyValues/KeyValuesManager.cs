@@ -1167,7 +1167,11 @@ internal sealed class KeyValuesManager : IDisposable
                     // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
                     // recorded these keys, so the HashSet fold is idempotent.
                     AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                    CachedType = KeyValueResponseType.Set
+                    // A batch that confirmed at least one write completes terminally so its effect folds. A
+                    // batch that confirmed nothing must NOT be cached as a terminal success — that would let a
+                    // same-id retry replay the false success forever instead of re-registering. Mark it
+                    // transient so the completion cancels the registration and a same-id retry re-executes.
+                    CachedType = modifiedKeys.Count > 0 ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry
                 }))
             return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
 
@@ -1271,9 +1275,11 @@ internal sealed class KeyValuesManager : IDisposable
                     // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
                     // recorded these keys, so the HashSet fold is idempotent.
                     AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                    // A definitive (non-MustRetry) terminal type just lets the registration complete and the
-                    // effects fold.
-                    CachedType = KeyValueResponseType.Deleted
+                    // A batch that confirmed at least one delete completes terminally so its effect folds. A
+                    // batch that confirmed nothing must NOT be cached as a terminal success — that would let a
+                    // same-id retry replay the false success forever instead of re-registering. Mark it
+                    // transient so the completion cancels the registration and a same-id retry re-executes.
+                    CachedType = modifiedKeys.Count > 0 ? KeyValueResponseType.Deleted : KeyValueResponseType.MustRetry
                 }))
             return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
 
@@ -1943,7 +1949,11 @@ internal sealed class KeyValuesManager : IDisposable
                 new OperationCompletionPayload
                 {
                     AcquiredPointLocks = acquired.Count > 0 ? acquired : null,
-                    CachedType = KeyValueResponseType.Locked
+                    // A batch that acquired at least one lock completes terminally so its held locks fold. A
+                    // batch that acquired nothing must NOT be cached as a terminal success — that would let a
+                    // same-id retry replay the false success forever instead of re-registering. Mark it
+                    // transient so the completion cancels the registration and a same-id retry re-executes.
+                    CachedType = acquired.Count > 0 ? KeyValueResponseType.Locked : KeyValueResponseType.MustRetry
                 }))
             return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
 

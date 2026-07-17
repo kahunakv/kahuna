@@ -2419,6 +2419,72 @@ public sealed class TestTransactionRegistrationRouting
     }
 
     /// <summary>
+    /// A registered batch that confirms nothing (every item comes back non-terminal for the effect —
+    /// here a SetIfNotExists batch over keys that already exist, so every item is NotSet) must not be
+    /// cached as a terminal success. If it were, a same-id retry would replay that false success forever
+    /// instead of re-executing. The completion must cancel the registration so a same-id re-registration
+    /// comes back as New. The contrast case — a batch that confirms at least one write — stays terminal
+    /// and a same-id re-registration replays the cached response (AlreadyCompleted).
+    /// </summary>
+    [Fact]
+    public async Task BatchSet_ConfirmsNothing_CancelsRegistration_SameIdReregisters_WhenConfirmsSomething_Replays()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Node[] nodes = await Assemble();
+        try
+        {
+            // Pre-populate the key (unregistered auto-commit) so a later SetIfNotExists cannot write it.
+            string existingKey = "batch/exists";
+            List<KahunaSetKeyValueResponseItem> seed = await nodes[0].Kahuna.LocateAndTrySetManyKeyValue(
+                [new() { Key = existingKey, Value = [1], Durability = KeyValueDurability.Ephemeral }], ct);
+            Assert.Equal(KeyValueResponseType.Set, seed.Single().Type);
+
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+            // — Branch A: batch confirms nothing (SetIfNotExists over an existing key → NotSet). —
+            List<KahunaSetKeyValueRequestItem> noneItems =
+            [
+                new() { Key = existingKey, Value = [2], Flags = KeyValueFlags.SetIfNotExists,
+                        Durability = KeyValueDurability.Ephemeral, TransactionId = handle.TransactionId }
+            ];
+            TransactionOperationId opNone = TransactionOperationId.NewRandom();
+
+            List<KahunaSetKeyValueResponseItem> noneResp = await nodes[0].Kahuna.LocateAndTrySetManyKeyValue(
+                noneItems, ct, handle.CoordinatorKey, opNone);
+            Assert.Equal(KeyValueResponseType.NotSet, noneResp.Single().Type);
+
+            // Nothing was confirmed, so the registration must have been cancelled: re-registering the same
+            // id with the same declaration comes back as New (not a replayed terminal success).
+            (OperationRegistrationOutcome reregNone, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, opNone, OperationKind.SetMany,
+                OperationDigest.ForSetMany(noneItems), ct);
+            Assert.Equal(OperationRegistrationOutcome.New, reregNone);
+
+            // — Branch B: batch confirms a write (fresh key → Set). Stays terminal, replays on same id. —
+            List<KahunaSetKeyValueRequestItem> someItems =
+            [
+                new() { Key = "batch/fresh", Value = [3], Durability = KeyValueDurability.Ephemeral,
+                        TransactionId = handle.TransactionId }
+            ];
+            TransactionOperationId opSome = TransactionOperationId.NewRandom();
+
+            List<KahunaSetKeyValueResponseItem> someResp = await nodes[0].Kahuna.LocateAndTrySetManyKeyValue(
+                someItems, ct, handle.CoordinatorKey, opSome);
+            Assert.Equal(KeyValueResponseType.Set, someResp.Single().Type);
+
+            (OperationRegistrationOutcome reregSome, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, opSome, OperationKind.SetMany,
+                OperationDigest.ForSetMany(someItems), ct);
+            Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, reregSome);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
     /// The inbound handler must re-check local leadership before folding. When the node is not
     /// the coordinator-partition leader, <c>CompleteOperationInbound</c> returns <c>MustRetry</c>
     /// without touching the coordinator — preventing a false acknowledgement from a demoted node.
