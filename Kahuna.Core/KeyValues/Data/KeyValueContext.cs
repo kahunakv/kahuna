@@ -49,7 +49,14 @@ internal sealed class KeyValueContext
     public IActorRef<BackgroundWriterActor, BackgroundWriteRequest> BackgroundWriter { get; }
     
     public IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> ProposalRouter { get; }
-    
+
+    /// <summary>
+    /// Off-mailbox worker router for two-phase-commit Raft round trips (prepare/commit/rollback), so a
+    /// participant handler can dispatch its Raft call rather than await it inline on the actor mailbox.
+    /// Null only in bare test contexts that never exercise the phase-two dispatch path.
+    /// </summary>
+    public IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? PhaseTwoRouter { get; }
+
     public IRaft Raft  { get; }
 
     public KeySpaceRegistry KeySpaceRegistry { get; }
@@ -136,7 +143,8 @@ internal sealed class KeyValueContext
         ILogger<IKahuna> logger,
         SnapshotFloorStore? snapshotFloorStore = null,
         CompletionReceiptStore? completionReceiptStore = null,
-        Transactions.CoordinatorDecisionStore? coordinatorDecisionStore = null
+        Transactions.CoordinatorDecisionStore? coordinatorDecisionStore = null,
+        IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter = null
     )
     {
         ActorContext = actorContext;
@@ -146,6 +154,7 @@ internal sealed class KeyValueContext
         Proposals = proposals;
         BackgroundWriter = backgroundWriter;
         ProposalRouter = proposalRouter;
+        PhaseTwoRouter = phaseTwoRouter;
         PersistenceBackend = persistenceBackend;
         Raft = raft;
         KeySpaceRegistry = keySpaceRegistry;

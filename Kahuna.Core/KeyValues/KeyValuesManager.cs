@@ -58,6 +58,8 @@ internal sealed class KeyValuesManager : IDisposable
     
     private readonly IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter;
 
+    private readonly IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest> phaseTwoRouter;
+
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
     
     private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
@@ -192,6 +194,7 @@ internal sealed class KeyValuesManager : IDisposable
         coordinatorDecisionStore = externalDecisionStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
         proposalRouter = GetProposalRouter(configuration);
+        phaseTwoRouter = GetPhaseTwoRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
 
@@ -731,6 +734,23 @@ internal sealed class KeyValuesManager : IDisposable
         return actorSystem.Spawn<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest>(null, proposalInstances);
     }
 
+    private IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest> GetPhaseTwoRouter(
+        KahunaConfiguration configuration
+    )
+    {
+        List<IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>> phaseTwoInstances = new(configuration.KeyValueWorkers);
+
+        for (int i = 0; i < configuration.KeyValueWorkers; i++)
+            phaseTwoInstances.Add(actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>(
+                "phasetwo-keyvalue-" + i,
+                raft,
+                configuration,
+                logger
+            ));
+
+        return actorSystem.Spawn<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>(null, phaseTwoInstances);
+    }
+
     /// <summary>
     /// Creates the ephemeral key/values router
     /// </summary>
@@ -762,6 +782,7 @@ internal sealed class KeyValuesManager : IDisposable
         request.Type is KeyValueRequestType.ResumeRead
             or KeyValueRequestType.CompleteProposal
             or KeyValueRequestType.ReleaseProposal
+            or KeyValueRequestType.CompletePhaseTwo
             or KeyValueRequestType.InvalidateOrApply
             or KeyValueRequestType.FlushAck
             or KeyValueRequestType.Collect
@@ -801,6 +822,7 @@ internal sealed class KeyValuesManager : IDisposable
                 options,
                 backgroundWriter,
                 proposalRouter,
+                phaseTwoRouter,
                 persistenceBackend,
                 raft,
                 keySpaceRegistry,
@@ -836,6 +858,7 @@ internal sealed class KeyValuesManager : IDisposable
                 options,
                 backgroundWriter,
                 proposalRouter,
+                phaseTwoRouter,
                 persistenceBackend,
                 raft,
                 keySpaceRegistry,

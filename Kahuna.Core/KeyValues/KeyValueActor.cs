@@ -233,6 +233,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly ResumeReadHandler resumeReadHandler;
 
     /// <summary>
+    /// Resolves the caller's promise from an off-mailbox two-phase-commit Raft outcome delivered by
+    /// <see cref="KeyValuePhaseTwoActor"/>.
+    /// </summary>
+    private readonly CompletePhaseTwoHandler completePhaseTwoHandler;
+
+    /// <summary>
     /// Applies a committed Raft log entry to a resident cache entry so a follower (or a newly
     /// promoted leader) never serves a stale revision from memory.
     /// </summary>
@@ -271,7 +277,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : this(actorContext, backgroundWriter, proposalRouter, persistenceBackend, raft,
+    ) : this(actorContext, backgroundWriter, proposalRouter, null, persistenceBackend, raft,
              keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null)
     {
     }
@@ -280,6 +286,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
+        IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KeySpaceRegistry keySpaceRegistry,
@@ -310,7 +317,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             logger,
             snapshotFloorStore,
             completionReceiptStore,
-            coordinatorDecisionStore
+            coordinatorDecisionStore,
+            phaseTwoRouter
         );
 
         KeyValueContext context = kvContext;
@@ -342,6 +350,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         releaseProposalHandler = new(context);
         resumeReadHandler = new(context);
         invalidateOrApplyHandler = new(context);
+        completePhaseTwoHandler = new(context);
     }
 
     /// <summary>
@@ -422,6 +431,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
+                KeyValueRequestType.CompletePhaseTwo => CompletePhaseTwo(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
                 KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 KeyValueRequestType.FlushAck => FlushAck(message),
@@ -661,6 +671,17 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private KeyValueResponse? ResumeRead(KeyValueRequest message)
     {
         return resumeReadHandler.Execute(message);
+    }
+
+    /// <summary>
+    /// Resolves the caller's promise from a two-phase-commit Raft outcome produced off the mailbox
+    /// by <see cref="KeyValuePhaseTwoActor"/>.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private KeyValueResponse CompletePhaseTwo(KeyValueRequest message)
+    {
+        return completePhaseTwoHandler.Execute(message);
     }
 
     private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)
