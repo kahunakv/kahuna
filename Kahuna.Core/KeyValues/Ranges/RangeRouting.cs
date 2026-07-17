@@ -37,10 +37,11 @@ internal static class RangeRouting
         DataPartitionRouter dataPartitionRouter,
         string key)
     {
-        string keySpace = KeySpaceRegistry.ExtractKeySpace(key);
-
-        if (registry.GetMode(keySpace) == RoutingMode.KeyRange)
+        // Mode check first without allocating the key-space substring; only the key-range branch
+        // materializes it (the hash-routed fast path never needs a key-space string).
+        if (registry.GetModeForKey(key) == RoutingMode.KeyRange)
         {
+            string keySpace = KeySpaceRegistry.ExtractKeySpace(key);
             RangeDescriptor? descriptor = rangeMap.Find(keySpace, key);
 
             if (descriptor is null)
@@ -56,7 +57,7 @@ internal static class RangeRouting
 
     /// <summary>True when <paramref name="key"/> belongs to a key-range-routed space.</summary>
     public static bool IsKeyRange(KeySpaceRegistry registry, string key) =>
-        registry.GetMode(KeySpaceRegistry.ExtractKeySpace(key)) == RoutingMode.KeyRange;
+        registry.GetModeForKey(key) == RoutingMode.KeyRange;
 
     /// <summary>
     /// True when the <paramref name="keySpace"/> is safe to serve with a single-partition prefix

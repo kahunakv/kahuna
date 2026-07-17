@@ -918,7 +918,10 @@ internal sealed class GrpcBatcher
 
     private static void FailPendingRequests(long sharedStreamingId, RpcException ex)
     {
-        foreach (KeyValuePair<int, long> requestStreamRef in requestStreamRefs.ToArray())
+        // Enumerate the concurrent dictionary directly: its enumerator is weakly consistent and safe
+        // under concurrent TryRemove, so a snapshot array (allocated precisely while a stream is
+        // failing and in-flight work is peaking) is unnecessary.
+        foreach (KeyValuePair<int, long> requestStreamRef in requestStreamRefs)
         {
             if (requestStreamRef.Value != sharedStreamingId)
                 continue;

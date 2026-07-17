@@ -269,6 +269,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     {
         Key = string.Empty;
         Value = null;
+        CompareValue = null;
         Promise = null;
         StartKey = null;
         EndKey = null;

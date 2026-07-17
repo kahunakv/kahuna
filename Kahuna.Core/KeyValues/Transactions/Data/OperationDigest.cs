@@ -1,6 +1,7 @@
 
+using System.Buffers;
 using System.Buffers.Binary;
-using System.Security.Cryptography;
+using System.IO.Hashing;
 using System.Text;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
@@ -8,16 +9,27 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>
-/// Builds a stable SHA-256 digest of a transaction operation's structured inputs. The digest lets the
+/// Builds a stable xxHash128 digest of a transaction operation's structured inputs. The digest lets the
 /// operation registry reject a reused operation id whose declaration differs. Fields are appended
 /// length-prefixed (never concatenated as text) so that distinct field boundaries cannot collide —
 /// e.g. key "ab"+value "c" hashes differently from key "a"+value "bc".
+///
+/// <para>
+/// A non-cryptographic hash is sufficient here: digests are only ever compared 1:1 for a given
+/// operation id (never used as a lookup key across many items), the comparison is not a trust
+/// boundary, and the value is transient session state — never persisted or replicated. This is a
+/// correctness guard against a client resending an id with a divergent declaration, not a defence
+/// against adversarial collisions.
+/// </para>
 /// </summary>
 internal static class OperationDigest
 {
+    /// <summary>Strings up to this UTF-8 byte count encode on the stack; longer ones rent from the pool.</summary>
+    private const int StackEncodeThreshold = 256;
+
     internal static byte[] ForSet(string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.Set);
         AppendString(hash, key);
         AppendBytes(hash, value);
@@ -31,7 +43,7 @@ internal static class OperationDigest
 
     internal static byte[] ForDelete(string key, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.Delete);
         AppendString(hash, key);
         AppendInt(hash, (int)durability);
@@ -45,7 +57,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForDeleteMany(IReadOnlyList<(string Key, KeyValueDurability Durability)> items)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.DeleteMany);
         AppendInt(hash, items.Count);
         foreach ((string key, KeyValueDurability durability) in items)
@@ -64,7 +76,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForSetMany(IReadOnlyList<KahunaSetKeyValueRequestItem> items)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.SetMany);
         AppendInt(hash, items.Count);
         foreach (KahunaSetKeyValueRequestItem item in items)
@@ -82,7 +94,7 @@ internal static class OperationDigest
 
     internal static byte[] ForExtend(string key, int expiresMs, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.Extend);
         AppendString(hash, key);
         AppendInt(hash, expiresMs);
@@ -92,7 +104,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPointLockAcquire(string key, int expiresMs, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.PointLock);
         AppendString(hash, key);
         AppendInt(hash, expiresMs);
@@ -107,7 +119,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForManyPointLockAcquire(IReadOnlyList<(string Key, int ExpiresMs, KeyValueDurability Durability)> items)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.ManyPointLock);
         AppendInt(hash, items.Count);
         foreach ((string key, int expiresMs, KeyValueDurability durability) in items)
@@ -121,7 +133,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPointLockRelease(string key, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.PointLock);
         // A distinct constant separates a release declaration from an acquire of the same key.
         AppendInt(hash, -1);
@@ -132,7 +144,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPrefixLockAcquire(string prefixKey, int expiresMs, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.PrefixLock);
         AppendString(hash, prefixKey);
         AppendInt(hash, expiresMs);
@@ -142,7 +154,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPrefixLockRelease(string prefixKey, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.PrefixLock);
         // A distinct constant separates a release declaration from an acquire of the same prefix.
         AppendInt(hash, -1);
@@ -153,7 +165,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRangeLockAcquire(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, RangeLockMode mode, int expiresMs, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.RangeLock);
         AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
         AppendInt(hash, (int)mode);
@@ -164,7 +176,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRangeLockRelease(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.RangeLock);
         // A distinct constant separates a release declaration from an acquire of the same bounds.
         AppendInt(hash, -1);
@@ -175,7 +187,7 @@ internal static class OperationDigest
 
     internal static byte[] ForScan(string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.Scan);
         AppendString(hash, prefixedKey);
         AppendHlc(hash, readTimestamp);
@@ -185,7 +197,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRangeScan(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, OperationKind.Scan);
         AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
         AppendInt(hash, limit);
@@ -202,7 +214,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForManyRead(OperationKind kind, IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, kind);
         AppendInt(hash, keys.Count);
         foreach ((string key, long revision, KeyValueDurability durability) in keys)
@@ -223,7 +235,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        XxHash128 hash = new();
         AppendTag(hash, kind);
         AppendString(hash, key);
         AppendLong(hash, revision);
@@ -234,48 +246,81 @@ internal static class OperationDigest
 
     /// <summary>Binds the complete hybrid logical clock — node, physical, counter — so two reads that differ
     /// only in the snapshot they pin to are distinct declarations.</summary>
-    private static void AppendHlc(IncrementalHash hash, HLCTimestamp timestamp)
+    private static void AppendHlc(XxHash128 hash, HLCTimestamp timestamp)
     {
         AppendInt(hash, timestamp.N);
         AppendLong(hash, timestamp.L);
         AppendLong(hash, timestamp.C);
     }
 
-    private static void AppendBounds(IncrementalHash hash, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    private static void AppendBounds(XxHash128 hash, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
     {
         AppendString(hash, prefix);
-        AppendBytes(hash, startKey is null ? null : Encoding.UTF8.GetBytes(startKey));
+        AppendStringData(hash, startKey);
         AppendInt(hash, startInclusive ? 1 : 0);
-        AppendBytes(hash, endKey is null ? null : Encoding.UTF8.GetBytes(endKey));
+        AppendStringData(hash, endKey);
         AppendInt(hash, endInclusive ? 1 : 0);
     }
 
-    private static void AppendTag(IncrementalHash hash, OperationKind kind) => AppendInt(hash, (int)kind);
+    private static void AppendTag(XxHash128 hash, OperationKind kind) => AppendInt(hash, (int)kind);
 
-    private static void AppendString(IncrementalHash hash, string value) =>
-        AppendBytes(hash, Encoding.UTF8.GetBytes(value));
+    private static void AppendString(XxHash128 hash, string value) => AppendStringData(hash, value);
 
-    private static void AppendBytes(IncrementalHash hash, byte[]? value)
+    /// <summary>
+    /// Length-prefixed UTF-8 framing of a possibly-null string, identical to <see cref="AppendBytes"/>'s
+    /// framing: a 4-byte little-endian byte count (−1 for null) followed by the UTF-8 bytes. The string is
+    /// encoded through a bounded stack/pooled buffer so no per-string array is allocated.
+    /// </summary>
+    private static void AppendStringData(XxHash128 hash, string? value)
     {
-        Span<byte> len = stackalloc byte[4];
-        // -1 marks null so it is distinguishable from an empty array.
-        BinaryPrimitives.WriteInt32LittleEndian(len, value?.Length ?? -1);
-        hash.AppendData(len);
-        if (value is not null)
-            hash.AppendData(value);
+        if (value is null)
+        {
+            AppendLength(hash, -1);
+            return;
+        }
+
+        int maxBytes = Encoding.UTF8.GetMaxByteCount(value.Length);
+        byte[]? rented = maxBytes > StackEncodeThreshold ? ArrayPool<byte>.Shared.Rent(maxBytes) : null;
+        Span<byte> buffer = rented ?? stackalloc byte[StackEncodeThreshold];
+        try
+        {
+            int written = Encoding.UTF8.GetBytes(value, buffer);
+            AppendLength(hash, written);
+            hash.Append(buffer[..written]);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
-    private static void AppendInt(IncrementalHash hash, int value)
+    private static void AppendBytes(XxHash128 hash, byte[]? value)
+    {
+        // -1 marks null so it is distinguishable from an empty array.
+        AppendLength(hash, value?.Length ?? -1);
+        if (value is not null)
+            hash.Append(value);
+    }
+
+    private static void AppendLength(XxHash128 hash, int length)
+    {
+        Span<byte> len = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(len, length);
+        hash.Append(len);
+    }
+
+    private static void AppendInt(XxHash128 hash, int value)
     {
         Span<byte> buffer = stackalloc byte[4];
         BinaryPrimitives.WriteInt32LittleEndian(buffer, value);
-        hash.AppendData(buffer);
+        hash.Append(buffer);
     }
 
-    private static void AppendLong(IncrementalHash hash, long value)
+    private static void AppendLong(XxHash128 hash, long value)
     {
         Span<byte> buffer = stackalloc byte[8];
         BinaryPrimitives.WriteInt64LittleEndian(buffer, value);
-        hash.AppendData(buffer);
+        hash.Append(buffer);
     }
 }

@@ -172,25 +172,34 @@ public class TestRangeMap
         ]);
 
         // Query spanning first two ranges.
-        IReadOnlyList<RangeDescriptor> r1 = map.FindIntersecting("ks", "a", "e");
+        ArraySegment<RangeDescriptor> r1 = map.FindIntersecting("ks", "a", "e");
         Assert.Equal(2, r1.Count);
         Assert.Equal(1, r1[0].PartitionId);
         Assert.Equal(2, r1[1].PartitionId);
 
-        // Query touching only the exact boundary "d" should include [d,m) but not (-inf,d).
-        IReadOnlyList<RangeDescriptor> r2 = map.FindIntersecting("ks", "d", "e");
+        // Query touching only the exact boundary "d" should include [d,m) but not (-inf,d). The
+        // binary search lands on (-inf,d) as the leading candidate; it must be dropped because its
+        // EndKey "d" is not > the query start "d", leaving just [d,m).
+        ArraySegment<RangeDescriptor> r2 = map.FindIntersecting("ks", "d", "e");
         Assert.Single(r2);
         Assert.Equal(2, r2[0].PartitionId);
 
         // Null bounds = ±inf: full scan returns all three.
-        IReadOnlyList<RangeDescriptor> r3 = map.FindIntersecting("ks", null, null);
+        ArraySegment<RangeDescriptor> r3 = map.FindIntersecting("ks", null, null);
         Assert.Equal(3, r3.Count);
 
         // Query beyond the last range returns only the last.
-        IReadOnlyList<RangeDescriptor> r4 = map.FindIntersecting("ks", "z", null);
+        ArraySegment<RangeDescriptor> r4 = map.FindIntersecting("ks", "z", null);
         Assert.Single(r4);
         Assert.Equal(3, r4[0].PartitionId);
 
-        Assert.Empty(map.FindIntersecting("missing", null, null));
+        // A query landing strictly inside the first range keeps it (its EndKey "d" > start "a") and
+        // extends across the contiguous window until a descriptor starts at/after the query end.
+        ArraySegment<RangeDescriptor> r5 = map.FindIntersecting("ks", "a", "q");
+        Assert.Equal(3, r5.Count);
+        Assert.Equal(1, r5[0].PartitionId);
+        Assert.Equal(3, r5[2].PartitionId);
+
+        Assert.Equal(0, map.FindIntersecting("missing", null, null).Count);
     }
 }
