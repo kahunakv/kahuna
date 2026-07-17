@@ -18,6 +18,15 @@ internal sealed class KeySpaceRegistry
 {
     private readonly ConcurrentDictionary<string, RoutingMode> modes = new(StringComparer.Ordinal);
 
+    /// <summary>Span keyed view of <see cref="modes"/> so a key's mode can be looked up without
+    /// allocating the key-space substring (the ordinal comparer supports span lookups).</summary>
+    private readonly ConcurrentDictionary<string, RoutingMode>.AlternateLookup<ReadOnlySpan<char>> modesBySpan;
+
+    public KeySpaceRegistry()
+    {
+        modesBySpan = modes.GetAlternateLookup<ReadOnlySpan<char>>();
+    }
+
     /// <summary>Marks <paramref name="keySpace"/> as key-range routed (idempotent).</summary>
     /// <exception cref="ArgumentException">
     /// <paramref name="keySpace"/> ends with <c>/meta</c> — schema-log spaces must stay hash-routed.
@@ -60,8 +69,15 @@ internal sealed class KeySpaceRegistry
     public RoutingMode GetMode(string keySpace) =>
         modes.TryGetValue(keySpace, out RoutingMode mode) ? mode : RoutingMode.Hash;
 
-    /// <summary>The routing mode for the key space that <paramref name="key"/> belongs to.</summary>
-    public RoutingMode GetModeForKey(string key) => GetMode(ExtractKeySpace(key));
+    /// <summary>The routing mode for the key space that <paramref name="key"/> belongs to. Resolves
+    /// without allocating the key-space substring — the common (unregistered ⇒ Hash) key touches no
+    /// heap.</summary>
+    public RoutingMode GetModeForKey(string key)
+    {
+        int separator = key.LastIndexOf('/');
+        ReadOnlySpan<char> keySpace = separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
+        return modesBySpan.TryGetValue(keySpace, out RoutingMode mode) ? mode : RoutingMode.Hash;
+    }
 
     /// <summary>
     /// Extracts the key space (prefix before the last <c>'/'</c>) from a raw key. A key with no

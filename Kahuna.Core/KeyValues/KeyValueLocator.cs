@@ -922,7 +922,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
 
-        IReadOnlyList<RangeDescriptor> descriptors =
+        ArraySegment<RangeDescriptor> descriptors =
             manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
 
         if (afterSnapshot != null)
@@ -1025,8 +1025,8 @@ internal sealed class KeyValueLocator
     /// <c>LocateAndTryAcquireExclusiveRangeLock</c> doc for the full local-snapshot caveat.
     /// </summary>
     private static bool DescriptorSetStable(
-        IReadOnlyList<RangeDescriptor> before,
-        IReadOnlyList<RangeDescriptor> after)
+        ArraySegment<RangeDescriptor> before,
+        ArraySegment<RangeDescriptor> after)
     {
         if (before.Count != after.Count)
             return false;
@@ -1053,7 +1053,7 @@ internal sealed class KeyValueLocator
         if (string.IsNullOrEmpty(prefix))
             return KeyValueResponseType.InvalidInput;
 
-        IReadOnlyList<RangeDescriptor> descriptors =
+        ArraySegment<RangeDescriptor> descriptors =
             manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
 
         if (descriptors.Count == 0)
@@ -1602,7 +1602,9 @@ internal sealed class KeyValueLocator
         // Multi-range path (parallel): key-range space is split; fan out to all descriptors
         // concurrently. Snapshot the map once — safe because orphan retention + MVCC means the source
         // partition still answers snapshot reads for stale entries after a cutover.
-        string keySpace = KeySpaceRegistry.ExtractKeySpace(prefixedKey + "/");
+        // The scan prefix is already the key space, so extracting the portion before a trailing
+        // separator would just return it unchanged.
+        string keySpace = prefixedKey;
         IReadOnlyList<RangeDescriptor> descriptors = manager.RangeMapStore.Current.FindAll(keySpace);
 
         if (descriptors.Count == 0)
@@ -1743,9 +1745,11 @@ internal sealed class KeyValueLocator
         // may query a now-stale source partition, but that is safe: the split transaction orphan-retains [K,E) on
         // the source, so the fixed readTimestamp (MVCC) still resolves correctly from there. The
         // next page re-resolves RangeMapStore.Current fresh and routes to the new partition.
-        string keySpace = KeySpaceRegistry.ExtractKeySpace(prefix + "/");
+        // The scan prefix is already the key space, so extracting the portion before a trailing
+        // separator would just return it unchanged.
+        string keySpace = prefix;
         RangeMap rangeMap = manager.RangeMapStore.Current;
-        IReadOnlyList<RangeDescriptor> descriptors = rangeMap.FindIntersecting(keySpace, startKey, endKey);
+        ArraySegment<RangeDescriptor> descriptors = rangeMap.FindIntersecting(keySpace, startKey, endKey);
 
         if (descriptors.Count == 0)
             return new(KeyValueResponseType.Get, [], null, false);

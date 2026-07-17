@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers.Text;
 using System.Text;
 using System.Text.Json;
 using Kahuna.Shared.KeyValue;
@@ -106,10 +107,18 @@ public class KahunaKeyValue
     /// <returns>A string representation of the binary value, or null if the value is unavailable.</returns>
     public long ValueAsLong()
     {
-        if (Value is null || !long.TryParse(Encoding.ASCII.GetString(Value), out long result))
+        if (Value is null)
             throw new KahunaException("Value cannot be casted to long", KeyValueResponseType.InvalidInput);
 
-        return result;
+        // Fast path: exact integer bytes parse without decoding to a temporary string.
+        if (Utf8Parser.TryParse(Value, out long fast, out int consumed) && consumed == Value.Length)
+            return fast;
+
+        // Fallback preserves the original tolerance for surrounding whitespace and a leading '+'.
+        if (long.TryParse(Encoding.ASCII.GetString(Value), out long result))
+            return result;
+
+        throw new KahunaException("Value cannot be casted to long", KeyValueResponseType.InvalidInput);
     }
     
     /// <summary>
@@ -119,10 +128,18 @@ public class KahunaKeyValue
     /// <returns>A string representation of the binary value, or null if the value is unavailable.</returns>
     public bool ValueAsBool()
     {
-        if (Value is null || !bool.TryParse(Encoding.ASCII.GetString(Value), out bool result))
+        if (Value is null)
             throw new KahunaException("Value cannot be casted to long", KeyValueResponseType.InvalidInput);
 
-        return result;
+        // Fast path: exact "true"/"false" bytes parse without decoding to a temporary string.
+        if (Utf8Parser.TryParse(Value, out bool fast, out int consumed) && consumed == Value.Length)
+            return fast;
+
+        // Fallback preserves the original tolerance for surrounding whitespace and case variants.
+        if (bool.TryParse(Encoding.ASCII.GetString(Value), out bool result))
+            return result;
+
+        throw new KahunaException("Value cannot be casted to long", KeyValueResponseType.InvalidInput);
     }
     
     /// <summary>

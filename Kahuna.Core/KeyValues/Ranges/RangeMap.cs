@@ -89,10 +89,15 @@ internal sealed class RangeMap
     /// the first candidate (rightmost descriptor with StartKey ≤ startKey), then a forward
     /// scan stops as soon as D.StartKey ≥ endKey.
     /// </summary>
-    public IReadOnlyList<RangeDescriptor> FindIntersecting(string keySpace, string? startKey, string? endKey)
+    /// <remarks>
+    /// The result is a slice over this key space's immutable, StartKey-sorted descriptor array —
+    /// no copy. The map is replaced wholesale on mutation, so the backing array never changes under
+    /// the returned segment. Consume it synchronously or copy it before crossing an <c>await</c>.
+    /// </remarks>
+    public ArraySegment<RangeDescriptor> FindIntersecting(string keySpace, string? startKey, string? endKey)
     {
         if (!bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges) || ranges.Length == 0)
-            return Array.Empty<RangeDescriptor>();
+            return ArraySegment<RangeDescriptor>.Empty;
 
         // Binary-search for the rightmost descriptor with StartKey ≤ startKey.
         // Descriptors before it have EndKey ≤ startKey (no-gap invariant) and cannot intersect.
@@ -115,30 +120,44 @@ internal sealed class RangeMap
             }
         }
 
-        var result = new List<RangeDescriptor>();
-        for (int i = first; i < ranges.Length; i++)
+        // The intersecting descriptors form a contiguous window [start, end): they run from `first`
+        // forward until one starts at or beyond endKey. Only the leading candidate can fail the
+        // lower-bound test (D.End > startKey) — every later descriptor satisfies it by the no-gap
+        // invariant — so the window drops at most that single descriptor off the front.
+        int start = first;
         {
-            RangeDescriptor d = ranges[i];
+            RangeDescriptor d = ranges[start];
 
-            // [D.Start, D.End) intersects [startKey, endKey) iff D.End > startKey && D.Start < endKey.
-            // D.End > startKey: guaranteed for i > first by the no-gap invariant (D.StartKey >
-            // startKey implies D.EndKey > D.StartKey > startKey); still checked for i == first.
-            bool endAfterQueryStart = d.EndKey is null
-                                   || startKey is null
-                                   || string.CompareOrdinal(d.EndKey, startKey) > 0;
-
-            // D.Start < endKey: once false, all subsequent descriptors also fail (sorted order).
+            // D.Start < endKey: if the first candidate already starts beyond the query, nothing
+            // in this key space intersects (later descriptors start even higher).
             bool startBeforeQueryEnd = d.StartKey is null
                                     || endKey is null
                                     || string.CompareOrdinal(d.StartKey, endKey) < 0;
+            if (!startBeforeQueryEnd)
+                return ArraySegment<RangeDescriptor>.Empty;
 
+            // D.End > startKey: the only descriptor that can fail this is the leading one.
+            bool endAfterQueryStart = d.EndKey is null
+                                   || startKey is null
+                                   || string.CompareOrdinal(d.EndKey, startKey) > 0;
+            if (!endAfterQueryStart)
+                start++;
+        }
+
+        // Extend while D.Start < endKey; once false, all subsequent descriptors also fail (sorted).
+        int end = start;
+        while (end < ranges.Length)
+        {
+            RangeDescriptor d = ranges[end];
+            bool startBeforeQueryEnd = d.StartKey is null
+                                    || endKey is null
+                                    || string.CompareOrdinal(d.StartKey, endKey) < 0;
             if (!startBeforeQueryEnd)
                 break;
-
-            if (endAfterQueryStart)
-                result.Add(d);
+            end++;
         }
-        return result;
+
+        return new ArraySegment<RangeDescriptor>(ranges, start, end - start);
     }
 
     /// <summary>
