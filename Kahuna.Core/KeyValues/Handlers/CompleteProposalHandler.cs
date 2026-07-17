@@ -74,7 +74,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
         if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
             context.EnqueueTombstone(proposal.Key);
 
-        context.BackgroundWriter.Send(new(
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             message.PartitionId,
             proposal.Key,

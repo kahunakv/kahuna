@@ -163,7 +163,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         using WriteBatch batch = new();
 
-        foreach (PersistenceRequestItem item in items)
+        // The list is not mutated while it is being written out, so iterate its backing storage by
+        // reference — each item is a wide struct and a by-value foreach would copy every one.
+        foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
         {
             RocksDbLockMessage kvm = new()
             {
@@ -179,8 +181,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             if (item.Value != null)
                 kvm.Owner = UnsafeByteOperations.UnsafeWrap(item.Value);
-            
-            PutLocksItems(batch, item, kvm, columnFamilyLocks);
+
+            PutLocksItems(batch, in item, kvm, columnFamilyLocks);
         }
         
         db.Write(batch, DefaultWriteOptions);
@@ -196,7 +198,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <param name="item">The lock item containing key, revision, and additional metadata.</param>
     /// <param name="kvm">The RocksDB lock message to be serialized and persisted.</param>
     /// <param name="columnFamily">The column family handle identifying the column family where the data is stored.</param>
-    private static void PutLocksItems(WriteBatch batch, PersistenceRequestItem item, RocksDbLockMessage kvm, ColumnFamilyHandle columnFamily)
+    private static void PutLocksItems(WriteBatch batch, in PersistenceRequestItem item, RocksDbLockMessage kvm, ColumnFamilyHandle columnFamily)
     {
         int serializedSize = kvm.CalculateSize();
         int keyLen = Encoding.UTF8.GetByteCount(item.Key);
@@ -245,8 +247,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
         using WriteBatch batch = new();
-        
-        foreach (PersistenceRequestItem item in items)
+
+        // The list is not mutated while it is being written out, so iterate its backing storage by
+        // reference — each item is a wide struct and a by-value foreach would copy every one.
+        foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
         {
             RocksDbKeyValueMessage kvm = new()
             {
@@ -262,8 +266,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             if (item.Value is not null)
                 kvm.Value = UnsafeByteOperations.UnsafeWrap(item.Value);
-            
-            PutStoreItems(batch, item, kvm, columnFamilyKeys);
+
+            PutStoreItems(batch, in item, kvm, columnFamilyKeys);
         }
 
         db.Write(batch, DefaultWriteOptions);
@@ -288,7 +292,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <param name="columnFamily">
     /// The RocksDB column family handle where the key-value pair will be stored.
     /// </param>
-    private static void PutStoreItems(WriteBatch batch, PersistenceRequestItem item, RocksDbKeyValueMessage kvm, ColumnFamilyHandle columnFamily)
+    private static void PutStoreItems(WriteBatch batch, in PersistenceRequestItem item, RocksDbKeyValueMessage kvm, ColumnFamilyHandle columnFamily)
     {
         int serializedSize = kvm.CalculateSize();
         int keyLen = Encoding.UTF8.GetByteCount(item.Key);

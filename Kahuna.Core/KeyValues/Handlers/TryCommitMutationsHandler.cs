@@ -224,7 +224,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
             context.EnqueueTombstone(proposal.Key);
 
-        context.BackgroundWriter.Send(new(
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,

@@ -157,7 +157,7 @@ internal abstract class BaseHandler
             return false;
         }
         
-        context.BackgroundWriter.Send(new(
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,

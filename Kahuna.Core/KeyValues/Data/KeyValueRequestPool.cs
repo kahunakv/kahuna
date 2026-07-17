@@ -10,6 +10,14 @@ namespace Kahuna.Server.KeyValues;
 
 internal static class KeyValueRequestPool
 {
+    /// <summary>
+    /// Upper bound on requests retained per thread. Rent and return frequently land on different
+    /// thread-pool threads (a request is rented before async work and returned after), so an
+    /// unbounded per-thread stack would let a traffic burst pin its peak object population on every
+    /// thread indefinitely. Returns beyond this cap drop the object for the GC to reclaim.
+    /// </summary>
+    private const int MaxPooledPerThread = 1024;
+
     [ThreadStatic]
     private static Stack<KeyValueRequest>? _poolRequests;
     
@@ -120,6 +128,10 @@ internal static class KeyValueRequestPool
     {
         obj.Clear();
         _poolRequests ??= new();
-        _poolRequests.Push(obj);
+
+        // Bounded retention: beyond the cap the object is dropped rather than pinned on this thread's
+        // stack. Pooling is only an optimization, so discarding an excess request is always safe.
+        if (_poolRequests.Count < MaxPooledPerThread)
+            _poolRequests.Push(obj);
     }
 }

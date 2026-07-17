@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
@@ -355,6 +356,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     if (lockRequest.Value is not null)
                         size += lockRequest.Value.Length;
 
+                    // The request has been copied into the item struct and is no longer referenced
+                    // (the retry path keeps the items, not the requests), so recycle it.
+                    BackgroundWriteRequestPool.Return(lockRequest);
+
                     if (++counter >= MaxBatchSize || size >= MaxPacketSize)
                         break;
                 }
@@ -466,6 +471,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     if (keyValueRequest.Value is not null)
                         size += keyValueRequest.Value.Length;
 
+                    // The request has been copied into the item struct and is no longer referenced
+                    // (the retry path keeps the items, not the requests), so recycle it.
+                    BackgroundWriteRequestPool.Return(keyValueRequest);
+
                     if (++counter >= MaxBatchSize || size >= MaxPacketSize)
                         break;
                 }
@@ -499,13 +508,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             // Acknowledge each durably-stored key-value back to its owning actor so it can advance
             // FlushedRevision and release the entry for eviction. The actor ignores acks that don't
             // match a live entry at that revision, so stale/superseded acks are harmless.
-            foreach (PersistenceRequestItem item in items)
+            foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
                 flushNotificationSink.NotifyFlushed(item.Key, item.Revision);
 
             if (ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration)
                 && configuration.PersistentRevisionCleanupOnWrite)
             {
-                foreach (PersistenceRequestItem item in items)
+                foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
                 {
                     if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
                         pendingRevisionCleanupKeys.Add(item.Key);

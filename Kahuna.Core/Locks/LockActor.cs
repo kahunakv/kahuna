@@ -461,7 +461,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         entry.LastUsed = proposal.LastUsed;
         entry.State = proposal.State;
 
-        backgroundWriter.Send(new(
+        backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
             message.PartitionId,
             proposal.Resource,

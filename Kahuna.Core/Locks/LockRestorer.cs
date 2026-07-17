@@ -84,8 +84,8 @@ internal sealed class LockRestorer
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreLock,
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreLock,
                         partitionId,
                         lockMessage.Resource,
                         owner,
@@ -127,8 +127,8 @@ internal sealed class LockRestorer
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreLock,
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreLock,
                         partitionId,
                         lockMessage.Resource,
                         owner,
@@ -170,8 +170,8 @@ internal sealed class LockRestorer
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreLock,
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreLock,
                         partitionId,
                         lockMessage.Resource,
                         owner,

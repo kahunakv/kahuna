@@ -142,8 +142,8 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
@@ -185,8 +185,8 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
@@ -222,8 +222,8 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
-                    backgroundWriter.Send(new(
-                        BackgroundWriteType.QueueStoreKeyValue,
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
