@@ -77,6 +77,7 @@ internal static class BenchmarkRunner
         // ── measurement ───────────────────────────────────────────────────────
         diag.WriteLine($"Running measurement for {opts.Duration}s…");
         WorkloadGenerator.ResetKeyCounter();
+        WorkloadGenerator.ResetErrorCategories();
 
         long ceiling   = WorkerStats.CeilingMicrosFromTimeout(opts.Timeout);
         bool isConsole = opts.Format.Equals("console", StringComparison.OrdinalIgnoreCase);

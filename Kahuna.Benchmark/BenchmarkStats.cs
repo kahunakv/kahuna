@@ -12,7 +12,7 @@ namespace Kahuna.Benchmark;
 
 internal enum OpOutcome { Success, Error, Timeout, Miss }
 
-internal enum OperationType { Get, Set, Lock, Sequence, Script }
+internal enum OperationType { Get, Set, Delete, SetMany, DeleteMany, Transaction, Lock, Sequence, Script }
 
 /// <summary>
 /// Per-worker latency histograms and counters. Not thread-safe — only the owning

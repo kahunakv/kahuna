@@ -127,6 +127,18 @@ internal static class BenchmarkReporter
 
         AnsiConsole.Write(table);
         Console.WriteLine();
+
+        // Break the "errors" column down by cause so a non-zero count is actionable — a Kahuna
+        // response code (MustRetry, Aborted, …) points at contention/leadership; a transport type
+        // (RpcException, IOException, …) points at the network or a node being unreachable.
+        IReadOnlyList<(string Category, long Count)> errorBreakdown = WorkloadGenerator.SnapshotErrorCategories();
+        if (errorBreakdown.Count > 0)
+        {
+            AnsiConsole.MarkupLine("[bold]error breakdown[/]");
+            foreach ((string category, long count) in errorBreakdown)
+                Console.WriteLine($"  {count,10:N0}  {category}");
+            Console.WriteLine();
+        }
     }
 
     // ── JSON ─────────────────────────────────────────────────────────────────

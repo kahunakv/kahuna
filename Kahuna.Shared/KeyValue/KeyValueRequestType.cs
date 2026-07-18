@@ -40,4 +40,6 @@ public enum KeyValueRequestType
     StagePrepareMutations,
     ApplyRolledBackMutations,
     ApplyCommittedMutations,
+    StageSet,
+    StageDelete,
 }

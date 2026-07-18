@@ -17,7 +17,7 @@ internal sealed class BenchmarkOptions
     public string ConnectionSource { get; set; } = "";
 
     [Option("workload", Default = "mixed",
-        HelpText = "set | get | mixed | lock | sequence | script")]
+        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | lock | sequence | script")]
     public string Workload { get; set; } = "mixed";
 
     [Option("duration", Default = 30,
@@ -40,6 +40,10 @@ internal sealed class BenchmarkOptions
         HelpText = "Number of distinct keys cycled through (controls hit/contention rate)")]
     public int KeySpace { get; set; } = 10000;
 
+    [Option("key-prefix", Default = "bench:",
+        HelpText = "Prefix for generated keys. End it with '/' (e.g. 'bench/') to put every key in ONE hash key-space so a set-many/delete-many batch lands on a single partition (one ReplicateLogs); the default 'bench:' spreads keys across partitions.")]
+    public string KeyPrefix { get; set; } = "bench:";
+
     [Option("value-size", Default = 128,
         HelpText = "Value payload size in bytes for write ops")]
     public int ValueSize { get; set; } = 128;
@@ -47,6 +51,18 @@ internal sealed class BenchmarkOptions
     [Option("read-pct", Default = 50,
         HelpText = "For mixed: percentage of reads (the rest are writes)")]
     public int ReadPct { get; set; } = 50;
+
+    [Option("batch-size", Default = 100,
+        HelpText = "For set-many/delete-many: number of keys mutated per batched request")]
+    public int BatchSize { get; set; } = 100;
+
+    [Option("keys-per-txn", Default = 4,
+        HelpText = "For txn: number of keys written per interactive transaction before commit")]
+    public int KeysPerTxn { get; set; } = 4;
+
+    [Option("txn-locking", Default = "pessimistic",
+        HelpText = "For txn: pessimistic | optimistic locking strategy")]
+    public string TxnLocking { get; set; } = "pessimistic";
 
     [Option("durability", Default = "persistent",
         HelpText = "persistent | ephemeral")]

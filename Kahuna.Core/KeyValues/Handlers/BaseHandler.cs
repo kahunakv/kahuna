@@ -20,9 +20,47 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal abstract class BaseHandler
 {
-    private const int ProposalWaitTimeout = 10000;
-    
+    protected const int ProposalWaitTimeout = 10000;
+
     private static int proposalId;
+
+    /// <summary>Allocates the next process-wide proposal id, shared with <see cref="CreateProposal"/> so the
+    /// per-key and batched write paths draw from the same monotonic sequence.</summary>
+    protected static int RentProposalId() => Interlocked.Increment(ref proposalId);
+
+    /// <summary>
+    /// Serializes a proposal into the committed <see cref="KeyValueMessage"/> log record — byte-for-byte
+    /// identical to what <see cref="KeyValueProposalActor"/> replicates per key, so a batched proposal
+    /// applies on followers and restores exactly as a single-key set/delete would. Shared by the batched
+    /// staging paths of the set and delete handlers (a delete carries a null value and Deleted state via its
+    /// request type).
+    /// </summary>
+    protected static byte[] SerializeProposal(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
+    {
+        KeyValueMessage kvm = new()
+        {
+            Type = (int)type,
+            Key = proposal.Key,
+            Revision = proposal.Revision,
+            ExpireNode = proposal.Expires.N,
+            ExpirePhysical = proposal.Expires.L,
+            ExpireCounter = proposal.Expires.C,
+            LastUsedNode = proposal.LastUsed.N,
+            LastUsedPhysical = proposal.LastUsed.L,
+            LastUsedCounter = proposal.LastUsed.C,
+            LastModifiedNode = proposal.LastModified.N,
+            LastModifiedPhysical = proposal.LastModified.L,
+            LastModifiedCounter = proposal.LastModified.C,
+            TimeNode = currentTime.N,
+            TimePhysical = currentTime.L,
+            TimeCounter = currentTime.C
+        };
+
+        if (proposal.Value is not null)
+            kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
+
+        return ReplicationSerializer.Serialize(kvm);
+    }
     
     /// <summary>
     /// Represents the background writer actor reference.
