@@ -4,6 +4,7 @@ using Nixie;
 using Kommander;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Utils;
 using Kommander.Time;
@@ -30,7 +31,7 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         if (entry.MvccEntries is null)
-            context.Logger.LogDebug("Trying to release exclusive lock for {Key} but MVCC entries are null", message.Key);
+            context.Logger.LogReleaseExclusiveLockMvccNull(message.Key);
         else
             RemoveMvccEntry(entry, message.TransactionId);
 

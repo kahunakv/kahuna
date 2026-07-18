@@ -383,8 +383,14 @@ public class TestLocks : BaseCluster
         ], ct);
         Assert.True(seeded);
 
-        foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(RlSpace).Count == 2);
+        // Wait for the seeded descriptors to replicate to every node's meta-partition follower — the lock
+        // request routes to whichever node leads the target data partition, so that node needs the map too.
+        // Check all nodes under one deadline (not a per-node loop, which would grant each its own budget) and
+        // give it generous headroom: on a saturated CI runner the shared executor pool can stall P0 apply for
+        // tens of seconds, and this propagation gates every split-keyspace lock test.
+        await WaitUntilAsync(
+            () => nodes.All(n => n.Item2.RangeMapStore.Current.FindAll(RlSpace).Count == 2),
+            30_000);
 
         return nodes;
     }

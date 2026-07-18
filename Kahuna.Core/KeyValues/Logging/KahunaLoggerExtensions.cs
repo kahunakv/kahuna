@@ -262,4 +262,7 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Removed {Key} from script cache")]
     public static partial void LogScriptRemovedFromCache(this ILogger<IKahuna> logger, string key);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Trying to release exclusive lock for {Key} but MVCC entries are null")]
+    public static partial void LogReleaseExclusiveLockMvccNull(this ILogger<IKahuna> logger, string key);
 }
