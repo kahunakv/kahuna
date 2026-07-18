@@ -2238,19 +2238,17 @@ internal sealed class TransactionCoordinator
             {
                 if (response == KeyValueResponseType.RolledBack)
                 {
+                    // A settled rollback is the only positive proof the participant's prepare state is gone.
                     pendingRollbacks.Remove(key);
                     continue;
                 }
 
-                if (response == KeyValueResponseType.MustRetry)
-                {
-                    hasTransientFailure = true;
-                    logger.LogWarning("RollbackMutations: transient failure on {Key} attempt {Attempt}, retrying", key, attempt + 1);
-                    continue;
-                }
-
-                logger.LogWarning("RollbackMutations {Type} {Key} {TicketId} {Durability}", response, key, commitIndex, durability);
-                pendingRollbacks.Remove(key);
+                // Anything else — an explicit MustRetry or an unsettled Errored — is NOT proof the write intent
+                // or proposal is gone, so retain and retry rather than abandon a possibly-live intent. On
+                // exhaustion the pending set is logged and the lingering state expires via its write-intent
+                // lease.
+                hasTransientFailure = true;
+                logger.LogWarning("RollbackMutations: unsettled {Type} on {Key} attempt {Attempt}, retaining", response, key, attempt + 1);
             }
 
             if (!hasTransientFailure)

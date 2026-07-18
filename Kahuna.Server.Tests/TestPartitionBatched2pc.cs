@@ -513,6 +513,85 @@ public sealed class TestPartitionBatched2pc
         Assert.Equal(initB, eb!.Value);
     }
 
+    /// <summary>
+    /// S1 batched rollback: when a transaction prepares one partition (getting a shared ticket) but another
+    /// partition fails prepare, the coordinator aborts and rolls the prepared partition back through the
+    /// batched path — one <c>RollbackLogs</c> for the ticket, then a per-key intent clear. Asserts the
+    /// transaction aborts, the prepared key is not committed, and — crucially — its write intent is cleared
+    /// (a fresh direct write to it succeeds), proving the batched rollback settled the ticket and cleaned up.
+    /// </summary>
+    [Fact]
+    public async Task PreparedPartitionRolledBackViaBatch_ClearsTicketAndIntents_KeyWritableAgain()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 8
+        }, loggerFactory);
+        await node.StartAsync(ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        (string keyA, string keyB) = FindKeysOnDifferentPartitions(node, logger);
+        await node.WaitForLeaderForKeyAsync(keyA, ct);
+        await node.WaitForLeaderForKeyAsync(keyB, ct);
+
+        byte[] initA = "init-a"u8.ToArray();
+        byte[] newA = "new-a"u8.ToArray();
+        byte[] finalA = "final-a"u8.ToArray();
+
+        (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sa);
+
+        // Force partition B's prepare to fail so the transaction aborts after partition A has prepared a ticket.
+        KeyValuesManager kv = ((KahunaManager)node.Kahuna).KeyValues;
+        kv.ForcePrepareOutcomeForKey = k => string.Equals(k, keyB, StringComparison.Ordinal) ? KeyValueResponseType.Errored : null;
+
+        try
+        {
+            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = "rollback-s1",
+                    Locking = KeyValueTransactionLocking.Pessimistic,
+                    Timeout = 10_000,
+                },
+                ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyA, newA, null, -1,
+                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyB, "new-b"u8.ToArray(), null, -1,
+                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+
+            (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+            Assert.Equal(KeyValueResponseType.Aborted, commitResult);
+        }
+        finally
+        {
+            kv.ForcePrepareOutcomeForKey = null;
+        }
+
+        // Partition A was rolled back — it keeps its pre-transaction value.
+        (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, ra);
+        Assert.Equal(initA, ea!.Value);
+
+        // The batched rollback cleared A's write intent — a fresh direct write succeeds instead of conflicting.
+        (KeyValueResponseType fresh, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyA, finalA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, fresh);
+
+        (KeyValueResponseType rf, ReadOnlyKeyValueEntry? ef) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, rf);
+        Assert.Equal(finalA, ef!.Value);
+    }
+
     private static (string keyA, string keyB) FindKeysOnDifferentPartitions(EmbeddedKahunaNode node, ILogger<IKahuna> logger)
     {
         KeySpaceRegistry registry = new();

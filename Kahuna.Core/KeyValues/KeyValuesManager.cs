@@ -49,6 +49,14 @@ internal sealed class KeyValuesManager : IDisposable
     /// <c>CommitTicketGroup</c> without running a real split. Return null to use real routing.
     /// </summary>
     internal Func<string, int?>? PartitionOverrideForCommit;
+
+    /// <summary>
+    /// Test seam (null in production): forces a partition group's batched prepare outcome without staging or
+    /// proposing it. Lets a test make one partition fail prepare while another prepares for real, so the
+    /// coordinator aborts and rolls back the prepared partition's shared ticket — exercising the batched
+    /// rollback. Keyed by the group's routing key; return null to leave the group's real staging untouched.
+    /// </summary>
+    internal Func<string, KeyValueResponseType?>? ForcePrepareOutcomeForKey;
     
     private readonly ActorSystem actorSystem;
 
@@ -4937,6 +4945,12 @@ internal sealed class KeyValuesManager : IDisposable
         string? recordAnchorKey
     )
     {
+        // Test seam: force this group's prepare outcome without staging or proposing, so a test can fail one
+        // partition's prepare while another prepares for real and drive the coordinator's rollback of the
+        // prepared partition.
+        if (ForcePrepareOutcomeForKey?.Invoke(items[0].key) is KeyValueResponseType forcedPrepare)
+            return items.Select(i => (forcedPrepare, HLCTimestamp.Zero, i.key, i.durability)).ToList();
+
         // Exception-safe wrapper: any throw during staging or propose unwinds every intent staged so far, so a
         // partition batch that faults mid-flight cannot leak an entry-pinning intent. The staged list is owned
         // here so the catch can unwind whatever the core managed to stage.
@@ -5245,24 +5259,10 @@ internal sealed class KeyValuesManager : IDisposable
         // so the transaction re-drives and re-prepares against the current partition. Nothing is stranded and
         // nothing is falsely aborted. (Fully committing across a split would require the range splitter to
         // drain or hand off in-flight prepared tickets before cutover — a separate range-machinery change.)
-        DataPartitionRouter router = new(raft);
-        RangeMap rangeMap = rangeMapStore.Current;
-
-        int CommitPartitionOf(string key) =>
-            PartitionOverrideForCommit?.Invoke(key) ?? RangeRouting.Locate(keySpaceRegistry, rangeMap, router, key).PartitionId;
-
-        int partitionId = CommitPartitionOf(group[0].key);
-
-        for (int i = 1; i < group.Count; i++)
+        if (!TryResolveCohesiveTicketPartition(group, out int partitionId))
         {
-            if (CommitPartitionOf(group[i].key) != partitionId)
-            {
-                logger.LogWarning(
-                    "Batched commit: prepared ticket group split across partitions since prepare ({KeyA} vs {KeyB}); MustRetry",
-                    group[0].key, group[i].key);
-
-                return group.Select(g => (KeyValueResponseType.MustRetry, g.key, -1L, g.durability)).ToList();
-            }
+            logger.LogWarning("Batched commit: prepared ticket group split across partitions since prepare; MustRetry");
+            return group.Select(g => (KeyValueResponseType.MustRetry, g.key, -1L, g.durability)).ToList();
         }
 
         // NOTE: the batched commit is intentionally NOT deadline-bounded yet. A Phase2CommitTimeout token
@@ -5315,6 +5315,27 @@ internal sealed class KeyValuesManager : IDisposable
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Resolves the partition a ticket group's keys currently share. Returns false when a range split/move has
+    /// divided them across partitions since prepare — the shared ticket can no longer be settled on one
+    /// partition, so the batched commit/rollback must defer to in-doubt MustRetry rather than risk stranding.
+    /// Honours the commit-partition test seam.
+    /// </summary>
+    private bool TryResolveCohesiveTicketPartition(List<(string key, KeyValueDurability durability)> group, out int partitionId)
+    {
+        DataPartitionRouter router = new(raft);
+        RangeMap rangeMap = rangeMapStore.Current;
+
+        int Resolve(string key) => PartitionOverrideForCommit?.Invoke(key) ?? RangeRouting.Locate(keySpaceRegistry, rangeMap, router, key).PartitionId;
+
+        partitionId = Resolve(group[0].key);
+        for (int i = 1; i < group.Count; i++)
+            if (Resolve(group[i].key) != partitionId)
+                return false;
+
+        return true;
     }
 
     private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
@@ -5384,49 +5405,127 @@ internal sealed class KeyValuesManager : IDisposable
         List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys
     )
     {
-        Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[] tasks =
-            new Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[keys.Count];
+        // Participants that share a Raft partition proposal ticket roll back once: a single RollbackLogs
+        // settles the ticket (idempotent on repeat), then each key clears its local prepare state with no
+        // further Raft — so an abort no longer issues N concurrent RollbackLogs for one ticket. Ephemeral keys,
+        // and persistent keys with no ticket, keep the per-key rollback.
+        Dictionary<HLCTimestamp, List<(string key, KeyValueDurability durability)>> byTicket = [];
+        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> perKey = [];
 
-        for (int i = 0; i < keys.Count; i++)
+        foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in keys)
         {
-            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key = keys[i];
-            tasks[i] = RollbackOneMutation(key);
+            if (key.durability == KeyValueDurability.Persistent && key.proposalTicketId != HLCTimestamp.Zero && raft.Joined)
+            {
+                if (byTicket.TryGetValue(key.proposalTicketId, out List<(string key, KeyValueDurability durability)>? group))
+                    group.Add((key.key, key.durability));
+                else
+                    byTicket[key.proposalTicketId] = [(key.key, key.durability)];
+            }
+            else
+                perKey.Add(key);
         }
 
-        return [.. await Task.WhenAll(tasks)];
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> results = new(keys.Count);
 
-        async Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> RollbackOneMutation(
-            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key)
+        foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in perKey)
+            results.Add(await RollbackOneMutation(transactionId, key));
+
+        foreach ((HLCTimestamp ticket, List<(string key, KeyValueDurability durability)> group) in byTicket)
+            results.AddRange(await RollbackTicketGroup(transactionId, ticket, group));
+
+        return results;
+    }
+
+    /// <summary>
+    /// Rolls back one mutation the per-key way: dispatches a <c>TryRollbackMutations</c> to the owning actor,
+    /// which rolls back its ticket and clears the local prepare state. Used for ephemeral participants and
+    /// persistent keys with no shared ticket, which are not batched.
+    /// </summary>
+    private async Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> RollbackOneMutation(
+        HLCTimestamp transactionId,
+        (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key)
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryRollbackMutations, transactionId, HLCTimestamp.Zero, key.key,
+            null, null, -1, KeyValueFlags.None, 0, key.proposalTicketId, key.durability, 0, 0, null);
+
+        try
         {
-            KeyValueRequest request = new(
-                KeyValueRequestType.TryRollbackMutations,
-                transactionId,
-                HLCTimestamp.Zero,
-                key.key,
-                null,
-                null,
-                -1,
-                KeyValueFlags.None,
-                0,
-                key.proposalTicketId,
-                key.durability,
-                0,
-                0,
-                null
-            );
-
-            KeyValueResponse? response;
-
-            if (key.durability == KeyValueDurability.Ephemeral)
-                response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
-            else
-                response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+            KeyValueResponse? response = key.durability == KeyValueDurability.Ephemeral
+                ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
+                : await AskKeyValueActor(persistentKeyValuesRouter, request);
 
             if (response is null)
                 return (KeyValueResponseType.Errored, key.key, -1, key.durability);
 
             return (response.Type, key.key, response.Revision, key.durability);
         }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Rolls back every participant of one partition that shares a proposal ticket: one <c>RollbackLogs</c>
+    /// settles the ticket (idempotent if an earlier retry already rolled it back), then each key clears its
+    /// local prepare state (write intent + MVCC) with no further Raft. A ticket group split across partitions
+    /// since prepare, or a rollback that could not be settled, returns MustRetry so the participant is retained
+    /// and re-driven rather than abandoned — only a settled rollback is positive proof the effect is gone.
+    /// </summary>
+    private async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> RollbackTicketGroup(
+        HLCTimestamp transactionId,
+        HLCTimestamp ticket,
+        List<(string key, KeyValueDurability durability)> group)
+    {
+        if (!TryResolveCohesiveTicketPartition(group, out int partitionId))
+        {
+            logger.LogWarning("Batched rollback: prepared ticket group split across partitions since prepare; MustRetry");
+            return group.Select(g => (KeyValueResponseType.MustRetry, g.key, -1L, g.durability)).ToList();
+        }
+
+        (bool success, RaftOperationStatus status, long _) = await raft.RollbackLogs(partitionId, ticket, CancellationToken.None);
+
+        if (!success)
+        {
+            logger.LogWarning("Batched rollback failed Partition={Partition} Count={Count} Status={Status}", partitionId, group.Count, status);
+
+            // Anything short of a settled rollback is retryable — a rollback that did not take effect leaves
+            // the prepare state possibly intact, so the participants are retained (MustRetry), never abandoned.
+            // Only a proposal that already committed (rollback impossible) is a hard error the coordinator must
+            // see.
+            KeyValueResponseType outcome = status == RaftOperationStatus.Errored
+                ? KeyValueResponseType.Errored
+                : KeyValueResponseType.MustRetry;
+
+            return group.Select(g => (outcome, g.key, -1L, g.durability)).ToList();
+        }
+
+        // The ticket is rolled back in Raft. Clear each key's local prepare state; a dropped/actor-busy clear
+        // is retryable (MustRetry) so the intent is not left dangling.
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> results = new(group.Count);
+
+        foreach ((string key, KeyValueDurability durability) g in group)
+        {
+            KeyValueRequest request = KeyValueRequestPool.Rent(
+                KeyValueRequestType.ApplyRolledBackMutations, transactionId, HLCTimestamp.Zero, g.key,
+                null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, g.durability, 0, 0, null);
+
+            try
+            {
+                KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+                KeyValueResponseType applied = response?.Type == KeyValueResponseType.RolledBack
+                    ? KeyValueResponseType.RolledBack
+                    : KeyValueResponseType.MustRetry;
+                results.Add((applied, g.key, -1L, g.durability));
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
+        }
+
+        return results;
     }
 
     /// <summary>
