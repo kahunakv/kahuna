@@ -37,4 +37,5 @@ public enum KeyValueRequestType
     InvalidateOrApply,
     FlushAck,
     CompletePhaseTwo,
+    StagePrepareMutations,
 }

@@ -29,42 +29,115 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
+        (KeyValueResponse? terminal, byte[]? serialized, int partitionId) = await PrepareAndBuild(message);
+
+        // A terminal outcome means the key needs no proposal: a validation rejection (Errored/MustRetry),
+        // an ephemeral prepare, an Undefined read, or a not-joined single-node success. Return it as-is.
+        if (terminal is not null)
+            return terminal;
+
+        // Persistent prepare that produced a proposal. When not joined to a Raft cluster (embedded
+        // single-node) PrepareAndBuild already returned Prepared, so we are joined here. Build the committed
+        // message once and dispatch the ReplicateLogs round trip to the off-mailbox worker so this actor is
+        // free while it runs; the completion resolves Prepared(ticket) on success or Errored on replication
+        // failure. When no worker is wired (bare test contexts) replicate inline. The write intent set by
+        // PrepareAndBuild pins the entry across the window.
+        if (context.PhaseTwoRouter is null)
+        {
+            (bool success, HLCTimestamp proposalTicket) = await ReplicatePreparedInline(partitionId, serialized!, message.Key);
+            return success
+                ? new(KeyValueResponseType.Prepared, proposalTicket)
+                : KeyValueStaticResponses.ErroredResponse;
+        }
+
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        int phaseTwoId = context.NextPhaseTwoId();
+        long deadlineTicks = KeyValuePhaseTwoRequest.DeadlineFrom(context.Configuration.Phase2CommitTimeout);
+
+        PendingPhaseTwo pending = PendingPhaseTwo.ForPrepare(message.TransactionId, message.Key, message.Durability);
+        pending.Promise = actorContext.Reply.Value.Promise;
+        pending.DeadlineTicks = deadlineTicks;
+        context.PendingPhaseTwos[phaseTwoId] = pending;
+
+        context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForPrepare(
+            phaseTwoId, partitionId, serialized!,
+            deadlineTicks, message.RoutedGeneration, actorContext.Self, actorContext.Reply.Value.Promise));
+
+        actorContext.ByPassReply = true;
+
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
+
+    /// <summary>
+    /// Prepare for the partition-batched path: runs the same validation and installs the same write intent
+    /// as <see cref="Execute"/>, but instead of proposing per key it hands the serialized proposal back so
+    /// the manager can batch every key of a partition into one <c>ReplicateLogs</c>. No Raft call, no
+    /// pending registration, no ByPassReply — the manager owns the round trip. A terminal response
+    /// (Errored/MustRetry, or Prepared with nothing to propose) is returned unchanged; its type tells the
+    /// manager whether to abort the batch or count the key as prepared-with-no-proposal.
+    /// </summary>
+    public async Task<KeyValueResponse> StageExecute(KeyValueRequest message)
+    {
+        (KeyValueResponse? terminal, byte[]? serialized, int partitionId) = await PrepareAndBuild(message);
+
+        if (terminal is not null)
+            return terminal;
+
+        return KeyValueResponse.Staged(serialized, partitionId);
+    }
+
+    /// <summary>
+    /// Runs the full prepare validation, installs/refreshes the write intent, and — for a persistent
+    /// mutation that needs a proposal — builds the serialized committed message. The single source of truth
+    /// for prepare semantics shared by the per-key dispatch path (<see cref="Execute"/>) and the batched
+    /// staging path, so the two cannot drift.
+    ///
+    /// <para>Returns a non-null <c>Terminal</c> response when the key is done without a proposal — a
+    /// validation rejection (Errored/MustRetry), an ephemeral prepare, a read of an Undefined value, or a
+    /// not-joined single-node success. Otherwise <c>Terminal</c> is null and <c>Serialized</c>/<c>PartitionId</c>
+    /// carry the proposal for the caller to replicate (dispatch) or batch (stage).</para>
+    /// </summary>
+    private async Task<(KeyValueResponse? Terminal, byte[]? Serialized, int PartitionId)> PrepareAndBuild(KeyValueRequest message)
+    {
         if (message.TransactionId == HLCTimestamp.Zero)
         {
             context.Logger.LogWarning("Cannot prepare mutations for missing transaction id");
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
         
         if (message.CommitId == HLCTimestamp.Zero)
         {
             context.Logger.LogWarning("Cannot prepare mutations for missing commit id");
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
         if (entry is null)
         {
             context.Logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
 
         if (entry.WriteIntent is not null && entry.WriteIntent.TransactionId != message.TransactionId)
         {
             context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);
-        
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
-        
+
         if (entry.Bucket is not null && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
         {
             if (intent.TransactionId != message.TransactionId)
             {
                 if (intent.Expires - message.CommitId > TimeSpan.Zero)
-                    return new(KeyValueResponseType.MustRetry, 0);
-            
+                    return (new(KeyValueResponseType.MustRetry, 0), null, 0);
+
                 context.LocksByPrefix.Remove(entry.Bucket);
             }
         }
@@ -72,31 +145,31 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (entry.MvccEntries is null)
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
 
         if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
 
         /// A new revision is available in the context which means the transaction was modified
         if (entry.Revision > mvccEntry.Revision)
         {
             context.Logger.LogWarning("Transaction CommitId={TransactionId} conflicts with Revision={Revision} NewRevision={NewRevision} [3]", message.CommitId, entry.Revision, mvccEntry.Revision);
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
-        
+
         /// Last modified is higher than the commit id which means the transaction was modified
         if (entry.LastModified.CompareTo(message.CommitId) > 0)
         {
             context.Logger.LogWarning("Transaction CommitId={TransactionId} conflicts with LastModified={LastModified} [4]", message.CommitId, entry.LastModified);
-            
-            return KeyValueStaticResponses.ErroredResponse;
+
+            return (KeyValueStaticResponses.ErroredResponse, null, 0);
         }
 
         // Higher transactions with staged mutations have seen the committed value.
@@ -114,29 +187,36 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             if (hasStagedMutation && key.CompareTo(message.TransactionId) > 0)
             {
                 context.Logger.LogWarning("Transaction {TransactionId} conflicts with {ExistingTransactionId} [5]", message.TransactionId, key);
-            
-                return KeyValueStaticResponses.ErroredResponse;
+
+                return (KeyValueStaticResponses.ErroredResponse, null, 0);
             }
         }
-        
+
         // Transaction queried a value that didn't exist
         if (mvccEntry.State == KeyValueState.Undefined)
-            return KeyValueStaticResponses.PrepareResponse;
+            return (KeyValueStaticResponses.PrepareResponse, null, 0);
 
         // In optimistic concurrency, we create the write intent if it doesn't exist
         // this is to ensure that the assigned transaction will win the race.
-        // The write intent lease will by extended by DefaultTxCompleteTimeout
-        // it will give the transaction enough time to commit or rollback
+        // The write intent lease is extended by DefaultTxCompleteTimeout from *now* (prepare/dispatch
+        // time), NOT from the transaction start (message.TransactionId). A long-running transaction can
+        // reach prepare well after TransactionId + DefaultTxCompleteTimeout has already elapsed; a
+        // start-relative lease would be born already-expired, letting the collector, lazy expiry, or a
+        // competing transaction clear the intent and evict the entry while the phase-two Raft op is still
+        // detached in flight. A dispatch-relative deadline keeps the entry pinned across that window.
         // CommitTimestamp records the ts the committed revision will carry (mvccEntry.LastModified,
         // stamped at MVCC write time in TrySetHandler). This lets snapshot readers determine whether the
         // in-flight write will commit at-or-before their readTimestamp without blocking the actor.
         // CommitId is a different coordinator-supplied fence value and is NOT used here.
+        HLCTimestamp intentExpires = context.Raft.HybridLogicalClock
+            .TrySendOrLocalEvent(context.Raft.GetLocalNodeId()) + DefaultTxCompleteTimeout;
+
         if (entry.WriteIntent is null)
         {
             entry.WriteIntent = new()
             {
                 TransactionId    = message.TransactionId,
-                Expires          = message.TransactionId + DefaultTxCompleteTimeout,
+                Expires          = intentExpires,
                 CommitTimestamp  = mvccEntry.LastModified,
                 RecordAnchorKey  = message.RecordAnchorKey,
                 EmbeddedDecision = message.EmbeddedDecision
@@ -144,7 +224,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         }
         else
         {
-            entry.WriteIntent.Expires         = message.TransactionId + DefaultTxCompleteTimeout;
+            entry.WriteIntent.Expires         = intentExpires;
             entry.WriteIntent.CommitTimestamp = mvccEntry.LastModified;
             // Stamp the anchor once the coordinator supplies it; a plain pre-prepare lock had none.
             if (message.RecordAnchorKey is not null)
@@ -155,11 +235,11 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         }
 
         if (message.Durability != KeyValueDurability.Persistent)
-            return KeyValueStaticResponses.PrepareResponse;
+            return (KeyValueStaticResponses.PrepareResponse, null, 0);
 
         // Phantom enforcement: reject if a foreign tx holds a range lock covering this key.
         if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, message.CommitId))
-            return new(KeyValueResponseType.MustRetry, 0);
+            return (new(KeyValueResponseType.MustRetry, 0), null, 0);
 
         // Key-range generation fence for 2PC (prepare path). A non-zero RoutedGeneration
         // was set by the locator at route time; if the descriptor was bumped since then (split or
@@ -171,7 +251,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             context.Logger.LogWarning(
                 "2PC prepare fence rejected key {Key} RoutedGen={Gen} — range moved/split; MustRetry",
                 message.Key, message.RoutedGeneration);
-            return new(KeyValueResponseType.MustRetry, 0);
+            return (new(KeyValueResponseType.MustRetry, 0), null, 0);
         }
 
         KeyValueProposal proposal = new(
@@ -191,38 +271,17 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             ? KeyValueRequestType.TryDelete
             : KeyValueRequestType.TrySet;
 
-        // Persistent prepare. When not joined to a Raft cluster (embedded single-node) the proposal is an
-        // immediate success. Otherwise build the committed message once and dispatch the ReplicateLogs
-        // round trip to the off-mailbox worker so this actor is free while it runs; the completion resolves
-        // Prepared(ticket) on success or Errored on replication failure. When no worker is wired (bare test
-        // contexts) replicate inline. The write intent set above pins the entry across the window.
+        // Persistent prepare that produced a proposal. When not joined to a Raft cluster (embedded
+        // single-node) there is nothing to replicate — the prepare succeeds immediately and hands back no
+        // proposal. Otherwise build the committed message once; the caller replicates it (per-key dispatch)
+        // or batches it (staging). The write intent set above pins the entry across that window.
         if (!context.Raft.Joined)
-            return new(KeyValueResponseType.Prepared, HLCTimestamp.Zero);
+            return (new(KeyValueResponseType.Prepared, HLCTimestamp.Zero), null, 0);
 
         byte[] serialized = BuildPreparedMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey, message.EmbeddedDecision);
         int partitionId = ResolvePartition(message.Key);
 
-        if (context.PhaseTwoRouter is null)
-        {
-            (bool success, HLCTimestamp proposalTicket) = await ReplicatePreparedInline(partitionId, serialized, message.Key);
-            return success
-                ? new(KeyValueResponseType.Prepared, proposalTicket)
-                : KeyValueStaticResponses.ErroredResponse;
-        }
-
-        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
-        if (!actorContext.Reply.HasValue)
-            return KeyValueStaticResponses.ErroredResponse;
-
-        int phaseTwoId = context.NextPhaseTwoId();
-        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForPrepare(message.TransactionId, message.Key, message.Durability);
-
-        context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForPrepare(
-            phaseTwoId, partitionId, serialized, actorContext.Self, actorContext.Reply.Value.Promise));
-
-        actorContext.ByPassReply = true;
-
-        return KeyValueStaticResponses.WaitingForReplicationResponse;
+        return (null, serialized, partitionId);
     }
 
     /// <summary>

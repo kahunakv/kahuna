@@ -3,7 +3,6 @@ using Nixie;
 using Kommander;
 using Kommander.Data;
 using Kommander.Time;
-using Kahuna.Server.Configuration;
 using Kahuna.Server.Replication;
 
 namespace Kahuna.Server.KeyValues;
@@ -20,8 +19,6 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
 {
     private readonly IRaft raft;
 
-    private readonly KahunaConfiguration configuration;
-
     private readonly ILogger<IKahuna> logger;
 
     /// <summary>
@@ -32,17 +29,28 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
     /// </summary>
     internal Func<Task>? BeforeRaftCallHook;
 
+    /// <summary>Minimum interval between emitted failure warnings, per worker (see
+    /// <see cref="LogFailureRateLimited"/>).</summary>
+    private const long FailureLogIntervalMs = 1000;
+
+    private long lastFailureLogTicks;
+
+    private int suppressedFailures;
+
     public KeyValuePhaseTwoActor(
         IActorContext<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> context,
         IRaft raft,
-        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
         this.raft = raft;
-        this.configuration = configuration;
         this.logger = logger;
     }
+
+    /// <summary>Milliseconds remaining until the dispatch deadline; <see cref="int.MaxValue"/> when the
+    /// request carries no deadline. Negative once the deadline has passed.</summary>
+    private static long RemainingMs(long deadlineTicks) =>
+        deadlineTicks == KeyValuePhaseTwoRequest.NoDeadline ? int.MaxValue : deadlineTicks - Environment.TickCount64;
 
     public async Task Receive(KeyValuePhaseTwoRequest message)
     {
@@ -57,12 +65,16 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
         if (BeforeRaftCallHook is { } gate)
             await gate();
 
-        // Bound the Raft wait so a stuck partition (no leader, quorum loss, WAL stall) cannot park
-        // the worker indefinitely. On the deadline the call surfaces OperationCancelled, classified
-        // transient by the participant's completion path, and the coordinator re-drives the same
-        // ticket — idempotent once it commits. A non-positive timeout disables the bound.
-        int timeoutMs = configuration.Phase2CommitTimeout;
-        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
+        // Bound the Raft wait by the time remaining to the dispatch deadline — NOT a fresh full timeout —
+        // so queue time counts against the budget: an op that spent most of its window queued behind other
+        // work gets only the leftover for its Raft call, tripping quickly to OperationCancelled (transient,
+        // re-driven by the coordinator) instead of waiting a full timeout after dequeue. A request already
+        // past its deadline still makes one minimal (1 ms) attempt rather than being skipped — the attempt
+        // may still land (Kommander applies a cancelled commit late), which the idempotent retry needs. No
+        // deadline (timeout disabled) leaves the wait unbounded.
+        using CancellationTokenSource? cts = message.DeadlineTicks != KeyValuePhaseTwoRequest.NoDeadline
+            ? new CancellationTokenSource((int)Math.Clamp(RemainingMs(message.DeadlineTicks), 1, int.MaxValue))
+            : null;
         CancellationToken token = cts?.Token ?? CancellationToken.None;
 
         bool success;
@@ -81,6 +93,7 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
                         ReplicationTypes.KeyValues,
                         message.SerializedMessage!,
                         autoCommit: false,
+                        expectedGeneration: message.RoutedGeneration,
                         cancellationToken: token
                     );
 
@@ -123,9 +136,38 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
         }
 
         if (!success)
-            logger.LogWarning("KeyValuePhaseTwoActor: {OpKind} on partition {Partition} failed Status={Status}", message.OpKind, message.PartitionId, status);
+            LogFailureRateLimited(message.OpKind, message.PartitionId, status);
 
         SendCompletion(message, success, status, commitIndex, ticketId);
+    }
+
+    /// <summary>
+    /// Logs a phase-two failure at warning level at most once per <see cref="FailureLogIntervalMs"/> per
+    /// worker, folding the count of suppressed failures into the next emitted line. A cluster-wide outage
+    /// with many keys and retries would otherwise emit thousands of near-identical warnings; this caps
+    /// the volume while preserving a sampled, counted diagnostic. Actor-thread only — no locking.
+    /// </summary>
+    private void LogFailureRateLimited(PhaseTwoOpKind opKind, int partitionId, RaftOperationStatus status)
+    {
+        long now = Environment.TickCount64;
+        if (now - lastFailureLogTicks < FailureLogIntervalMs)
+        {
+            suppressedFailures++;
+            return;
+        }
+
+        int suppressed = suppressedFailures;
+        suppressedFailures = 0;
+        lastFailureLogTicks = now;
+
+        if (suppressed > 0)
+            logger.LogWarning(
+                "KeyValuePhaseTwoActor: {OpKind} on partition {Partition} failed Status={Status} (+{Suppressed} similar suppressed)",
+                opKind, partitionId, status, suppressed);
+        else
+            logger.LogWarning(
+                "KeyValuePhaseTwoActor: {OpKind} on partition {Partition} failed Status={Status}",
+                opKind, partitionId, status);
     }
 
     private static void SendCompletion(

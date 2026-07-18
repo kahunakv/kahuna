@@ -744,7 +744,6 @@ internal sealed class KeyValuesManager : IDisposable
             phaseTwoWorkers.Add(actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>(
                 "phasetwo-keyvalue-" + i,
                 raft,
-                configuration,
                 logger
             ));
 
@@ -758,6 +757,36 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal KeyValuePhaseTwoActor? FirstPhaseTwoWorker =>
         phaseTwoWorkers.Count > 0 ? phaseTwoWorkers[0].Runner.Actor as KeyValuePhaseTwoActor : null;
+
+    /// <summary>
+    /// Groups participants by their resolved Raft partition (via the same <see cref="RangeRouting.Locate"/>
+    /// used by per-key routing, so grouping cannot drift), carrying the shared routing generation. This is
+    /// the seam for partition-batched 2PC: keys in one group share a partition — hence one proposal ticket
+    /// and one descriptor-fence generation — so the propose/commit can be issued once per group instead of
+    /// once per key. Grouping is by partition, not leader: one node can lead several partitions, and a batched
+    /// <c>ReplicateLogs</c> takes a single partition id.
+    /// </summary>
+    internal static Dictionary<int, (long Generation, List<T> Items)> GroupByPartition<T>(
+        KeySpaceRegistry registry,
+        RangeMap rangeMap,
+        DataPartitionRouter dataPartitionRouter,
+        IEnumerable<T> items,
+        Func<T, string> keyOf)
+    {
+        Dictionary<int, (long Generation, List<T> Items)> groups = [];
+
+        foreach (T item in items)
+        {
+            (int partitionId, long generation) = RangeRouting.Locate(registry, rangeMap, dataPartitionRouter, keyOf(item));
+
+            if (groups.TryGetValue(partitionId, out (long Generation, List<T> Items) group))
+                group.Items.Add(item);
+            else
+                groups[partitionId] = (generation, [item]);
+        }
+
+        return groups;
+    }
 
     /// <summary>
     /// Creates the ephemeral key/values router

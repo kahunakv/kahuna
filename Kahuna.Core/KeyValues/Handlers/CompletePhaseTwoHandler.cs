@@ -35,10 +35,9 @@ internal sealed class CompletePhaseTwoHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
-        // Primary duplicate-completion guard: the first completion for this id removes the pending entry
-        // and applies; any later completion for the same id finds nothing and no-ops. The promise it
-        // targets was already resolved by the first completion, so re-resolving is harmless.
-        if (!context.PendingPhaseTwos.Remove(completion.PhaseTwoId, out PendingPhaseTwo? pending))
+        // A completion whose pending entry is already gone is a duplicate (or arrived after a retry
+        // advanced the state); the promise was already resolved, so re-resolving is harmless.
+        if (!context.PendingPhaseTwos.TryGetValue(completion.PhaseTwoId, out PendingPhaseTwo? pending))
         {
             KeyValueResponse duplicate = MapOutcome(completion);
 
@@ -46,6 +45,24 @@ internal sealed class CompletePhaseTwoHandler : BaseHandler
 
             return duplicate;
         }
+
+        // Correlation guard: the completion's op kind must match the parked entry's. A mismatch is a
+        // misrouted/malformed internal completion — surface a protocol error without consuming the pending
+        // entry (its real completion still owns it) or applying under the wrong operation.
+        if (completion.OpKind != pending.OpKind)
+        {
+            context.Logger.LogError(
+                "KeyValueActor/CompletePhaseTwo: op-kind mismatch for id {Id} — completion {CompletionKind}, pending {PendingKind}",
+                completion.PhaseTwoId, completion.OpKind, pending.OpKind);
+
+            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+
+            return KeyValueStaticResponses.ErroredResponse;
+        }
+
+        // Primary duplicate-completion guard: the first completion for this id removes the pending entry
+        // and applies; any later completion for the same id finds nothing and no-ops.
+        context.PendingPhaseTwos.Remove(completion.PhaseTwoId);
 
         KeyValueResponse response;
         try
@@ -94,18 +111,27 @@ internal sealed class CompletePhaseTwoHandler : BaseHandler
                 ? KeyValueStaticResponses.MustRetryResponse
                 : KeyValueStaticResponses.ErroredResponse;
 
-        // Second line of defence behind the registry: if the tx's write intent is no longer active here
-        // (no resident entry, cleared, or owned by a different tx), it was already resolved — a prior
-        // completion for a coordinator retry, or an idempotent re-commit that raced ahead. Consult the
-        // recent-decision set rather than re-applying, and never report a false Committed over a rollback.
+        // The tx's write intent is no longer active here (no resident entry, cleared, or owned by a
+        // different tx): the local apply already happened, or state was lost. Positive identification —
+        // report Committed only with local proof that this node applied the commit: the recent-decision
+        // set, or a durable completion receipt (recorded by the replication apply that ran during
+        // CommitLogs, or by an earlier retry's completion). Record the decision so this terminal path is
+        // authoritative too. Without proof, do not fabricate a Committed over missing local state — return
+        // retryable so the coordinator re-drives (idempotent); the apply/receipt reconciles it.
         if (!context.Store.TryGetValue(pending.Key, out KeyValueEntry? entry) || entry is null
             || entry.WriteIntent is null || entry.WriteIntent.TransactionId != pending.TxId)
         {
+            if (context.WasCommittedHere(pending.TxId)
+                || context.CompletionReceiptStore.Contains(pending.TxId, pending.Key, pending.Durability))
+            {
+                context.RecordCommitted(pending.TxId);
+                return new KeyValueResponse(KeyValueResponseType.Committed, completion.CommitIndex);
+            }
+
             if (context.WasRolledBackHere(pending.TxId))
                 return KeyValueStaticResponses.ErroredResponse;
 
-            // Committed here already, or the CommitLogs succeeded durably with no conflicting decision.
-            return new KeyValueResponse(KeyValueResponseType.Committed, completion.CommitIndex);
+            return KeyValueStaticResponses.MustRetryResponse;
         }
 
         // Confirmed durable commit, first apply: the entry is pinned by its live write intent, so it is
@@ -124,16 +150,22 @@ internal sealed class CompletePhaseTwoHandler : BaseHandler
                 ? KeyValueStaticResponses.MustRetryResponse
                 : KeyValueStaticResponses.ErroredResponse;
 
-        // Second line of defence behind the registry: if the tx's write intent is no longer active here,
-        // it was already resolved. Consult the recent-decision set rather than re-clearing state, and
-        // never report a false RolledBack over a commit.
+        // The tx's write intent is no longer active here: it was already resolved. Positive identification —
+        // report RolledBack only with local proof (the recent-rolled-back set); record it so this path is
+        // authoritative. Never report RolledBack over a commit recorded here. Without proof, return retryable.
         if (!context.Store.TryGetValue(pending.Key, out KeyValueEntry? entry) || entry is null
             || entry.WriteIntent is null || entry.WriteIntent.TransactionId != pending.TxId)
         {
+            if (context.WasRolledBackHere(pending.TxId))
+            {
+                context.RecordRolledBack(pending.TxId);
+                return new KeyValueResponse(KeyValueResponseType.RolledBack, completion.CommitIndex);
+            }
+
             if (context.WasCommittedHere(pending.TxId))
                 return KeyValueStaticResponses.ErroredResponse;
 
-            return new KeyValueResponse(KeyValueResponseType.RolledBack, completion.CommitIndex);
+            return KeyValueStaticResponses.MustRetryResponse;
         }
 
         // Confirmed rollback, first apply. RecordRolledBack (inside ApplyConfirmedRollback) makes this

@@ -45,6 +45,16 @@ internal sealed class PendingPhaseTwo
     /// transaction; installed atomically as the anchor commit applies.</summary>
     public CoordinatorDecisionRecord? EmbeddedDecision { get; }
 
+    /// <summary>The caller's ask promise, retained so a deadline sweep can resolve it (retryable) if the
+    /// off-mailbox worker dies or its completion message is dropped and never arrives. Set by the
+    /// dispatching handler; null in bare-context tests that drive the completion directly.</summary>
+    public TaskCompletionSource<KeyValueResponse?>? Promise { get; set; }
+
+    /// <summary>Absolute dispatch deadline (<see cref="Environment.TickCount64"/> ms) mirrored from the
+    /// worker request, so the sweep can tell an orphaned entry from one whose completion is still due.
+    /// <see cref="KeyValuePhaseTwoRequest.NoDeadline"/> disables the sweep for this entry.</summary>
+    public long DeadlineTicks { get; set; } = KeyValuePhaseTwoRequest.NoDeadline;
+
     private PendingPhaseTwo(
         PhaseTwoOpKind opKind,
         HLCTimestamp txId,

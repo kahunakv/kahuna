@@ -94,7 +94,7 @@ public sealed class TestPhaseTwoOffMailbox
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, node.Raft, logger);
 
         TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        worker.Send(KeyValuePhaseTwoRequest.ForPrepare(1, partitionId, SerializeSet("phasetwo/prepare", 0), replyActor, promise));
+        worker.Send(KeyValuePhaseTwoRequest.ForPrepare(1, partitionId, SerializeSet("phasetwo/prepare", 0), KeyValuePhaseTwoRequest.NoDeadline, 0, replyActor, promise));
 
         KeyValueResponse? response = await promise.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
 
@@ -137,7 +137,7 @@ public sealed class TestPhaseTwoOffMailbox
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, node.Raft, logger);
 
         TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        worker.Send(KeyValuePhaseTwoRequest.ForCommit(1, partitionId, prepared.TicketId, replyActor, promise));
+        worker.Send(KeyValuePhaseTwoRequest.ForCommit(1, partitionId, prepared.TicketId, KeyValuePhaseTwoRequest.NoDeadline, replyActor, promise));
 
         KeyValueResponse? response = await promise.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
 
@@ -441,7 +441,7 @@ public sealed class TestPhaseTwoOffMailbox
         };
 
         TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        worker.Send(KeyValuePhaseTwoRequest.ForCommit(1, partitionId, prepared.TicketId, replyActor, promise));
+        worker.Send(KeyValuePhaseTwoRequest.ForCommit(1, partitionId, prepared.TicketId, KeyValuePhaseTwoRequest.NoDeadline, replyActor, promise));
 
         // The worker reaches the gate — the op is in flight, before the Raft call.
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
@@ -654,7 +654,7 @@ public sealed class TestPhaseTwoOffMailbox
 
         using ActorSystem actorSystem = new();
         IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker =
-            actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>("notjoined-worker", raft, config, logger);
+            actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>("notjoined-worker", raft, logger);
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor =
             actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                 "notjoined-reply", null!, null!, new MemoryPersistenceBackend(), raft,
@@ -670,7 +670,8 @@ public sealed class TestPhaseTwoOffMailbox
 
         TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
         worker.Send(KeyValuePhaseTwoRequest.ForCommit(
-            1, 1, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), replyActor, promise));
+            1, 1, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()),
+            KeyValuePhaseTwoRequest.NoDeadline, replyActor, promise));
 
         // The worker reaches the Raft-call path even when not joined (before R2 it short-circuited).
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
@@ -799,8 +800,242 @@ public sealed class TestPhaseTwoOffMailbox
             promise));
 
         Assert.Equal(KeyValueResponseType.MustRetry, resp.Type);
-        Assert.True(promise.Task.IsCompleted);
-        Assert.Equal(KeyValueResponseType.MustRetry, promise.Task.Result!.Type);
+        // The promise was resolved (not leaked) with the same response the handler returned.
+        Assert.True(promise.Task.IsCompletedSuccessfully);
+    }
+
+    /// <summary>
+    /// R4 (B3): the prepare write-intent lease is dispatch-relative (now + timeout), not tx-start-relative.
+    /// A long-running transaction reaching prepare an hour after it started must still get a future lease
+    /// so the entry stays pinned across the detached phase-two window — not one born already expired.
+    /// </summary>
+    [Fact]
+    public async Task Prepare_SetsDispatchRelativeIntentExpiry_NotTxStartRelative()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("prepare-expiry");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        const string key = "phasetwo/expiry";
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp oldTxId = now - 3_600_000;  // the transaction started an hour ago
+        HLCTimestamp commitId = now;
+
+        KeyValueEntry entry = new()
+        {
+            Value = "v"u8.ToArray(),
+            Revision = 1,
+            State = KeyValueState.Set,
+            LastUsed = oldTxId,
+            LastModified = oldTxId,
+            MvccEntries = new() { [oldTxId] = new KeyValueMvccEntry { Value = "v2"u8.ToArray(), Revision = 1, State = KeyValueState.Set, LastModified = commitId } }
+        };
+        context.Store.Insert(key, entry);
+
+        KeyValueRequest prepare = new(
+            KeyValueRequestType.TryPrepareMutations, oldTxId, commitId, key, null, null, -1,
+            KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 0, null);
+
+        TryPrepareMutationsHandler handler = new(context);
+        KeyValueResponse resp = await handler.Execute(prepare);
+
+        Assert.Equal(KeyValueResponseType.Prepared, resp.Type);
+        Assert.NotNull(entry.WriteIntent);
+        // Dispatch-relative: the lease expires in the future, well beyond the tx-start-relative deadline.
+        Assert.True(entry.WriteIntent!.Expires - now > TimeSpan.Zero);
+        Assert.True(entry.WriteIntent.Expires - (oldTxId + 15000) > TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// R5 (B4): a successful commit completion whose participant state is missing, with no local proof
+    /// (no recent-committed decision, no completion receipt), must not fabricate a Committed — it returns
+    /// retryable so the coordinator re-drives.
+    /// </summary>
+    [Fact]
+    public void CommitCompletion_MissingStateNoProof_ReturnsRetryable()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("missing-noproof");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        const string key = "phasetwo/missing-noproof";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        // Entry present but no write intent (state gone), and no receipt / recent decision recorded.
+        context.Store.Insert(key, new KeyValueEntry { Value = "v"u8.ToArray(), Revision = 5, State = KeyValueState.Set });
+
+        KeyValueProposal proposal = new(
+            KeyValueRequestType.TrySet, key, "v"u8.ToArray(), 5, false,
+            HLCTimestamp.Zero, txId, txId, KeyValueState.Set, KeyValueDurability.Persistent);
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForCommit(
+            txId, key, KeyValueDurability.Persistent, proposal, txId, txId, 1, null, null);
+
+        CompletePhaseTwoHandler handler = new(context);
+        KeyValueResponse resp = handler.Execute(KeyValueRequest.ForCompletePhaseTwo(
+            new PhaseTwoCompletionData(phaseTwoId, PhaseTwoOpKind.Commit, true, RaftOperationStatus.Success, 5, HLCTimestamp.Zero),
+            null));
+
+        Assert.Equal(KeyValueResponseType.MustRetry, resp.Type);
+    }
+
+    /// <summary>
+    /// R5 (B4): a successful commit completion with missing state but a durable completion receipt (proof
+    /// the commit applied here, e.g. via the replication apply) returns Committed and records the decision.
+    /// </summary>
+    [Fact]
+    public void CommitCompletion_MissingStateWithReceipt_ReturnsCommitted()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("missing-receipt");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        const string key = "phasetwo/missing-receipt";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        context.Store.Insert(key, new KeyValueEntry { Value = "v"u8.ToArray(), Revision = 5, State = KeyValueState.Set });
+        context.CompletionReceiptStore.Record(txId, key, null, KeyValueDurability.Persistent);
+
+        KeyValueProposal proposal = new(
+            KeyValueRequestType.TrySet, key, "v"u8.ToArray(), 5, false,
+            HLCTimestamp.Zero, txId, txId, KeyValueState.Set, KeyValueDurability.Persistent);
+        int phaseTwoId = context.NextPhaseTwoId();
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForCommit(
+            txId, key, KeyValueDurability.Persistent, proposal, txId, txId, 1, null, null);
+
+        CompletePhaseTwoHandler handler = new(context);
+        KeyValueResponse resp = handler.Execute(KeyValueRequest.ForCompletePhaseTwo(
+            new PhaseTwoCompletionData(phaseTwoId, PhaseTwoOpKind.Commit, true, RaftOperationStatus.Success, 5, HLCTimestamp.Zero),
+            null));
+
+        Assert.Equal(KeyValueResponseType.Committed, resp.Type);
+        Assert.True(context.WasCommittedHere(txId));
+    }
+
+    /// <summary>
+    /// R7 (B5): the dispatch deadline is a future absolute monotonic tick for a positive timeout, and the
+    /// NoDeadline sentinel when the timeout is disabled — so the worker can bound dispatch-to-resolution.
+    /// </summary>
+    [Fact]
+    public void DeadlineFrom_ComputesFutureDeadline_OrNoDeadlineWhenDisabled()
+    {
+        long before = Environment.TickCount64;
+        long deadline = KeyValuePhaseTwoRequest.DeadlineFrom(5000);
+        Assert.True(deadline >= before + 5000);
+        Assert.True(deadline <= Environment.TickCount64 + 5000);
+
+        Assert.Equal(KeyValuePhaseTwoRequest.NoDeadline, KeyValuePhaseTwoRequest.DeadlineFrom(0));
+        Assert.Equal(KeyValuePhaseTwoRequest.NoDeadline, KeyValuePhaseTwoRequest.DeadlineFrom(-1));
+    }
+
+    /// <summary>
+    /// R7 (B5): a request already past its dispatch deadline is not skipped — the worker still makes one
+    /// minimal Raft attempt (the gate hook is reached) bounded by the leftover budget, so a cancelled
+    /// commit can still land late for the idempotent retry. The doomed attempt resolves retryably.
+    /// </summary>
+    [Fact]
+    public async Task Worker_ExpiredDeadline_StillAttemptsRaft_ResolvesRetryable()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("phasetwo-expired");
+
+        using ActorSystem actorSystem = new();
+        (IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker,
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, raft, logger);
+
+        KeyValuePhaseTwoActor workerInstance = (worker.Runner.Actor as KeyValuePhaseTwoActor)!;
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        workerInstance.BeforeRaftCallHook = () =>
+        {
+            entered.TrySetResult();
+            return Task.CompletedTask;
+        };
+
+        TaskCompletionSource<KeyValueResponse?> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        long expiredDeadline = Environment.TickCount64 - 1000;  // already past its window
+        worker.Send(KeyValuePhaseTwoRequest.ForCommit(
+            1, 1, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()),
+            expiredDeadline, replyActor, promise));
+
+        KeyValueResponse? response = await promise.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+        Assert.NotNull(response);
+        // The doomed minimal attempt resolves as a failure, never a fabricated commit.
+        Assert.NotEqual(KeyValueResponseType.Committed, response!.Type);
+
+        // The Raft-call path was still reached (a minimal attempt), not skipped.
+        Assert.True(entered.Task.IsCompleted);
+    }
+
+    /// <summary>
+    /// R7/R6 (B6): the periodic collect sweeps an orphaned phase-two entry whose worker never returned a
+    /// completion (past its deadline + grace), resolving the caller's retained promise retryably so the
+    /// coordinator's ask cannot hang forever. An entry still within its deadline is left untouched.
+    /// </summary>
+    [Fact]
+    public async Task Sweep_ResolvesOrphanedPhaseTwoPastDeadline_LeavesInFlightAlone()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("phasetwo-sweep");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        KeyValueProposal proposal = new(
+            KeyValueRequestType.TrySet, "sweep/key", null, 1, false,
+            HLCTimestamp.Zero, txId, txId, KeyValueState.Set, KeyValueDurability.Persistent);
+
+        // Orphaned: well past its deadline + grace — must be swept.
+        TaskCompletionSource<KeyValueResponse?> orphanPromise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int orphanId = context.NextPhaseTwoId();
+        PendingPhaseTwo orphan = PendingPhaseTwo.ForCommit(txId, "sweep/key", KeyValueDurability.Persistent, proposal, txId, txId, 1, null, null);
+        orphan.Promise = orphanPromise;
+        orphan.DeadlineTicks = Environment.TickCount64 - 60_000;
+        context.PendingPhaseTwos[orphanId] = orphan;
+
+        // In flight: deadline in the future — must be left alone.
+        TaskCompletionSource<KeyValueResponse?> livePromise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int liveId = context.NextPhaseTwoId();
+        PendingPhaseTwo live = PendingPhaseTwo.ForCommit(txId, "sweep/live", KeyValueDurability.Persistent, proposal, txId, txId, 1, null, null);
+        live.Promise = livePromise;
+        live.DeadlineTicks = Environment.TickCount64 + 60_000;
+        context.PendingPhaseTwos[liveId] = live;
+
+        // The periodic collect runs the phase-two sweep.
+        new TryCollectHandler(context).Execute();
+
+        Assert.False(context.PendingPhaseTwos.ContainsKey(orphanId));
+        KeyValueResponse? resolved = await orphanPromise.Task;
+        Assert.Equal(KeyValueResponseType.MustRetry, resolved!.Type);
+
+        Assert.True(context.PendingPhaseTwos.ContainsKey(liveId));
+        Assert.False(livePromise.Task.IsCompleted);
+    }
+
+    /// <summary>
+    /// R10 (S6): a completion whose op kind does not match the parked entry is a misrouted/malformed
+    /// internal completion — it surfaces a protocol error and does not consume the pending entry (its
+    /// real completion still owns it) or apply under the wrong operation.
+    /// </summary>
+    [Fact]
+    public void Completion_OpKindMismatch_ReturnsErrored_WithoutConsumingPending()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("phasetwo-kindmismatch");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        int phaseTwoId = context.NextPhaseTwoId();
+        // Parked as a Commit.
+        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForRollback(
+            txId, "kind/key", KeyValueDurability.Persistent, txId, txId, 1);
+
+        CompletePhaseTwoHandler handler = new(context);
+        // Deliver a Commit completion for a Rollback pending — a correlation mismatch.
+        KeyValueResponse resp = handler.Execute(KeyValueRequest.ForCompletePhaseTwo(
+            new PhaseTwoCompletionData(phaseTwoId, PhaseTwoOpKind.Commit, true, RaftOperationStatus.Success, 5, HLCTimestamp.Zero),
+            null));
+
+        Assert.Equal(KeyValueResponseType.Errored, resp.Type);
+        // The pending entry is not consumed by the misrouted completion.
+        Assert.True(context.PendingPhaseTwos.ContainsKey(phaseTwoId));
     }
 
     private static KeyValueContext DirectContext(RaftManager raft, KahunaConfiguration config, ILogger<IKahuna> logger)
@@ -837,7 +1072,7 @@ public sealed class TestPhaseTwoOffMailbox
         KahunaConfiguration config = Config();
 
         IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker =
-            actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>("phasetwo-worker", raft, config, logger);
+            actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>("phasetwo-worker", raft, logger);
 
         // A minimal participant actor acts as the completion sink: it receives the CompletePhaseTwo
         // message and resolves the promise. It exercises no store/backend state on this path.

@@ -134,12 +134,18 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         // Park the after-Raft context on the actor, keyed by a monotonic id the completion carries back.
         // The entry stays pinned by its live write intent across the window, so it cannot be evicted.
         int phaseTwoId = context.NextPhaseTwoId();
-        context.PendingPhaseTwos[phaseTwoId] = PendingPhaseTwo.ForRollback(
+        long deadlineTicks = KeyValuePhaseTwoRequest.DeadlineFrom(context.Configuration.Phase2CommitTimeout);
+
+        PendingPhaseTwo pending = PendingPhaseTwo.ForRollback(
             message.TransactionId, message.Key, message.Durability, currentTime,
             message.ProposalTicketId, partitionId);
+        pending.Promise = actorContext.Reply.Value.Promise;
+        pending.DeadlineTicks = deadlineTicks;
+        context.PendingPhaseTwos[phaseTwoId] = pending;
 
         context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForRollback(
-            phaseTwoId, partitionId, message.ProposalTicketId, actorContext.Self, actorContext.Reply.Value.Promise));
+            phaseTwoId, partitionId, message.ProposalTicketId,
+            deadlineTicks, actorContext.Self, actorContext.Reply.Value.Promise));
 
         actorContext.ByPassReply = true;
 

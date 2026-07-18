@@ -13,6 +13,9 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 internal sealed class KeyValuePhaseTwoRequest
 {
+    /// <summary>Sentinel <see cref="DeadlineTicks"/> meaning "no deadline" (the timeout is disabled).</summary>
+    public const long NoDeadline = long.MaxValue;
+
     /// <summary>Which Raft round trip to run: prepare proposal, commit, or rollback.</summary>
     public PhaseTwoOpKind OpKind { get; }
 
@@ -37,12 +40,25 @@ internal sealed class KeyValuePhaseTwoRequest
     /// <summary>The caller's promise, resolved by the actor-owned completion handler.</summary>
     public TaskCompletionSource<KeyValueResponse?> Promise { get; }
 
+    /// <summary>Absolute deadline (in <see cref="Environment.TickCount64"/> monotonic ms) computed at
+    /// dispatch, so the timeout covers dispatch-to-resolution — queue time plus the Raft call — not just
+    /// the Raft call after dequeue. <see cref="NoDeadline"/> when the timeout is disabled.</summary>
+    public long DeadlineTicks { get; }
+
+    /// <summary>Key-range routing generation the prepare was resolved on, threaded into the worker's
+    /// <c>ReplicateLogs(expectedGeneration:)</c> so a split/move during the queue delay is fenced (the
+    /// proposal is rejected rather than landing on a stale partition). 0 for hash spaces and for
+    /// commit/rollback (which target a ticket, not a routed proposal).</summary>
+    public long RoutedGeneration { get; }
+
     private KeyValuePhaseTwoRequest(
         PhaseTwoOpKind opKind,
         int phaseTwoId,
         int partitionId,
         byte[]? serializedMessage,
         HLCTimestamp ticketId,
+        long deadlineTicks,
+        long routedGeneration,
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> keyValueActor,
         TaskCompletionSource<KeyValueResponse?> promise
     )
@@ -52,9 +68,15 @@ internal sealed class KeyValuePhaseTwoRequest
         PartitionId = partitionId;
         SerializedMessage = serializedMessage;
         TicketId = ticketId;
+        DeadlineTicks = deadlineTicks;
+        RoutedGeneration = routedGeneration;
         KeyValueActor = keyValueActor;
         Promise = promise;
     }
+
+    /// <summary>Computes the absolute dispatch deadline from a timeout in ms (≤ 0 disables it).</summary>
+    public static long DeadlineFrom(int timeoutMs) =>
+        timeoutMs > 0 ? Environment.TickCount64 + timeoutMs : NoDeadline;
 
     /// <summary>Builds a prepare request that proposes <paramref name="serializedMessage"/> to
     /// <paramref name="partitionId"/> with <c>autoCommit:false</c>; the proposal yields the ticket.</summary>
@@ -62,25 +84,29 @@ internal sealed class KeyValuePhaseTwoRequest
         int phaseTwoId,
         int partitionId,
         byte[] serializedMessage,
+        long deadlineTicks,
+        long routedGeneration,
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> keyValueActor,
         TaskCompletionSource<KeyValueResponse?> promise
-    ) => new(PhaseTwoOpKind.Prepare, phaseTwoId, partitionId, serializedMessage, HLCTimestamp.Zero, keyValueActor, promise);
+    ) => new(PhaseTwoOpKind.Prepare, phaseTwoId, partitionId, serializedMessage, HLCTimestamp.Zero, deadlineTicks, routedGeneration, keyValueActor, promise);
 
     /// <summary>Builds a commit request for a previously prepared <paramref name="ticketId"/>.</summary>
     public static KeyValuePhaseTwoRequest ForCommit(
         int phaseTwoId,
         int partitionId,
         HLCTimestamp ticketId,
+        long deadlineTicks,
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> keyValueActor,
         TaskCompletionSource<KeyValueResponse?> promise
-    ) => new(PhaseTwoOpKind.Commit, phaseTwoId, partitionId, null, ticketId, keyValueActor, promise);
+    ) => new(PhaseTwoOpKind.Commit, phaseTwoId, partitionId, null, ticketId, deadlineTicks, 0, keyValueActor, promise);
 
     /// <summary>Builds a rollback request for a previously prepared <paramref name="ticketId"/>.</summary>
     public static KeyValuePhaseTwoRequest ForRollback(
         int phaseTwoId,
         int partitionId,
         HLCTimestamp ticketId,
+        long deadlineTicks,
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> keyValueActor,
         TaskCompletionSource<KeyValueResponse?> promise
-    ) => new(PhaseTwoOpKind.Rollback, phaseTwoId, partitionId, null, ticketId, keyValueActor, promise);
+    ) => new(PhaseTwoOpKind.Rollback, phaseTwoId, partitionId, null, ticketId, deadlineTicks, 0, keyValueActor, promise);
 }

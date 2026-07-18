@@ -423,6 +423,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ImportRangeLocks => ImportRangeLocks(message),
                 KeyValueRequestType.GetSafeTimestamp => await getSafeTimestampHandler.Execute(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
+                KeyValueRequestType.StagePrepareMutations => await StagePrepareMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
                 KeyValueRequestType.GetByBucket => await GetByBucket(message),
@@ -625,7 +626,17 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     {
         return tryPrepareMutationsHandler.Execute(message);
     }
-    
+
+    /// <summary>
+    /// Prepare for the partition-batched path: validate and pin the write intent exactly as a per-key
+    /// prepare, but return the serialized proposal for the manager to batch into one partition-wide
+    /// <c>ReplicateLogs</c> instead of proposing here.
+    /// </summary>
+    private Task<KeyValueResponse> StagePrepareMutations(KeyValueRequest message)
+    {
+        return tryPrepareMutationsHandler.StageExecute(message);
+    }
+
     /// <summary>
     /// Commit the mutations made to the key currently held in the MVCC entry
     /// </summary>

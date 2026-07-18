@@ -73,6 +73,10 @@ internal sealed class TryCollectHandler : BaseHandler
 
     public void Execute()
     {
+        // Resolve any orphaned phase-two entries (worker died / completion dropped) before the sweep of
+        // resident entries — the periodic collect is the reliable trigger that fires even when idle.
+        SweepExpiredPhaseTwos();
+
         Stopwatch stopwatch = Stopwatch.StartNew();
         int tombstoneEvicted = 0;
         int expiryEvicted = 0;
