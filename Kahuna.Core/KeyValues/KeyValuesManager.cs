@@ -5027,8 +5027,15 @@ internal sealed class KeyValuesManager : IDisposable
         // lease (DefaultTxCompleteTimeout), which pins the staged entries; the deadline that matters for the
         // lease-outliving race is on the commit, which retries idempotently. (Verified: a propose deadline
         // breaks the deadline-bounded recovery path.)
+        // expectedGeneration is 0 (fence disabled) on purpose: `generation` here is the Kahuna range-descriptor
+        // generation used to group and route the batch, NOT the physical Raft partition generation that
+        // Kommander's expectedGeneration fences against. The two are independent — a range split bumps the
+        // descriptor generation in place without touching the physical partition generation — so fencing this
+        // proposal by the descriptor generation would reject every post-split key-range prepare with
+        // PartitionMoved. The descriptor-move fence already ran per key on the actor (TryFenceKeyRange against
+        // the current range map) during staging, before this propose.
         RaftReplicationResult result = await raft.ReplicateLogs(
-            partitionId, ReplicationTypes.KeyValues, batch, autoCommit: false, expectedGeneration: generation);
+            partitionId, ReplicationTypes.KeyValues, batch, autoCommit: false, expectedGeneration: 0);
 
         if (!result.Success)
         {

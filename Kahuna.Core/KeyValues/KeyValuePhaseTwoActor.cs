@@ -88,12 +88,20 @@ internal sealed class KeyValuePhaseTwoActor : IActor<KeyValuePhaseTwoRequest>
             {
                 case PhaseTwoOpKind.Prepare:
                 {
+                    // Do NOT fence this proposal by the routed generation. RoutedGeneration is the Kahuna
+                    // range-descriptor generation; Kommander's expectedGeneration fences against the physical
+                    // Raft partition generation, an independent namespace Kahuna never syncs from descriptors
+                    // (a range split bumps the descriptor generation in place on the same partition without
+                    // touching the physical partition generation). Threading the descriptor generation here
+                    // would reject every post-split key-range prepare with PartitionMoved. The descriptor-move
+                    // fence is already enforced on the actor in the prepare handler (TryFenceKeyRange against
+                    // the current range map) before this dispatch, so passing 0 (fence disabled) is correct.
                     RaftReplicationResult result = await raft.ReplicateLogs(
                         message.PartitionId,
                         ReplicationTypes.KeyValues,
                         message.SerializedMessage!,
                         autoCommit: false,
-                        expectedGeneration: message.RoutedGeneration,
+                        expectedGeneration: 0,
                         cancellationToken: token
                     );
 

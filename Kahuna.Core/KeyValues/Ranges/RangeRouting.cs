@@ -19,8 +19,11 @@ internal static class RangeRouting
     /// <list type="bullet">
     /// <item><b>KeyRange</b> space → the descriptor from <paramref name="rangeMap"/> whose half-open
     /// ordinal interval contains the key; returns <c>(descriptor.PartitionId, descriptor.Generation)</c>.
-    /// The generation is the routing fence threaded into <c>ReplicateLogs(expectedGeneration:)</c>
-    /// by the generation fence.</item>
+    /// The generation is the Kahuna routing fence, validated against the current range map by
+    /// <see cref="TryFenceKeyRange"/> (and in the 2PC prepare handler) so a request routed at a stale
+    /// generation after a split is rejected with MustRetry. It is <b>not</b> Kommander's physical-partition
+    /// <c>ReplicateLogs(expectedGeneration:)</c> fence — that is an independent namespace Kahuna does not sync
+    /// from descriptors, so the descriptor generation must never be passed there.</item>
     /// <item><b>Hash</b> space (default; system + <c>{db}/meta</c>) → <c>(DataPartitionRouter.Locate(key), 0)</c>.
     /// Kahuna owns hash assignment (Kommander partitions are <c>Unrouted</c>), mapping the key onto the
     /// user partitions <c>[1, InitialPartitions]</c> (P1 included — hash data may share it with the meta
