@@ -1754,6 +1754,15 @@ internal sealed class TransactionCoordinator
         Dictionary<string, (HLCTimestamp ticketId, KeyValueDurability durability)> pendingCommits =
             mutationsPrepared.ToDictionary(x => x.key, x => (x.ticketId, x.durability));
 
+        // Result-truth rule for phase two: the transaction may report a definite Aborted only when EVERY
+        // participant provably did not commit. A participant provably did not commit only when its group's
+        // CommitLogs returned a hard error (Errored). A MustRetry is in-doubt — the shared commit may have
+        // landed while only the local apply is uncertain, or a transient may clear on re-drive — so a pending
+        // MustRetry participant, like any committed participant, forbids Aborted. A shared partition ticket
+        // commits its whole group at once, so this boundary is per group, not per key.
+        bool anyCommitted = false;
+        HashSet<string> permanentlyFailed = [];
+
         for (int attempt = 0; attempt <= MaxPhase2Retries && pendingCommits.Count > 0; attempt++)
         {
             if (attempt > 0 && !await DelayBetweenRetries(cancellationToken))
@@ -1766,37 +1775,62 @@ internal sealed class TransactionCoordinator
                 await manager.LocateAndTryCommitManyMutations(context.TransactionId, batch, CancellationToken.None);
 
             bool hasTransientFailure = false;
+            bool hasPermanentFailure = false;
             foreach ((KeyValueResponseType response, string key, long commitIndex, KeyValueDurability durability) in responses)
             {
                 if (response == KeyValueResponseType.Committed)
                 {
                     pendingCommits.Remove(key);
+                    permanentlyFailed.Remove(key);
+                    anyCommitted = true;
                     continue;
                 }
 
                 if (response == KeyValueResponseType.MustRetry)
                 {
                     hasTransientFailure = true;
+                    permanentlyFailed.Remove(key);
                     logger.LogWarning("CommitMutations: transient failure on {Key} attempt {Attempt}, retrying", key, attempt + 1);
                     continue;
                 }
 
-                string reason = $"Permanent commit failure on {key}: {response}";
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+                // A hard failure of this participant's group — its CommitLogs never took effect. Record it, but
+                // decide abort vs in-doubt only after the whole run: a sibling group may have committed, and a
+                // key that fails hard this round could still be re-driven if it is not the last word.
+                hasPermanentFailure = true;
+                permanentlyFailed.Add(key);
                 logger.LogError("CommitMutations: permanent failure {Type} on {Key} attempt {Attempt}", response, key, attempt + 1);
-                throw new KahunaAbortedException(reason);
             }
 
-            if (!hasTransientFailure)
+            if (hasPermanentFailure || !hasTransientFailure)
                 break;
         }
 
         if (pendingCommits.Count > 0)
         {
-            logger.LogError("CommitMutations: exhausted {MaxRetries} retries, {Count} participants still pending: {Keys}",
-                MaxPhase2Retries, pendingCommits.Count, string.Join(", ", pendingCommits.Keys));
+            // In-doubt unless every still-pending participant provably failed (hard Errored) AND none committed.
+            bool everyPendingProvablyFailed = pendingCommits.Keys.All(permanentlyFailed.Contains);
 
-            string reason = $"Coordinator exhausted retries during commit ({pendingCommits.Count} participants still pending)";
+            if (anyCommitted || !everyPendingProvablyFailed)
+            {
+                // At least one participant committed, or at least one is in-doubt (pending MustRetry). Never
+                // abort — leave the transaction Committing and return MustRetry so a retry (or, for Durable,
+                // recovery) re-drives the rest. A definite failure here would lie about a possibly-committed
+                // participant.
+                logger.LogWarning(
+                    "CommitMutations: {Count} participant(s) not confirmed committed; in-doubt, returning MustRetry: {Keys}",
+                    pendingCommits.Count, string.Join(", ", pendingCommits.Keys));
+
+                context.Result = new() { Type = KeyValueResponseType.MustRetry, Reason = "Commit in-doubt: not every participant confirmed, remainder pending re-drive" };
+                return;
+            }
+
+            // Every participant provably failed to commit and none committed — nothing took effect anywhere, so
+            // a definite abort is truthful and gives the caller a terminal answer instead of endless MustRetry.
+            logger.LogError("CommitMutations: all {Count} participant(s) hard-failed to commit, none committed: {Keys}",
+                pendingCommits.Count, string.Join(", ", pendingCommits.Keys));
+
+            string reason = $"All {pendingCommits.Count} participant(s) failed to commit and none committed";
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
             throw new KahunaAbortedException(reason);
         }

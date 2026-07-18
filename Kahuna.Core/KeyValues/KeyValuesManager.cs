@@ -33,6 +33,22 @@ namespace Kahuna.Server.KeyValues;
 internal sealed class KeyValuesManager : IDisposable
 {
     private const int MaxRetries = 3;
+
+    /// <summary>
+    /// Test seam (null in production): forces the batched commit outcome for a participant group, short-
+    /// circuiting its <c>CommitLogs</c> so the ticket genuinely does not commit. Lets a test drive a real
+    /// cross-partition partial commit — one partition commits for real while another is forced to fail — and
+    /// assert the coordinator never reports Aborted once any participant has committed. Keyed by the group's
+    /// routing key; return null to leave the group's real commit untouched.
+    /// </summary>
+    internal Func<string, KeyValueResponseType?>? ForceCommitOutcomeForKey;
+
+    /// <summary>
+    /// Test seam (null in production): overrides the commit-time partition a key resolves to, simulating a
+    /// range split/move between prepare and commit so a test can drive the split-cohesion guard in
+    /// <c>CommitTicketGroup</c> without running a real split. Return null to use real routing.
+    /// </summary>
+    internal Func<string, int?>? PartitionOverrideForCommit;
     
     private readonly ActorSystem actorSystem;
 
@@ -759,30 +775,35 @@ internal sealed class KeyValuesManager : IDisposable
         phaseTwoWorkers.Count > 0 ? phaseTwoWorkers[0].Runner.Actor as KeyValuePhaseTwoActor : null;
 
     /// <summary>
-    /// Groups participants by their resolved Raft partition (via the same <see cref="RangeRouting.Locate"/>
-    /// used by per-key routing, so grouping cannot drift), carrying the shared routing generation. This is
-    /// the seam for partition-batched 2PC: keys in one group share a partition — hence one proposal ticket
-    /// and one descriptor-fence generation — so the propose/commit can be issued once per group instead of
-    /// once per key. Grouping is by partition, not leader: one node can lead several partitions, and a batched
-    /// <c>ReplicateLogs</c> takes a single partition id.
+    /// Groups participants by their resolved Raft partition <b>and</b> routed fence generation (via the same
+    /// <see cref="RangeRouting.Locate"/> used by per-key routing, so grouping cannot drift). This is the seam
+    /// for partition-batched 2PC: every key in one group shares both a partition and a generation, so the
+    /// group can be proposed with a single ticket and one <c>expectedGeneration</c> that is correct for all its
+    /// keys — never applying one participant's generation to another. The common bulk write (one key space)
+    /// forms a single group; the rare case where distinct generations map to one physical partition (a hash
+    /// key at generation 0 alongside a key-range key, or two descriptors) splits into one group per generation
+    /// so each is fenced correctly, at the cost of one extra proposal for that partition. Grouping is by
+    /// partition, not leader: one node can lead several partitions, and a batched <c>ReplicateLogs</c> takes a
+    /// single partition id.
     /// </summary>
-    internal static Dictionary<int, (long Generation, List<T> Items)> GroupByPartition<T>(
+    internal static Dictionary<(int PartitionId, long Generation), List<T>> GroupByPartition<T>(
         KeySpaceRegistry registry,
         RangeMap rangeMap,
         DataPartitionRouter dataPartitionRouter,
         IEnumerable<T> items,
         Func<T, string> keyOf)
     {
-        Dictionary<int, (long Generation, List<T> Items)> groups = [];
+        Dictionary<(int PartitionId, long Generation), List<T>> groups = [];
 
         foreach (T item in items)
         {
             (int partitionId, long generation) = RangeRouting.Locate(registry, rangeMap, dataPartitionRouter, keyOf(item));
+            (int PartitionId, long Generation) groupKey = (partitionId, generation);
 
-            if (groups.TryGetValue(partitionId, out (long Generation, List<T> Items) group))
-                group.Items.Add(item);
+            if (groups.TryGetValue(groupKey, out List<T>? group))
+                group.Add(item);
             else
-                groups[partitionId] = (generation, [item]);
+                groups[groupKey] = [item];
         }
 
         return groups;
@@ -4850,10 +4871,10 @@ internal sealed class KeyValuesManager : IDisposable
         if (batchable.Count == 0)
             return results;
 
-        Dictionary<int, (long Generation, List<(string key, KeyValueDurability durability)> Items)> groups =
+        Dictionary<(int PartitionId, long Generation), List<(string key, KeyValueDurability durability)>> groups =
             GroupByPartition(keySpaceRegistry, rangeMapStore.Current, new DataPartitionRouter(raft), batchable, k => k.key);
 
-        foreach ((int partitionId, (long generation, List<(string key, KeyValueDurability durability)> items)) in groups)
+        foreach (((int partitionId, long generation), List<(string key, KeyValueDurability durability)> items) in groups)
             results.AddRange(await StageAndProposePartition(transactionId, commitId, partitionId, generation, items, recordAnchorKey));
 
         return results;
@@ -4916,8 +4937,33 @@ internal sealed class KeyValuesManager : IDisposable
         string? recordAnchorKey
     )
     {
+        // Exception-safe wrapper: any throw during staging or propose unwinds every intent staged so far, so a
+        // partition batch that faults mid-flight cannot leak an entry-pinning intent. The staged list is owned
+        // here so the catch can unwind whatever the core managed to stage.
         List<(string key, KeyValueDurability durability, KeyValueResponseType type, byte[]? proposal)> staged = new(items.Count);
 
+        try
+        {
+            return await StageAndProposePartitionCore(transactionId, commitId, partitionId, generation, items, recordAnchorKey, staged);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Batched stage/propose threw Partition={Partition}; unwinding {Count} staged intent(s)", partitionId, staged.Count);
+            await UnwindStagedIntents(transactionId, staged);
+            return items.Select(i => (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, i.key, i.durability)).ToList();
+        }
+    }
+
+    private async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> StageAndProposePartitionCore(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        int partitionId,
+        long generation,
+        List<(string key, KeyValueDurability durability)> items,
+        string? recordAnchorKey,
+        List<(string key, KeyValueDurability durability, KeyValueResponseType type, byte[]? proposal)> staged
+    )
+    {
         foreach ((string key, KeyValueDurability durability) item in items)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -4961,6 +5007,12 @@ internal sealed class KeyValuesManager : IDisposable
         if (batch.Count == 0)
             return staged.Select(s => (KeyValueResponseType.Prepared, HLCTimestamp.Zero, s.key, s.durability)).ToList();
 
+        // The propose is deliberately NOT deadline-bounded. Prepare does not retry — the coordinator aborts on
+        // any non-Prepared participant — so cancelling ReplicateLogs mid-quorum would abort valid transactions
+        // and can leave a proposal half-registered. A stalled propose is already bounded by the write-intent
+        // lease (DefaultTxCompleteTimeout), which pins the staged entries; the deadline that matters for the
+        // lease-outliving race is on the commit, which retries idempotently. (Verified: a propose deadline
+        // breaks the deadline-bounded recovery path.)
         RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId, ReplicationTypes.KeyValues, batch, autoCommit: false, expectedGeneration: generation);
 
@@ -4970,7 +5022,13 @@ internal sealed class KeyValuesManager : IDisposable
 
             await UnwindStagedIntents(transactionId, staged);
 
-            return staged.Select(s => (KeyValueResponseType.Errored, HLCTimestamp.Zero, s.key, s.durability)).ToList();
+            // A propose that never landed leaves nothing committed, so the transaction can safely abort. Leader
+            // loss / a moved partition are retryable rather than definite; surface those as MustRetry.
+            KeyValueResponseType outcome = IsTransientRaftStatus(result.Status)
+                ? KeyValueResponseType.MustRetry
+                : KeyValueResponseType.Errored;
+
+            return staged.Select(s => (outcome, HLCTimestamp.Zero, s.key, s.durability)).ToList();
         }
 
         HLCTimestamp ticket = result.TicketId;
@@ -4983,7 +5041,10 @@ internal sealed class KeyValuesManager : IDisposable
 
     /// <summary>
     /// Unwinds the write intents of the keys that staged successfully (a failed batch never proposed them,
-    /// so they hold no ticket the coordinator would roll back) via a no-Raft local rollback on each.
+    /// so they hold no ticket the coordinator would roll back) via a no-Raft local rollback on each. The clear
+    /// is <b>positively acknowledged</b>: a dropped or actor-busy clear (mapped to MustRetry) is retried rather
+    /// than silently treated as done, because a swallowed clear leaves an entry-pinning intent the coordinator
+    /// never sees. <see cref="ApplyRolledBackMutationsHandler"/> is idempotent, so re-driving is safe.
     /// </summary>
     private async Task UnwindStagedIntents(
         HLCTimestamp transactionId,
@@ -4994,18 +5055,25 @@ internal sealed class KeyValuesManager : IDisposable
             if (type != KeyValueResponseType.Prepared)
                 continue;
 
-            KeyValueRequest request = KeyValueRequestPool.Rent(
-                KeyValueRequestType.ApplyRolledBackMutations,
-                transactionId, HLCTimestamp.Zero, key,
-                null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, durability, 0, 0, null);
+            for (int attempt = 0; attempt < MaxRetries; attempt++)
+            {
+                KeyValueRequest request = KeyValueRequestPool.Rent(
+                    KeyValueRequestType.ApplyRolledBackMutations,
+                    transactionId, HLCTimestamp.Zero, key,
+                    null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, durability, 0, 0, null);
 
-            try
-            {
-                await AskKeyValueActor(persistentKeyValuesRouter, request);
-            }
-            finally
-            {
-                KeyValueRequestPool.Return(request);
+                try
+                {
+                    KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+                    if (response?.Type == KeyValueResponseType.RolledBack)
+                        break;
+
+                    logger.LogWarning("Unwind of staged intent {Key} returned {Type}; retrying", key, response?.Type);
+                }
+                finally
+                {
+                    KeyValueRequestPool.Return(request);
+                }
             }
         }
     }
@@ -5149,24 +5217,71 @@ internal sealed class KeyValuesManager : IDisposable
     /// <summary>
     /// Commits every participant of one partition that shares a proposal ticket: one <c>CommitLogs</c>
     /// settles the ticket durably (idempotent if an earlier retry already committed it), then each key applies
-    /// its confirmed mutation on its owning actor with no further Raft. A transient commit failure
-    /// (leadership/queue/timeout) returns MustRetry for the whole group so the coordinator re-drives it; a
-    /// hard failure is Errored.
+    /// its confirmed mutation on its owning actor with no further Raft.
+    ///
+    /// <para>The commit is bounded by the phase-two deadline so a stalled leader cannot let the shared ticket
+    /// outlive the participants' write-intent lease. A commit that does <b>not</b> take effect (leadership
+    /// loss, a missing proposal after failover, queue/timeout, or cancellation) is retryable — the whole
+    /// group returns MustRetry so the coordinator re-drives or re-routes; only a genuine hard error, where the
+    /// commit provably never applied, is Errored. Once <c>CommitLogs</c> succeeds every log in the group is
+    /// durable, so from that point <b>no participant may report a definite failure</b>: an apply that cannot
+    /// archive locally is in-doubt (Committed on proof, else MustRetry), never Errored/Aborted.</para>
     /// </summary>
     private async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> CommitTicketGroup(
         HLCTimestamp transactionId,
         HLCTimestamp ticket,
         List<(string key, KeyValueDurability durability)> group)
     {
-        // Every key of a ticket shares the partition the batched prepare grouped them into.
-        int partitionId = RangeRouting.Locate(keySpaceRegistry, rangeMapStore.Current, new DataPartitionRouter(raft), group[0].key).PartitionId;
+        // Test seam: force this group's outcome without committing, so a cross-partition partial-commit test
+        // can fail one partition while another commits for real.
+        if (ForceCommitOutcomeForKey?.Invoke(group[0].key) is KeyValueResponseType forced)
+            return group.Select(g => (forced, g.key, -1L, g.durability)).ToList();
 
-        (bool success, RaftOperationStatus status, long _) = await raft.CommitLogs(partitionId, ticket, CancellationToken.None);
+        // Every key of a ticket shared one partition when the batch was proposed. Re-resolve them now: if a
+        // range split or move has divided them across partitions since prepare, the shared ticket can no
+        // longer be committed on a single partition without stranding the moved keys' logs on a partition that
+        // reads no longer route to. Committing the ticket on the original partition would silently lose those
+        // writes; committing on a new partition finds no ticket. So do NOT commit — return in-doubt MustRetry
+        // so the transaction re-drives and re-prepares against the current partition. Nothing is stranded and
+        // nothing is falsely aborted. (Fully committing across a split would require the range splitter to
+        // drain or hand off in-flight prepared tickets before cutover — a separate range-machinery change.)
+        DataPartitionRouter router = new(raft);
+        RangeMap rangeMap = rangeMapStore.Current;
+
+        int CommitPartitionOf(string key) =>
+            PartitionOverrideForCommit?.Invoke(key) ?? RangeRouting.Locate(keySpaceRegistry, rangeMap, router, key).PartitionId;
+
+        int partitionId = CommitPartitionOf(group[0].key);
+
+        for (int i = 1; i < group.Count; i++)
+        {
+            if (CommitPartitionOf(group[i].key) != partitionId)
+            {
+                logger.LogWarning(
+                    "Batched commit: prepared ticket group split across partitions since prepare ({KeyA} vs {KeyB}); MustRetry",
+                    group[0].key, group[i].key);
+
+                return group.Select(g => (KeyValueResponseType.MustRetry, g.key, -1L, g.durability)).ToList();
+            }
+        }
+
+        // NOTE: the batched commit is intentionally NOT deadline-bounded yet. A Phase2CommitTimeout token
+        // makes CommitLogs return OperationCancelled while the queued commit still applies async (Kommander
+        // contract); the coordinator then re-drives, and the retry must re-apply the now-committed ticket
+        // whose replicator apply deferred to the still-live write intent. Getting that trip → retry → apply
+        // sequence correct in the batched path needs the deferred-apply-on-retry semantics resolved; until
+        // then the write-intent lease (DefaultTxCompleteTimeout) bounds the intent pinning. Tracked as a
+        // deferred remediation item.
+        (bool success, RaftOperationStatus status, long commitIndex) = await raft.CommitLogs(partitionId, ticket, CancellationToken.None);
 
         if (!success)
         {
             logger.LogWarning("Batched commit failed Partition={Partition} Count={Count} Status={Status}", partitionId, group.Count, status);
 
+            // The ticket did not commit here, so nothing in this group is durable yet. Everything retryable —
+            // leadership loss, a missing proposal (failover truncated the uncommitted entry, or the ticket is
+            // on another leader), queue/timeout, cancellation — returns MustRetry so the coordinator re-drives
+            // or re-routes; only a genuine hard error aborts, and only because the commit provably never took.
             KeyValueResponseType outcome = IsTransientRaftStatus(status)
                 ? KeyValueResponseType.MustRetry
                 : KeyValueResponseType.Errored;
@@ -5174,6 +5289,9 @@ internal sealed class KeyValuesManager : IDisposable
             return group.Select(g => (outcome, g.key, -1L, g.durability)).ToList();
         }
 
+        // Durable from here. The shared commit index is the per-key proposal index. A non-Committed apply
+        // (in-doubt, actor busy, intent replaced by a later owner) becomes MustRetry — never Errored — so a
+        // committed group can never surface an abort.
         List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> results = new(group.Count);
 
         foreach ((string key, KeyValueDurability durability) g in group)
@@ -5185,9 +5303,10 @@ internal sealed class KeyValuesManager : IDisposable
             try
             {
                 KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
-                results.Add(response is null
-                    ? (KeyValueResponseType.Errored, g.key, -1L, g.durability)
-                    : (response.Type, g.key, response.Revision, g.durability));
+                KeyValueResponseType applied = response?.Type == KeyValueResponseType.Committed
+                    ? KeyValueResponseType.Committed
+                    : KeyValueResponseType.MustRetry;
+                results.Add((applied, g.key, commitIndex, g.durability));
             }
             finally
             {
@@ -5204,7 +5323,8 @@ internal sealed class KeyValuesManager : IDisposable
         RaftOperationStatus.RestoreInProgress or
         RaftOperationStatus.ProposalTimeout or
         RaftOperationStatus.ReplicationFailed or
-        RaftOperationStatus.OperationCancelled;
+        RaftOperationStatus.OperationCancelled or
+        RaftOperationStatus.ProposalNotFound;
     
     /// <summary>
     /// Passes a TryRollback request to the key/value actor for the given keyValue name.

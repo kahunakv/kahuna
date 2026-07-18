@@ -196,6 +196,31 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (mvccEntry.State == KeyValueState.Undefined)
             return (KeyValueStaticResponses.PrepareResponse, null, 0);
 
+        // Persistent-only fences that can reject run BEFORE the write intent is installed, so a rejection
+        // leaves no intent behind. The batched staging path only unwinds participants whose staged result was
+        // Prepared; a MustRetry emitted after installing the intent would therefore leak an entry-pinning
+        // intent the coordinator never sees as prepared and never rolls back. Both checks are read-only, so
+        // running them ahead of the install does not change their outcome.
+        if (message.Durability == KeyValueDurability.Persistent)
+        {
+            // Phantom enforcement: reject if a foreign tx holds a range lock covering this key.
+            if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, message.CommitId))
+                return (new(KeyValueResponseType.MustRetry, 0), null, 0);
+
+            // Key-range generation fence for 2PC (prepare path). A non-zero RoutedGeneration was set by the
+            // locator at route time; if the descriptor was bumped since then (split or cutover) the proposal
+            // would land on the stale partition. Reject with MustRetry so the coordinator re-resolves and
+            // retries the transaction on the correct partition.
+            if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key) &&
+                !RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out _))
+            {
+                context.Logger.LogWarning(
+                    "2PC prepare fence rejected key {Key} RoutedGen={Gen} — range moved/split; MustRetry",
+                    message.Key, message.RoutedGeneration);
+                return (new(KeyValueResponseType.MustRetry, 0), null, 0);
+            }
+        }
+
         // In optimistic concurrency, we create the write intent if it doesn't exist
         // this is to ensure that the assigned transaction will win the race.
         // The write intent lease is extended by DefaultTxCompleteTimeout from *now* (prepare/dispatch
@@ -236,23 +261,6 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
             return (KeyValueStaticResponses.PrepareResponse, null, 0);
-
-        // Phantom enforcement: reject if a foreign tx holds a range lock covering this key.
-        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, message.CommitId))
-            return (new(KeyValueResponseType.MustRetry, 0), null, 0);
-
-        // Key-range generation fence for 2PC (prepare path). A non-zero RoutedGeneration
-        // was set by the locator at route time; if the descriptor was bumped since then (split or
-        // cutover) the proposal would land on the stale partition. Reject with MustRetry so the
-        // coordinator re-resolves and retries the transaction on the correct partition.
-        if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key) &&
-            !RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out _))
-        {
-            context.Logger.LogWarning(
-                "2PC prepare fence rejected key {Key} RoutedGen={Gen} — range moved/split; MustRetry",
-                message.Key, message.RoutedGeneration);
-            return (new(KeyValueResponseType.MustRetry, 0), null, 0);
-        }
 
         KeyValueProposal proposal = new(
             message.Type,

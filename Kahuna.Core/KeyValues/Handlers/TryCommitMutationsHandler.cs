@@ -138,9 +138,16 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     /// log — which, under the write-intent deferral, no-ops on the resident entry but still records a
     /// completion receipt — <em>before</em> this apply runs. A receipt-first short-circuit (as <see cref="Execute"/>
     /// uses for re-delivered commits) would therefore see that receipt and skip the real archive, leaving the
-    /// entry frozen at its pre-commit value with the intent never cleared. So while the intent is still live
-    /// for this transaction, this always archives; only once the intent is gone (a genuinely re-delivered
-    /// apply) does it resolve idempotently from durable proof.</para>
+    /// entry frozen at its pre-commit value with the intent never cleared. So while our own intent is still
+    /// live it always archives; only once the intent is gone or held by a later owner does it resolve from
+    /// durable proof.</para>
+    ///
+    /// <para><b>Never returns Errored (except malformed input).</b> The caller only invokes this after the
+    /// group's shared <c>CommitLogs</c> already succeeded, so the mutation is durable in Raft. A failure to
+    /// archive locally (entry evicted, intent replaced by a later transaction, MVCC gone) is therefore
+    /// in-doubt/recoverable, not an abort: it resolves to <c>Committed</c> on durable proof (completion receipt
+    /// or recorded decision) and otherwise to <c>MustRetry</c> for re-drive/recovery — the atomicity rule that
+    /// nothing may report a definite failure after a shared ticket has committed.</para>
     /// </summary>
     public async Task<KeyValueResponse> ApplyExecute(KeyValueRequest message)
     {
@@ -155,66 +162,46 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
-        if (entry is null)
+        // Fast path: our own write intent is still live and the staged MVCC is present → archive the confirmed
+        // commit into the resident entry now. Intent-first, not receipt-first (see remarks): the replicator has
+        // already recorded the receipt for this durable log, so keying idempotency on it here would skip the
+        // real archive and freeze the entry at its pre-commit value.
+        if (entry?.WriteIntent is not null &&
+            entry.WriteIntent.TransactionId == message.TransactionId &&
+            entry.MvccEntries is not null &&
+            entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
         {
-            context.Logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
+            string? recordAnchorKey = entry.WriteIntent.RecordAnchorKey;
+            Transactions.Data.CoordinatorDecisionRecord? embeddedDecision = entry.WriteIntent.EmbeddedDecision;
 
-            return KeyValueStaticResponses.ErroredResponse;
+            KeyValueProposal proposal = new(
+                message.Type,
+                message.Key,
+                mvccEntry.Value,
+                mvccEntry.Revision,
+                mvccEntry.NoRevision,
+                mvccEntry.Expires,
+                mvccEntry.LastUsed,
+                mvccEntry.LastModified,
+                mvccEntry.State,
+                message.Durability
+            );
+
+            ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime,
+                ResolvePartition(message.Key), recordAnchorKey, embeddedDecision);
+
+            return new(KeyValueResponseType.Committed, entry.Revision);
         }
 
-        if (entry.WriteIntent is null)
-        {
-            // Intent gone: this apply already ran and cleared it, or the log was applied without an intent to
-            // defer to. Resolve idempotently from durable proof (recorded decision or completion receipt); if
-            // there is none and the prepare state is also gone, this node never held it → MustRetry so the
-            // coordinator re-routes to the node that does.
-            if (context.WasCommittedHere(message.TransactionId) ||
-                context.CompletionReceiptStore.Contains(message.TransactionId, message.Key, message.Durability))
-                return new(KeyValueResponseType.Committed, 0);
+        // No own live intent to archive: the commit already applied here (a re-delivered apply cleared the
+        // intent), or the entry is gone/held by a later transaction that took it after our commit applied and
+        // cleared. Either way the shared ticket already committed, so the mutation is durable. Report Committed
+        // on durable proof; otherwise it is in-doubt and re-driven — never Errored, never aborted.
+        if (context.WasCommittedHere(message.TransactionId) ||
+            context.CompletionReceiptStore.Contains(message.TransactionId, message.Key, message.Durability))
+            return new(KeyValueResponseType.Committed, entry?.Revision ?? 0);
 
-            bool mvccGone = entry.MvccEntries is null || !entry.MvccEntries.ContainsKey(message.TransactionId);
-            if (mvccGone)
-                return KeyValueStaticResponses.MustRetryResponse;
-
-            context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
-
-            return KeyValueStaticResponses.ErroredResponse;
-        }
-
-        if (entry.WriteIntent.TransactionId != message.TransactionId)
-        {
-            context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);
-
-            return KeyValueStaticResponses.ErroredResponse;
-        }
-
-        string? recordAnchorKey = entry.WriteIntent.RecordAnchorKey;
-        Transactions.Data.CoordinatorDecisionRecord? embeddedDecision = entry.WriteIntent.EmbeddedDecision;
-
-        if (entry.MvccEntries is null || !entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
-        {
-            context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId}", message.TransactionId);
-
-            return KeyValueStaticResponses.ErroredResponse;
-        }
-
-        KeyValueProposal proposal = new(
-            message.Type,
-            message.Key,
-            mvccEntry.Value,
-            mvccEntry.Revision,
-            mvccEntry.NoRevision,
-            mvccEntry.Expires,
-            mvccEntry.LastUsed,
-            mvccEntry.LastModified,
-            mvccEntry.State,
-            message.Durability
-        );
-
-        ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime,
-            ResolvePartition(message.Key), recordAnchorKey, embeddedDecision);
-
-        return new(KeyValueResponseType.Committed, 0);
+        return KeyValueStaticResponses.MustRetryResponse;
     }
 
     /// <summary>

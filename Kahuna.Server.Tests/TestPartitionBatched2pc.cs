@@ -4,6 +4,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -19,9 +20,10 @@ namespace Kahuna.Server.Tests;
 /// <summary>
 /// Tests for partition-batched two-phase commit: a multi-key transaction whose participants share a
 /// Raft partition issues a single proposal/commit ticket for the whole group instead of one per key,
-/// collapsing N fsyncs into one. This first slice covers the routing seam — grouping participants by
-/// their resolved partition (and carrying the shared descriptor-fence generation) — which every later
-/// batched step builds on.
+/// collapsing N fsyncs into one. Covers the routing/grouping seam, the stage-and-propose and apply steps,
+/// the partial-staging unwind, and the atomicity guard that a committed shared ticket can never surface an
+/// abort. Multi-node failover, split-between-prepare-and-commit, and operation-count instrumentation are
+/// tracked separately in the remediation plan.
 /// </summary>
 [Collection("ClusterTests")]
 public sealed class TestPartitionBatched2pc
@@ -61,14 +63,14 @@ public sealed class TestPartitionBatched2pc
         // distinct key spaces are what spread work across the four partitions.
         List<string> keys = Enumerable.Range(0, 64).Select(i => $"space-{i}/row").ToList();
 
-        Dictionary<int, (long Generation, List<string> Items)> groups =
+        Dictionary<(int PartitionId, long Generation), List<string>> groups =
             KeyValuesManager.GroupByPartition(registry, rangeMap, router, keys, k => k);
 
         // Every key is present exactly once, and each key sits in the group for the partition it routes to.
-        Assert.Equal(keys.Count, groups.Values.Sum(g => g.Items.Count));
+        Assert.Equal(keys.Count, groups.Values.Sum(g => g.Count));
         Assert.True(groups.Count > 1, "64 keys across distinct key spaces should span more than one partition");
 
-        foreach ((int partitionId, (long _, List<string> items)) in groups)
+        foreach (((int partitionId, long _), List<string> items) in groups)
             foreach (string key in items)
                 Assert.Equal(partitionId, RangeRouting.Locate(registry, rangeMap, router, key).PartitionId);
     }
@@ -98,11 +100,12 @@ public sealed class TestPartitionBatched2pc
 
         List<string> keys = Enumerable.Range(0, 32).Select(i => $"orders/row-{i}").ToList();
 
-        Dictionary<int, (long Generation, List<string> Items)> groups =
+        Dictionary<(int PartitionId, long Generation), List<string>> groups =
             KeyValuesManager.GroupByPartition(registry, rangeMap, router, keys, k => k);
 
-        (long generation, List<string> items) = Assert.Single(groups.Values);
+        List<string> items = Assert.Single(groups.Values);
         Assert.Equal(keys.Count, items.Count);
+        (int _, long generation) = Assert.Single(groups.Keys);
         Assert.Equal(RangeRouting.Locate(registry, rangeMap, router, keys[0]).Generation, generation);
     }
 
@@ -344,9 +347,325 @@ public sealed class TestPartitionBatched2pc
         Assert.Equal(otherTx, entry.WriteIntent!.TransactionId);
     }
 
+    /// <summary>
+    /// Cross-partition atomicity guard for B1: a multi-key transaction where one partition commits for real
+    /// and another is forced to fail its commit must report <b>MustRetry</b> (in-doubt), never a false
+    /// <c>Aborted</c> — because the committed partition is durable and an abort would contradict it. Uses the
+    /// commit-failure injection seam to fail exactly one partition group's <c>CommitLogs</c> while the other
+    /// commits. Asserts the transaction returns MustRetry and the committed partition's value is durable while
+    /// the failed partition keeps its pre-transaction value.
+    /// </summary>
+    [Fact]
+    public async Task CrossPartitionPartialCommit_ReturnsMustRetryNotAborted_AndCommittedPartitionIsDurable()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 8
+        }, loggerFactory);
+        await node.StartAsync(ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        (string keyA, string keyB) = FindKeysOnDifferentPartitions(node, logger);
+        await node.WaitForLeaderForKeyAsync(keyA, ct);
+        await node.WaitForLeaderForKeyAsync(keyB, ct);
+
+        byte[] initA = "init-a"u8.ToArray();
+        byte[] initB = "init-b"u8.ToArray();
+        byte[] newA = "new-a"u8.ToArray();
+        byte[] newB = "new-b"u8.ToArray();
+
+        // Both keys start with a committed value.
+        (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sa);
+        (KeyValueResponseType sb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyB, initB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sb);
+
+        // Force partition B's group to hard-fail its commit (its CommitLogs never takes effect).
+        KeyValuesManager kv = ((KahunaManager)node.Kahuna).KeyValues;
+        kv.ForceCommitOutcomeForKey = k => string.Equals(k, keyB, StringComparison.Ordinal) ? KeyValueResponseType.Errored : null;
+
+        try
+        {
+            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = "xpart-b1",
+                    Locking = KeyValueTransactionLocking.Pessimistic,
+                    Timeout = 10_000,
+                },
+                ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            (KeyValueResponseType wa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                handle.TransactionId, keyA, newA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, wa);
+            (KeyValueResponseType wb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                handle.TransactionId, keyB, newB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, wb);
+
+            (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+
+            // The fix: partition A committed durably while B failed → in-doubt, NOT a false Aborted.
+            Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
+        }
+        finally
+        {
+            kv.ForceCommitOutcomeForKey = null;
+        }
+
+        // Partition A's mutation is durably committed.
+        (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, ra);
+        Assert.Equal(newA, ea!.Value);
+
+        // Partition B's mutation never committed — it retains its pre-transaction value.
+        (KeyValueResponseType rb, ReadOnlyKeyValueEntry? eb) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyB, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, rb);
+        Assert.Equal(initB, eb!.Value);
+    }
+
+    /// <summary>
+    /// B5 split-cohesion guard: if a range split/move divides a prepared ticket's keys across partitions
+    /// between prepare and commit, the batched commit must NOT commit the shared ticket (committing on the
+    /// origin partition would strand the moved keys' logs where reads no longer route). It returns in-doubt
+    /// MustRetry so the transaction re-drives, and neither key is committed — no stranding, no partial commit.
+    /// Uses the commit-partition override seam to simulate the split without running a real one.
+    /// </summary>
+    [Fact]
+    public async Task PreparedTicketSplitAcrossPartitions_RefusesCommit_ReturnsMustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 4
+        }, loggerFactory);
+        await node.StartAsync(ct);
+
+        // Two keys in ONE key space share a partition, so the batched prepare groups them under one ticket.
+        const string keyA = "split/a";
+        const string keyB = "split/b";
+        await node.WaitForLeaderForKeyAsync(keyA, ct);
+
+        byte[] initA = "init-a"u8.ToArray();
+        byte[] initB = "init-b"u8.ToArray();
+        byte[] newA = "new-a"u8.ToArray();
+        byte[] newB = "new-b"u8.ToArray();
+
+        (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sa);
+        (KeyValueResponseType sb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyB, initB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sb);
+
+        // Simulate a split moving keyB to a different partition at commit time (999 is outside the pool).
+        KeyValuesManager kv = ((KahunaManager)node.Kahuna).KeyValues;
+        kv.PartitionOverrideForCommit = k => string.Equals(k, keyB, StringComparison.Ordinal) ? 999 : null;
+
+        try
+        {
+            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = "split-b5",
+                    Locking = KeyValueTransactionLocking.Pessimistic,
+                    Timeout = 10_000,
+                },
+                ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyA, newA, null, -1,
+                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyB, newB, null, -1,
+                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+
+            (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+
+            // The ticket group split across partitions ⇒ in-doubt MustRetry, never a stranding commit.
+            Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
+        }
+        finally
+        {
+            kv.PartitionOverrideForCommit = null;
+        }
+
+        // Neither key committed — both retain their pre-transaction value.
+        (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, ra);
+        Assert.Equal(initA, ea!.Value);
+        (KeyValueResponseType rb, ReadOnlyKeyValueEntry? eb) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyB, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, rb);
+        Assert.Equal(initB, eb!.Value);
+    }
+
+    private static (string keyA, string keyB) FindKeysOnDifferentPartitions(EmbeddedKahunaNode node, ILogger<IKahuna> logger)
+    {
+        KeySpaceRegistry registry = new();
+        DataPartitionRouter router = new(node.Raft);
+        RangeMap rangeMap = new RangeMapStore(node.Raft, null, null, logger).Current;
+
+        const string first = "xpb-0/k";
+        int firstPartition = RangeRouting.Locate(registry, rangeMap, router, first).PartitionId;
+
+        for (int i = 1; i < 256; i++)
+        {
+            string candidate = $"xpb-{i}/k";
+            if (RangeRouting.Locate(registry, rangeMap, router, candidate).PartitionId != firstPartition)
+                return (first, candidate);
+        }
+
+        throw new InvalidOperationException("Could not find two keys routing to different partitions");
+    }
+
     private static KeyValueRequest ClearRequest(HLCTimestamp txId, string key) =>
         new(KeyValueRequestType.ApplyRolledBackMutations, txId, HLCTimestamp.Zero, key,
             null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 0, null);
+
+    private static KeyValueRequest ApplyCommittedRequest(HLCTimestamp txId, string key) =>
+        new(KeyValueRequestType.ApplyCommittedMutations, txId, HLCTimestamp.Zero, key,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 0, null);
+
+    /// <summary>
+    /// Atomicity guard: the batched apply runs only after the group's shared <c>CommitLogs</c> already made the
+    /// mutation durable, so it must never report a definite failure. When our write intent has been replaced by
+    /// a <b>later</b> transaction (the lease expired and another owner took the entry) but a durable proof of
+    /// our commit exists, the apply reports <c>Committed</c> — not <c>Errored</c> — leaving the foreign owner's
+    /// intent untouched. A false <c>Errored</c> here is what lets a committed transaction be reported aborted.
+    /// </summary>
+    [Fact]
+    public async Task ApplyExecute_ForeignIntentWithDurableProof_ReturnsCommittedNotErrored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.Raft.WaitForLeader(1, ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        KeyValueContext context = DirectContext(node.Raft, logger);
+
+        const string key = "orders/row-1";
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp foreignTx = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        // A later transaction now holds the intent, and our commit is durably proven (recorded here).
+        context.Store.Insert(key, new KeyValueEntry
+        {
+            Value = "v"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            WriteIntent = new() { TransactionId = foreignTx, Expires = foreignTx + 15000 }
+        });
+        context.RecordCommitted(txId);
+
+        KeyValueResponse response = await new TryCommitMutationsHandler(context).ApplyExecute(ApplyCommittedRequest(txId, key));
+
+        Assert.Equal(KeyValueResponseType.Committed, response.Type);
+        Assert.NotNull(context.Store.Get(key)!.WriteIntent);
+        Assert.Equal(foreignTx, context.Store.Get(key)!.WriteIntent!.TransactionId);
+    }
+
+    /// <summary>
+    /// Atomicity guard: with no live own-intent and no durable proof yet (the prepare state is gone on this
+    /// node), the batched apply is in-doubt, not failed — it returns <c>MustRetry</c> for re-drive/recovery,
+    /// never <c>Errored</c>. Nothing may surface a definite failure after the shared ticket has committed.
+    /// </summary>
+    [Fact]
+    public async Task ApplyExecute_NoIntentNoProof_ReturnsMustRetryNotErrored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.Raft.WaitForLeader(1, ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        KeyValueContext context = DirectContext(node.Raft, logger);
+
+        const string key = "orders/row-2";
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        // No write intent, no MVCC for the transaction, no recorded decision — prepare state is simply gone.
+        context.Store.Insert(key, new KeyValueEntry { Value = "v"u8.ToArray(), Revision = 4, State = KeyValueState.Set });
+
+        KeyValueResponse response = await new TryCommitMutationsHandler(context).ApplyExecute(ApplyCommittedRequest(txId, key));
+
+        Assert.Equal(KeyValueResponseType.MustRetry, response.Type);
+    }
+
+    /// <summary>
+    /// Staging-leak guard (partial staging): a persistent participant whose key-range generation fence rejects
+    /// must leave <b>no</b> write intent. The batched staging path only unwinds participants that stage
+    /// Prepared, so a fence rejection that had installed an intent would leak it — the coordinator never sees
+    /// the key as prepared and never rolls it back. All fallible checks now run before the intent install, so
+    /// the rejection returns MustRetry with the entry unpinned.
+    /// </summary>
+    [Fact]
+    public async Task StageExecute_KeyRangeFenceFails_LeavesNoIntent()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.Raft.WaitForLeader(1, ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        KeyValueContext context = DirectContext(node.Raft, logger);
+
+        // A key-range key with no descriptor in the (empty) range map fails the fence unconditionally.
+        context.KeySpaceRegistry.RegisterKeyRange("ranged");
+        const string key = "ranged/row-1";
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp commitId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = txId,
+            LastModified = txId,
+            MvccEntries = new() { [txId] = new KeyValueMvccEntry { Value = "new"u8.ToArray(), Revision = 5, State = KeyValueState.Set, LastModified = commitId } }
+        };
+        context.Store.Insert(key, entry);
+
+        KeyValueResponse response = await new TryPrepareMutationsHandler(context)
+            .StageExecute(StagePrepareRequest(txId, commitId, key, KeyValueDurability.Persistent));
+
+        Assert.Equal(KeyValueResponseType.MustRetry, response.Type);
+        Assert.Null(response.StagedProposal);
+        Assert.Null(entry.WriteIntent);
+    }
 
     private static KahunaConfiguration Config() => ConfigurationValidator.Validate(new()
     {
