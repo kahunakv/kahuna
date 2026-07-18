@@ -38,4 +38,6 @@ public enum KeyValueRequestType
     FlushAck,
     CompletePhaseTwo,
     StagePrepareMutations,
+    ApplyRolledBackMutations,
+    ApplyCommittedMutations,
 }

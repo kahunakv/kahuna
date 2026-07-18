@@ -1,8 +1,10 @@
+using System.Text;
 using Kahuna;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -242,6 +244,109 @@ public sealed class TestPartitionBatched2pc
         Assert.Equal(KeyValueResponseType.Prepared, response.Type);
         Assert.Null(response.StagedProposal);
     }
+
+    /// <summary>
+    /// End-to-end acceptance: a transaction writing many keys of one hash key space — all resolving to one
+    /// partition — commits through the batched propose path and every key is durably readable afterward. This
+    /// is the motivating bulk-write shape (a table's rows), where the batch collapses N proposes into one.
+    /// </summary>
+    [Fact]
+    public async Task MultiKeyOneKeySpace_TransactionCommitsAndReadsBack()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 4
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("orders/row-1", ct);
+
+        const int count = 16;
+        StringBuilder script = new("BEGIN ");
+        for (int i = 1; i <= count; i++)
+            script.Append($"SET `orders/row-{i}` 'value-{i}' ");
+        script.Append("COMMIT END");
+
+        KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes(script.ToString()), null, null);
+        Assert.Equal(KeyValueResponseType.Set, result.Type);
+
+        for (int i = 1; i <= count; i++)
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, $"orders/row-{i}", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Get, type);
+            Assert.NotNull(entry);
+            Assert.Equal(Encoding.UTF8.GetBytes($"value-{i}"), entry!.Value);
+        }
+    }
+
+    /// <summary>
+    /// The partial-staging unwind mechanism: clearing a staged write intent that never proposed removes it
+    /// with no Raft round trip, is idempotent on already-cleared state, and never touches an intent owned by
+    /// another transaction — so a failed batch cannot leak a pinned intent or clobber a concurrent owner.
+    /// </summary>
+    [Fact]
+    public async Task ApplyRolledBackMutations_ClearsStagedIntent_IdempotentAndOwnershipSafe()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.Raft.WaitForLeader(1, ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        KeyValueContext context = DirectContext(node.Raft, logger);
+
+        const string key = "orders/row-1";
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        HLCTimestamp commitId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = txId,
+            LastModified = txId,
+            MvccEntries = new() { [txId] = new KeyValueMvccEntry { Value = "new"u8.ToArray(), Revision = 5, State = KeyValueState.Set, LastModified = commitId } }
+        };
+        context.Store.Insert(key, entry);
+
+        // Stage installs the intent.
+        await new TryPrepareMutationsHandler(context).StageExecute(StagePrepareRequest(txId, commitId, key, KeyValueDurability.Persistent));
+        Assert.NotNull(entry.WriteIntent);
+
+        // Unwind clears it with no Raft.
+        KeyValueResponse cleared = await new ApplyRolledBackMutationsHandler(context).Execute(ClearRequest(txId, key));
+        Assert.Equal(KeyValueResponseType.RolledBack, cleared.Type);
+        Assert.Null(entry.WriteIntent);
+
+        // Idempotent on already-cleared state.
+        KeyValueResponse again = await new ApplyRolledBackMutationsHandler(context).Execute(ClearRequest(txId, key));
+        Assert.Equal(KeyValueResponseType.RolledBack, again.Type);
+
+        // A foreign transaction's intent is left untouched.
+        HLCTimestamp otherTx = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        entry.WriteIntent = new() { TransactionId = otherTx, Expires = otherTx + 15000 };
+        KeyValueResponse foreign = await new ApplyRolledBackMutationsHandler(context).Execute(ClearRequest(txId, key));
+        Assert.Equal(KeyValueResponseType.RolledBack, foreign.Type);
+        Assert.NotNull(entry.WriteIntent);
+        Assert.Equal(otherTx, entry.WriteIntent!.TransactionId);
+    }
+
+    private static KeyValueRequest ClearRequest(HLCTimestamp txId, string key) =>
+        new(KeyValueRequestType.ApplyRolledBackMutations, txId, HLCTimestamp.Zero, key,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 0, null);
 
     private static KahunaConfiguration Config() => ConfigurationValidator.Validate(new()
     {

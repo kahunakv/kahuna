@@ -211,6 +211,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly TryRollbackMutationsHandler tryRollbackMutationsHandler;
 
     /// <summary>
+    /// Unwinds a write intent staged for the partition-batched prepare whose batch never proposed (no-Raft
+    /// local rollback), so a partition batch that fails staging cannot leak pinned intents.
+    /// </summary>
+    private readonly ApplyRolledBackMutationsHandler applyRolledBackMutationsHandler;
+
+    /// <summary>
     /// Handles the process of collecting and managing key/value resources within the actor.
     /// This handler is responsible for triggering cleanup or optimization tasks, such as
     /// consolidating cached data or freeing unneeded resources to maintain efficient operation.
@@ -345,6 +351,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryPrepareMutationsHandler = new(context);
         tryCommitMutationsHandler = new(context);
         tryRollbackMutationsHandler = new(context);
+        applyRolledBackMutationsHandler = new(context);
         tryCollectHandler = new(context);
         completeProposalHandler = new(context);
         releaseProposalHandler = new(context);
@@ -424,7 +431,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.GetSafeTimestamp => await getSafeTimestampHandler.Execute(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
                 KeyValueRequestType.StagePrepareMutations => await StagePrepareMutations(message),
+                KeyValueRequestType.ApplyRolledBackMutations => await ApplyRolledBackMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
+                KeyValueRequestType.ApplyCommittedMutations => await ApplyCommittedMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
                 KeyValueRequestType.GetByBucket => await GetByBucket(message),
                 KeyValueRequestType.GetByRange => await GetByRange(message),
@@ -638,6 +647,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     }
 
     /// <summary>
+    /// Unwinds a write intent staged for a partition batch that never proposed — a no-Raft local rollback of
+    /// prepare state, so a batch that fails staging leaves no pinned intent behind.
+    /// </summary>
+    private Task<KeyValueResponse> ApplyRolledBackMutations(KeyValueRequest message)
+    {
+        return applyRolledBackMutationsHandler.Execute(message);
+    }
+
+    /// <summary>
     /// Commit the mutations made to the key currently held in the MVCC entry
     /// </summary>
     /// <param name="message"></param>
@@ -645,6 +663,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryCommitMutations(KeyValueRequest message)
     {
         return tryCommitMutationsHandler.Execute(message);
+    }
+
+    /// <summary>
+    /// Applies a mutation whose partition ticket the manager already committed in one batched CommitLogs —
+    /// the per-key apply half of partition-batched commit, with no Raft round trip of its own.
+    /// </summary>
+    private Task<KeyValueResponse> ApplyCommittedMutations(KeyValueRequest message)
+    {
+        return tryCommitMutationsHandler.ApplyExecute(message);
     }
     
     /// <summary>

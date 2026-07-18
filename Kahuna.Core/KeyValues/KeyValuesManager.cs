@@ -4831,52 +4831,177 @@ internal sealed class KeyValuesManager : IDisposable
         string? recordAnchorKey = null
     )
     {
-        Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>[] tasks =
-            new Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>[keys.Count];
+        // Persistent participants that share a Raft partition are proposed as ONE batched ReplicateLogs —
+        // one WAL proposal, one fsync — instead of one propose per key, which is where the fsync
+        // amplification on a bulk write (a table's rows all land in one key space ⇒ one partition) comes
+        // from. Ephemeral participants have no Raft proposal, and a not-joined single node has nothing to
+        // batch to; both keep the per-key prepare.
+        List<(string key, KeyValueDurability durability)> batchable = [];
+        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> results = new(keys.Count);
 
-        for (int i = 0; i < keys.Count; i++)
+        foreach ((string key, KeyValueDurability durability) key in keys)
         {
-            (string key, KeyValueDurability durability) key = keys[i];
-            tasks[i] = PrepareOneMutation(key);
+            if (key.durability == KeyValueDurability.Persistent && raft.Joined)
+                batchable.Add(key);
+            else
+                results.Add(await PrepareOneMutation(transactionId, commitId, key, recordAnchorKey));
         }
 
-        return [.. await Task.WhenAll(tasks)];
+        if (batchable.Count == 0)
+            return results;
 
-        async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> PrepareOneMutation(
-            (string key, KeyValueDurability durability) key)
+        Dictionary<int, (long Generation, List<(string key, KeyValueDurability durability)> Items)> groups =
+            GroupByPartition(keySpaceRegistry, rangeMapStore.Current, new DataPartitionRouter(raft), batchable, k => k.key);
+
+        foreach ((int partitionId, (long generation, List<(string key, KeyValueDurability durability)> items)) in groups)
+            results.AddRange(await StageAndProposePartition(transactionId, commitId, partitionId, generation, items, recordAnchorKey));
+
+        return results;
+    }
+
+    /// <summary>
+    /// Prepares one mutation the per-key way: dispatches a <c>TryPrepareMutations</c> to the owning actor,
+    /// which proposes (or, for a persistent key, dispatches the propose off its mailbox) and returns the
+    /// per-key proposal ticket. Used for ephemeral participants and the not-joined single-node case, which
+    /// are not batched.
+    /// </summary>
+    private async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> PrepareOneMutation(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        (string key, KeyValueDurability durability) key,
+        string? recordAnchorKey
+    )
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryPrepareMutations,
+            transactionId, commitId, key.key,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, key.durability, 0, 0, null);
+
+        request.RecordAnchorKey = recordAnchorKey;
+
+        try
+        {
+            KeyValueResponse? response = key.durability == KeyValueDurability.Ephemeral
+                ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
+                : await AskKeyValueActor(persistentKeyValuesRouter, request);
+
+            if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
+                return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability);
+
+            return (response.Type, response.Ticket, key.key, key.durability);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Stages every participant of one partition (validate + pin write intent + build proposal, no Raft),
+    /// then proposes the whole set in a single <c>ReplicateLogs</c> so the group shares one WAL proposal and
+    /// one ticket. Keys that contributed a proposal share the returned ticket; a key that prepared with
+    /// nothing to propose (an Undefined read) keeps a Zero ticket, exactly as the per-key path returns.
+    ///
+    /// <para>Staging installs each write intent before the batch proposes. If any key fails staging — or the
+    /// batch propose itself fails — the batch cannot commit a partial set, so it unwinds the intents it did
+    /// stage (they hold no ticket the coordinator would roll back) and reports every key of the partition as
+    /// failed, aborting the transaction cleanly with no leaked intent.</para>
+    /// </summary>
+    private async Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> StageAndProposePartition(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        int partitionId,
+        long generation,
+        List<(string key, KeyValueDurability durability)> items,
+        string? recordAnchorKey
+    )
+    {
+        List<(string key, KeyValueDurability durability, KeyValueResponseType type, byte[]? proposal)> staged = new(items.Count);
+
+        foreach ((string key, KeyValueDurability durability) item in items)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
-                KeyValueRequestType.TryPrepareMutations,
-                transactionId,
-                commitId,
-                key.key,
-                null,
-                null,
-                -1,
-                KeyValueFlags.None,
-                0,
-                HLCTimestamp.Zero,
-                key.durability,
-                0,
-                0,
-                null
-            );
+                KeyValueRequestType.StagePrepareMutations,
+                transactionId, commitId, item.key,
+                null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, item.durability, 0, 0, null);
 
             request.RecordAnchorKey = recordAnchorKey;
+            request.RoutedGeneration = generation;
 
             try
             {
-                KeyValueResponse? response;
+                KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+                staged.Add(response is null
+                    ? (item.key, item.durability, KeyValueResponseType.Errored, null)
+                    : (item.key, item.durability, response.Type, response.StagedProposal));
+            }
+            finally
+            {
+                KeyValueRequestPool.Return(request);
+            }
+        }
 
-                if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
-                else
-                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+        if (staged.Any(s => s.type != KeyValueResponseType.Prepared))
+        {
+            await UnwindStagedIntents(transactionId, staged);
 
-                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                    return (KeyValueResponseType.Errored, HLCTimestamp.Zero, key.key, key.durability);
+            // Report the staged-and-unwound keys as failed too — the whole partition batch aborted.
+            return staged.Select(s => (
+                s.type == KeyValueResponseType.Prepared ? KeyValueResponseType.Errored : s.type,
+                HLCTimestamp.Zero, s.key, s.durability)).ToList();
+        }
 
-                return (response.Type, response.Ticket, key.key, key.durability);
+        List<byte[]> batch = [];
+        foreach ((string _, KeyValueDurability _, KeyValueResponseType _, byte[]? proposal) in staged)
+            if (proposal is not null)
+                batch.Add(proposal);
+
+        // Every key prepared with nothing to propose (all Undefined reads): nothing to replicate, all
+        // Prepared with a Zero ticket.
+        if (batch.Count == 0)
+            return staged.Select(s => (KeyValueResponseType.Prepared, HLCTimestamp.Zero, s.key, s.durability)).ToList();
+
+        RaftReplicationResult result = await raft.ReplicateLogs(
+            partitionId, ReplicationTypes.KeyValues, batch, autoCommit: false, expectedGeneration: generation);
+
+        if (!result.Success)
+        {
+            logger.LogWarning("Batched propose failed Partition={Partition} Count={Count} Status={Status}", partitionId, batch.Count, result.Status);
+
+            await UnwindStagedIntents(transactionId, staged);
+
+            return staged.Select(s => (KeyValueResponseType.Errored, HLCTimestamp.Zero, s.key, s.durability)).ToList();
+        }
+
+        HLCTimestamp ticket = result.TicketId;
+
+        return staged.Select(s => (
+            KeyValueResponseType.Prepared,
+            s.proposal is not null ? ticket : HLCTimestamp.Zero,
+            s.key, s.durability)).ToList();
+    }
+
+    /// <summary>
+    /// Unwinds the write intents of the keys that staged successfully (a failed batch never proposed them,
+    /// so they hold no ticket the coordinator would roll back) via a no-Raft local rollback on each.
+    /// </summary>
+    private async Task UnwindStagedIntents(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability, KeyValueResponseType type, byte[]? proposal)> staged)
+    {
+        foreach ((string key, KeyValueDurability durability, KeyValueResponseType type, byte[]? _) in staged)
+        {
+            if (type != KeyValueResponseType.Prepared)
+                continue;
+
+            KeyValueRequest request = KeyValueRequestPool.Rent(
+                KeyValueRequestType.ApplyRolledBackMutations,
+                transactionId, HLCTimestamp.Zero, key,
+                null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, durability, 0, 0, null);
+
+            try
+            {
+                await AskKeyValueActor(persistentKeyValuesRouter, request);
             }
             finally
             {
@@ -4959,57 +5084,127 @@ internal sealed class KeyValuesManager : IDisposable
         List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> keys
     )
     {
-        Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[] tasks =
-            new Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>[keys.Count];
+        // Persistent participants that share a Raft partition proposal ticket commit once: a single
+        // CommitLogs settles the whole partition (idempotent on repeat), then each key applies its confirmed
+        // mutation with no further Raft — the commit half of collapsing N per-key round trips into one.
+        // Ephemeral keys, and persistent keys with no ticket (an Undefined read, or a not-joined single
+        // node), keep the per-key commit.
+        Dictionary<HLCTimestamp, List<(string key, KeyValueDurability durability)>> byTicket = [];
+        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> perKey = [];
 
-        for (int i = 0; i < keys.Count; i++)
+        foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in keys)
         {
-            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key = keys[i];
-            tasks[i] = CommitOneMutation(key);
+            if (key.durability == KeyValueDurability.Persistent && key.proposalTicketId != HLCTimestamp.Zero && raft.Joined)
+            {
+                if (byTicket.TryGetValue(key.proposalTicketId, out List<(string key, KeyValueDurability durability)>? group))
+                    group.Add((key.key, key.durability));
+                else
+                    byTicket[key.proposalTicketId] = [(key.key, key.durability)];
+            }
+            else
+                perKey.Add(key);
         }
 
-        return [.. await Task.WhenAll(tasks)];
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> results = new(keys.Count);
 
-        async Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> CommitOneMutation(
-            (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key)
+        foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in perKey)
+            results.Add(await CommitOneMutation(transactionId, key));
+
+        foreach ((HLCTimestamp ticket, List<(string key, KeyValueDurability durability)> group) in byTicket)
+            results.AddRange(await CommitTicketGroup(transactionId, ticket, group));
+
+        return results;
+    }
+
+    /// <summary>
+    /// Commits one mutation the per-key way: dispatches a <c>TryCommitMutations</c> to the owning actor,
+    /// which commits its ticket (or, for a persistent key, off its mailbox) and applies. Used for ephemeral
+    /// participants and persistent keys with no shared ticket, which are not batched.
+    /// </summary>
+    private async Task<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> CommitOneMutation(
+        HLCTimestamp transactionId,
+        (string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key)
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryCommitMutations, transactionId, HLCTimestamp.Zero, key.key,
+            null, null, -1, KeyValueFlags.None, 0, key.proposalTicketId, key.durability, 0, 0, null);
+
+        try
+        {
+            KeyValueResponse? response = key.durability == KeyValueDurability.Ephemeral
+                ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
+                : await AskKeyValueActor(persistentKeyValuesRouter, request);
+
+            if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
+                return (KeyValueResponseType.Errored, key.key, -1, key.durability);
+
+            return (response.Type, key.key, response.Revision, key.durability);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Commits every participant of one partition that shares a proposal ticket: one <c>CommitLogs</c>
+    /// settles the ticket durably (idempotent if an earlier retry already committed it), then each key applies
+    /// its confirmed mutation on its owning actor with no further Raft. A transient commit failure
+    /// (leadership/queue/timeout) returns MustRetry for the whole group so the coordinator re-drives it; a
+    /// hard failure is Errored.
+    /// </summary>
+    private async Task<List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)>> CommitTicketGroup(
+        HLCTimestamp transactionId,
+        HLCTimestamp ticket,
+        List<(string key, KeyValueDurability durability)> group)
+    {
+        // Every key of a ticket shares the partition the batched prepare grouped them into.
+        int partitionId = RangeRouting.Locate(keySpaceRegistry, rangeMapStore.Current, new DataPartitionRouter(raft), group[0].key).PartitionId;
+
+        (bool success, RaftOperationStatus status, long _) = await raft.CommitLogs(partitionId, ticket, CancellationToken.None);
+
+        if (!success)
+        {
+            logger.LogWarning("Batched commit failed Partition={Partition} Count={Count} Status={Status}", partitionId, group.Count, status);
+
+            KeyValueResponseType outcome = IsTransientRaftStatus(status)
+                ? KeyValueResponseType.MustRetry
+                : KeyValueResponseType.Errored;
+
+            return group.Select(g => (outcome, g.key, -1L, g.durability)).ToList();
+        }
+
+        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> results = new(group.Count);
+
+        foreach ((string key, KeyValueDurability durability) g in group)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
-                KeyValueRequestType.TryCommitMutations,
-                transactionId,
-                HLCTimestamp.Zero,
-                key.key,
-                null,
-                null,
-                -1,
-                KeyValueFlags.None,
-                0,
-                key.proposalTicketId,
-                key.durability,
-                0,
-                0,
-                null
-            );
+                KeyValueRequestType.ApplyCommittedMutations, transactionId, HLCTimestamp.Zero, g.key,
+                null, null, -1, KeyValueFlags.None, 0, ticket, g.durability, 0, 0, null);
 
             try
             {
-                KeyValueResponse? response;
-
-                if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
-                else
-                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
-
-                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                    return (KeyValueResponseType.Errored, key.key, -1, key.durability);
-
-                return (response.Type, key.key, response.Revision, key.durability);
+                KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+                results.Add(response is null
+                    ? (KeyValueResponseType.Errored, g.key, -1L, g.durability)
+                    : (response.Type, g.key, response.Revision, g.durability));
             }
             finally
             {
                 KeyValueRequestPool.Return(request);
             }
         }
+
+        return results;
     }
+
+    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
+        RaftOperationStatus.NodeIsNotLeader or
+        RaftOperationStatus.ProposalQueueFull or
+        RaftOperationStatus.RestoreInProgress or
+        RaftOperationStatus.ProposalTimeout or
+        RaftOperationStatus.ReplicationFailed or
+        RaftOperationStatus.OperationCancelled;
     
     /// <summary>
     /// Passes a TryRollback request to the key/value actor for the given keyValue name.
