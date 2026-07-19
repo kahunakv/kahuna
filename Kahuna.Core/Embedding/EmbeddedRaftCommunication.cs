@@ -43,7 +43,7 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
 
     public Task<RequestVotesResponse> RequestVotes(RaftManager manager, RaftNode node, RequestVotesRequest request)
     {
-        manager.Vote(new(request.Partition, request.Term, request.MaxLogId, request.Time, node.Endpoint, preVote: request.PreVote));
+        manager.Vote(new(request.Partition, request.Term, request.MaxLogId, request.LastLogTerm, request.Time, node.Endpoint, preVote: request.PreVote));
         return RequestVotesResponse;
     }
 
