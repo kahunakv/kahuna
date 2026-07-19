@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// A durable transaction-record transition, replicated on the data partition that owns the transaction's record
+// anchor key. Each replica re-applies the transition through the canonical CAS state machine in Raft log order,
+// so a commit/abort race resolves identically everywhere (log order, not last-writer, picks the winner). The
+// record is internal metadata, never inserted into the user key-value namespace.
+enum TransactionRecordCommandKindMessage {
+  TRANSACTION_RECORD_INITIALIZE = 0; // freeze immutable identity, create Undecided
+  TRANSACTION_RECORD_COMMIT     = 1; // Undecided -> Commit (within the decision deadline)
+  TRANSACTION_RECORD_ABORT      = 2; // Undecided|absent -> Abort (may create a tombstone from absence)
+}
+
+message TransactionParticipantRefMessage {
+  string key = 1;
+  int32  durability = 2; // KeyValueDurability
+}
+
+message TransactionRecordCommandMessage {
+  TransactionRecordCommandKindMessage kind = 1;
+
+  // identity carried by every transition
+  int32  transactionIdNode     = 2;
+  int64  transactionIdPhysical = 3;
+  uint32 transactionIdCounter  = 4;
+  int64  epoch = 5;
+  int64  manifestHash = 6;
+
+  // the operation id that, if it wins the terminal transition, is recorded as the winner
+  int32  opIdNode     = 7;
+  int64  opIdPhysical = 8;
+  uint32 opIdCounter  = 9;
+
+  // the attempt's HLC (commit/abort): the deadline check and DecidedAt come from this, never a local clock
+  int32  attemptNode     = 10;
+  int64  attemptPhysical = 11;
+  uint32 attemptCounter  = 12;
+
+  // initialize (and abort-from-absence tombstone) fields
+  string coordinatorKey  = 13;
+  string recordAnchorKey = 14;
+  int32  commitTimestampNode     = 15;
+  int64  commitTimestampPhysical = 16;
+  uint32 commitTimestampCounter  = 17;
+  int32  decisionDeadlineNode     = 18;
+  int64  decisionDeadlinePhysical = 19;
+  uint32 decisionDeadlineCounter  = 20;
+  int32  createdAtNode     = 21;
+  int64  createdAtPhysical = 22;
+  uint32 createdAtCounter  = 23;
+  repeated TransactionParticipantRefMessage participants = 24; // initialize only
+
+  int32  abortClass = 25; // abort only (TransactionAbortClass)
+}
+
+// A batch of transitions committing as a single atomic data-partition log entry. Applied in order; each
+// transition is idempotent by construction, so Raft re-delivery and tail replay converge.
+message TransactionRecordDeltaMessage {
+  repeated TransactionRecordCommandMessage commands = 1;
+}
+
+enum TransactionDecisionMessage {
+  TRANSACTION_DECISION_UNDECIDED = 0;
+  TRANSACTION_DECISION_COMMIT    = 1;
+  TRANSACTION_DECISION_ABORT     = 2;
+}
+
+// The full materialized state of one transaction record, for the durable on-disk snapshot and whole-partition
+// state transfer (each blob replaces the partition's record set). Unlike a command, it carries the decided
+// outcome, winner, and manifest-present flag.
+message TransactionRecordSnapshotEntry {
+  int32  transactionIdNode     = 1;
+  int64  transactionIdPhysical = 2;
+  uint32 transactionIdCounter  = 3;
+  int64  epoch = 4;
+  string coordinatorKey  = 5;
+  string recordAnchorKey = 6;
+  int32  commitTimestampNode     = 7;
+  int64  commitTimestampPhysical = 8;
+  uint32 commitTimestampCounter  = 9;
+  int32  decisionDeadlineNode     = 10;
+  int64  decisionDeadlinePhysical = 11;
+  uint32 decisionDeadlineCounter  = 12;
+  int64  manifestHash = 13;
+  repeated TransactionParticipantRefMessage participants = 14;
+  bool   manifestPresent = 15;
+  TransactionDecisionMessage decision = 16;
+  int32  abortClass = 17;
+  int32  winningOpIdNode     = 18;
+  int64  winningOpIdPhysical  = 19;
+  uint32 winningOpIdCounter  = 20;
+  int32  createdAtNode     = 21;
+  int64  createdAtPhysical = 22;
+  uint32 createdAtCounter  = 23;
+  int32  decidedAtNode     = 24;
+  int64  decidedAtPhysical = 25;
+  uint32 decidedAtCounter  = 26;
+}
+
+message TransactionRecordSnapshotMessage {
+  repeated TransactionRecordSnapshotEntry records = 1;
+}

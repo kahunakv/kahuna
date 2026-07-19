@@ -177,6 +177,13 @@ public sealed class KahunaConfiguration
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 
     /// <summary>
+    /// Routes all-persistent interactive transactions through the durable prepared-intent 2PC model (durable
+    /// committed intents plus a canonical decision record) instead of the manual-ticket path. Off by default
+    /// while that path is being brought up; the ticket path remains for ephemeral/mixed transactions regardless.
+    /// </summary>
+    public bool EnableDurableIntentTransactions { get; set; }
+
+    /// <summary>
     /// Number of keys a KeyRange descriptor must contain before the auto-split trigger
     /// considers splitting it. 0 disables auto-split.
     /// </summary>

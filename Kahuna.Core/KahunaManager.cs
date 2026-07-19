@@ -1389,6 +1389,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
             ReplicationTypes.RangeMap => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.SnapshotFloor => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.CoordinatorDecision => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.TransactionRecord => await keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.PreparedIntent => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.CompletionReceipt => await keyValues.OnLogRestored(partitionId, log),
             ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
             _ => true
@@ -1403,6 +1405,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
             ReplicationTypes.RangeMap => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.SnapshotFloor => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.CoordinatorDecision => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.TransactionRecord => await keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.PreparedIntent => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.CompletionReceipt => await keyValues.OnReplicationReceived(partitionId, log),
             ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
             _ => true

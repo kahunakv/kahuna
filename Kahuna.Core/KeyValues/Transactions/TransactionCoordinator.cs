@@ -1149,6 +1149,17 @@ internal sealed class TransactionCoordinator
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
 
+        // Durable prepared-intent path (opt-in): an all-persistent transaction whose staged mutations are all
+        // available is finalized via durable committed intents plus a canonical decision record, with no manual
+        // Raft ticket. Falls through to the legacy ticket path when the input cannot be built (mixed durability,
+        // no anchor, or a modified key without a staged value).
+        if (configuration.EnableDurableIntentTransactions
+            && TryBuildDurableFinalizeInput(context, out DurableFinalizeInput? durableInput, out HLCTimestamp durableOpId))
+        {
+            await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         // Durable policy rejections, before any write intent is placed. A Durable transaction records its
         // decision on the data partition of its anchor (first confirmed persistent modified key), so it may
         // not mutate an ephemeral key (no durable participant) and must have an anchor.
@@ -1218,6 +1229,110 @@ internal sealed class TransactionCoordinator
         {
             admissionReservation?.Dispose();
         }
+    }
+
+    // ── Durable prepared-intent finalize path (opt-in) ─────────────────────────────
+
+    private const long DurableDecisionDeadlineMarginMs = 30_000;
+
+    private DurableTransactionFinalizer? durableFinalizer;
+
+    private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
+        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync);
+
+    private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
+        (await raft.ReplicateLogs(partitionId, logType, data, autoCommit: true, expectedGeneration: 0, cancellationToken).ConfigureAwait(false)).Success;
+
+    /// <summary>
+    /// Builds the frozen finalize input from the transaction's staged persistent mutations, grouping intents by
+    /// their current data partition. Returns false — so the caller falls back to the ticket path — when the
+    /// transaction is not all-persistent, has no anchor, or a modified key has no staged value to prepare.
+    /// </summary>
+    private bool TryBuildDurableFinalizeInput(TransactionContext context, out DurableFinalizeInput? input, out HLCTimestamp opId)
+    {
+        input = null;
+        opId = HLCTimestamp.Zero;
+
+        if (context.ModifiedKeys is null || context.RecordAnchorKey is null)
+            return false;
+
+        if (!context.ModifiedKeys.All(static k => k.Item2 == KeyValueDurability.Persistent))
+            return false;
+
+        List<KeyValueTransactionResultValue>? values = context.ModifiedResult?.Values;
+        if (values is null || values.Count == 0)
+            return false;
+
+        HLCTimestamp txId = context.TransactionId;
+        const long epoch = 1;
+        HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
+        HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DurableDecisionDeadlineMarginMs, commitTimestamp.C);
+        string anchorKey = context.RecordAnchorKey;
+
+        List<TransactionParticipantRef> manifest = context.ModifiedKeys
+            .Select(k => new TransactionParticipantRef(k.Item1, k.Item2))
+            .ToList();
+
+        long manifestHash = TransactionManifest.ComputeHash(txId, epoch, anchorKey, commitTimestamp, manifest);
+
+        // One intent per modified key, sourced from its staged result value; every modified key must be covered.
+        Dictionary<string, KeyValueTransactionResultValue> byKey = new(values.Count);
+        foreach (KeyValueTransactionResultValue value in values)
+            if (value.Key is not null)
+                byKey[value.Key] = value;
+
+        Dictionary<int, List<PreparedIntent>> byPartition = [];
+        foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
+        {
+            if (!byKey.TryGetValue(key, out KeyValueTransactionResultValue? value))
+                return false;
+
+            PreparedIntent intent = new(
+                txId, epoch, key, manifestHash, anchorKey, commitTimestamp,
+                State: value.Value is not null ? KeyValueState.Set : KeyValueState.Deleted,
+                Value: value.Value,
+                Bucket: null,
+                Revision: value.Revision,
+                Expires: value.Expires,
+                NoRevision: false,
+                BaseRevision: value.Revision - 1,
+                BaseState: KeyValueState.Set,
+                RecoveryDeadline: decisionDeadline,
+                Resolution: PreparedIntentResolution.Pending);
+
+            int partitionId = manager.LocateDurablePartition(key).PartitionId;
+            if (!byPartition.TryGetValue(partitionId, out List<PreparedIntent>? list))
+                byPartition[partitionId] = list = [];
+            list.Add(intent);
+        }
+
+        int anchorPartitionId = manager.LocateDurablePartition(anchorKey).PartitionId;
+
+        List<DurablePartitionPrepare> partitions = byPartition
+            .Select(kvp => new DurablePartitionPrepare(kvp.Key, kvp.Value))
+            .ToList();
+
+        input = new DurableFinalizeInput(
+            txId, epoch, context.CoordinatorKey ?? anchorKey, anchorKey, anchorPartitionId,
+            commitTimestamp, decisionDeadline, manifestHash, manifest, partitions, CreatedAt: txId);
+        opId = commitTimestamp;
+        return true;
+    }
+
+    private async Task DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        DurableFinalizeOutcome outcome = await DurableFinalizer.FinalizeAsync(
+            input,
+            validateReadSet: ct => CheckReadSetForConflicts(context, ct),
+            opId,
+            cancellationToken).ConfigureAwait(false);
+
+        context.Result = outcome.Result switch
+        {
+            DurableFinalizeResult.Committed => new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
+            DurableFinalizeResult.Aborted => new KeyValueTransactionResult { Type = KeyValueResponseType.Aborted, Reason = "Transaction conflict" },
+            _ => new KeyValueTransactionResult { Type = KeyValueResponseType.MustRetry, Reason = "Durable finalize could not complete; retry" }
+        };
     }
 
     /// <summary>

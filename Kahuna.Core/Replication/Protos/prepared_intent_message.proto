@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// A durable prepared-intent transition, replicated on the participant's data partition. Each replica re-applies
+// it through the prepared-intent state machine in Raft log order, so every replica holds the same unresolved
+// intent set. Prepared intents are internal metadata, never inserted into the user key-value namespace.
+enum PreparedIntentCommandKindMessage {
+  PREPARED_INTENT_PREPARE = 0; // install a pending intent (idempotent for an exact-duplicate mutation)
+  PREPARED_INTENT_RESOLVE = 1; // record the transaction's terminal decision on the intent (commit/abort)
+  PREPARED_INTENT_REMOVE  = 2; // garbage-collect a resolved intent
+}
+
+message PreparedIntentCommandMessage {
+  PreparedIntentCommandKindMessage kind = 1;
+
+  // identity carried by every transition
+  int32  transactionIdNode     = 2;
+  int64  transactionIdPhysical = 3;
+  uint32 transactionIdCounter  = 4;
+  int64  epoch = 5;
+  string key = 6;
+
+  bool commit = 7; // resolve only
+
+  // prepare payload
+  int64  manifestHash = 8;
+  string recordAnchorKey = 9;
+  int32  commitTimestampNode     = 10;
+  int64  commitTimestampPhysical = 11;
+  uint32 commitTimestampCounter  = 12;
+  int32  state = 13; // KeyValueState
+  bytes  value = 14;
+  bool   valueNull = 15;
+  string bucket = 16;
+  bool   bucketNull = 17;
+  int64  revision = 18;
+  int32  expiresNode     = 19;
+  int64  expiresPhysical = 20;
+  uint32 expiresCounter  = 21;
+  bool   noRevision = 22;
+  int64  baseRevision = 23;
+  int32  baseState = 24; // KeyValueState
+  int32  recoveryDeadlineNode     = 25;
+  int64  recoveryDeadlinePhysical = 26;
+  uint32 recoveryDeadlineCounter  = 27;
+  int32  resolution = 28; // PreparedIntentResolution (carried so a replayed prepare reflects its resolved state)
+}
+
+// A batch of transitions committing as a single atomic data-partition log entry.
+message PreparedIntentDeltaMessage {
+  repeated PreparedIntentCommandMessage commands = 1;
+}
+
+// The full materialized intent set of a data partition, for the durable on-disk snapshot and whole-partition
+// state transfer. Each entry is a PREPARE-kind command message, which already carries every intent field
+// including its current resolution, so no separate entry shape is needed.
+message PreparedIntentSnapshotMessage {
+  repeated PreparedIntentCommandMessage intents = 1;
+}

@@ -79,6 +79,12 @@
     <Protobuf Include="Replication\Protos\coordinator_decision_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
+    <Protobuf Include="Replication\Protos\transaction_record_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
+    <Protobuf Include="Replication\Protos\prepared_intent_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
     <Protobuf Include="Persistence\Protos\rocksdb.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>

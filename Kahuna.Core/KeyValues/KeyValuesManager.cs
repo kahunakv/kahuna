@@ -134,6 +134,22 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly CoordinatorDecisionStore coordinatorDecisionStore;
 
+    // Durable-intent 2PC model: canonical transaction records plus per-key prepared intents. Replication,
+    // restore, and per-partition snapshot are wired here so followers and restore reconstruct them; the finalize
+    // path that produces these transitions is not yet wired, so in steady state today nothing writes these log
+    // types.
+    private readonly TransactionRecordStore transactionRecordStore;
+
+    private readonly PreparedIntentStore preparedIntentStore;
+
+    /// <summary>The durable-intent 2PC stores and key→partition routing, exposed to the transaction coordinator's
+    /// durable finalize path (behind <see cref="KahunaConfiguration.EnableDurableIntentTransactions"/>).</summary>
+    internal TransactionRecordStore DurableTransactionRecordStore => transactionRecordStore;
+
+    internal PreparedIntentStore DurablePreparedIntentStore => preparedIntentStore;
+
+    internal (int PartitionId, long Generation) LocateDurablePartition(string key) => locator.LocateRange(key);
+
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
 
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
@@ -220,6 +236,11 @@ internal sealed class KeyValuesManager : IDisposable
         // anchor → partition resolver is attached below once the locator exists.
         coordinatorDecisionStore = externalDecisionStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // Durable-intent 2PC stores share the same per-partition snapshot lifecycle; their key/anchor → partition
+        // resolvers are attached below once the locator exists.
+        transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
         writeAggregator = new Writes.PartitionWriteAggregator(
             actorSystem,
@@ -276,6 +297,8 @@ internal sealed class KeyValuesManager : IDisposable
         // routers) so the actors could share the one instance for install-on-anchor-commit; that install
         // path needs no resolver, only the coordinator's UpsertAsync/RemoveAsync do.
         coordinatorDecisionStore.AttachAnchorResolver(locator.LocateRange);
+        transactionRecordStore.AttachAnchorResolver(locator.LocateRange);
+        preparedIntentStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
 
         // The receipt store's per-partition checkpoint snapshot routes each receipt by its key the same way.
         completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
@@ -961,6 +984,12 @@ internal sealed class KeyValuesManager : IDisposable
         if (log.LogType == ReplicationTypes.CoordinatorDecision)
             return Task.FromResult(coordinatorDecisionStore.Restore(partitionId, log));
 
+        if (log.LogType == ReplicationTypes.TransactionRecord)
+            return Task.FromResult(transactionRecordStore.Restore(partitionId, log));
+
+        if (log.LogType == ReplicationTypes.PreparedIntent)
+            return Task.FromResult(preparedIntentStore.Restore(partitionId, log));
+
         if (log.LogType == ReplicationTypes.CompletionReceipt)
             return Task.FromResult(completionReceiptStore.Restore(partitionId, log));
 
@@ -992,6 +1021,12 @@ internal sealed class KeyValuesManager : IDisposable
 
         if (log.LogType == ReplicationTypes.CoordinatorDecision)
             return Task.FromResult(coordinatorDecisionStore.Replicate(partitionId, log));
+
+        if (log.LogType == ReplicationTypes.TransactionRecord)
+            return Task.FromResult(transactionRecordStore.Replicate(partitionId, log));
+
+        if (log.LogType == ReplicationTypes.PreparedIntent)
+            return Task.FromResult(preparedIntentStore.Replicate(partitionId, log));
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
             return Task.FromResult(completionReceiptStore.Replicate(partitionId, log));

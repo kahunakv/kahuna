@@ -38,4 +38,17 @@ public static class ReplicationTypes
     /// handoff, which is otherwise not present in the destination partition's log.
     /// </summary>
     public const string CompletionReceipt = "receipt";
+
+    /// <summary>
+    /// A canonical transaction-record CAS transition (initialize/commit/abort), replicated on the data partition
+    /// that owns the transaction's record anchor key (never the meta partition). The durable-intent 2PC model's
+    /// terminal-decision authority.
+    /// </summary>
+    public const string TransactionRecord = "txnrecord";
+
+    /// <summary>
+    /// A durable prepared-intent transition (prepare/resolve/remove), replicated on each participant's data
+    /// partition. The durable-intent 2PC model's per-key pending-mutation authority.
+    /// </summary>
+    public const string PreparedIntent = "preparedintent";
 }

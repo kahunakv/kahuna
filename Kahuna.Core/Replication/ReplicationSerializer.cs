@@ -105,4 +105,52 @@ public static class ReplicationSerializer
 
     public static CoordinatorDecisionSnapshotMessage UnserializeCoordinatorDecisionSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
         CoordinatorDecisionSnapshotMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(TransactionRecordDeltaMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static TransactionRecordDeltaMessage UnserializeTransactionRecordDeltaMessage(ReadOnlySpan<byte> serializedData) =>
+        TransactionRecordDeltaMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(PreparedIntentDeltaMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static PreparedIntentDeltaMessage UnserializePreparedIntentDeltaMessage(ReadOnlySpan<byte> serializedData) =>
+        PreparedIntentDeltaMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(TransactionRecordSnapshotMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static TransactionRecordSnapshotMessage UnserializeTransactionRecordSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
+        TransactionRecordSnapshotMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(PreparedIntentSnapshotMessage message)
+    {
+        int size = message.CalculateSize();
+        byte[] buf = new byte[size];
+        using CodedOutputStream cos = new(buf);
+        message.WriteTo(cos);
+        return buf;
+    }
+
+    public static PreparedIntentSnapshotMessage UnserializePreparedIntentSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
+        PreparedIntentSnapshotMessage.Parser.ParseFrom(serializedData);
 }
