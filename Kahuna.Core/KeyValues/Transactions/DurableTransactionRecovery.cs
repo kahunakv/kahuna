@@ -118,9 +118,16 @@ internal sealed class DurableTransactionRecovery
             }
         }
 
-        byte[] resolveDelta = PreparedIntentStore.SerializeDelta(group.Select(i =>
-            (PreparedIntentCommand)new ResolveIntentCommand(i.TransactionId, i.Epoch, i.Key, commit)));
+        // Resolve and remove each intent atomically (Pending -> resolved -> deleted), so recovery leaves no
+        // lingering resolved intent. Idempotent under replay.
+        List<PreparedIntentCommand> settle = new(group.Count * 2);
+        foreach (PreparedIntent intent in group)
+        {
+            settle.Add(new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit));
+            settle.Add(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key));
+        }
 
+        byte[] resolveDelta = PreparedIntentStore.SerializeDelta(settle);
         if (await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, cancellationToken).ConfigureAwait(false))
             intentStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = resolveDelta });
     }

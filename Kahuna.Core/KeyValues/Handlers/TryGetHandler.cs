@@ -3,6 +3,8 @@ using Nixie;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
@@ -25,6 +27,31 @@ internal sealed class TryGetHandler : BaseHandler
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        // Durable-intent read visibility: a foreign prepared intent covering this key may have a committed value
+        // that has not yet materialized locally (deferred settlement). Consult the canonical outcome before the
+        // ordinary read paths. Empty store (durable-intent path disabled) ⇒ null ⇒ no effect.
+        if (context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
+            && foreignIntent.TransactionId != message.TransactionId)
+        {
+            HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
+            switch (PreparedIntentVisibility.Resolve(foreignIntent, readTs))
+            {
+                case ReadVisibilityAction.Retry:
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                case ReadVisibilityAction.UseIntentValue:
+                    return foreignIntent.State == KeyValueState.Deleted
+                        ? KeyValueStaticResponses.DoesNotExistContextResponse
+                        : new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                            foreignIntent.Value, foreignIntent.Revision, foreignIntent.Expires,
+                            currentTime, foreignIntent.CommitTimestamp, foreignIntent.State));
+
+                case ReadVisibilityAction.UseExisting:
+                default:
+                    break; // fall through to the ordinary read paths
+            }
+        }
 
         // Validate active replication intent — client must retry until the entry is
         // fully replicated before reading it.

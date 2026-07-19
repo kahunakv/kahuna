@@ -72,7 +72,7 @@ public sealed class TestDurableTransactionFinalizer
 
         Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
         Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
-        Assert.Equal(PreparedIntentResolution.Committed, intents.Get("acct/1")!.Resolution);
+        Assert.Null(intents.Get("acct/1")); // resolved and garbage-collected in one atomic settle
     }
 
     [Fact]
@@ -86,8 +86,8 @@ public sealed class TestDurableTransactionFinalizer
             Input(txId, 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
 
         Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
-        Assert.Equal(PreparedIntentResolution.Committed, intents.Get("acct/1")!.Resolution);
-        Assert.Equal(PreparedIntentResolution.Committed, intents.Get("idx/name/bob")!.Resolution);
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Null(intents.Get("idx/name/bob"));
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
         Assert.Equal(TransactionAbortClass.Conflict, outcome.AbortClass);
         Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
-        Assert.Equal(PreparedIntentResolution.Aborted, intents.Get("acct/1")!.Resolution);
+        Assert.Null(intents.Get("acct/1"));
     }
 
     [Fact]
@@ -117,8 +117,8 @@ public sealed class TestDurableTransactionFinalizer
 
         Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
         Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
-        // Partition 5's intent prepared, then aborted by resolution; partition 8's never landed.
-        Assert.Equal(PreparedIntentResolution.Aborted, intents.Get("acct/1")!.Resolution);
+        // Partition 5's intent prepared, then aborted and removed by settlement; partition 8's never landed.
+        Assert.Null(intents.Get("acct/1"));
         Assert.Null(intents.Get("idx/name/bob"));
     }
 
@@ -165,6 +165,24 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(DurableFinalizeResult.Committed, second.Result);
         Assert.Equal(1, records.Count);
         Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+    }
+
+    [Fact]
+    public async Task SequentialTransactions_SameKey_BothCommit_NoLingeringIntent()
+    {
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, _, PreparedIntentStore intents) = Build(seam);
+
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.Null(intents.Get("acct/1")); // first transaction's intent is GC'd on commit
+
+        // A second, later transaction writes the same key; without GC its prepare would conflict with the first's
+        // lingering intent (one live intent per key) and this key would be stuck.
+        DurableFinalizeOutcome second = await finalizer.FinalizeAsync(Input(Ts(3000), 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, second.Result);
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Equal(0, intents.Count);
     }
 
     [Fact]

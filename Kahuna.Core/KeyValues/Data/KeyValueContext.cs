@@ -84,6 +84,10 @@ internal sealed class KeyValueContext
     /// </summary>
     public Transactions.CoordinatorDecisionStore? CoordinatorDecisionStore { get; }
 
+    /// <summary>The durable prepared-intent store, consulted by reads to apply the read-visibility contract when a
+    /// committed value has not yet materialized locally (deferred settlement). Null in bare test contexts.</summary>
+    public Transactions.PreparedIntentStore? PreparedIntentStore { get; }
+
     public IPersistenceBackend PersistenceBackend  { get; }
 
     public BTree<string, KeyValueEntry> Store  { get; }
@@ -162,7 +166,8 @@ internal sealed class KeyValueContext
         SnapshotFloorStore? snapshotFloorStore = null,
         CompletionReceiptStore? completionReceiptStore = null,
         Transactions.CoordinatorDecisionStore? coordinatorDecisionStore = null,
-        IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter = null
+        IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter = null,
+        Transactions.PreparedIntentStore? preparedIntentStore = null
     )
     {
         ActorContext = actorContext;
@@ -182,6 +187,7 @@ internal sealed class KeyValueContext
         SnapshotFloorStore = snapshotFloorStore;
         CompletionReceiptStore = completionReceiptStore ?? new CompletionReceiptStore();
         CoordinatorDecisionStore = coordinatorDecisionStore;
+        PreparedIntentStore = preparedIntentStore;
     }
 
     /// <summary>

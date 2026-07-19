@@ -158,7 +158,8 @@ internal sealed class DurableTransactionFinalizer
         foreach (DurablePartitionPrepare partition in input.Partitions)
         {
             // On commit, materialize each intent's value as an ordinary key/value record so the existing
-            // replicator applies it to visible MVCC/persistence; on abort nothing materializes.
+            // replicator applies it to visible MVCC/persistence — durably, BEFORE the intent is removed below.
+            // On abort nothing materializes.
             if (commit)
             {
                 foreach (PreparedIntent intent in partition.Intents)
@@ -168,12 +169,24 @@ internal sealed class DurableTransactionFinalizer
                 }
             }
 
-            IEnumerable<PreparedIntentCommand> resolves = partition.Intents.Select(i =>
-                (PreparedIntentCommand)new ResolveIntentCommand(i.TransactionId, i.Epoch, i.Key, commit));
-
-            byte[] delta = PreparedIntentStore.SerializeDelta(resolves);
-            await ReplicateIntentsAsync(partition.PartitionId, delta, cancellationToken).ConfigureAwait(false);
+            await SettleIntentsAsync(partition.PartitionId, partition.Intents, commit, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    // Resolves and removes each intent in one atomic delta (applied in order Pending -> resolved -> deleted), so
+    // no "resolved-but-not-removed" state can linger to block a later write to the key or serve a stale value.
+    // Idempotent: a replay of [Resolve, Remove] over an already-removed intent is a pair of no-ops.
+    private async Task SettleIntentsAsync(int partitionId, IReadOnlyList<PreparedIntent> intents, bool commit, CancellationToken cancellationToken)
+    {
+        List<PreparedIntentCommand> settle = new(intents.Count * 2);
+        foreach (PreparedIntent intent in intents)
+        {
+            settle.Add(new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit));
+            settle.Add(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key));
+        }
+
+        byte[] delta = PreparedIntentStore.SerializeDelta(settle);
+        await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, CancellationToken cancellationToken)

@@ -69,7 +69,7 @@ public sealed class TestDurableTransactionRecovery
         int resolved = await recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None);
 
         Assert.Equal(1, resolved);
-        Assert.Equal(PreparedIntentResolution.Committed, store.Get("acct/1")!.Resolution);
+        Assert.Null(store.Get("acct/1")); // resolved-committed and removed
         Assert.Contains(seam.Calls, c => c.Type == ReplicationTypes.KeyValues); // materialized
     }
 
@@ -82,7 +82,7 @@ public sealed class TestDurableTransactionRecovery
 
         await recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None);
 
-        Assert.Equal(PreparedIntentResolution.Aborted, store.Get("acct/1")!.Resolution);
+        Assert.Null(store.Get("acct/1")); // resolved-aborted and removed
         Assert.DoesNotContain(seam.Calls, c => c.Type == ReplicationTypes.KeyValues);
     }
 
@@ -98,7 +98,7 @@ public sealed class TestDurableTransactionRecovery
 
         await recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None);
 
-        Assert.Equal(PreparedIntentResolution.Aborted, store.Get("acct/1")!.Resolution);
+        Assert.Null(store.Get("acct/1")); // resolved-aborted and removed
     }
 
     [Fact]
@@ -126,7 +126,7 @@ public sealed class TestDurableTransactionRecovery
 
         await recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None);
 
-        Assert.Equal(PreparedIntentResolution.Aborted, store.Get("acct/1")!.Resolution);
+        Assert.Null(store.Get("acct/1")); // resolved-aborted and removed
     }
 
     [Fact]
@@ -141,7 +141,7 @@ public sealed class TestDurableTransactionRecovery
 
         await recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None);
 
-        Assert.Equal(PreparedIntentResolution.Committed, store.Get("acct/1")!.Resolution);
+        Assert.Null(store.Get("acct/1")); // resolved-committed and removed
         Assert.Contains(seam.Calls, c => c.Type == ReplicationTypes.KeyValues);
     }
 
