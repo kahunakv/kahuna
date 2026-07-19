@@ -1238,7 +1238,29 @@ internal sealed class TransactionCoordinator
     private DurableTransactionFinalizer? durableFinalizer;
 
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
-        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync);
+        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, ScheduleDeferredResolution);
+
+    /// <summary>
+    /// Deferred settlement: run a committed/aborted transaction's resolution (materialize committed values, settle
+    /// intents) off the commit critical path so the finalizer returns as soon as the canonical decision is durable.
+    /// Reads and writers observe the committed intent through the §6 visibility contract until materialization
+    /// lands. The resolution is detached from the request's cancellation (the client call may have returned) and
+    /// never propagates its failure to the caller; the canonical decision is durable, so the recovery driver
+    /// finishes any resolution this background run drops.
+    /// </summary>
+    private void ScheduleDeferredResolution(Func<CancellationToken, Task> resolution) => _ = RunDeferredResolution(resolution);
+
+    private async Task RunDeferredResolution(Func<CancellationToken, Task> resolution)
+    {
+        try
+        {
+            await resolution(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Deferred durable resolution failed; the recovery driver will complete it");
+        }
+    }
 
     private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
         (await raft.ReplicateLogs(partitionId, logType, data, autoCommit: true, expectedGeneration: 0, cancellationToken).ConfigureAwait(false)).Success;
@@ -1288,9 +1310,13 @@ internal sealed class TransactionCoordinator
 
     private async Task DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
     {
+        // Post-prepare read-set validation: the revision-comparison check (intent-aware — it reads current
+        // committed state through the durable-intent-aware read path) catches a read that a concurrent commit made
+        // stale, and the write-intent probe catches a concurrent in-flight writer. Both must pass to commit.
         DurableFinalizeOutcome outcome = await DurableFinalizer.FinalizeAsync(
             input,
-            validateReadSet: ct => CheckReadSetForConflicts(context, ct),
+            validateReadSet: async ct => await ValidateReadSet(context, ct).ConfigureAwait(false)
+                && await CheckReadSetForConflicts(context, ct).ConfigureAwait(false),
             opId,
             cancellationToken).ConfigureAwait(false);
 

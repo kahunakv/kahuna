@@ -2,6 +2,8 @@
 using Nixie;
 using Kommander;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -28,6 +30,30 @@ internal sealed class TryExistsHandler : BaseHandler
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        // Durable-intent read visibility: a foreign prepared intent may carry a committed outcome not yet
+        // materialized locally. Empty store (durable-intent path disabled) ⇒ null ⇒ no effect.
+        if (context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
+            && foreignIntent.TransactionId != message.TransactionId)
+        {
+            HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
+            switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs))
+            {
+                case ReadVisibilityAction.Retry:
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                case ReadVisibilityAction.UseIntentValue:
+                    return foreignIntent.State == KeyValueState.Deleted
+                        ? KeyValueStaticResponses.DoesNotExistContextResponse
+                        : new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
+                            null, foreignIntent.Revision, foreignIntent.Expires,
+                            currentTime, foreignIntent.CommitTimestamp, foreignIntent.State));
+
+                case ReadVisibilityAction.UseExisting:
+                default:
+                    break;
+            }
+        }
 
         if (entry?.ReplicationIntent is not null)
         {
@@ -245,6 +271,32 @@ internal sealed class TryExistsHandler : BaseHandler
 
     private KeyValueResponse ExecuteByRevision(KeyValueRequest message)
     {
+        // Deferred-settlement by-revision visibility: the requested revision may be a foreign committed intent
+        // that has not yet materialized (so it is absent from the store and disk). Report it exists when committed
+        // and its revision is exactly the one requested, retry while undecided, and ignore an aborted intent. A
+        // committed delete at that revision does not exist. No-op off the durable-intent path.
+        if (context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
+            && foreignIntent.TransactionId != message.TransactionId
+            && foreignIntent.Revision == message.CompareRevision)
+        {
+            switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero))
+            {
+                case ReadVisibilityAction.Retry:
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                case ReadVisibilityAction.UseIntentValue:
+                    return foreignIntent.State == KeyValueState.Deleted
+                        ? KeyValueStaticResponses.DoesNotExistContextResponse
+                        : new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
+                            null, foreignIntent.Revision,
+                            HLCTimestamp.Zero, HLCTimestamp.Zero, foreignIntent.CommitTimestamp, foreignIntent.State));
+
+                case ReadVisibilityAction.UseExisting:
+                default:
+                    break; // aborted: fall through to the ordinary store/disk lookup
+            }
+        }
+
         // ── Stage 1: in-memory shortcuts (no disk, no detach) ────────────────────────────────
         context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
 

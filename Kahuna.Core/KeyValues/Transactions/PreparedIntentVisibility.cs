@@ -3,6 +3,8 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
+// TransactionDecision lives in Transactions.Data; the using above brings it in.
+
 /// <summary>What a read should do about a durable prepared intent that covers the key it is reading.</summary>
 internal enum ReadVisibilityAction
 {
@@ -30,7 +32,13 @@ internal static class PreparedIntentVisibility
     /// <param name="intent">The prepared intent covering the key, or null when the key has none.</param>
     /// <param name="readTimestamp">The read's snapshot timestamp; <see cref="HLCTimestamp.Zero"/> means a latest
     /// (most-recent-committed) read, which conceptually sits at or after every commit timestamp.</param>
-    public static ReadVisibilityAction Resolve(PreparedIntent? intent, HLCTimestamp readTimestamp)
+    /// <param name="canonicalDecision">The intent transaction's canonical decision from its transaction record, used
+    /// only while the intent's own resolution is still <see cref="PreparedIntentResolution.Pending"/> — under
+    /// deferred settlement the intent stays pending until it settles, after the decision is already durable, so the
+    /// record is the authority. <see cref="TransactionDecision.Undecided"/> (the default) when the record is not
+    /// consulted or not locally available, which keeps a pending intent at <see cref="ReadVisibilityAction.Retry"/>.</param>
+    public static ReadVisibilityAction Resolve(PreparedIntent? intent, HLCTimestamp readTimestamp,
+        TransactionDecision canonicalDecision = TransactionDecision.Undecided)
     {
         if (intent is null)
             return ReadVisibilityAction.UseExisting;
@@ -41,12 +49,18 @@ internal static class PreparedIntentVisibility
         if (!latest && readTimestamp < intent.CommitTimestamp)
             return ReadVisibilityAction.UseExisting;
 
-        // Latest read, or a snapshot at/after the commit timestamp: the outcome decides visibility.
-        return intent.Resolution switch
-        {
-            PreparedIntentResolution.Committed => ReadVisibilityAction.UseIntentValue,
-            PreparedIntentResolution.Aborted => ReadVisibilityAction.UseExisting,
-            _ => ReadVisibilityAction.Retry
-        };
+        // A terminal intent resolution is authoritative; a still-pending intent defers to the canonical transaction
+        // decision (deferred settlement flips the intent's resolution only once it settles).
+        bool committed = intent.Resolution == PreparedIntentResolution.Committed
+            || (intent.Resolution == PreparedIntentResolution.Pending && canonicalDecision == TransactionDecision.Commit);
+        bool aborted = intent.Resolution == PreparedIntentResolution.Aborted
+            || (intent.Resolution == PreparedIntentResolution.Pending && canonicalDecision == TransactionDecision.Abort);
+
+        if (committed)
+            return ReadVisibilityAction.UseIntentValue;
+        if (aborted)
+            return ReadVisibilityAction.UseExisting;
+
+        return ReadVisibilityAction.Retry;
     }
 }

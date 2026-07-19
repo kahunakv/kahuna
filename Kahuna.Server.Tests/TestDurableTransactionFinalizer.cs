@@ -59,6 +59,40 @@ public sealed class TestDurableTransactionFinalizer
         return (new DurableTransactionFinalizer(records, intents, seam.Replicate), records, intents);
     }
 
+    private static (DurableTransactionFinalizer, TransactionRecordStore, PreparedIntentStore) Build(
+        Seam seam, DurableTransactionFinalizer.ResolutionScheduler scheduler)
+    {
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        return (new DurableTransactionFinalizer(records, intents, seam.Replicate, scheduler), records, intents);
+    }
+
+    [Fact]
+    public async Task DeferredResolution_ReturnsCommittedBeforeSettle_ThenSettlesWhenRun()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        Func<CancellationToken, Task>? captured = null;
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) =
+            Build(seam, resolution => captured = resolution);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // The decision is durable and the finalize returned committed, but resolution has NOT run: the intent is
+        // still prepared (pending), and the canonical record says Commit. This is the deferred-settlement window.
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        PreparedIntent? stillPending = intents.Get("acct/1");
+        Assert.NotNull(stillPending);
+        Assert.Equal(PreparedIntentResolution.Pending, stillPending!.Resolution);
+        Assert.NotNull(captured);
+
+        // Running the deferred resolution settles it: the intent is materialized and garbage-collected.
+        await captured!(CancellationToken.None);
+        Assert.Null(intents.Get("acct/1"));
+    }
+
     private static Func<CancellationToken, Task<bool>> Validate(bool ok) => _ => Task.FromResult(ok);
 
     [Fact]

@@ -1,4 +1,6 @@
 
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -291,6 +293,30 @@ internal sealed class RangeScanContinuation : ReadContinuation
             }, TaskScheduler.Default);
 
             return; // mailbox is free until the next ResumeRead arrives
+        }
+
+        // Durable-intent scan visibility: overlay prepared intents covering this range onto the accumulated page.
+        // No-op when the intent store is empty (durable-intent path disabled). BuildResponse then applies the
+        // page cap/cursor to the merged list, so an injected key counts toward the page and can become the cursor.
+        if (context.PreparedIntentStore is { } intentStore)
+        {
+            IReadOnlyList<PreparedIntent> ranged = intentStore.SnapshotRange(startKey ?? prefix, memEnd);
+            if (ranged.Count > 0)
+            {
+                bool pageExhausted = accumulated.Count <= limit;
+                (List<(string, ReadOnlyKeyValueEntry)> merged, bool mustRetry) =
+                    PreparedIntentScanMerge.Merge(accumulated, ranged, snapshotTs, pageExhausted,
+                        i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+                if (mustRetry)
+                {
+                    Resolve(new(KeyValueResponseType.MustRetry,
+                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false)));
+                    return;
+                }
+
+                Resolve(BuildResponse(merged, limit, snapshotTs, prefix, durability));
+                return;
+            }
         }
 
         Resolve(BuildResponse(accumulated, limit, snapshotTs, prefix, durability));

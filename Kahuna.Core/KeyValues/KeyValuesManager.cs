@@ -931,7 +931,8 @@ internal sealed class KeyValuesManager : IDisposable
                 snapshotFloorStore,
                 completionReceiptStore,
                 coordinatorDecisionStore,
-                preparedIntentStore
+                preparedIntentStore,
+                transactionRecordStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
@@ -968,7 +969,8 @@ internal sealed class KeyValuesManager : IDisposable
                 snapshotFloorStore,
                 completionReceiptStore,
                 coordinatorDecisionStore,
-                preparedIntentStore
+                preparedIntentStore,
+                transactionRecordStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(persistentInstances);

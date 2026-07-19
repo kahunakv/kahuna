@@ -1,5 +1,7 @@
 
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
@@ -90,6 +92,24 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             {
                 resumeAfterKey = key;
                 break;
+            }
+        }
+
+        // Durable-intent scan visibility: overlay prepared intents covering this range onto the page. No-op when
+        // the intent store is empty (durable-intent path disabled).
+        if (context.PreparedIntentStore is { } intentStore)
+        {
+            IReadOnlyList<PreparedIntent> ranged = intentStore.SnapshotRange(memStart, memEnd);
+            if (ranged.Count > 0)
+            {
+                bool pageExhausted = resumeAfterKey is null && items.Count <= limit;
+                (List<(string, ReadOnlyKeyValueEntry)> mergedItems, bool mustRetry) =
+                    PreparedIntentScanMerge.Merge(items, ranged, snapshotTs, pageExhausted,
+                        i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+                if (mustRetry)
+                    return new(KeyValueResponseType.MustRetry,
+                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));
+                items = mergedItems;
             }
         }
 

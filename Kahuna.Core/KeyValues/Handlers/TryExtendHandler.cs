@@ -24,7 +24,15 @@ internal sealed class TryExtendHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
-        
+
+        // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
+        // committed value not yet materialized locally, so an intent-only committed key is not really missing.
+        // Resolve its canonical outcome before treating the key as absent — a committed set materializes into a
+        // resident entry to extend, an undecided intent retries, and an aborted or committed-delete intent leaves
+        // the key absent. No-op off the durable-intent path.
+        if (ForeignIntentWriteResolver.Resolve(context, message.Key, message.TransactionId, ref entry) == ForeignIntentWriteDecision.MustRetry)
+            return KeyValueStaticResponses.MustRetryResponse;
+
         if (entry is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
         

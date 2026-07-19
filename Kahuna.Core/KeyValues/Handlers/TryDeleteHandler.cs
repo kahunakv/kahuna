@@ -94,6 +94,14 @@ internal sealed class TryDeleteHandler : BaseHandler
             ? context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId())
             : context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 
+        // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
+        // committed value not yet materialized locally, so the key is not really missing. Resolve its canonical
+        // outcome before treating the key as absent — a committed set materializes into a resident entry (so the
+        // tombstone deletes the committed value), an undecided intent retries, and an aborted or committed-delete
+        // intent leaves the key absent. No-op off the durable-intent path.
+        if (ForeignIntentWriteResolver.Resolve(context, message.Key, message.TransactionId, ref entry) == ForeignIntentWriteDecision.MustRetry)
+            return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
+
         if (entry is null)
             return (KeyValueStaticResponses.DoesNotExistResponse, null, currentTime);
 

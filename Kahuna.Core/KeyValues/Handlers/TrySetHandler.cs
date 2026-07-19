@@ -155,6 +155,18 @@ internal sealed class TrySetHandler : BaseHandler
             }
         }
 
+        // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
+        // committed value not yet materialized into local MVCC. Resolve its canonical outcome before the write
+        // proceeds — materialize a committed value into the entry (so the new revision and conditional flags are
+        // based on it), treat an undecided intent as a live conflict, and ignore an aborted one. No-op off the
+        // durable-intent path (null store).
+        KeyValueEntry? resolvedEntry = entry;
+        if (ForeignIntentWriteResolver.Resolve(context, message.Key, message.TransactionId, ref resolvedEntry) == ForeignIntentWriteDecision.MustRetry)
+            return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+
+        entry = resolvedEntry!;
+        exists = entry.State is not (KeyValueState.Deleted or KeyValueState.Undefined);
+
         // Validate if there's an active replication enty on the key/value entry
         // clients must retry operations to make sure the entry is fully replicated
         // before modifying the entry

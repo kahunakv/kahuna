@@ -35,7 +35,7 @@ internal sealed class TryGetHandler : BaseHandler
             && foreignIntent.TransactionId != message.TransactionId)
         {
             HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
-            switch (PreparedIntentVisibility.Resolve(foreignIntent, readTs))
+            switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs))
             {
                 case ReadVisibilityAction.Retry:
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
@@ -300,6 +300,32 @@ internal sealed class TryGetHandler : BaseHandler
 
     private KeyValueResponse ExecuteByRevision(KeyValueRequest message)
     {
+        // Deferred-settlement by-revision visibility: the requested revision may be a foreign committed intent
+        // that has not yet materialized (so it is absent from the store and disk). Serve it when committed and its
+        // revision is exactly the one requested, retry while undecided, and ignore an aborted intent (its revision
+        // was never committed). No-op off the durable-intent path.
+        if (context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
+            && foreignIntent.TransactionId != message.TransactionId
+            && foreignIntent.Revision == message.CompareRevision)
+        {
+            switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero))
+            {
+                case ReadVisibilityAction.Retry:
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                case ReadVisibilityAction.UseIntentValue:
+                    return foreignIntent.State == KeyValueState.Deleted
+                        ? KeyValueStaticResponses.DoesNotExistContextResponse
+                        : new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                            foreignIntent.Value, foreignIntent.Revision, foreignIntent.Expires,
+                            HLCTimestamp.Zero, foreignIntent.CommitTimestamp, foreignIntent.State));
+
+                case ReadVisibilityAction.UseExisting:
+                default:
+                    break; // aborted: fall through to the ordinary store/disk lookup
+            }
+        }
+
         // ── Stage 1: in-memory shortcuts (no disk, no detach) ────────────────────────────────
         // Historical revisions are immutable. A cache-resident entry whose current Revision
         // already equals the request, or whose Revisions dict holds the target, can be served

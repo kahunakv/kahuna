@@ -88,6 +88,12 @@ internal sealed class KeyValueContext
     /// committed value has not yet materialized locally (deferred settlement). Null in bare test contexts.</summary>
     public Transactions.PreparedIntentStore? PreparedIntentStore { get; }
 
+    /// <summary>The durable transaction-record store, holding each transaction's canonical decision on its anchor
+    /// partition. A read that meets a still-<c>Pending</c> foreign intent resolves the intent's outcome from this
+    /// record (co-located anchor); a remote anchor is not consulted here and the read retries. Null in bare test
+    /// contexts.</summary>
+    public Transactions.TransactionRecordStore? TransactionRecordStore { get; }
+
     public IPersistenceBackend PersistenceBackend  { get; }
 
     public BTree<string, KeyValueEntry> Store  { get; }
@@ -167,7 +173,8 @@ internal sealed class KeyValueContext
         CompletionReceiptStore? completionReceiptStore = null,
         Transactions.CoordinatorDecisionStore? coordinatorDecisionStore = null,
         IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter = null,
-        Transactions.PreparedIntentStore? preparedIntentStore = null
+        Transactions.PreparedIntentStore? preparedIntentStore = null,
+        Transactions.TransactionRecordStore? transactionRecordStore = null
     )
     {
         ActorContext = actorContext;
@@ -188,6 +195,7 @@ internal sealed class KeyValueContext
         CompletionReceiptStore = completionReceiptStore ?? new CompletionReceiptStore();
         CoordinatorDecisionStore = coordinatorDecisionStore;
         PreparedIntentStore = preparedIntentStore;
+        TransactionRecordStore = transactionRecordStore;
     }
 
     /// <summary>

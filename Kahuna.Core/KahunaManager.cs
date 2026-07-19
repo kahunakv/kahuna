@@ -1302,6 +1302,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>Durable prepared-intent store. Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.PreparedIntentStore DurablePreparedIntentStore => keyValues.DurablePreparedIntentStore;
 
+    /// <summary>Durable transaction-record store (canonical decisions). Diagnostic/test access.</summary>
+    internal Server.KeyValues.Transactions.TransactionRecordStore DurableTransactionRecordStore => keyValues.DurableTransactionRecordStore;
+
     /// <summary>The first phase-two worker instance, for test injection of
     /// <see cref="Server.KeyValues.KeyValuePhaseTwoActor.BeforeRaftCallHook"/>.</summary>
     internal Server.KeyValues.KeyValuePhaseTwoActor? FirstPhaseTwoWorker => keyValues.FirstPhaseTwoWorker;

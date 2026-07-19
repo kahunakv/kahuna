@@ -52,17 +52,32 @@ internal sealed class DurableTransactionFinalizer
     /// local store on success (idempotent with the replication-callback apply on every replica).</summary>
     public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, CancellationToken cancellationToken);
 
+    /// <summary>Runs the post-decision resolution (materialize committed values, settle intents). The default
+    /// runs it inline so it completes before <see cref="FinalizeAsync"/> returns; production injects a scheduler
+    /// that runs it on a background task, off the commit critical path (deferred settlement). Either way the
+    /// canonical decision is already durable, so recovery finishes resolution if a deferred run is lost.</summary>
+    public delegate void ResolutionScheduler(Func<CancellationToken, Task> resolution);
+
     private readonly TransactionRecordStore recordStore;
 
     private readonly PreparedIntentStore intentStore;
 
     private readonly ReplicateDelegate replicate;
 
-    public DurableTransactionFinalizer(TransactionRecordStore recordStore, PreparedIntentStore intentStore, ReplicateDelegate replicate)
+    private readonly ResolutionScheduler scheduleResolution;
+
+    public DurableTransactionFinalizer(
+        TransactionRecordStore recordStore,
+        PreparedIntentStore intentStore,
+        ReplicateDelegate replicate,
+        ResolutionScheduler? resolutionScheduler = null)
     {
         this.recordStore = recordStore;
         this.intentStore = intentStore;
         this.replicate = replicate;
+        // Inline default: resolution completes before FinalizeAsync returns (the pre-deferral behavior).
+        this.scheduleResolution = resolutionScheduler
+            ?? (static resolution => resolution(CancellationToken.None).GetAwaiter().GetResult());
     }
 
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
@@ -110,9 +125,12 @@ internal sealed class DurableTransactionFinalizer
             outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken).ConfigureAwait(false);
         }
 
-        // ── Resolution: apply the terminal decision to every prepared intent (materialization of committed values
-        // into visible KV state is a later slice; here resolution flips the intent's durable resolution state). ──
-        await ResolveAsync(input, cancellationToken).ConfigureAwait(false);
+        // ── Resolution: apply the terminal decision to every prepared intent — on commit, materialize each intent
+        // into visible KV state, then settle (resolve + remove) the intent. Under deferred settlement this runs off
+        // the commit critical path: the decision is already durable, reads/writers observe the committed intent via
+        // the §6 visibility contract until materialization lands, and recovery finishes it if a deferred run is
+        // lost. The scheduler decides whether it runs inline (default) or in the background (production). ──
+        scheduleResolution(ct => ResolveAsync(input, ct));
 
         return outcome;
     }
