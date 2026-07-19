@@ -4,7 +4,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Spectre.Console;
-using Spectre.Console.Advanced;
 
 namespace RadLine
 {
@@ -59,6 +58,14 @@ namespace RadLine
 
             _history.Reset();
             _input.Initialize(KeyBindings);
+
+            // Ask the terminal to bracket pastes (ESC[200~ ... ESC[201~) so the input layer can
+            // tell pasted newlines apart from a real Enter keypress. Terminals that don't support
+            // it simply ignore the request. Always turned back off in the finally below.
+            _console.WriteAnsi("\u001b[?2004h");
+
+            try
+            {
             _renderer.Refresh(state);
 
             while (true)
@@ -67,8 +74,27 @@ namespace RadLine
 
                 if (result.Result == SubmitAction.Cancel)
                 {
-                    cancelled = true;
-                    break;
+                    // A real (token) cancellation always aborts. A Ctrl+C keypress only aborts when
+                    // the prompt is empty; if there's content, discard it and drop to a fresh prompt.
+                    if (cancellationToken.IsCancellationRequested || state.IsEmpty)
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    // Leave the abandoned input on screen, move past it, and start over empty.
+                    _renderer.RenderLine(state, cursorPosition: 0);
+                    while (state.MoveDown())
+                    {
+                        _console.Cursor.MoveDown();
+                    }
+
+                    _console.WriteLine();
+
+                    state = new LineEditorState(Prompt, string.Empty);
+                    _history.Reset();
+                    _renderer.Refresh(state);
+                    continue;
                 }
                 else if (result.Result == SubmitAction.Submit)
                 {
@@ -100,6 +126,14 @@ namespace RadLine
                     _renderer.AnsiBuilder.BuildRefresh(builder, state);
                     builder.Append("\u001b[?25h"); // Show cursor
                     _console.WriteAnsi(builder.ToString());
+                }
+                else if (result.Result == SubmitAction.Backspace && MultiLine && !state.IsFirstLine)
+                {
+                    MergeLine(state, withNext: false);
+                }
+                else if (result.Result == SubmitAction.Delete && MultiLine && !state.IsLastLine)
+                {
+                    MergeLine(state, withNext: true);
                 }
                 else if (result.Result == SubmitAction.MoveUp && MultiLine)
                 {
@@ -139,6 +173,12 @@ namespace RadLine
 
             // Return all the lines
             return cancelled ? null : state.Text;
+            }
+            finally
+            {
+                // Stop bracketed paste so it doesn't leak into whatever reads input next.
+                _console.WriteAnsi("\u001b[?2004l");
+            }
         }
 
         private async Task<(LineBuffer Buffer, SubmitAction Result)> ReadLine(
@@ -207,6 +247,44 @@ namespace RadLine
             }
 
             return KeyBindings.GetCommand(key.Key, key.Modifiers);
+        }
+
+        // Joins two lines into one and redraws. Because the line count shrinks, we clear the
+        // whole block first (using the pre-merge state), perform the merge, then refresh —
+        // the same full-rebuild strategy used by history navigation in SetContent.
+        private void MergeLine(LineEditorState state, bool withNext)
+        {
+            var builder = new StringBuilder();
+
+            // Clear the currently displayed lines; cursor ends at the top of the block.
+            _renderer.AnsiBuilder.BuildClear(builder, state);
+
+            // Hide the cursor while we rebuild.
+            builder.Append("\u001b[?25l");
+
+            // Collapse the two lines. This updates the current line index and cursor position.
+            if (withNext)
+            {
+                state.MergeWithNext();
+            }
+            else
+            {
+                state.MergeWithPrevious();
+            }
+
+            // BuildRefresh expects the physical cursor to sit on the current line, so move it
+            // down from the top of the block to the merged line before refreshing.
+            if (state.LineIndex > 0)
+            {
+                builder.Append("\u001b[").Append(state.LineIndex).Append('B');
+            }
+
+            _renderer.AnsiBuilder.BuildRefresh(builder, state);
+
+            // Show the cursor again.
+            builder.Append("\u001b[?25h");
+
+            _console.WriteAnsi(builder.ToString());
         }
 
         private void MoveUp(LineEditorState state)

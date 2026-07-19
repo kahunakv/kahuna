@@ -27,6 +27,10 @@ namespace RadLine
             bindings.Add<NextHistoryCommand>(ConsoleKey.DownArrow);
             bindings.Add<SubmitCommand>(ConsoleKey.Enter);
             bindings.Add<NewLineCommand>(ConsoleKey.Enter, ConsoleModifiers.Shift);
+
+            // Only reaches the editor when the host enables Console.TreatControlCAsInput; otherwise
+            // Ctrl+C is handled by the runtime as a cancel signal.
+            bindings.Add<CancelCommand>(ConsoleKey.C, ConsoleModifiers.Control);
         }
 
         public static void Add<TCommand>(this KeyBindings bindings, ConsoleKey key, ConsoleModifiers? modifiers = null)

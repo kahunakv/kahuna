@@ -2,7 +2,6 @@ using System;
 using System.Linq;
 using System.Text;
 using Spectre.Console;
-using Spectre.Console.Advanced;
 using Spectre.Console.Rendering;
 
 namespace RadLine
@@ -233,16 +232,16 @@ namespace RadLine
 
         private IRenderable BuildHighlightedText(string text)
         {
-            IHighlighter? highlighter = _accessor.Highlighter;
+            var highlighter = _accessor.Highlighter;
             if (highlighter == null)
             {
                 return new Text(text);
             }
 
-            Paragraph paragraph = new();
-            foreach (string token in StringTokenizer.Tokenize(text))
+            var paragraph = new Paragraph();
+            foreach (var token in StringTokenizer.Tokenize(text))
             {
-                Style? style = string.IsNullOrWhiteSpace(token) ? null : highlighter.Highlight(token);
+                var style = string.IsNullOrWhiteSpace(token) ? null : highlighter.Highlight(token);
                 paragraph.Append(token, style);
             }
 

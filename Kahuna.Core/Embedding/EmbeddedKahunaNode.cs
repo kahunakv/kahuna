@@ -54,6 +54,16 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
+        // The standalone quorum is formed by phantom witnesses that persist nothing and auto-ACK
+        // every AppendLogs — they exist only to grant a ceremonial majority so the sole real node
+        // can elect itself leader. After a cold restart the leader restores its committed index from
+        // its own durable WAL, yet the witnesses are seeded at the election-time log id and look far
+        // behind. With the default backfill trigger this streams every historical WAL entry to the
+        // witnesses in small batches on startup, one bounded WAL read per round, only for them to
+        // discard it — a large, pointless startup stall. Disable backfill here: the witnesses never
+        // need real data, and the leader's own commit progress does not depend on their catch-up.
+        raftConfiguration.BackfillThreshold = int.MaxValue;
+
         this.Raft = new RaftManager(
             raftConfiguration,
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),

@@ -12,6 +12,24 @@ using Kahuna.Control;
 using Kahuna.Control.Commands;
 using Spectre.Console;
 
+// Some capable terminals (e.g. Rio, WezTerm) advertise a TERM value that Spectre.Console's ANSI
+// detector doesn't recognize, so it disables the rich line editor even though the terminal handles
+// ANSI fine. Passing --force-rich (or setting KAHUNA_FORCE_RICH=1) forces the capabilities on so the
+// interactive shell renders richly. The flag is stripped from args first so CommandLineParser, which
+// only knows the options bound on KahunaControlOptions, doesn't reject it as unknown.
+bool forceRich = ConsumeFlag(ref args, "--force-rich")
+    || IsTruthy(Environment.GetEnvironmentVariable("KAHUNA_FORCE_RICH"));
+
+if (forceRich)
+{
+    AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings
+    {
+        Ansi = AnsiSupport.Yes,
+        Interactive = InteractionSupport.Yes,
+        ColorSystem = ColorSystemSupport.Detect,
+    });
+}
+
 ParserResult<KahunaControlOptions> optsResult = Parser.Default.ParseArguments<KahunaControlOptions>(args);
 
 KahunaControlOptions? opts = optsResult.Value;
@@ -196,6 +214,26 @@ static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
     KahunaOptions kahunaOptions = new() { AllowInsecureCertificateValidation = insecure };
 
     return Task.FromResult(new KahunaClient(connectionPool, null, null, kahunaOptions));
+}
+
+// Removes the first occurrence of a bare flag from the argument array, returning whether it was
+// present. Used to intercept flags the CommandLineParser options don't declare before parsing.
+static bool ConsumeFlag(ref string[] arguments, string flag)
+{
+    int index = Array.IndexOf(arguments, flag);
+    if (index < 0)
+        return false;
+
+    arguments = arguments.Where((_, i) => i != index).ToArray();
+    return true;
+}
+
+static bool IsTruthy(string? value)
+{
+    return !string.IsNullOrEmpty(value)
+        && (value == "1"
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase));
 }
 
 static bool IsLocalhost(string url)

@@ -104,5 +104,38 @@ namespace RadLine
             _lines.Add(new LineBuffer(content));
             _lineIndex++;
         }
+
+        // Joins the current line onto the end of the previous one (backspace at column 0).
+        // The merged line becomes the current line and the cursor is placed at the join point.
+        public void MergeWithPrevious()
+        {
+            if (_lineIndex <= 0)
+                return;
+
+            int join = _lines[_lineIndex - 1].Length;
+            string merged = _lines[_lineIndex - 1].Content + _lines[_lineIndex].Content;
+
+            _lines.RemoveAt(_lineIndex);
+            _lineIndex--;
+
+            _lines[_lineIndex] = new LineBuffer(merged);
+            _lines[_lineIndex].Move(join);
+        }
+
+        // Pulls the next line onto the end of the current one (delete at end of line).
+        // The cursor stays at the join point on the current line.
+        public void MergeWithNext()
+        {
+            if (_lineIndex >= _lines.Count - 1)
+                return;
+
+            int join = _lines[_lineIndex].Length;
+            string merged = _lines[_lineIndex].Content + _lines[_lineIndex + 1].Content;
+
+            _lines.RemoveAt(_lineIndex + 1);
+
+            _lines[_lineIndex] = new LineBuffer(merged);
+            _lines[_lineIndex].Move(join);
+        }
     }
 }

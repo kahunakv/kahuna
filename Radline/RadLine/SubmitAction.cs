@@ -5,6 +5,8 @@ namespace RadLine
         Cancel,
         Submit,
         NewLine,
+        Backspace,
+        Delete,
         MoveDown,
         MoveUp,
         MoveFirst,

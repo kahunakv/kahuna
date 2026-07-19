@@ -37,8 +37,7 @@ namespace RadLine
                     return kv.Value.styleRegex;
             }
             
-            _words.TryGetValue(token, out Style? style);
-            return style;
+            return _words.TryGetValue(token, out Style style) ? style : (Style?)null;
         }
     }
 }

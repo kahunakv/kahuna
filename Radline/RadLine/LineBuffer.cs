@@ -147,7 +147,7 @@ namespace RadLine
 
             if (movingLeft)
             {
-                foreach (var e in indices.Reverse())
+                foreach (var e in Enumerable.Reverse(indices))
                 {
                     if (e <= position)
                     {

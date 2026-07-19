@@ -219,6 +219,12 @@ public static class InteractiveConsole
             SaveHistory(historyPath, history).Wait();
         };
 
+        // Deliver Ctrl+C to the line editor as input instead of killing the process, so the editor can
+        // clear a non-empty prompt on the first press and only exit when the prompt is already empty.
+        // When the rich editor is unavailable the CancelKeyPress handler above keeps the old behaviour.
+        if (editor is not null)
+            Console.TreatControlCAsInput = true;
+
         while (true)
         {
             try
@@ -229,6 +235,15 @@ public static class InteractiveConsole
                     command = await editor.ReadLine(CancellationToken.None);
                 else
                     command = AnsiConsole.Prompt(new TextPrompt<string>("kahuna-cli> ").AllowEmpty());
+
+                // The editor returns null when Ctrl+C is pressed on an already-empty prompt: exit cleanly,
+                // disposing any held locks and saving history the same way the "exit" command does.
+                if (command is null)
+                {
+                    AnsiConsole.MarkupLine("[cyan]\nExiting...[/]");
+                    await Exit(historyPath, history, locks, elocks);
+                    break;
+                }
 
                 if (string.IsNullOrWhiteSpace(command))
                     continue;
