@@ -125,7 +125,7 @@ public sealed class TestSnapshotFloorBoundaryTrim
             locksByRange:        null!,
             proposals:           null!,
             backgroundWriter:    null!,
-            proposalRouter:      null!,
+            writeAggregator:     null!,
             persistenceBackend:  null!,
             raft:                raft,
             keySpaceRegistry:    null!,

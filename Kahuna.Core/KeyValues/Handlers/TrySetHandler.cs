@@ -45,60 +45,9 @@ internal sealed class TrySetHandler : BaseHandler
     }
 
     /// <summary>
-    /// Prepare for the batched write path: runs the same validation and installs the same replication intent
-    /// as the persistent branch of <see cref="Execute"/>, but instead of proposing per key it hands the
-    /// serialized proposal, its partition, and the proposal id back so the manager can batch every key of a
-    /// partition into one <c>ReplicateLogs</c> and then complete/release each by id. Persistent only — the
-    /// caller routes ephemeral and transactional sets through <see cref="Execute"/>. A terminal response
-    /// (WaitingForReplication / MustRetry / NotSet / Errored) is returned unchanged and installs no intent.
-    /// </summary>
-    public async Task<KeyValueResponse> StageExecute(KeyValueRequest message)
-    {
-        if (message.TransactionId != HLCTimestamp.Zero || message.Durability != KeyValueDurability.Persistent)
-            return KeyValueStaticResponses.ErroredResponse;
-
-        (KeyValueResponse? terminal, KeyValueEntry? entry, KeyValueProposal? proposal, HLCTimestamp currentTime) =
-            await BuildNonTransactionalSet(message);
-
-        if (terminal is not null)
-            return terminal;
-
-        // Generation fence, mirroring KeyValueProposalActor: a key-range write whose routed generation no
-        // longer matches the live descriptor (range moved/split since routing) is rejected with MustRetry —
-        // before installing any intent, so a fenced key leaves nothing pinned. Hash spaces are unfenced.
-        if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key) &&
-            !RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out _))
-        {
-            context.Logger.LogWarning(
-                "Batched set fence rejected key {Key} RoutedGen={Gen} — range moved/split; MustRetry",
-                message.Key, message.RoutedGeneration);
-            return new(KeyValueResponseType.MustRetry, 0);
-        }
-
-        // Install the replication intent and register the proposal exactly as CreateProposal would, then hand
-        // the serialized log record back instead of sending it to the proposal actor. CompleteProposal (on a
-        // committed batch) or ReleaseProposal (on a failed one) applies or unwinds this by ProposalId.
-        int currentProposalId = RentProposalId();
-        proposal!.RoutedGeneration = message.RoutedGeneration;
-
-        entry!.ReplicationIntent = new()
-        {
-            ProposalId = currentProposalId,
-            Expires = currentTime + ProposalWaitTimeout
-        };
-
-        context.Proposals.Add(currentProposalId, proposal);
-
-        byte[] serialized = SerializeProposal(proposal.Type, proposal, currentTime);
-        int partitionId = ResolvePartition(message.Key);
-
-        return KeyValueResponse.StagedSet(serialized, partitionId, currentProposalId);
-    }
-
-    /// <summary>
-    /// Non-transactional set path shared by <see cref="Execute"/> (which proposes) and
-    /// <see cref="StageExecute"/> (which batches): loads/creates the entry, runs the lock/intent/flag
-    /// validation, and builds the proposal. Returns a non-null <c>Terminal</c> when the set resolves without
+    /// Non-transactional set path used by <see cref="Execute"/>: loads/creates the entry, runs the
+    /// lock/intent/flag validation, and builds the proposal. Returns a non-null <c>Terminal</c> when the set
+    /// resolves without
     /// a proposal (WaitingForReplication on a live replication intent, MustRetry on a conflicting lock, NotSet
     /// on a failed conditional); otherwise <c>Terminal</c> is null and the entry/proposal/currentTime are set.
     /// </summary>
@@ -123,8 +72,8 @@ internal sealed class TrySetHandler : BaseHandler
             return (new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified), null, null, currentTime);
 
         // Operation type is always TrySet here (this handler only serves sets). Use the literal rather than
-        // message.Type so the staged path — dispatched as StageSet — still records a TrySet proposal, which is
-        // what CompleteProposal and the replicated log record expect.
+        // message.Type so the proposal the aggregator carries records a TrySet, which is what CompleteProposal
+        // and the replicated log record expect.
         KeyValueProposal proposal = new(
             KeyValueRequestType.TrySet,
             message.Key,

@@ -58,13 +58,13 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         long deadlineTicks = KeyValuePhaseTwoRequest.DeadlineFrom(context.Configuration.Phase2CommitTimeout);
 
         PendingPhaseTwo pending = PendingPhaseTwo.ForPrepare(message.TransactionId, message.Key, message.Durability);
-        pending.Promise = actorContext.Reply.Value.Promise;
+        pending.Promise = actorContext.Reply.Value.Promise!;
         pending.DeadlineTicks = deadlineTicks;
         context.PendingPhaseTwos[phaseTwoId] = pending;
 
         context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForPrepare(
             phaseTwoId, partitionId, serialized!,
-            deadlineTicks, message.RoutedGeneration, actorContext.Self, actorContext.Reply.Value.Promise));
+            deadlineTicks, message.RoutedGeneration, actorContext.Self, actorContext.Reply.Value.Promise!));
 
         actorContext.ByPassReply = true;
 

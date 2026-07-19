@@ -58,9 +58,9 @@ internal sealed class KeyValueLocator
     /// <summary>
     /// The key-order router: resolves <paramref name="key"/> to <c>(partitionId,
     /// generation)</c> through the range-descriptor map for key-range spaces, or falls back to the
-    /// hash router (<c>GetPartitionKey</c>) for hash spaces. Both this router and
-    /// <c>KeyValueProposalActor</c> resolve through the same <see cref="RangeRouting.Locate"/> so the
-    /// two routing sites cannot drift.
+    /// hash router (<c>GetPartitionKey</c>) for hash spaces. Both this router and the leader-side direct-write
+    /// resolver (<c>BaseHandler.TryResolveDirectWritePartition</c>) go through the same
+    /// <see cref="RangeRouting.Locate"/> so the two routing sites cannot drift.
     /// </summary>
     public (int PartitionId, long Generation) LocateRange(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);

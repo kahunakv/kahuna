@@ -48,7 +48,12 @@ internal sealed class KeyValueContext
     
     public IActorRef<BackgroundWriterActor, BackgroundWriteRequest> BackgroundWriter { get; }
     
-    public IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> ProposalRouter { get; }
+    /// <summary>
+    /// Leader-local aggregator that batches direct (auto-commit, non-transactional) writes to the same Raft
+    /// partition into shared proposals. A persistent set/delete/extend stages its intent + proposal, serializes
+    /// the record, then hands the envelope here instead of proposing per key.
+    /// </summary>
+    public Writes.PartitionWriteAggregator WriteAggregator { get; }
 
     /// <summary>
     /// Off-mailbox worker router for two-phase-commit Raft round trips (prepare/commit/rollback), so a
@@ -147,7 +152,7 @@ internal sealed class KeyValueContext
         Dictionary<string, List<KeyValueRangeLock>> locksByRange,
         Dictionary<int, KeyValueProposal> proposals,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
+        Writes.PartitionWriteAggregator writeAggregator,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KeySpaceRegistry keySpaceRegistry,
@@ -166,7 +171,7 @@ internal sealed class KeyValueContext
         LocksByRange = locksByRange;
         Proposals = proposals;
         BackgroundWriter = backgroundWriter;
-        ProposalRouter = proposalRouter;
+        WriteAggregator = writeAggregator;
         PhaseTwoRouter = phaseTwoRouter;
         PersistenceBackend = persistenceBackend;
         Raft = raft;

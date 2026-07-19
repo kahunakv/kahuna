@@ -240,8 +240,8 @@ split will misroute:
 
 1. **`KeyValueLocator`** — routes a request to the right **leader node** (where do I send this
    operation?).
-2. **`KeyValueProposalActor`** — once on the leader, re-derives the partition to **replicate
-   into** (which Raft log do I append to?).
+2. **The leader-side direct-write resolver** (`BaseHandler.TryResolveDirectWritePartition`) — once on the
+   leader, re-derives and fences the partition to **replicate into** (which Raft log do I append to?).
 
 If only one of these consulted the descriptor map and the other still hashed, a write could be
 routed to the correct leader but replicated into the wrong (stale) partition's log. That's why
@@ -472,9 +472,9 @@ Putting it all together, here's a write to a key-range space, start to finish:
 3. Locator routes the request to partition 6's LEADER NODE,
    stamping it with routedGeneration = 42.
 
-4. On the leader, KeyValueProposalActor re-derives the partition
-   (same RangeRouting.Locate → partition 6) and, just before replicating,
-   calls TryFenceKeyRange:
+4. On the leader, the direct-write path (BaseHandler.TryResolveDirectWritePartition)
+   re-derives the partition (same RangeRouting.Locate → partition 6) and, just before
+   replicating, calls TryFenceKeyRange:
      - current descriptor for "users/0300" is still gen 42 on P6?  → OK, proceed.
      - (if a split had bumped it to 43 or moved it)  → reject MustRetry.
 
@@ -563,9 +563,9 @@ A condensed checklist — violating any of these silently corrupts the system:
 3. **The fence catches stale routing.** Every stale-routed write returns `MustRetry` and retries
    to the correct partition — never double-applies. The descriptor `Generation` is the fence,
    and it's a Kahuna mechanism, not Kommander's.
-4. **Both routing call sites must agree.** `KeyValueLocator` and `KeyValueProposalActor` both go
-   through `RangeRouting.Locate`. The local worker-actor hash router is a different thing — leave
-   it alone.
+4. **Both routing call sites must agree.** `KeyValueLocator` and the leader-side direct-write resolver
+   (`BaseHandler.TryResolveDirectWritePartition`) both go through `RangeRouting.Locate`. The local
+   worker-actor hash router is a different thing — leave it alone.
 5. **Never range-split the schema log.** `{db}/meta` (CamusDB's DDL log) must stay
    single-partition for total ordering — the registry rejects ranging it.
 6. **Snapshot before checkpoint** in `RangeMapStore` — reversing it loses the map on restart.
@@ -597,4 +597,4 @@ Everything lives under `Kahuna.Core/KeyValues/Ranges/` unless noted.
 | `RangeMergeTrigger.cs`, `RangeMergeCheckerActor.cs` | Auto-merge candidate-finding + orchestration + `pendingRemovals` retry. |
 | `RangeQuiesceStore.cs` | Best-effort direct-write quiesce during a split window. |
 | `KeyValueLocator.cs` *(parent dir)* | Request routing: `LocateRange`, multi-range scans/buckets, range locks. |
-| `KeyValueProposalActor.cs` *(parent dir)* | The second routing site + the write-path generation fence. |
+| `Handlers/BaseHandler.cs` *(parent dir)* | The leader-side direct-write resolver (`TryResolveDirectWritePartition`) — the second routing site + the write-path generation fence. |

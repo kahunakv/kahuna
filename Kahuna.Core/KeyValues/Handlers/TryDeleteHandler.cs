@@ -45,56 +45,9 @@ internal sealed class TryDeleteHandler : BaseHandler
     }
 
     /// <summary>
-    /// Prepare for the batched write path: runs the same validation and installs the same replication intent
-    /// as the persistent branch of <see cref="Execute"/>, but instead of proposing per key it hands the
-    /// serialized proposal, its partition, and the proposal id back so the manager can batch every key of a
-    /// partition into one <c>ReplicateLogs</c> and then complete/release each by id. Persistent only. A
-    /// terminal response (DoesNotExist / WaitingForReplication / MustRetry / Errored) installs no intent.
-    /// </summary>
-    public async Task<KeyValueResponse> StageExecute(KeyValueRequest message)
-    {
-        if (message.TransactionId != HLCTimestamp.Zero || message.Durability != KeyValueDurability.Persistent)
-            return KeyValueStaticResponses.ErroredResponse;
-
-        (KeyValueResponse? terminal, KeyValueEntry? entry, KeyValueProposal? proposal, HLCTimestamp currentTime) =
-            await BuildNonTransactionalDelete(message);
-
-        if (terminal is not null)
-            return terminal;
-
-        // Generation fence, mirroring KeyValueProposalActor: a key-range write whose routed generation no
-        // longer matches the live descriptor (range moved/split since routing) is rejected with MustRetry —
-        // before installing any intent. Hash spaces are unfenced.
-        if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key) &&
-            !RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out _))
-        {
-            context.Logger.LogWarning(
-                "Batched delete fence rejected key {Key} RoutedGen={Gen} — range moved/split; MustRetry",
-                message.Key, message.RoutedGeneration);
-            return new(KeyValueResponseType.MustRetry, 0);
-        }
-
-        int currentProposalId = RentProposalId();
-        proposal!.RoutedGeneration = message.RoutedGeneration;
-
-        entry!.ReplicationIntent = new()
-        {
-            ProposalId = currentProposalId,
-            Expires = currentTime + ProposalWaitTimeout
-        };
-
-        context.Proposals.Add(currentProposalId, proposal);
-
-        byte[] serialized = SerializeProposal(proposal.Type, proposal, currentTime);
-        int partitionId = ResolvePartition(message.Key);
-
-        return KeyValueResponse.StagedSet(serialized, partitionId, currentProposalId);
-    }
-
-    /// <summary>
-    /// Non-transactional delete path shared by <see cref="Execute"/> (which proposes) and
-    /// <see cref="StageExecute"/> (which batches): loads the entry, runs the lock/intent validation, and
-    /// builds the tombstone proposal. Returns a non-null <c>Terminal</c> when the delete resolves without a
+    /// Non-transactional delete path used by <see cref="Execute"/>: loads the entry, runs the lock/intent
+    /// validation, and builds the tombstone proposal. Returns a non-null <c>Terminal</c> when the delete
+    /// resolves without a
     /// proposal (the key is missing or already deleted → DoesNotExist, a live replication intent →
     /// WaitingForReplication, a conflicting lock → MustRetry); otherwise the entry/proposal/currentTime are set.
     /// </summary>
@@ -108,9 +61,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (entry!.State == KeyValueState.Deleted)
             return (new(KeyValueResponseType.DoesNotExist, entry.Revision), null, null, currentTime);
 
-        // Operation type is always TryDelete here. Use the literal rather than message.Type so the staged
-        // path — dispatched as StageDelete — still records a TryDelete proposal, which is what CompleteProposal
-        // and the replicated log record expect.
+        // Operation type is always TryDelete here. Use the literal rather than message.Type so the proposal the
+        // aggregator carries records a TryDelete, which is what CompleteProposal and the replicated log record
+        // expect.
         KeyValueProposal proposal = new(
             KeyValueRequestType.TryDelete,
             message.Key,

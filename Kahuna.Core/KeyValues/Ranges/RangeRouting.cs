@@ -6,11 +6,11 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <list type="number">
 /// <item><see cref="KeyValueLocator"/> — routes a request to the right <b>leader node</b> (via every
 /// <c>GetPartitionKey</c> / <c>GetPrefixPartitionKey</c> call).</item>
-/// <item><c>KeyValueProposalActor</c> (<c>:45</c>) — re-derives the partition to <b>replicate
-/// into</b> once on the leader.</item>
+/// <item>The leader-side direct-write path (<c>BaseHandler.TryResolveDirectWritePartition</c>) — re-derives
+/// and fences the partition to <b>replicate into</b> once on the leader, just before proposing.</item>
 /// </list>
-/// If those two disagree for a ranged key, a split replicates into the stale partition. They are
-/// inventoried here; the caller switch is wired separately (both then call this method).
+/// If those two disagree for a ranged key, a split replicates into the stale partition. Both funnel through
+/// this method so they cannot drift.
 /// </summary>
 internal static class RangeRouting
 {
@@ -92,20 +92,52 @@ internal static class RangeRouting
     /// On success, <paramref name="partitionId"/> is the descriptor's current partition.
     /// <para>Call <see cref="IsKeyRange"/> first; hash keys are not fenced.</para>
     /// </summary>
-    public static bool TryFenceKeyRange(RangeMap rangeMap, string key, long routedGeneration, out int partitionId)
+    public static bool TryFenceKeyRange(RangeMap rangeMap, string key, long routedGeneration, out int partitionId) =>
+        TryFenceKeyRange(rangeMap, key, routedGeneration, out partitionId, out _);
+
+    /// <summary>
+    /// As <see cref="TryFenceKeyRange(RangeMap,string,long,out int)"/>, but also outputs the live descriptor
+    /// <paramref name="generation"/> resolved during the check. Callers that defer the write (the direct-write
+    /// aggregator, which re-fences at flush time after a linger) capture this generation at admission so the
+    /// later fence can detect a range move even for writes that carried no routed generation (delete/extend).
+    /// On failure both outputs are zero.
+    /// </summary>
+    public static bool TryFenceKeyRange(RangeMap rangeMap, string key, long routedGeneration, out int partitionId, out long generation)
     {
         RangeDescriptor? descriptor = rangeMap.Find(KeySpaceRegistry.ExtractKeySpace(key), key);
 
         if (descriptor is null)
         {
             partitionId = 0;
+            generation = 0;
             return false;
         }
 
         partitionId = descriptor.PartitionId;
+        generation = descriptor.Generation;
 
         // routedGeneration 0 = the request didn't carry a routed generation (pre-switch path); route
         // to the current descriptor without fencing. A non-zero routed generation must match.
         return routedGeneration == 0 || descriptor.Generation == routedGeneration;
+    }
+
+    /// <summary>
+    /// Flush-time staleness check for a key-range write that was resolved at admission and then deferred.
+    /// Returns true when the descriptor covering <paramref name="key"/> has moved since admission — no
+    /// covering descriptor now, a different generation, or a different partition than the write was admitted
+    /// against. Unlike <see cref="TryFenceKeyRange(RangeMap,string,long,out int)"/> this makes no
+    /// generation-zero exception: <paramref name="admittedGeneration"/> is the live descriptor generation
+    /// captured at admission, so zero is a concrete value to match, not "fence disabled". The partition is
+    /// compared as well so a move that somehow did not bump the generation is still caught.
+    /// <para>Call <see cref="IsKeyRange"/> first; hash keys never move.</para>
+    /// </summary>
+    public static bool HasKeyRangeMovedSinceAdmission(RangeMap rangeMap, string key, long admittedGeneration, int admittedPartitionId)
+    {
+        RangeDescriptor? descriptor = rangeMap.Find(KeySpaceRegistry.ExtractKeySpace(key), key);
+
+        if (descriptor is null)
+            return true;
+
+        return descriptor.Generation != admittedGeneration || descriptor.PartitionId != admittedPartitionId;
     }
 }

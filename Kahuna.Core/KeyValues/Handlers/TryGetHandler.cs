@@ -194,7 +194,7 @@ internal sealed class TryGetHandler : BaseHandler
             if (!actorContext.Reply.HasValue)
                 return KeyValueStaticResponses.ErroredResponse;
 
-            TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+            TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
             // Coalesce: attach to the in-flight read if one exists for this key.
             // (key, -1, false) = latest-point TryGet; by-revision or TryExists reads use
@@ -300,7 +300,7 @@ internal sealed class TryGetHandler : BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
         // (key, revision, false) = by-revision TryGet. The false flag keeps this slot separate
         // from a TryExists for the same (key, revision), which uses (key, revision, true).

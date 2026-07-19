@@ -184,7 +184,7 @@ internal sealed class TryExistsHandler : BaseHandler
             if (!actorContext.Reply.HasValue)
                 return KeyValueStaticResponses.ErroredResponse;
 
-            TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+            TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
             (string, long, bool) pointKey = (message.Key, -1L, true);
             if (context.PendingReads.TryGetValue(pointKey, out ReadContinuation? inflight))
@@ -268,7 +268,7 @@ internal sealed class TryExistsHandler : BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
         // (key, revision, true) = by-revision TryExists; distinct from TryGet's (key, rev, false).
         (string, long, bool) revKey = (message.Key, message.CompareRevision, true);

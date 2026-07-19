@@ -1,3 +1,5 @@
+using Writes = Kahuna.Server.KeyValues.Writes;
+
 namespace Kahuna;
 
 /// <summary>
@@ -5,6 +7,11 @@ namespace Kahuna;
 /// </summary>
 public sealed class EmbeddedKahunaOptions
 {
+    /// <summary>Test-only per-node decorator over the key/value write aggregator's Raft batch executor. When
+    /// set, the node wraps its real executor with this so a test can count/gate/force the aggregator's batch
+    /// calls; scoped to this node, never a process-wide static. Null in production.</summary>
+    internal Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? WriteBatchExecutorDecorator { get; set; }
+
     public string NodeName { get; set; } = "embedded-1";
 
     public int NodeId { get; set; } = 1;
@@ -109,6 +116,20 @@ public sealed class EmbeddedKahunaOptions
     public long MaxBytesPerActor { get; set; } = 256L * 1024 * 1024;
 
     public int CollectBatchMax { get; set; } = 1_000;
+
+    public int KeyValueWriteLingerMs { get; set; } = 1;
+
+    public int KeyValueWriteMaxBatchItems { get; set; } = 512;
+
+    public int KeyValueWriteMaxBatchBytes { get; set; } = 4 * 1024 * 1024;
+
+    public int KeyValueWriteMaxQueuedItemsPerPartition { get; set; } = 8_192;
+
+    public long KeyValueWriteMaxQueuedBytesPerPartition { get; set; } = 32L * 1024 * 1024;
+
+    public int KeyValueWriteMaxQueueDelayMs { get; set; } = 1_000;
+
+    public int MaxKeyValueWriteAggregatorInboxSize { get; set; } = 16_384;
 
     public int RevisionRetention { get; set; } = 16;
 

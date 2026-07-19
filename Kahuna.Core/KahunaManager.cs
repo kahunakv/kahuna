@@ -24,6 +24,7 @@ using Kahuna.Shared.Sequences;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
+using Writes = Kahuna.Server.KeyValues.Writes;
 
 namespace Kahuna;
 
@@ -97,11 +98,22 @@ public sealed class KahunaManager : IKahuna, IDisposable
     }
 
     /// <summary>
+    /// Test-only variant that injects a per-node decorator over the key/value write aggregator's Raft batch
+    /// executor, so a test can count/gate/force the aggregator's batch calls while driving the real public
+    /// write entry points. Scoped to this node — never a process-wide static — so a concurrent test cannot be
+    /// accidentally wrapped. A null decorator behaves exactly as the public constructor.
+    /// </summary>
+    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, RocksDbSharedResources? sharedResources, ILogger<IKahuna> logger, Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, sharedResources), logger, writeBatchExecutorDecorator)
+    {
+    }
+
+    /// <summary>
     /// Constructor variant used by PITR bootstrap: accepts a pre-seeded <paramref name="preSeededBackend"/>
     /// instead of creating a fresh one from configuration.  The WAL for the Raft layer is also
     /// pre-seeded externally; only the persistence-backend injection is handled here.
     /// </summary>
-    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, IPersistenceBackend preSeededBackend, ILogger<IKahuna> logger)
+    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, IPersistenceBackend preSeededBackend, ILogger<IKahuna> logger, Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null)
     {
         this.actorSystem = actorSystem;
 
@@ -141,7 +153,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, coordinatorDecisionStore);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, coordinatorDecisionStore, writeBatchExecutorDecorator);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
@@ -170,6 +182,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 keyValues.GetSafeTimestampAsync);
         }
     }
+
+    /// <summary>Drains the key/value write aggregator (releases queued writes retryably and awaits in-flight
+    /// settlement) while the actor system and Raft are still alive. Call before disposing them; the sync
+    /// <see cref="Dispose"/> then performs a best-effort stop for any remaining state.</summary>
+    public Task DrainKeyValueWritesAsync(TimeSpan timeout) => keyValues.DrainWritesAsync(timeout);
 
     public void Dispose()
     {

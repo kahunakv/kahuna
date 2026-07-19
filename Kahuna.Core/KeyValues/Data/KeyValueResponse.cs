@@ -152,32 +152,9 @@ public sealed class KeyValueResponse
     public int StagedPartitionId { get; private set; }
 
     /// <summary>
-    /// Proposal id of a staged non-transactional set, correlating the staged write intent with the later
-    /// <see cref="Kahuna.Shared.KeyValue.KeyValueRequestType.CompleteProposal"/> /
-    /// <see cref="Kahuna.Shared.KeyValue.KeyValueRequestType.ReleaseProposal"/> that applies or releases it
-    /// once the manager has proposed the partition batch. Zero on a 2PC prepare stage, which uses a Raft
-    /// ticket rather than a proposal id.
-    /// </summary>
-    public int StagedProposalId { get; private set; }
-
-    /// <summary>
-    /// A staged prepare outcome for the batched path: Prepared, carrying an optional serialized proposal and
-    /// the partition it routes to. A null proposal means the key prepared with nothing to replicate.
+    /// A staged prepare outcome for the batched 2PC path: Prepared, carrying an optional serialized proposal
+    /// and the partition it routes to. A null proposal means the key prepared with nothing to replicate.
     /// </summary>
     public static KeyValueResponse Staged(byte[]? stagedProposal, int stagedPartitionId) =>
         new(KeyValueResponseType.Prepared) { StagedProposal = stagedProposal, StagedPartitionId = stagedPartitionId };
-
-    /// <summary>
-    /// A staged non-transactional set for the batched write path: Prepared, carrying the serialized proposal,
-    /// the partition it routes to, and the proposal id that its <c>CompleteProposal</c>/<c>ReleaseProposal</c>
-    /// must reference. The write intent is already installed on the entry; the manager proposes the partition
-    /// batch, then completes (on success) or releases (on failure) each staged key by this id.
-    /// </summary>
-    public static KeyValueResponse StagedSet(byte[] stagedProposal, int stagedPartitionId, int stagedProposalId) =>
-        new(KeyValueResponseType.Prepared)
-        {
-            StagedProposal = stagedProposal,
-            StagedPartitionId = stagedPartitionId,
-            StagedProposalId = stagedProposalId
-        };
 }

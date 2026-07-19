@@ -29,13 +29,12 @@ internal abstract class BaseHandler
     protected static int RentProposalId() => Interlocked.Increment(ref proposalId);
 
     /// <summary>
-    /// Serializes a proposal into the committed <see cref="KeyValueMessage"/> log record — byte-for-byte
-    /// identical to what <see cref="KeyValueProposalActor"/> replicates per key, so a batched proposal
-    /// applies on followers and restores exactly as a single-key set/delete would. Shared by the batched
-    /// staging paths of the set and delete handlers (a delete carries a null value and Deleted state via its
-    /// request type).
+    /// Serializes a proposal into the committed <see cref="KeyValueMessage"/> log record. The bytes are
+    /// independent of how many writes share a Raft proposal, so an item aggregated into a bulk batch applies on
+    /// followers and restores exactly as a single-key set/delete would. Used by the direct-write path for set,
+    /// delete, and extend (a delete carries a null value and Deleted state via its request type).
     /// </summary>
-    protected static byte[] SerializeProposal(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
+    internal static byte[] SerializeProposal(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
         KeyValueMessage kvm = new()
         {
@@ -53,13 +52,35 @@ internal abstract class BaseHandler
             LastModifiedCounter = proposal.LastModified.C,
             TimeNode = currentTime.N,
             TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C
+            TimeCounter = currentTime.C,
+            // The follower apply/restore path (KeyValueReplicator) reads NoRevision; carry it so a
+            // SetNoRevision write suppresses revision history on followers exactly as it does on the leader.
+            NoRevision = proposal.NoRevision
         };
 
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
 
         return ReplicationSerializer.Serialize(kvm);
+    }
+
+    /// <summary>
+    /// Resolves the target partition for a direct write and, for a key-range space, fences it against the
+    /// routed descriptor generation. Returns false when the range moved/split since routing so the caller
+    /// rejects with MustRetry before installing any intent; hash spaces are never fenced. Shared by the
+    /// per-key dispatch (<see cref="CreateProposal"/>) and the batched staging paths so they cannot drift.
+    /// </summary>
+    protected bool TryResolveDirectWritePartition(KeyValueRequest message, out int partitionId, out long fenceGeneration)
+    {
+        if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key))
+            // Capture the live descriptor generation even when the inbound write carried none (delete/extend
+            // route with no routed generation): the deferred flush fence needs the real admission-time
+            // generation to detect a range move during linger, not the zero that would disable it.
+            return RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out partitionId, out fenceGeneration);
+
+        partitionId = ResolvePartition(message.Key);
+        fenceGeneration = 0; // hash space: never fenced at flush.
+        return true;
     }
     
     /// <summary>
@@ -113,102 +134,60 @@ internal abstract class BaseHandler
     protected KeyValueResponse CreateProposal(KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
-        
+
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
-            
-        int currentProposalId = Interlocked.Increment(ref proposalId);
 
-        // Carry the key-range routing generation from the request into the proposal so the proposal
-        // actor's generation fence can reject a stale-routed write. 0 for hash spaces.
-        proposal.RoutedGeneration = message.RoutedGeneration;
+        // Resolve and fence the partition before installing any intent: a key-range write whose routed
+        // generation no longer matches the live descriptor (range moved/split since routing) is rejected with
+        // MustRetry, leaving nothing pinned. The proposal actor no longer fences — it only replicates.
+        if (!TryResolveDirectWritePartition(message, out int partitionId, out long fenceGeneration))
+            return new(KeyValueResponseType.MustRetry, 0);
+
+        int currentProposalId = RentProposalId();
+
+        // Carry the live descriptor generation captured at admission (0 for hash) so the aggregator can
+        // re-fence at flush time against a range move during linger — for every write type, not just those
+        // that arrived with a routed generation.
+        proposal.RoutedGeneration = fenceGeneration;
+
+        // Serialize the committed record here, on the owning actor, so the queued envelope carries bytes — not
+        // the value graph, which stays in the proposal dictionary below until completion.
+        byte[] serialized = SerializeProposal(proposal.Type, proposal, currentTime);
 
         entry.ReplicationIntent = new()
         {
-            ProposalId = currentProposalId, 
+            ProposalId = currentProposalId,
             Expires = currentTime + ProposalWaitTimeout
         };
-            
+
         context.Proposals.Add(currentProposalId, proposal);
-            
-        context.ProposalRouter.Send(new(
-            message.Type,
-            currentProposalId, 
-            proposal,
-            actorContext.Self, 
-            actorContext.Reply.Value.Promise,
-            currentTime
-        ));
 
-        actorContext.ByPassReply = true;
-            
-        return KeyValueStaticResponses.WaitingForReplicationResponse;
-    }
-    
-    /// <summary>
-    /// Persists and replicates the key/value messages to the Raft partition
-    /// </summary>
-    /// <param name="type"></param>
-    /// <param name="proposal"></param>
-    /// <param name="currentTime"></param>
-    /// <returns></returns>
-    protected async Task<bool> PersistAndReplicateKeyValueMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
-    {
-        if (!context.Raft.Joined)
-            return true;
-
-        int partitionId = ResolvePartition(proposal.Key);
-
-        KeyValueMessage kvm = new()
-        {
-            Type = (int)type,
-            Key = proposal.Key,
-            Revision = proposal.Revision,
-            ExpireNode = proposal.Expires.N,
-            ExpirePhysical = proposal.Expires.L,
-            ExpireCounter = proposal.Expires.C,
-            LastUsedNode = proposal.LastUsed.N,
-            LastUsedPhysical = proposal.LastUsed.L,
-            LastUsedCounter = proposal.LastUsed.C,
-            LastModifiedNode = proposal.LastModified.N,
-            LastModifiedPhysical = proposal.LastModified.L,
-            LastModifiedCounter = proposal.LastModified.C,
-            TimeNode = currentTime.N,
-            TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C,
-            NoRevision = proposal.NoRevision
-        };
-
-        if (proposal.Value is not null)
-            kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
-
-        RaftReplicationResult result = await context.Raft.ReplicateLogs(
+        KeyValueProposalRequest envelope = new(
+            message.Key,
             partitionId,
-            ReplicationTypes.KeyValues,
-            ReplicationSerializer.Serialize(kvm)
+            currentProposalId,
+            message.Durability,
+            fenceGeneration,
+            serialized,
+            actorContext.Self,
+            actorContext.Reply.Value.Promise!,
+            0 // placeholder: the aggregator stamps EnqueueTicks from its own TimeProvider at admission.
         );
 
-        if (!result.Success)
+        // Hand the staged write to the partition aggregator. On synchronous backpressure (the partition's
+        // queued item/byte bound is full) unwind the just-installed intent + proposal on this same mailbox and
+        // return a retryable MustRetry — no completion message will arrive to do it later.
+        if (!context.WriteAggregator.TryEnqueue(envelope))
         {
-            context.Logger.LogWarning("Failed to replicate key/value {Key} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Key, partitionId, result.Status, result.TicketId);
-            
-            return false;
+            entry.ReplicationIntent = null;
+            context.Proposals.Remove(currentProposalId);
+            return new(KeyValueResponseType.MustRetry, 0);
         }
-        
-        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-            BackgroundWriteType.QueueStoreKeyValue,
-            partitionId,
-            proposal.Key,
-            proposal.Value,
-            proposal.Revision,
-            proposal.Expires,
-            proposal.LastUsed,
-            proposal.LastModified,
-            (int)proposal.State,
-            proposal.NoRevision
-        ));
 
-        return result.Success;
+        actorContext.ByPassReply = true;
+
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
 
     /// <summary>

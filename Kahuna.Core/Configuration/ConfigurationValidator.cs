@@ -75,6 +75,48 @@ public static class ConfigurationValidator
                 $"MaxTransactionTimeout ({configuration.MaxTransactionTimeout} ms) must be >= DefaultTransactionTimeout ({configuration.DefaultTransactionTimeout} ms); " +
                 "a maximum below the default would clamp every default-length session.");
 
+        // ── Partition write aggregator ──────────────────────────────────────────────────────────────
+        // Linger may be zero (immediate dispatch) but never negative.
+        if (configuration.KeyValueWriteLingerMs < 0)
+            configuration.KeyValueWriteLingerMs = 0;
+
+        if (configuration.KeyValueWriteMaxBatchItems <= 0)
+            configuration.KeyValueWriteMaxBatchItems = 512;
+
+        if (configuration.KeyValueWriteMaxBatchBytes <= 0)
+            configuration.KeyValueWriteMaxBatchBytes = 4 * 1024 * 1024;
+
+        if (configuration.KeyValueWriteMaxQueuedItemsPerPartition <= 0)
+            configuration.KeyValueWriteMaxQueuedItemsPerPartition = 8_192;
+
+        if (configuration.KeyValueWriteMaxQueuedBytesPerPartition <= 0)
+            configuration.KeyValueWriteMaxQueuedBytesPerPartition = 32L * 1024 * 1024;
+
+        if (configuration.KeyValueWriteMaxQueueDelayMs <= 0)
+            configuration.KeyValueWriteMaxQueueDelayMs = 1_000;
+
+        // Linger is the coalescing wait before a buffer flushes; it must never exceed the queue-age deadline,
+        // or an item could pass its release deadline before its buffer's linger timer ever fires. Clamp down.
+        if (configuration.KeyValueWriteLingerMs > configuration.KeyValueWriteMaxQueueDelayMs)
+            configuration.KeyValueWriteLingerMs = configuration.KeyValueWriteMaxQueueDelayMs;
+
+        // A batch can never select more than a partition is allowed to hold.
+        if (configuration.KeyValueWriteMaxBatchItems > configuration.KeyValueWriteMaxQueuedItemsPerPartition)
+            configuration.KeyValueWriteMaxBatchItems = configuration.KeyValueWriteMaxQueuedItemsPerPartition;
+
+        if (configuration.KeyValueWriteMaxBatchBytes > configuration.KeyValueWriteMaxQueuedBytesPerPartition)
+            configuration.KeyValueWriteMaxBatchBytes = (int)Math.Min(configuration.KeyValueWriteMaxBatchBytes, configuration.KeyValueWriteMaxQueuedBytesPerPartition);
+
+        // The pre-dispatch residence bound must leave real headroom below the write-intent lease for the wake
+        // scheduling plus the Raft round trip, so a queue-age-released write can never be proposed after its
+        // intent could already have expired.
+        const int writeIntentLeaseMs = 10_000;
+        const int schedulingHeadroomMs = 2_000;
+        int maxAllowedQueueDelayMs = writeIntentLeaseMs - schedulingHeadroomMs;
+        if (configuration.KeyValueWriteMaxQueueDelayMs > maxAllowedQueueDelayMs)
+            throw new KahunaServerException(
+                $"KeyValueWriteMaxQueueDelayMs ({configuration.KeyValueWriteMaxQueueDelayMs} ms) must be <= {maxAllowedQueueDelayMs} ms — the {writeIntentLeaseMs} ms write-intent lease minus {schedulingHeadroomMs} ms of scheduling/round-trip headroom — so a queue-age-released write cannot be proposed late.");
+
         ValidatePersistentRevisionRetention(configuration);
         ValidatePitr(configuration);
 

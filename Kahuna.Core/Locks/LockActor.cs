@@ -402,7 +402,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             currentProposalId, 
             proposal, 
             actorContext.Self, 
-            actorContext.Reply.Value.Promise,
+            actorContext.Reply.Value.Promise!,
             currentTime
         ));
 

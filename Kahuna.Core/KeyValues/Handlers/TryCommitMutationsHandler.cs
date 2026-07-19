@@ -115,13 +115,13 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             message.ProposalTicketId, partitionId, recordAnchorKey, embeddedDecision);
         // Retain the promise + deadline so the collector's sweep can resolve the caller (retryable) if the
         // worker dies or its completion is dropped and never arrives.
-        pending.Promise = actorContext.Reply.Value.Promise;
+        pending.Promise = actorContext.Reply.Value.Promise!;
         pending.DeadlineTicks = deadlineTicks;
         context.PendingPhaseTwos[phaseTwoId] = pending;
 
         context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForCommit(
             phaseTwoId, partitionId, message.ProposalTicketId,
-            deadlineTicks, actorContext.Self, actorContext.Reply.Value.Promise));
+            deadlineTicks, actorContext.Self, actorContext.Reply.Value.Promise!));
 
         actorContext.ByPassReply = true;
 

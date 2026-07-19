@@ -276,14 +276,14 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     public KeyValueActor(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
+        Writes.PartitionWriteAggregator writeAggregator,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KeySpaceRegistry keySpaceRegistry,
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : this(actorContext, backgroundWriter, proposalRouter, null, persistenceBackend, raft,
+    ) : this(actorContext, backgroundWriter, writeAggregator, null, persistenceBackend, raft,
              keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null)
     {
     }
@@ -291,7 +291,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     public KeyValueActor(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter,
+        Writes.PartitionWriteAggregator writeAggregator,
         IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
@@ -314,7 +314,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             locksByRange,
             proposals,
             backgroundWriter,
-            proposalRouter,
+            writeAggregator,
             persistenceBackend,
             raft,
             keySpaceRegistry,
@@ -415,10 +415,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             response = message.Type switch
             {
                 KeyValueRequestType.TrySet => await TrySet(message),
-                KeyValueRequestType.StageSet => await StageSet(message),
                 KeyValueRequestType.TryExtend => await TryExtend(message),
                 KeyValueRequestType.TryDelete => await TryDelete(message),
-                KeyValueRequestType.StageDelete => await StageDelete(message),
                 KeyValueRequestType.TryGet => await TryGet(message),
                 KeyValueRequestType.TryExists => await TryExists(message),
                 KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
@@ -484,16 +482,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     }
 
     /// <summary>
-    /// Stages a non-transactional persistent set for the batched write path: validates and installs the
-    /// replication intent, then returns the serialized proposal + partition + proposal id without proposing —
-    /// the manager batches every staged key of a partition into one <c>ReplicateLogs</c>.
-    /// </summary>
-    private Task<KeyValueResponse> StageSet(KeyValueRequest message)
-    {
-        return trySetHandler.StageExecute(message);
-    }
-
-    /// <summary>
     /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
     /// </summary>
     /// <param name="message"></param>
@@ -511,16 +499,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private Task<KeyValueResponse> TryDelete(KeyValueRequest message)
     {
         return tryDeleteHandler.Execute(message);
-    }
-
-    /// <summary>
-    /// Stages a non-transactional persistent delete for the batched write path: validates and installs the
-    /// replication intent, then returns the serialized tombstone proposal + partition + proposal id without
-    /// proposing — the manager batches every staged key of a partition into one <c>ReplicateLogs</c>.
-    /// </summary>
-    private Task<KeyValueResponse> StageDelete(KeyValueRequest message)
-    {
-        return tryDeleteHandler.StageExecute(message);
     }
 
     /// <summary>

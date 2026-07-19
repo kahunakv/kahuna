@@ -69,6 +69,36 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int MaxKeyValueActorInboxSize { get; set; } = 16_384;
 
+    // ── Partition write aggregator (direct set/delete/extend coalescing) ────────────────────────────────
+
+    /// <summary>Delay, from the oldest queued item, before a partition's accumulated direct writes are
+    /// proposed. 0 dispatches an idle partition immediately (still batching work that piles up behind an
+    /// in-flight batch); a small positive value trades a little single-write latency for cross-request
+    /// coalescing. Zero is the low-latency escape hatch. Must not be negative.</summary>
+    public int KeyValueWriteLingerMs { get; set; } = 1;
+
+    /// <summary>Maximum log entries selected for one aggregator Raft call.</summary>
+    public int KeyValueWriteMaxBatchItems { get; set; } = 512;
+
+    /// <summary>Target serialized payload bytes per aggregator Raft call; an oversized single item dispatches
+    /// alone regardless.</summary>
+    public int KeyValueWriteMaxBatchBytes { get; set; } = 4 * 1024 * 1024;
+
+    /// <summary>Maximum admitted items per partition, including those waiting behind an in-flight batch. A
+    /// full partition rejects new writes with a retryable MustRetry.</summary>
+    public int KeyValueWriteMaxQueuedItemsPerPartition { get; set; } = 8_192;
+
+    /// <summary>Maximum admitted serialized bytes retained per partition, including in flight.</summary>
+    public long KeyValueWriteMaxQueuedBytesPerPartition { get; set; } = 32L * 1024 * 1024;
+
+    /// <summary>Maximum time an admitted write may wait before dispatch; on expiry it is released as
+    /// MustRetry. Must stay well below the write-intent lease so a released item is never proposed late.</summary>
+    public int KeyValueWriteMaxQueueDelayMs { get; set; } = 1_000;
+
+    /// <summary>Ordinary-submission inbox bound per aggregator lane; control messages (timer/completion/stop)
+    /// are exempt. A value &lt;= 0 disables the bound.</summary>
+    public int MaxKeyValueWriteAggregatorInboxSize { get; set; } = 16_384;
+
     /// <summary>
     /// Strict upper bound on the number of finalized transaction outcomes retained after their session is
     /// removed from the active map. A duplicate commit/rollback that arrives after the session is gone consults

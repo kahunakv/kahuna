@@ -132,7 +132,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
         // Only plain (non-transactional, non-snapshot) bucket scans are coalesced.
         // A transactional scan builds MVCC entries under its own txId; a snapshot scan

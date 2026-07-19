@@ -312,7 +312,28 @@ public sealed class KahunaCommandLineOptions
     
     [Option("cache-entries-to-remove", Required = false, HelpText = "Maximum number of cache entries to remove per eviction process", Default = 100)]
     public int CacheEntriesToRemove { get; set; } = 100;
-    
+
+    [Option("kv-write-linger-ms", Required = false, HelpText = "Delay from the oldest queued direct write before its partition batch is proposed; 0 = immediate (low-latency escape hatch)", Default = 1)]
+    public int KeyValueWriteLingerMs { get; set; } = 1;
+
+    [Option("kv-write-max-batch-items", Required = false, HelpText = "Maximum log entries per aggregator Raft call", Default = 512)]
+    public int KeyValueWriteMaxBatchItems { get; set; } = 512;
+
+    [Option("kv-write-max-batch-bytes", Required = false, HelpText = "Target serialized bytes per aggregator Raft call", Default = 4 * 1024 * 1024)]
+    public int KeyValueWriteMaxBatchBytes { get; set; } = 4 * 1024 * 1024;
+
+    [Option("kv-write-max-queued-items", Required = false, HelpText = "Maximum admitted direct writes per partition (incl. in flight)", Default = 8192)]
+    public int KeyValueWriteMaxQueuedItemsPerPartition { get; set; } = 8192;
+
+    [Option("kv-write-max-queued-bytes", Required = false, HelpText = "Maximum admitted serialized bytes per partition (incl. in flight)", Default = 32L * 1024 * 1024)]
+    public long KeyValueWriteMaxQueuedBytesPerPartition { get; set; } = 32L * 1024 * 1024;
+
+    [Option("kv-write-max-queue-delay-ms", Required = false, HelpText = "Maximum pre-dispatch residence for a direct write before it is released as MustRetry", Default = 1000)]
+    public int KeyValueWriteMaxQueueDelayMs { get; set; } = 1000;
+
+    [Option("kv-write-aggregator-inbox-size", Required = false, HelpText = "Ordinary-submission inbox bound per aggregator lane (control messages exempt); <=0 disables", Default = 16384)]
+    public int MaxKeyValueWriteAggregatorInboxSize { get; set; } = 16384;
+
     [Option("dirty-objects-writer-delay", Required = false, HelpText = "Specifies how often the dirty object writer flushes ti disk (in milliseconds)", Default = 200)]
     public int DirtyObjectsWriterDelay { get; set; } = 200;
 

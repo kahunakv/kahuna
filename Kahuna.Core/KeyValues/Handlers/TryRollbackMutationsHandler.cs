@@ -139,13 +139,13 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
         PendingPhaseTwo pending = PendingPhaseTwo.ForRollback(
             message.TransactionId, message.Key, message.Durability, currentTime,
             message.ProposalTicketId, partitionId);
-        pending.Promise = actorContext.Reply.Value.Promise;
+        pending.Promise = actorContext.Reply.Value.Promise!;
         pending.DeadlineTicks = deadlineTicks;
         context.PendingPhaseTwos[phaseTwoId] = pending;
 
         context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForRollback(
             phaseTwoId, partitionId, message.ProposalTicketId,
-            deadlineTicks, actorContext.Self, actorContext.Reply.Value.Promise));
+            deadlineTicks, actorContext.Self, actorContext.Reply.Value.Promise!));
 
         actorContext.ByPassReply = true;
 

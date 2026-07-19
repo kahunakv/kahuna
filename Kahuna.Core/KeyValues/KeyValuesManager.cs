@@ -80,7 +80,7 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
     
-    private readonly IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> proposalRouter;
+    private readonly Writes.PartitionWriteAggregator writeAggregator;
 
     private readonly IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest> phaseTwoRouter;
 
@@ -179,7 +179,8 @@ internal sealed class KeyValuesManager : IDisposable
         ILogger<IKahuna> logger,
         SnapshotFloorStore? externalFloorStore = null,
         CompletionReceiptStore? externalReceiptStore = null,
-        CoordinatorDecisionStore? externalDecisionStore = null
+        CoordinatorDecisionStore? externalDecisionStore = null,
+        Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null
     )
     {
         this.actorSystem = actorSystem;
@@ -219,7 +220,24 @@ internal sealed class KeyValuesManager : IDisposable
         // anchor → partition resolver is attached below once the locator exists.
         coordinatorDecisionStore = externalDecisionStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
-        proposalRouter = GetProposalRouter(configuration);
+        Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
+        writeAggregator = new Writes.PartitionWriteAggregator(
+            actorSystem,
+            writeBatchExecutorDecorator?.Invoke(realBatchExecutor) ?? realBatchExecutor,
+            new Writes.KeyValueActorCompletionRouter(),
+            new Writes.PartitionWriteAggregatorOptions
+            {
+                LingerMs = configuration.KeyValueWriteLingerMs,
+                MaxBatchItems = configuration.KeyValueWriteMaxBatchItems,
+                MaxBatchBytes = configuration.KeyValueWriteMaxBatchBytes,
+                MaxQueuedItemsPerPartition = configuration.KeyValueWriteMaxQueuedItemsPerPartition,
+                MaxQueuedBytesPerPartition = configuration.KeyValueWriteMaxQueuedBytesPerPartition,
+                MaxQueueDelayMs = configuration.KeyValueWriteMaxQueueDelayMs,
+                AggregatorInboxSize = configuration.MaxKeyValueWriteAggregatorInboxSize,
+                LaneCount = Math.Max(1, configuration.KeyValueWorkers)
+            },
+            new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore),
+            logger);
         phaseTwoRouter = GetPhaseTwoRouter(configuration);
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
@@ -740,26 +758,6 @@ internal sealed class KeyValuesManager : IDisposable
         return await rangeSplitter!.SplitAsync(keySpace, splitKey, newId, duringQuiesce, ct);
     }
 
-    private IActorRef<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest> GetProposalRouter(
-        KahunaConfiguration configuration
-    )
-    {
-        List<IActorRef<KeyValueProposalActor, KeyValueProposalRequest>> proposalInstances = new(configuration.LocksWorkers);
-
-        for (int i = 0; i < configuration.KeyValueWorkers; i++)
-            proposalInstances.Add(actorSystem.Spawn<KeyValueProposalActor, KeyValueProposalRequest>(
-                "proposal-keyvalue-" + i,
-                raft,
-                persistenceBackend,
-                configuration,
-                keySpaceRegistry,
-                rangeMapStore,
-                logger
-            ));
-        
-        return actorSystem.Spawn<BalancingActor<KeyValueProposalActor, KeyValueProposalRequest>, KeyValueProposalRequest>(null, proposalInstances);
-    }
-
     private IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest> GetPhaseTwoRouter(
         KahunaConfiguration configuration
     )
@@ -887,7 +885,7 @@ internal sealed class KeyValuesManager : IDisposable
                 "ephemeral-keyvalue-" + i,
                 options,
                 backgroundWriter,
-                proposalRouter,
+                writeAggregator,
                 phaseTwoRouter,
                 persistenceBackend,
                 raft,
@@ -923,7 +921,7 @@ internal sealed class KeyValuesManager : IDisposable
                 "persistent-keyvalue-" + i,
                 options,
                 backgroundWriter,
-                proposalRouter,
+                writeAggregator,
                 phaseTwoRouter,
                 persistenceBackend,
                 raft,
@@ -3148,43 +3146,15 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
     public async Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
     {
-        // Persistent, non-transactional sets destined for the same Raft partition are proposed as ONE
-        // ReplicateLogs instead of one proposal (one WAL append + fsync + quorum round trip) per key — the
-        // write-amplification fix for bulk writes. Ephemeral (no WAL fsync to amortise) and transactional
-        // (MVCC-staged, different lifecycle) items keep the per-key path.
-        List<KahunaSetKeyValueRequestItem>? batchable = null;
-        List<KahunaSetKeyValueRequestItem>? passthrough = null;
+        // Fan every item out through the ordinary TrySet path, launched together. Persistent items meet in the
+        // shared partition write aggregator — coalescing across this call, other concurrent many-key calls, and
+        // single writes to the same partition — while ephemeral and transactional items keep their existing
+        // per-key behavior. tasks[i] corresponds to items[i], so response order matches input order.
+        Task<KahunaSetKeyValueResponseItem>[] tasks = new Task<KahunaSetKeyValueResponseItem>[items.Count];
+        for (int i = 0; i < items.Count; i++)
+            tasks[i] = SetOneNodeKeyValue(items[i]);
 
-        foreach (KahunaSetKeyValueRequestItem item in items)
-        {
-            bool canBatch = !string.IsNullOrEmpty(item.Key)
-                && item.TransactionId == HLCTimestamp.Zero
-                && item.Durability == KeyValueDurability.Persistent;
-
-            if (canBatch)
-                (batchable ??= new()).Add(item);
-            else
-                (passthrough ??= new()).Add(item);
-        }
-
-        // Common fast path: every item batchable — no intermediate list merge.
-        if (passthrough is null)
-            return await SetManyBatched(batchable!);
-
-        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
-
-        if (passthrough is not null)
-        {
-            Task<KahunaSetKeyValueResponseItem>[] tasks = new Task<KahunaSetKeyValueResponseItem>[passthrough.Count];
-            for (int i = 0; i < passthrough.Count; i++)
-                tasks[i] = SetOneNodeKeyValue(passthrough[i]);
-            responses.AddRange(await Task.WhenAll(tasks));
-        }
-
-        if (batchable is not null)
-            responses.AddRange(await SetManyBatched(batchable));
-
-        return responses;
+        return [.. await Task.WhenAll(tasks)];
 
         async Task<KahunaSetKeyValueResponseItem> SetOneNodeKeyValue(KahunaSetKeyValueRequestItem item)
         {
@@ -3216,8 +3186,13 @@ internal sealed class KeyValuesManager : IDisposable
                 else
                     response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
-                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                    return new() { Type = KeyValueResponseType.Errored };
+                if (response is null)
+                    return new() { Key = item.Key ?? "", Type = KeyValueResponseType.Errored, Durability = item.Durability };
+
+                // A residual WaitingForReplication (a live replication intent the caller should retry against)
+                // is retryable, not a terminal error.
+                if (response.Type == KeyValueResponseType.WaitingForReplication)
+                    return new() { Key = item.Key ?? "", Type = KeyValueResponseType.MustRetry, Durability = item.Durability };
 
                 return new()
                 {
@@ -3235,241 +3210,17 @@ internal sealed class KeyValuesManager : IDisposable
         }
     }
 
-    /// <summary>
-    /// Batched write path for persistent, non-transactional set-many: stage every key on its actor (install
-    /// the replication intent + serialize the log record), propose all staged records of a partition in ONE
-    /// <c>ReplicateLogs</c>, then complete (apply) each committed key or release each on failure. Collapses N
-    /// per-key Raft proposals/fsyncs into one per partition.
-    /// </summary>
-    private async Task<List<KahunaSetKeyValueResponseItem>> SetManyBatched(List<KahunaSetKeyValueRequestItem> items)
-    {
-        // 1. Stage each key on its owning actor in parallel.
-        Task<KeyValueResponse?>[] stageTasks = new Task<KeyValueResponse?>[items.Count];
-        for (int i = 0; i < items.Count; i++)
-            stageTasks[i] = StageSetItem(items[i]);
-
-        KeyValueResponse?[] staged = await Task.WhenAll(stageTasks);
-
-        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
-        Dictionary<int, List<(KahunaSetKeyValueRequestItem Item, int ProposalId, byte[] Serialized)>> byPartition = new();
-
-        for (int i = 0; i < items.Count; i++)
-        {
-            KahunaSetKeyValueRequestItem item = items[i];
-            KeyValueResponse? s = staged[i];
-
-            if (s is not null && s.Type == KeyValueResponseType.Prepared && s.StagedProposal is not null)
-            {
-                if (!byPartition.TryGetValue(s.StagedPartitionId, out List<(KahunaSetKeyValueRequestItem, int, byte[])>? list))
-                    byPartition[s.StagedPartitionId] = list = [];
-
-                list.Add((item, s.StagedProposalId, s.StagedProposal));
-                continue;
-            }
-
-            // A staging terminal installed no intent, so nothing to propose or release. A live replication
-            // intent (a concurrent write on the key) is transient → MustRetry; other terminals pass through.
-            KeyValueResponseType outcome = s?.Type switch
-            {
-                KeyValueResponseType.WaitingForReplication => KeyValueResponseType.MustRetry,
-                null => KeyValueResponseType.Errored,
-                _ => s.Type
-            };
-
-            responses.Add(new()
-            {
-                Key = item.Key ?? "",
-                Type = outcome,
-                Revision = s?.Revision ?? 0,
-                Durability = KeyValueDurability.Persistent
-            });
-        }
-
-        // 2. Propose each partition's staged records in a single ReplicateLogs, then apply or release each.
-        foreach ((int partitionId, List<(KahunaSetKeyValueRequestItem Item, int ProposalId, byte[] Serialized)> members) in byPartition)
-        {
-            byte[][] batch = new byte[members.Count][];
-            for (int i = 0; i < members.Count; i++)
-                batch[i] = members[i].Serialized;
-
-            bool success;
-            RaftOperationStatus status;
-
-            try
-            {
-                // expectedGeneration 0 on purpose: the key-range fence already ran per key at stage;
-                // Kommander's expectedGeneration fences the physical partition generation, a different
-                // namespace Kahuna never syncs from descriptors (see KeyValuePhaseTwoActor / batched 2PC).
-                RaftReplicationResult result = await raft.ReplicateLogs(
-                    partitionId, ReplicationTypes.KeyValues, batch, autoCommit: true, expectedGeneration: 0);
-                success = result.Success;
-                status = result.Status;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Batched set propose threw Partition={Partition} Count={Count}", partitionId, members.Count);
-                success = false;
-                status = RaftOperationStatus.Errored;
-            }
-
-            if (success)
-            {
-                Task<KahunaSetKeyValueResponseItem>[] completes = new Task<KahunaSetKeyValueResponseItem>[members.Count];
-                for (int i = 0; i < members.Count; i++)
-                    completes[i] = CompleteSetItem(members[i].Item, members[i].ProposalId, partitionId);
-
-                responses.AddRange(await Task.WhenAll(completes));
-            }
-            else
-            {
-                // The proposal never committed, so no key applied. Release every staged intent (retain nothing
-                // pinned) and surface a retryable MustRetry for transient failures, else a terminal Errored.
-                bool transient = IsTransientRaftStatus(status);
-
-                Task[] releases = new Task[members.Count];
-                for (int i = 0; i < members.Count; i++)
-                    releases[i] = ReleaseStagedProposal(members[i].Item.Key ?? "", members[i].ProposalId, partitionId, transient);
-
-                await Task.WhenAll(releases);
-
-                KeyValueResponseType outcome = transient ? KeyValueResponseType.MustRetry : KeyValueResponseType.Errored;
-                foreach ((KahunaSetKeyValueRequestItem item, int _, byte[] _) in members)
-                    responses.Add(new() { Key = item.Key ?? "", Type = outcome, Durability = KeyValueDurability.Persistent });
-            }
-        }
-
-        return responses;
-    }
-
-    /// <summary>Stages one persistent set on its owning actor: validates + installs the replication intent and
-    /// returns the serialized proposal, partition, and proposal id (no Raft). Terminal on rejection.</summary>
-    private async Task<KeyValueResponse?> StageSetItem(KahunaSetKeyValueRequestItem item)
-    {
-        KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.StageSet,
-            item.TransactionId,
-            HLCTimestamp.Zero,
-            item.Key ?? "",
-            item.Value,
-            item.CompareValue,
-            item.CompareRevision,
-            item.Flags,
-            item.ExpiresMs,
-            HLCTimestamp.Zero,
-            item.Durability,
-            0,
-            0,
-            null
-        );
-
-        request.RoutedGeneration = item.RoutedGeneration;
-
-        try
-        {
-            return await AskKeyValueActor(persistentKeyValuesRouter, request);
-        }
-        finally
-        {
-            KeyValueRequestPool.Return(request);
-        }
-    }
-
-    /// <summary>Applies a staged set after its partition batch committed: CompleteProposal archives the
-    /// superseded revision, writes the value, clears the intent, and returns the committed revision.</summary>
-    private async Task<KahunaSetKeyValueResponseItem> CompleteSetItem(KahunaSetKeyValueRequestItem item, int proposalId, int partitionId)
-    {
-        KeyValueRequest request = new(
-            KeyValueRequestType.CompleteProposal,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
-            item.Key ?? "",
-            null,
-            null,
-            -1,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            proposalId,
-            partitionId,
-            null
-        );
-
-        KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
-        if (response is null)
-            return new() { Key = item.Key ?? "", Type = KeyValueResponseType.Errored, Durability = KeyValueDurability.Persistent };
-
-        return new()
-        {
-            Key = item.Key ?? "",
-            Type = response.Type,
-            Revision = response.Revision,
-            LastModified = response.Ticket,
-            Durability = KeyValueDurability.Persistent
-        };
-    }
-
-    /// <summary>Releases a staged set/delete whose partition batch failed to commit: ReleaseProposal drops the
-    /// replication intent and the staged proposal so the key is writable again on retry.</summary>
-    private async Task ReleaseStagedProposal(string key, int proposalId, int partitionId, bool transient)
-    {
-        KeyValueRequest request = new(
-            KeyValueRequestType.ReleaseProposal,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
-            key,
-            null,
-            null,
-            -1,
-            transient ? KeyValueFlags.ReplicationRetry : KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            proposalId,
-            partitionId,
-            null
-        );
-
-        await AskKeyValueActor(persistentKeyValuesRouter, request);
-    }
 
     public async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
     {
-        // Persistent, non-transactional deletes destined for the same Raft partition are proposed as ONE
-        // ReplicateLogs (one WAL append + fsync + quorum round trip) instead of one proposal per key.
-        // Ephemeral (no WAL fsync to amortise) and transactional (MVCC tombstone) items keep the per-key path.
-        List<KahunaDeleteKeyValueRequestItem>? batchable = null;
-        List<KahunaDeleteKeyValueRequestItem>? passthrough = null;
+        // Fan every item out through the ordinary TryDelete path, launched together. Persistent items meet in
+        // the shared partition write aggregator (coalescing across this and other concurrent calls), while
+        // ephemeral and transactional items keep their existing per-key behavior. Order matches input order.
+        Task<KahunaDeleteKeyValueResponseItem>[] tasks = new Task<KahunaDeleteKeyValueResponseItem>[items.Count];
+        for (int i = 0; i < items.Count; i++)
+            tasks[i] = DeleteOneNodeKeyValue(items[i]);
 
-        foreach (KahunaDeleteKeyValueRequestItem item in items)
-        {
-            bool canBatch = !string.IsNullOrEmpty(item.Key)
-                && item.TransactionId == HLCTimestamp.Zero
-                && item.Durability == KeyValueDurability.Persistent;
-
-            if (canBatch)
-                (batchable ??= new()).Add(item);
-            else
-                (passthrough ??= new()).Add(item);
-        }
-
-        if (passthrough is null)
-            return await DeleteManyBatched(batchable!);
-
-        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
-
-        if (passthrough is not null)
-        {
-            Task<KahunaDeleteKeyValueResponseItem>[] tasks = new Task<KahunaDeleteKeyValueResponseItem>[passthrough.Count];
-            for (int i = 0; i < passthrough.Count; i++)
-                tasks[i] = DeleteOneNodeKeyValue(passthrough[i]);
-            responses.AddRange(await Task.WhenAll(tasks));
-        }
-
-        if (batchable is not null)
-            responses.AddRange(await DeleteManyBatched(batchable));
-
-        return responses;
+        return [.. await Task.WhenAll(tasks)];
 
         async Task<KahunaDeleteKeyValueResponseItem> DeleteOneNodeKeyValue(KahunaDeleteKeyValueRequestItem item)
         {
@@ -3543,171 +3294,6 @@ internal sealed class KeyValuesManager : IDisposable
         }
     }
 
-    /// <summary>
-    /// Batched write path for persistent, non-transactional delete-many: stage every key on its actor
-    /// (install the replication intent + serialize the tombstone log record), propose all staged records of a
-    /// partition in ONE <c>ReplicateLogs</c>, then complete (apply) each committed key or release each on
-    /// failure. Collapses N per-key Raft proposals/fsyncs into one per partition.
-    /// </summary>
-    private async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyBatched(List<KahunaDeleteKeyValueRequestItem> items)
-    {
-        Task<KeyValueResponse?>[] stageTasks = new Task<KeyValueResponse?>[items.Count];
-        for (int i = 0; i < items.Count; i++)
-            stageTasks[i] = StageDeleteItem(items[i]);
-
-        KeyValueResponse?[] staged = await Task.WhenAll(stageTasks);
-
-        List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
-        Dictionary<int, List<(KahunaDeleteKeyValueRequestItem Item, int ProposalId, byte[] Serialized)>> byPartition = new();
-
-        for (int i = 0; i < items.Count; i++)
-        {
-            KahunaDeleteKeyValueRequestItem item = items[i];
-            KeyValueResponse? s = staged[i];
-
-            if (s is not null && s.Type == KeyValueResponseType.Prepared && s.StagedProposal is not null)
-            {
-                if (!byPartition.TryGetValue(s.StagedPartitionId, out List<(KahunaDeleteKeyValueRequestItem, int, byte[])>? list))
-                    byPartition[s.StagedPartitionId] = list = [];
-
-                list.Add((item, s.StagedProposalId, s.StagedProposal));
-                continue;
-            }
-
-            // A staging terminal installed no intent, so nothing to propose or release. DoesNotExist (missing
-            // or already-deleted key) passes through as-is; a live replication intent is transient → MustRetry.
-            KeyValueResponseType outcome = s?.Type switch
-            {
-                KeyValueResponseType.WaitingForReplication => KeyValueResponseType.MustRetry,
-                null => KeyValueResponseType.Errored,
-                _ => s.Type
-            };
-
-            responses.Add(new()
-            {
-                Key = item.Key ?? "",
-                Type = outcome,
-                Revision = s?.Revision ?? -1,
-                Durability = KeyValueDurability.Persistent
-            });
-        }
-
-        foreach ((int partitionId, List<(KahunaDeleteKeyValueRequestItem Item, int ProposalId, byte[] Serialized)> members) in byPartition)
-        {
-            byte[][] batch = new byte[members.Count][];
-            for (int i = 0; i < members.Count; i++)
-                batch[i] = members[i].Serialized;
-
-            bool success;
-            RaftOperationStatus status;
-
-            try
-            {
-                RaftReplicationResult result = await raft.ReplicateLogs(
-                    partitionId, ReplicationTypes.KeyValues, batch, autoCommit: true, expectedGeneration: 0);
-                success = result.Success;
-                status = result.Status;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Batched delete propose threw Partition={Partition} Count={Count}", partitionId, members.Count);
-                success = false;
-                status = RaftOperationStatus.Errored;
-            }
-
-            if (success)
-            {
-                Task<KahunaDeleteKeyValueResponseItem>[] completes = new Task<KahunaDeleteKeyValueResponseItem>[members.Count];
-                for (int i = 0; i < members.Count; i++)
-                    completes[i] = CompleteDeleteItem(members[i].Item, members[i].ProposalId, partitionId);
-
-                responses.AddRange(await Task.WhenAll(completes));
-            }
-            else
-            {
-                bool transient = IsTransientRaftStatus(status);
-
-                Task[] releases = new Task[members.Count];
-                for (int i = 0; i < members.Count; i++)
-                    releases[i] = ReleaseStagedProposal(members[i].Item.Key ?? "", members[i].ProposalId, partitionId, transient);
-
-                await Task.WhenAll(releases);
-
-                KeyValueResponseType outcome = transient ? KeyValueResponseType.MustRetry : KeyValueResponseType.Errored;
-                foreach ((KahunaDeleteKeyValueRequestItem item, int _, byte[] _) in members)
-                    responses.Add(new() { Key = item.Key ?? "", Type = outcome, Revision = -1, Durability = KeyValueDurability.Persistent });
-            }
-        }
-
-        return responses;
-    }
-
-    /// <summary>Stages one persistent delete on its owning actor: validates + installs the replication intent
-    /// and returns the serialized tombstone proposal, partition, and proposal id (no Raft). Terminal on a
-    /// missing/already-deleted key or a conflict.</summary>
-    private async Task<KeyValueResponse?> StageDeleteItem(KahunaDeleteKeyValueRequestItem item)
-    {
-        KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.StageDelete,
-            item.TransactionId,
-            HLCTimestamp.Zero,
-            item.Key ?? "",
-            null,
-            null,
-            -1,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            item.Durability,
-            0,
-            0,
-            null
-        );
-
-        try
-        {
-            return await AskKeyValueActor(persistentKeyValuesRouter, request);
-        }
-        finally
-        {
-            KeyValueRequestPool.Return(request);
-        }
-    }
-
-    /// <summary>Applies a staged delete after its partition batch committed: CompleteProposal tombstones the
-    /// entry, clears the intent, and returns Deleted with the revision.</summary>
-    private async Task<KahunaDeleteKeyValueResponseItem> CompleteDeleteItem(KahunaDeleteKeyValueRequestItem item, int proposalId, int partitionId)
-    {
-        KeyValueRequest request = new(
-            KeyValueRequestType.CompleteProposal,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
-            item.Key ?? "",
-            null,
-            null,
-            -1,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            proposalId,
-            partitionId,
-            null
-        );
-
-        KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
-        if (response is null)
-            return new() { Key = item.Key ?? "", Type = KeyValueResponseType.Errored, Revision = -1, Durability = KeyValueDurability.Persistent };
-
-        return new()
-        {
-            Key = item.Key ?? "",
-            Type = response.Type,
-            Revision = response.Revision,
-            LastModified = response.Ticket,
-            Durability = KeyValueDurability.Persistent
-        };
-    }
 
     /// <summary>
     /// Set a timeout on key. After the timeout has expired, the key will automatically be deleted
@@ -6325,8 +5911,15 @@ internal sealed class KeyValuesManager : IDisposable
         return min;
     }
 
+    /// <summary>Observable async drain of the direct-write aggregator: rejects new writes, releases queued
+    /// ones retryably, and awaits in-flight batch settlement. Must run while the actor system and Raft are
+    /// still alive (before their disposal), so in-flight batches can report their outcome.</summary>
+    public Task DrainWritesAsync(TimeSpan timeout) => writeAggregator.StopAsync(timeout);
+
     public void Dispose()
     {
+        // Reject new writes and release any queued-but-not-dispatched ones retryably before tearing down.
+        writeAggregator.Stop();
         rangeMapStore.Dispose();
         snapshotFloorStore.Dispose();
         coordinatorDecisionStore.Dispose();

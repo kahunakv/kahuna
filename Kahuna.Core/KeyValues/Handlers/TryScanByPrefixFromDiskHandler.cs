@@ -48,7 +48,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise;
+        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
         // (prefix, -3, false) = non-snapshot prefix-from-disk scan.
         // Snapshot scans are not registered in PendingReads (no coalescing).

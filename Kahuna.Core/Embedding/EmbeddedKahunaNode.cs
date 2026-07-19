@@ -86,6 +86,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             MaxEntriesPerActor = options.MaxEntriesPerActor,
             MaxBytesPerActor = options.MaxBytesPerActor,
             CollectBatchMax = options.CollectBatchMax,
+            KeyValueWriteLingerMs = options.KeyValueWriteLingerMs,
+            KeyValueWriteMaxBatchItems = options.KeyValueWriteMaxBatchItems,
+            KeyValueWriteMaxBatchBytes = options.KeyValueWriteMaxBatchBytes,
+            KeyValueWriteMaxQueuedItemsPerPartition = options.KeyValueWriteMaxQueuedItemsPerPartition,
+            KeyValueWriteMaxQueuedBytesPerPartition = options.KeyValueWriteMaxQueuedBytesPerPartition,
+            KeyValueWriteMaxQueueDelayMs = options.KeyValueWriteMaxQueueDelayMs,
+            MaxKeyValueWriteAggregatorInboxSize = options.MaxKeyValueWriteAggregatorInboxSize,
             RevisionRetention = options.RevisionRetention,
             DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay,
             PersistentRevisionRetentionCount = options.PersistentRevisionRetentionCount,
@@ -110,7 +117,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         }, options.WalPath);
 
         this.standaloneComm = new();
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger, options.WriteBatchExecutorDecorator);
     }
 
     /// <summary>
@@ -176,6 +183,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             MaxEntriesPerActor = options.MaxEntriesPerActor,
             MaxBytesPerActor = options.MaxBytesPerActor,
             CollectBatchMax = options.CollectBatchMax,
+            KeyValueWriteLingerMs = options.KeyValueWriteLingerMs,
+            KeyValueWriteMaxBatchItems = options.KeyValueWriteMaxBatchItems,
+            KeyValueWriteMaxBatchBytes = options.KeyValueWriteMaxBatchBytes,
+            KeyValueWriteMaxQueuedItemsPerPartition = options.KeyValueWriteMaxQueuedItemsPerPartition,
+            KeyValueWriteMaxQueuedBytesPerPartition = options.KeyValueWriteMaxQueuedBytesPerPartition,
+            KeyValueWriteMaxQueueDelayMs = options.KeyValueWriteMaxQueueDelayMs,
+            MaxKeyValueWriteAggregatorInboxSize = options.MaxKeyValueWriteAggregatorInboxSize,
             RevisionRetention = options.RevisionRetention,
             DirtyObjectsWriterDelay = options.DirtyObjectsWriterDelay,
             PersistentRevisionRetentionCount = options.PersistentRevisionRetentionCount,
@@ -200,7 +214,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         }, options.WalPath);
 
         this.standaloneComm = null;
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger, options.WriteBatchExecutorDecorator);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -261,6 +275,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Raft.OnLogRestored -= Kahuna.OnLogRestored;
             Raft.OnReplicationReceived -= Kahuna.OnReplicationReceived;
             Raft.OnReplicationError -= Kahuna.OnReplicationError;
+
+            // Drain the direct-write aggregator FIRST, while its lane actors and Raft are still alive: it
+            // releases queued writes retryably and awaits in-flight batches settling their Raft round trip.
+            // Disposing the actor system or Raft before this would strand queued items and drop in-flight
+            // completions on now-dead lanes.
+            if (Kahuna is KahunaManager kahunaManager)
+                await kahunaManager.DrainKeyValueWritesAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
             // Skip the graceful-leave commit (CommitGracefulLeaveAsync) — in a
             // single-node embedded cluster there are no peers to notify, and the
