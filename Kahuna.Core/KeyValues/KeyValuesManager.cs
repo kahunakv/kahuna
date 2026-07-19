@@ -150,7 +150,11 @@ internal sealed class KeyValuesManager : IDisposable
 
     internal (int PartitionId, long Generation) LocateDurablePartition(string key) => locator.LocateRange(key);
 
+    private readonly bool durableIntentTransactionsEnabled;
+
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
+
+    private readonly IActorRef<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest> preparedIntentRecovery;
 
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
 
@@ -240,6 +244,7 @@ internal sealed class KeyValuesManager : IDisposable
         // resolvers are attached below once the locator exists.
         transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
         preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        durableIntentTransactionsEnabled = configuration.EnableDurableIntentTransactions;
 
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
         writeAggregator = new Writes.PartitionWriteAggregator(
@@ -309,6 +314,13 @@ internal sealed class KeyValuesManager : IDisposable
         // leader so unable to replicate its own progress). Spawned after the locator so it can resolve anchors.
         coordinatorDecisionRecovery = actorSystem.Spawn<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest>(
             "coordinator-decision-recovery",
+            this,
+            configuration,
+            logger
+        );
+
+        preparedIntentRecovery = actorSystem.Spawn<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest>(
+            "prepared-intent-recovery",
             this,
             configuration,
             logger
@@ -4477,6 +4489,84 @@ internal sealed class KeyValuesManager : IDisposable
     /// completed here on the anchor partition's leader. Idempotent against a racing request-path drive: the
     /// participant commit, receipt forget, decision upsert, and remove are all idempotent.
     /// </summary>
+    /// <summary>
+    /// Participant-side recovery for the durable-intent path: on each partition this node leads, resolves due
+    /// unresolved prepared intents to their canonical decision (presuming abort only past the decision deadline,
+    /// for anchors this node also leads). No-op unless the durable-intent path is enabled. Runs off the request
+    /// path; idempotent with a concurrent finalize.
+    /// </summary>
+    internal async Task RecoverPreparedIntents(CancellationToken cancellationToken)
+    {
+        if (!durableIntentTransactionsEnabled || preparedIntentStore.Count == 0)
+            return;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        IReadOnlyList<PreparedIntent> due = preparedIntentStore.DueForRecovery(now);
+        if (due.Count == 0)
+            return;
+
+        HashSet<int> partitions = [];
+        foreach (PreparedIntent intent in due)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            int partitionId = locator.LocateRange(intent.Key).PartitionId;
+            if (partitions.Contains(partitionId))
+                continue;
+            if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+                continue;
+
+            partitions.Add(partitionId);
+        }
+
+        if (partitions.Count == 0)
+            return;
+
+        DurableTransactionRecovery recovery = BuildPreparedIntentRecovery();
+        foreach (int partitionId in partitions)
+        {
+            try
+            {
+                await recovery.SweepAsync(partitionId, now, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Prepared-intent recovery sweep failed for partition {Partition}", partitionId);
+            }
+        }
+    }
+
+    private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(
+        preparedIntentStore,
+        ReplicateDurableAsync,
+        // Local anchor record lookup: authoritative only when this node leads the anchor partition (otherwise the
+        // record lives on a remote leader). A local miss falls to the drive-abort path, which is likewise gated on
+        // anchor leadership, so a remote anchor is left for its own leader — never presumed-aborted from stale
+        // local state. Cross-node participant resolution (an inter-node record lookup) is a follow-up.
+        (transactionId, epoch, _, _) => Task.FromResult(transactionRecordStore.Get(transactionId, epoch)),
+        DriveDurableAbortAsync);
+
+    private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
+        (await raft.ReplicateLogs(partitionId, logType, data, autoCommit: true, expectedGeneration: 0, cancellationToken).ConfigureAwait(false)).Success;
+
+    private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
+    {
+        int anchorPartition = locator.LocateRange(anchorKey).PartitionId;
+
+        // Only drive/read the decision when this node leads the anchor partition; otherwise the local record store
+        // is not authoritative and applying an abort locally could diverge from the real remote decision.
+        if (raft.Joined && !await raft.AmILeader(anchorPartition, cancellationToken).ConfigureAwait(false))
+            return null;
+
+        byte[] delta = TransactionRecordStore.SerializeDelta([abort]);
+        if (await ReplicateDurableAsync(anchorPartition, ReplicationTypes.TransactionRecord, delta, cancellationToken).ConfigureAwait(false))
+            transactionRecordStore.Replicate(anchorPartition, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = delta });
+
+        return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
+    }
+
     internal async Task RecoverOutstandingDecisions(TimeSpan retentionTtl, CancellationToken cancellationToken)
     {
         IReadOnlyList<CoordinatorDecisionRecord> all = coordinatorDecisionStore.SnapshotAll();

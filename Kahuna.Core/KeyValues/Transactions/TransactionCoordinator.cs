@@ -1256,65 +1256,32 @@ internal sealed class TransactionCoordinator
         if (context.ModifiedKeys is null || context.RecordAnchorKey is null)
             return false;
 
-        if (!context.ModifiedKeys.All(static k => k.Item2 == KeyValueDurability.Persistent))
-            return false;
-
         List<KeyValueTransactionResultValue>? values = context.ModifiedResult?.Values;
         if (values is null || values.Count == 0)
             return false;
 
         HLCTimestamp txId = context.TransactionId;
+
+        // The finalize epoch is stable per transaction id: a retried finalize re-drives the same canonical record
+        // (the record CAS and intent idempotency converge), so it must not mint a second record for the same
+        // transaction. A distinct epoch would only be needed if the manifest itself could change between attempts,
+        // which it cannot — the write-set is frozen at commit.
         const long epoch = 1;
+
         HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DurableDecisionDeadlineMarginMs, commitTimestamp.C);
-        string anchorKey = context.RecordAnchorKey;
 
-        List<TransactionParticipantRef> manifest = context.ModifiedKeys
-            .Select(k => new TransactionParticipantRef(k.Item1, k.Item2))
-            .ToList();
-
-        long manifestHash = TransactionManifest.ComputeHash(txId, epoch, anchorKey, commitTimestamp, manifest);
-
-        // One intent per modified key, sourced from its staged result value; every modified key must be covered.
-        Dictionary<string, KeyValueTransactionResultValue> byKey = new(values.Count);
+        Dictionary<string, StagedMutation> stagedByKey = new(values.Count);
         foreach (KeyValueTransactionResultValue value in values)
             if (value.Key is not null)
-                byKey[value.Key] = value;
+                stagedByKey[value.Key] = new StagedMutation(value.Value, value.Revision, value.Expires);
 
-        Dictionary<int, List<PreparedIntent>> byPartition = [];
-        foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
-        {
-            if (!byKey.TryGetValue(key, out KeyValueTransactionResultValue? value))
-                return false;
+        if (!DurableFinalizeInputBuilder.TryBuild(
+                txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
+                commitTimestamp, decisionDeadline, context.ModifiedKeys, stagedByKey,
+                key => manager.LocateDurablePartition(key).PartitionId, out input))
+            return false;
 
-            PreparedIntent intent = new(
-                txId, epoch, key, manifestHash, anchorKey, commitTimestamp,
-                State: value.Value is not null ? KeyValueState.Set : KeyValueState.Deleted,
-                Value: value.Value,
-                Bucket: null,
-                Revision: value.Revision,
-                Expires: value.Expires,
-                NoRevision: false,
-                BaseRevision: value.Revision - 1,
-                BaseState: KeyValueState.Set,
-                RecoveryDeadline: decisionDeadline,
-                Resolution: PreparedIntentResolution.Pending);
-
-            int partitionId = manager.LocateDurablePartition(key).PartitionId;
-            if (!byPartition.TryGetValue(partitionId, out List<PreparedIntent>? list))
-                byPartition[partitionId] = list = [];
-            list.Add(intent);
-        }
-
-        int anchorPartitionId = manager.LocateDurablePartition(anchorKey).PartitionId;
-
-        List<DurablePartitionPrepare> partitions = byPartition
-            .Select(kvp => new DurablePartitionPrepare(kvp.Key, kvp.Value))
-            .ToList();
-
-        input = new DurableFinalizeInput(
-            txId, epoch, context.CoordinatorKey ?? anchorKey, anchorKey, anchorPartitionId,
-            commitTimestamp, decisionDeadline, manifestHash, manifest, partitions, CreatedAt: txId);
         opId = commitTimestamp;
         return true;
     }

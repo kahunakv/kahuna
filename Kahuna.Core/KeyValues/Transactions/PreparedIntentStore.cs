@@ -108,6 +108,24 @@ internal sealed class PreparedIntentStore
         return due;
     }
 
+    /// <summary>Due pending intents whose key routes to <paramref name="partitionId"/>. When no partition resolver
+    /// is attached (the in-memory/test configuration), every due intent is returned.</summary>
+    public IReadOnlyList<PreparedIntent> DueForRecovery(HLCTimestamp now, int partitionId)
+    {
+        Func<string, int>? resolver = resolvePartition;
+        List<PreparedIntent> due = [];
+        foreach (PreparedIntent intent in intents.Values)
+        {
+            if (!intent.IsPending || intent.RecoveryDeadline == HLCTimestamp.Zero || intent.RecoveryDeadline > now)
+                continue;
+            if (resolver is not null && resolver(intent.Key) != partitionId)
+                continue;
+            due.Add(intent);
+        }
+
+        return due;
+    }
+
     public int Count => intents.Count;
 
     private static string KeyOf(PreparedIntentCommand command) => command switch
