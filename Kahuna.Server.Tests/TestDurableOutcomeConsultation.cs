@@ -9,15 +9,18 @@ using Kommander.Time;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Acceptance tests for consulting the durable coordinator decision when the in-memory session is gone (Phase
-/// 6.5): a repeated commit or rollback routed by the handle's record anchor reads that partition's decision
-/// record — <c>Completed</c> → <c>Committed</c>, <c>CommitDecided</c> → <c>MustRetry</c> — so a retry works even
-/// after the coordinating session was evicted or its node failed; a stale unanchored handle or an expired record
-/// stays unknown <c>Errored</c>; and a rollback cannot override a durably decided commit.
+/// Acceptance tests for consulting the durable-intent canonical transaction record when the in-memory session is
+/// gone: a repeated commit or rollback reads the resident record for the handle's transaction id — a committed
+/// record answers <c>Committed</c>, an undecided record answers <c>MustRetry</c> (recovery finishes it), a
+/// conflict-aborted record answers <c>Aborted</c> — so a retry works even after the coordinating session was
+/// evicted or its node failed; a transaction with no resident record stays unknown <c>Errored</c>; and a rollback
+/// cannot override a durably committed transaction.
 /// </summary>
 [Collection("ClusterTests")]
 public sealed class TestDurableOutcomeConsultation
 {
+    private const long Epoch = 1;
+
     private static EmbeddedKahunaOptions EmbeddedOptions() => new()
     {
         Storage = "memory",
@@ -25,23 +28,35 @@ public sealed class TestDurableOutcomeConsultation
         InitialPartitions = 1,
     };
 
-    private static CoordinatorParticipant Participant(string key, bool acked) =>
-        new(key, KeyValueDurability.Persistent, HLCTimestamp.Zero, acked, acked);
+    private static TransactionRecordStore Store(EmbeddedKahunaNode node) =>
+        ((KahunaManager)node.Kahuna).DurableTransactionRecordStore;
 
-    private static async Task Seed(EmbeddedKahunaNode node, HLCTimestamp txId, string anchor, CoordinatorDecisionStatus status)
+    // Seeds the resident canonical record for a transaction with the given terminal decision (or leaves it
+    // undecided when decision is null), mirroring what the finalize/recovery apply would install.
+    private static void Seed(EmbeddedKahunaNode node, HLCTimestamp txId, string anchor, TransactionDecision? decision)
     {
-        HLCTimestamp completedAt = status == CoordinatorDecisionStatus.Completed ? txId : HLCTimestamp.Zero;
-        bool acked = status == CoordinatorDecisionStatus.Completed;
-        CoordinatorDecisionRecord record = new(
-            txId, "lost-coord", anchor, txId, status,
-            [Participant(anchor, acked)], [], txId, completedAt);
-        await node.Kahuna.ImportCoordinatorDecisions([record]);
+        HLCTimestamp commitTs = new(txId.N, txId.L + 1, txId.C);
+        HLCTimestamp deadline = new(commitTs.N, commitTs.L + 100_000, commitTs.C);
+        List<TransactionParticipantRef> manifest = [new TransactionParticipantRef(anchor, KeyValueDurability.Persistent)];
+        long manifestHash = TransactionManifest.ComputeHash(txId, Epoch, anchor, commitTs, manifest);
+
+        TransactionRecordStore store = Store(node);
+        store.Apply(new InitializeTransactionCommand(txId, Epoch, "lost-coord", anchor, commitTs, deadline, manifestHash, manifest, commitTs, txId));
+
+        switch (decision)
+        {
+            case TransactionDecision.Commit:
+                store.Apply(new CommitTransactionCommand(txId, Epoch, manifestHash, commitTs, commitTs));
+                break;
+            case TransactionDecision.Abort:
+                store.Apply(new AbortTransactionCommand(txId, Epoch, manifestHash, TransactionAbortClass.Conflict, commitTs, commitTs, anchor, commitTs, deadline, txId));
+                break;
+            // null → leave Undecided
+        }
     }
 
-    // ── A lost session with a Completed record answers Committed on retry ──────────────────────────────────
-
     [Fact]
-    public async Task MissingSession_CompletedRecord_CommitReturnsCommitted()
+    public async Task MissingSession_CommittedRecord_CommitReturnsCommitted()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = new(EmbeddedOptions());
@@ -49,9 +64,9 @@ public sealed class TestDurableOutcomeConsultation
 
         HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         const string anchor = "consult-done:aaa";
-        await Seed(node, txId, anchor, CoordinatorDecisionStatus.Completed);
+        Seed(node, txId, anchor, TransactionDecision.Commit);
 
-        // A handle for a session that does not exist in memory, carrying its record anchor.
+        // A handle for a session that does not exist in memory.
         TransactionHandle handle = new(txId, "lost-coord", anchor);
         (KeyValueResponseType type, string? returnedAnchor) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
 
@@ -59,10 +74,8 @@ public sealed class TestDurableOutcomeConsultation
         Assert.Equal(anchor, returnedAnchor);
     }
 
-    // ── A lost session with a still-CommitDecided record answers MustRetry on retry ────────────────────────
-
     [Fact]
-    public async Task MissingSession_CommitDecidedRecord_CommitReturnsMustRetry()
+    public async Task MissingSession_UndecidedRecord_CommitReturnsMustRetry()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = new(EmbeddedOptions());
@@ -70,7 +83,7 @@ public sealed class TestDurableOutcomeConsultation
 
         HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         const string anchor = "consult-pending:aaa";
-        await Seed(node, txId, anchor, CoordinatorDecisionStatus.CommitDecided);
+        Seed(node, txId, anchor, decision: null);
 
         TransactionHandle handle = new(txId, "lost-coord", anchor);
         (KeyValueResponseType type, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
@@ -78,7 +91,22 @@ public sealed class TestDurableOutcomeConsultation
         Assert.Equal(KeyValueResponseType.MustRetry, type);
     }
 
-    // ── A lost session with no record (never created / retention expired) is unknown Errored ───────────────
+    [Fact]
+    public async Task MissingSession_ConflictAbortedRecord_CommitReturnsAborted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
+        await node.StartAsync(ct);
+
+        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+        const string anchor = "consult-abort:aaa";
+        Seed(node, txId, anchor, TransactionDecision.Abort);
+
+        TransactionHandle handle = new(txId, "lost-coord", anchor);
+        (KeyValueResponseType type, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+
+        Assert.Equal(KeyValueResponseType.Aborted, type);
+    }
 
     [Fact]
     public async Task MissingSession_NoRecord_CommitReturnsErrored()
@@ -95,46 +123,24 @@ public sealed class TestDurableOutcomeConsultation
         Assert.Equal(KeyValueResponseType.Errored, type);
     }
 
-    // ── A stale unanchored handle cannot locate a lost session, even when a record exists ──────────────────
-
     [Fact]
-    public async Task MissingSession_UnanchoredHandle_CommitReturnsErrored()
+    public async Task MissingSession_Rollback_CannotOverrideCommittedTransaction()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = new(EmbeddedOptions());
         await node.StartAsync(ct);
 
-        HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
-        const string anchor = "consult-unanchored:aaa";
-        await Seed(node, txId, anchor, CoordinatorDecisionStatus.Completed);
-
-        // The retry lost the anchor: it cannot scan the cluster by transaction id, so the outcome is unknown.
-        TransactionHandle handle = new(txId, "lost-coord");
-        (KeyValueResponseType type, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
-
-        Assert.Equal(KeyValueResponseType.Errored, type);
-    }
-
-    // ── A rollback cannot override a durably decided commit ────────────────────────────────────────────────
-
-    [Fact]
-    public async Task MissingSession_Rollback_CannotOverrideDecidedCommit()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        await using EmbeddedKahunaNode node = new(EmbeddedOptions());
-        await node.StartAsync(ct);
-
-        // Completed decision → rollback of the lost session must report Committed, not RolledBack/Errored.
+        // Committed record → rollback of the lost session must report Committed, not RolledBack/Errored.
         HLCTimestamp doneTx = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         const string doneAnchor = "consult-rb-done:aaa";
-        await Seed(node, doneTx, doneAnchor, CoordinatorDecisionStatus.Completed);
+        Seed(node, doneTx, doneAnchor, TransactionDecision.Commit);
         KeyValueResponseType doneRollback = await node.Kahuna.LocateAndRollbackTransaction(new(doneTx, "lost-coord", doneAnchor), ct);
         Assert.Equal(KeyValueResponseType.Committed, doneRollback);
 
-        // CommitDecided decision → rollback must report MustRetry (recovery finishes the commit), not roll back.
+        // Undecided record → rollback must report MustRetry (recovery finishes it), not roll back.
         HLCTimestamp pendingTx = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         const string pendingAnchor = "consult-rb-pending:aaa";
-        await Seed(node, pendingTx, pendingAnchor, CoordinatorDecisionStatus.CommitDecided);
+        Seed(node, pendingTx, pendingAnchor, decision: null);
         KeyValueResponseType pendingRollback = await node.Kahuna.LocateAndRollbackTransaction(new(pendingTx, "lost-coord", pendingAnchor), ct);
         Assert.Equal(KeyValueResponseType.MustRetry, pendingRollback);
     }

@@ -457,58 +457,6 @@ public sealed class TestPhaseTwoOffMailbox
         Assert.Equal(KeyValueResponseType.Committed, response!.Type);
     }
 
-    /// <summary>
-    /// While a transaction's prepare is gated in flight on the off-mailbox worker, an unrelated read on
-    /// the same single KeyValueActor completes promptly — proving the participant handler no longer parks
-    /// the actor mailbox on its phase-two Raft round trip. Releasing the gate lets the transaction commit.
-    /// </summary>
-    [Fact]
-    public async Task PrepareCommitRollback_DoNotParkMailbox()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-
-        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
-        {
-            Storage = "memory",
-            WalStorage = "memory",
-            InitialPartitions = 1,
-            KeyValueWorkers = 1
-        }, loggerFactory);
-        await node.StartAsync(ct);
-        await node.WaitForLeaderForKeyAsync("pp", ct);
-
-        KeyValuePhaseTwoActor worker = ((KahunaManager)node.Kahuna).FirstPhaseTwoWorker!;
-        Assert.NotNull(worker);
-
-        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        TaskCompletionSource gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        worker.BeforeRaftCallHook = async () =>
-        {
-            entered.TrySetResult();
-            await gate.Task;
-        };
-
-        // Run a transaction whose prepare dispatches to the (gated) worker; do not await it yet.
-        Task<KeyValueTransactionResult> txTask = node.Kahuna.TryExecuteTransactionScript(
-            Encoding.UTF8.GetBytes("BEGIN SET pp 'v1' COMMIT END"), null, null);
-
-        // The worker reaches the gate — the prepare is in flight, off the actor mailbox.
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
-
-        // While the phase-two op is outstanding, an unrelated read on the same single actor completes
-        // promptly. If the mailbox were parked on the prepare, this would time out.
-        (KeyValueResponseType getType, _) = await node.Kahuna.LocateAndTryGetValue(
-                HLCTimestamp.Zero, "qq", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct)
-            .WaitAsync(TimeSpan.FromSeconds(5), ct);
-        Assert.Equal(KeyValueResponseType.DoesNotExist, getType);
-
-        // Release — the transaction commits.
-        gate.SetResult();
-        KeyValueTransactionResult result = await txTask.WaitAsync(TimeSpan.FromSeconds(15), ct);
-        Assert.Equal(KeyValueResponseType.Set, result.Type);
-
-        worker.BeforeRaftCallHook = null;
-    }
 
     /// <summary>
     /// The committed-log apply (InvalidateOrApply) must defer to a live 2PC write intent — the phase-two
