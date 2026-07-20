@@ -1,6 +1,7 @@
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Commands;
 
@@ -39,8 +40,8 @@ internal sealed class DeleteManyCommand : BaseCommand
 
             if (response.Type == KeyValueResponseType.Deleted)
             {
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((response.Key ?? "", response.Durability));
+                context.RecordModifiedKey((response.Key ?? "", response.Durability));
+                context.StageMutation(response.Key ?? "", null, response.Revision, HLCTimestamp.Zero); // tombstone
             }
 
             context.ModifiedResult = new()

@@ -30,6 +30,11 @@ internal sealed class SetManyCommand : BaseCommand
         
         List<KahunaSetKeyValueResponseItem> responses = await manager.LocateAndTrySetManyKeyValue(arguments, cancellationToken);
 
+        Dictionary<string, KahunaSetKeyValueRequestItem> argumentsByKey = new(arguments.Count);
+        foreach (KahunaSetKeyValueRequestItem argument in arguments)
+            if (argument.Key is not null)
+                argumentsByKey[argument.Key] = argument;
+
         foreach (KahunaSetKeyValueResponseItem response in responses)
         {
             switch (response.Type)
@@ -53,8 +58,12 @@ internal sealed class SetManyCommand : BaseCommand
                 ]
             };
             
-            context.ModifiedKeys ??= [];
-            context.ModifiedKeys.Add((response.Key ?? "", response.Durability));
+            context.RecordModifiedKey((response.Key ?? "", response.Durability));
+
+            // Stage the value for the durable-intent path (non-TTL only, mirroring the single set).
+            if (response.Type == KeyValueResponseType.Set && response.Key is not null
+                && argumentsByKey.TryGetValue(response.Key, out KahunaSetKeyValueRequestItem? argument) && argument.ExpiresMs <= 0)
+                context.StageMutation(response.Key, argument.Value, response.Revision, HLCTimestamp.Zero);
         }
         
         if (context.ModifiedResult is null)

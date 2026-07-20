@@ -48,8 +48,8 @@ internal sealed class DeleteCommand : BaseCommand
         switch (type)
         {
             case KeyValueResponseType.Deleted:
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((keyName, durability));
+                context.RecordModifiedKey((keyName, durability));
+                context.StageMutation(keyName, null, revision, HLCTimestamp.Zero); // null value = tombstone
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:

@@ -150,6 +150,39 @@ internal sealed class KeyValuesManager : IDisposable
 
     internal (int PartitionId, long Generation) LocateDurablePartition(string key) => locator.LocateRange(key);
 
+    /// <summary>
+    /// Replicates a durable-intent 2PC delta through the shared partition write scheduler so it coalesces with
+    /// concurrent transactions' records to the same partition into one <c>ReplicateEntries</c> proposal. Returns
+    /// true once the batch carrying it committed; false on scheduler backpressure (the finalizer maps that to a
+    /// retryable outcome). The caller applies the committed delta to its local store, matching the direct-write
+    /// path where the producer applies on completion.
+    /// </summary>
+    internal async Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Writes.DurableProposalSubmission submission = new(
+            partitionId,
+            [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0)],
+            completion);
+
+        if (!writeAggregator.TryEnqueue(submission))
+            return false;
+
+        using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
+        return await submission.Committed.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Applies a durable resolution's materialized key/value record to the local (leader) KV state — the owning
+    /// actor's cache via InvalidateOrApply and the background writer for persistence, exactly as the replicator
+    /// applies a committed <c>kv</c> log on a follower. The leader applies direct writes through CompleteProposal,
+    /// not the replication callback, so a durable-materialized value that is only replicated (not proposed through
+    /// an actor) would never land in the leader's store without this. Idempotent: the replicator's revision guard
+    /// no-ops a re-apply.
+    /// </summary>
+    internal void ApplyMaterializedKeyValue(int partitionId, byte[] kvRecord) =>
+        replicator.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.KeyValues, LogData = kvRecord }, forceResident: true);
+
     private readonly bool durableIntentTransactionsEnabled;
 
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
@@ -250,7 +283,6 @@ internal sealed class KeyValuesManager : IDisposable
         writeAggregator = new Writes.PartitionWriteAggregator(
             actorSystem,
             writeBatchExecutorDecorator?.Invoke(realBatchExecutor) ?? realBatchExecutor,
-            new Writes.KeyValueActorCompletionRouter(),
             new Writes.PartitionWriteAggregatorOptions
             {
                 LingerMs = configuration.KeyValueWriteLingerMs,

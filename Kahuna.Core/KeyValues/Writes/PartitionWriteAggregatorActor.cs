@@ -32,8 +32,6 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
     private readonly IPartitionBatchExecutor executor;
 
-    private readonly IWriteCompletionRouter completionRouter;
-
     private readonly PartitionAdmissionRegistry admission;
 
     private readonly PartitionWriteAggregatorOptions options;
@@ -57,7 +55,6 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     public PartitionWriteAggregatorActor(
         IActorContext<PartitionWriteAggregatorActor, PartitionWriteMessage, PartitionWriteAck> context,
         IPartitionBatchExecutor executor,
-        IWriteCompletionRouter completionRouter,
         PartitionAdmissionRegistry admission,
         PartitionWriteAggregatorOptions options,
         IWriteRangeFence fence,
@@ -67,7 +64,6 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     {
         this.self = context.Self;
         this.executor = executor;
-        this.completionRouter = completionRouter;
         this.admission = admission;
         this.options = options;
         this.fence = fence;
@@ -104,7 +100,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         return Task.FromResult<PartitionWriteAck?>(PartitionWriteAck.Instance);
     }
 
-    private void OnSubmit(KeyValueProposalRequest item)
+    private void OnSubmit(IProposalSubmission item)
     {
         // A submission that raced past shutdown is released retryably rather than stranded.
         if (stopping)
@@ -158,12 +154,12 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         if (!message.Success)
             LogFailureRateLimited(message.PartitionId, message.Batch!.Count, message.Status);
 
-        foreach (KeyValueProposalRequest item in message.Batch!)
+        foreach (IProposalSubmission item in message.Batch!)
         {
             if (message.Success)
-                completionRouter.Complete(item);
+                item.Complete();
             else
-                completionRouter.Release(item, message.Transient);
+                item.Release(message.Transient);
 
             admission.Release(message.PartitionId, item.ByteLength);
         }
@@ -186,7 +182,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // batches are left to report their real Raft outcome via BatchComplete.
         foreach ((int partitionId, PartitionWriteState state) in states)
         {
-            foreach (KeyValueProposalRequest item in state.DrainPending())
+            foreach (IProposalSubmission item in state.DrainPending())
             {
                 PartitionWriteAggregatorMetrics.RejectedStopping();
                 ReleaseItem(partitionId, item, transient: true);
@@ -205,14 +201,14 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         while (true)
         {
-            List<KeyValueProposalRequest> selected = state.SelectBatch(options.MaxBatchItems, options.MaxBatchBytes);
+            List<IProposalSubmission> selected = state.SelectBatch(options.MaxBatchItems, options.MaxBatchBytes);
             if (selected.Count == 0)
                 return;
 
             long now = NowMs();
-            List<KeyValueProposalRequest> valid = new(selected.Count);
+            List<IProposalSubmission> valid = new(selected.Count);
 
-            foreach (KeyValueProposalRequest item in selected)
+            foreach (IProposalSubmission item in selected)
             {
                 // Release queue-age-expired items and key-range items whose descriptor moved since admission,
                 // individually and retryably, rather than proposing them or letting them fail their siblings.
@@ -221,7 +217,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                     PartitionWriteAggregatorMetrics.ReleasedQueueExpired();
                     ReleaseItem(partitionId, item, transient: true);
                 }
-                else if (fence.IsStale(item.Key, item.FenceGeneration, item.PartitionId))
+                else if (item.IsStale(fence))
                 {
                     PartitionWriteAggregatorMetrics.ReleasedFenceStale();
                     ReleaseItem(partitionId, item, transient: true);
@@ -256,24 +252,29 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             }
 
             long batchBytes = 0;
-            byte[][] payloads = new byte[valid.Count][];
+            // One heterogeneous proposal: flatten each submission's ordered bundle in submission order, keeping
+            // every entry's producer log type. A submission's entries are contiguous and never split — that is
+            // what makes a multi-entry submission an atomic ordered bundle. Direct writes contribute one entry.
+            List<RaftProposalEntry> entryList = new(valid.Count);
             for (int i = 0; i < valid.Count; i++)
             {
-                payloads[i] = valid[i].SerializedMessage;
+                entryList.AddRange(valid[i].Entries);
                 batchBytes += valid[i].ByteLength;
             }
 
-            PartitionWriteAggregatorMetrics.BatchDispatched(valid.Count, batchBytes, now - valid[0].EnqueueTicks);
+            RaftProposalEntry[] entries = [.. entryList];
+
+            PartitionWriteAggregatorMetrics.BatchDispatched(entries.Length, batchBytes, now - valid[0].EnqueueTicks);
             admission.IncInFlight();
 
-            _ = RunBatch(partitionId, valid, payloads);
+            _ = RunBatch(partitionId, valid, entries);
             return;
         }
     }
 
     /// <summary>Detached Raft round trip for one batch. Owns only the immutable batch + payloads; never touches
     /// lane state. Converts every failure into a normal completion and sends it back as priority control.</summary>
-    private async Task RunBatch(int partitionId, IReadOnlyList<KeyValueProposalRequest> batch, byte[][] payloads)
+    private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries)
     {
         bool success;
         bool threw = false;
@@ -282,13 +283,13 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         try
         {
-            RaftReplicationResult result = await executor.ReplicateAsync(partitionId, payloads);
+            RaftReplicationResult result = await executor.ReplicateAsync(partitionId, entries);
             success = result.Success;
             status = result.Status;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Batched write propose threw Partition={Partition} Count={Count}", partitionId, payloads.Length);
+            logger.LogWarning(ex, "Batched write propose threw Partition={Partition} Count={Count}", partitionId, entries.Length);
             success = false;
             status = RaftOperationStatus.Errored;
             threw = true;
@@ -304,16 +305,16 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     private void SweepExpired(int partitionId, PartitionWriteState state)
     {
         long now = NowMs();
-        foreach (KeyValueProposalRequest item in state.PopExpired(now, options.MaxQueueDelayMs))
+        foreach (IProposalSubmission item in state.PopExpired(now, options.MaxQueueDelayMs))
         {
             PartitionWriteAggregatorMetrics.ReleasedQueueExpired();
             ReleaseItem(partitionId, item, transient: true);
         }
     }
 
-    private void ReleaseItem(int partitionId, KeyValueProposalRequest item, bool transient)
+    private void ReleaseItem(int partitionId, IProposalSubmission item, bool transient)
     {
-        completionRouter.Release(item, transient);
+        item.Release(transient);
         admission.Release(partitionId, item.ByteLength);
     }
 

@@ -6,6 +6,7 @@ using Kommander.Time;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
+using Kahuna.Server.Replication;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using TransactionHandle = Kahuna.Shared.KeyValue.TransactionHandle;
@@ -1262,8 +1263,20 @@ internal sealed class TransactionCoordinator
         }
     }
 
-    private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
-        (await raft.ReplicateLogs(partitionId, logType, data, autoCommit: true, expectedGeneration: 0, cancellationToken).ConfigureAwait(false)).Success;
+    // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
+    // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
+    // batching). The finalizer applies committed record/intent deltas to its local stores; a resolution's
+    // materialized key/value record has no such store, and the leader does not apply it through the replication
+    // callback, so it is applied to the leader's KV state explicitly here after it commits.
+    private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+    {
+        bool committed = await manager.ReplicateDurableThroughScheduler(partitionId, logType, data, cancellationToken).ConfigureAwait(false);
+
+        if (committed && logType == ReplicationTypes.KeyValues)
+            manager.ApplyMaterializedKeyValue(partitionId, data);
+
+        return committed;
+    }
 
     /// <summary>
     /// Builds the frozen finalize input from the transaction's staged persistent mutations, grouping intents by
@@ -1278,8 +1291,11 @@ internal sealed class TransactionCoordinator
         if (context.ModifiedKeys is null || context.RecordAnchorKey is null)
             return false;
 
-        List<KeyValueTransactionResultValue>? values = context.ModifiedResult?.Values;
-        if (values is null || values.Count == 0)
+        // Staged values are accumulated per key across every mutation command (not from ModifiedResult, which
+        // reflects only the last command). A modified key missing here — an extend, a TTL set, or any mutation the
+        // coordinator cannot stage losslessly — makes TryBuild fall back to the ticket path.
+        Dictionary<string, StagedValue>? staged = context.StagedMutations;
+        if (staged is null || staged.Count == 0)
             return false;
 
         HLCTimestamp txId = context.TransactionId;
@@ -1293,10 +1309,9 @@ internal sealed class TransactionCoordinator
         HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DurableDecisionDeadlineMarginMs, commitTimestamp.C);
 
-        Dictionary<string, StagedMutation> stagedByKey = new(values.Count);
-        foreach (KeyValueTransactionResultValue value in values)
-            if (value.Key is not null)
-                stagedByKey[value.Key] = new StagedMutation(value.Value, value.Revision, value.Expires);
+        Dictionary<string, StagedMutation> stagedByKey = new(staged.Count);
+        foreach ((string key, StagedValue value) in staged)
+            stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.Expires);
 
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,

@@ -4,6 +4,7 @@ using Kahuna;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Writes;
+using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Utils;
 using Kommander;
@@ -21,23 +22,68 @@ namespace Kahuna.Server.Tests;
 /// </summary>
 public sealed class TestPartitionWriteAggregator
 {
-    private static KeyValueProposalRequest Item(int partitionId, int proposalId, int bytes = 16, long ageMs = 0, string? key = null) =>
-        new(
-            key: key ?? "k" + proposalId,
-            partitionId: partitionId,
-            proposalId: proposalId,
-            durability: KeyValueDurability.Persistent,
-            fenceGeneration: 0,
-            serializedMessage: new byte[bytes],
-            keyValueActor: null!,
-            promise: new TaskCompletionSource<KeyValueResponse?>(),
-            enqueueTicks: Environment.TickCount64 - ageMs
-        );
+    private static RecordingSubmission Item(int partitionId, int proposalId, int bytes = 16, long ageMs = 0, string? key = null, RecordingRouter? sink = null) =>
+        new(sink, partitionId, proposalId, key ?? "k" + proposalId, new byte[bytes], Environment.TickCount64 - ageMs);
 
     private sealed class StubFence : IWriteRangeFence
     {
         public readonly HashSet<string> StaleKeys = [];
         public bool IsStale(string key, long admittedGeneration, int admittedPartitionId) => StaleKeys.Contains(key);
+    }
+
+    /// <summary>A neutral test submission: carries the batching surface and records its own terminal completion
+    /// into the shared <see cref="RecordingRouter"/> sink (production routes completion to the key actor instead).</summary>
+    private sealed class RecordingSubmission : IProposalSubmission
+    {
+        private readonly RecordingRouter? sink;
+        private readonly string key;
+
+        public int ProposalId { get; }
+        public int PartitionId { get; }
+        public int ByteLength { get; }
+        public IReadOnlyList<RaftProposalEntry> Entries { get; }
+        public long EnqueueTicks { get; set; }
+
+        public RecordingSubmission(RecordingRouter? sink, int partitionId, int proposalId, string key, byte[] serialized, long enqueueTicks)
+        {
+            this.sink = sink;
+            this.key = key;
+            PartitionId = partitionId;
+            ProposalId = proposalId;
+            ByteLength = serialized.Length;
+            Entries = [new RaftProposalEntry(ReplicationTypes.KeyValues, serialized, AutoCommit: true, ExpectedGeneration: 0)];
+            EnqueueTicks = enqueueTicks;
+        }
+
+        public bool IsStale(IWriteRangeFence fence) => fence.IsStale(key, 0, PartitionId);
+        public void Complete() => sink?.Completed.TryAdd(ProposalId, 1);
+        public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
+    }
+
+    /// <summary>A multi-entry atomic submission: its entries (marked by their first data byte) must reach one
+    /// proposal contiguously and in order, and it completes/releases as a unit.</summary>
+    private sealed class BundleSubmission : IProposalSubmission
+    {
+        private readonly RecordingRouter? sink;
+        public int ProposalId { get; }
+        public int PartitionId { get; }
+        public int ByteLength { get; }
+        public IReadOnlyList<RaftProposalEntry> Entries { get; }
+        public long EnqueueTicks { get; set; }
+
+        public BundleSubmission(RecordingRouter? sink, int partitionId, int proposalId, params byte[] markers)
+        {
+            this.sink = sink;
+            PartitionId = partitionId;
+            ProposalId = proposalId;
+            Entries = [.. markers.Select(m => new RaftProposalEntry(ReplicationTypes.KeyValues, [m], AutoCommit: true, ExpectedGeneration: 0))];
+            ByteLength = markers.Length;
+            EnqueueTicks = Environment.TickCount64;
+        }
+
+        public bool IsStale(IWriteRangeFence fence) => false;
+        public void Complete() => sink?.Completed.TryAdd(ProposalId, 1);
+        public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
     }
 
     // ── pure state ────────────────────────────────────────────────────────────
@@ -79,12 +125,12 @@ public sealed class TestPartitionWriteAggregator
         for (int i = 0; i < 5; i++)
             state.Enqueue(Item(1, i), maxItems: 512, maxBytes: 4096);
 
-        List<KeyValueProposalRequest> first = state.SelectBatch(maxItems: 3, maxBytes: 4096);
+        List<IProposalSubmission> first = state.SelectBatch(maxItems: 3, maxBytes: 4096);
         Assert.Equal(3, first.Count);
         Assert.True(state.InFlight);
 
         state.OnBatchComplete();
-        List<KeyValueProposalRequest> second = state.SelectBatch(maxItems: 3, maxBytes: 4096);
+        List<IProposalSubmission> second = state.SelectBatch(maxItems: 3, maxBytes: 4096);
         Assert.Equal(2, second.Count);
     }
 
@@ -95,16 +141,16 @@ public sealed class TestPartitionWriteAggregator
         state.Enqueue(Item(1, 1, bytes: 5000), maxItems: 512, maxBytes: 4096);
         state.Enqueue(Item(1, 2, bytes: 16), maxItems: 512, maxBytes: 4096);
 
-        List<KeyValueProposalRequest> batch = state.SelectBatch(maxItems: 512, maxBytes: 4096);
+        List<IProposalSubmission> batch = state.SelectBatch(maxItems: 512, maxBytes: 4096);
         Assert.Single(batch); // the oversized head goes alone; the small item waits for the next batch
-        Assert.Equal(1, batch[0].ProposalId);
+        Assert.Equal(1, ((RecordingSubmission)batch[0]).ProposalId);
     }
 
     [Fact]
     public void State_NextWakeDeadline_EarlierOfLingerAndAge_WhenNotInFlight()
     {
         PartitionWriteState state = new();
-        KeyValueProposalRequest it = Item(1, 1);
+        IProposalSubmission it = Item(1, 1);
         it.EnqueueTicks = 1000;
         state.Enqueue(it, maxItems: 512, maxBytes: 4096);
 
@@ -116,12 +162,12 @@ public sealed class TestPartitionWriteAggregator
     public void State_NextWakeDeadline_AgeOnly_WhileInFlight()
     {
         PartitionWriteState state = new();
-        KeyValueProposalRequest first = Item(1, 1);
+        IProposalSubmission first = Item(1, 1);
         first.EnqueueTicks = 1000;
         state.Enqueue(first, maxItems: 512, maxBytes: 4096);
         state.SelectBatch(maxItems: 512, maxBytes: 4096); // in flight, buffer drained
 
-        KeyValueProposalRequest behind = Item(1, 2);
+        IProposalSubmission behind = Item(1, 2);
         behind.EnqueueTicks = 1200;
         state.Enqueue(behind, maxItems: 512, maxBytes: 4096); // queued behind the in-flight batch
 
@@ -146,7 +192,7 @@ public sealed class TestPartitionWriteAggregator
     public void State_LingerElapsed_RespectsWindowAndInFlight()
     {
         PartitionWriteState state = new();
-        KeyValueProposalRequest it = Item(1, 1);
+        IProposalSubmission it = Item(1, 1);
         it.EnqueueTicks = 1000;
         state.Enqueue(it, maxItems: 512, maxBytes: 4096);
 
@@ -154,7 +200,7 @@ public sealed class TestPartitionWriteAggregator
         Assert.True(state.LingerElapsed(nowMs: 1050, lingerMs: 50));  // elapsed
 
         state.SelectBatch(maxItems: 512, maxBytes: 4096); // in flight
-        KeyValueProposalRequest behind = Item(1, 2);
+        IProposalSubmission behind = Item(1, 2);
         behind.EnqueueTicks = 1000;
         state.Enqueue(behind, maxItems: 512, maxBytes: 4096);
         Assert.False(state.LingerElapsed(nowMs: 100_000, lingerMs: 50)); // in flight suppresses flush
@@ -165,6 +211,8 @@ public sealed class TestPartitionWriteAggregator
     private sealed class RecordingExecutor : IPartitionBatchExecutor
     {
         public readonly ConcurrentQueue<(int Partition, int Count)> Calls = new();
+        // Per-call ordered entry signatures (first byte of each entry's Data), so a test can assert bundle order.
+        public readonly ConcurrentQueue<int[]> CallSignatures = new();
         private readonly ConcurrentDictionary<int, TaskCompletionSource> gates = new();
         public bool SucceedResult = true;
         public RaftOperationStatus ResultStatus = RaftOperationStatus.Success;
@@ -173,9 +221,10 @@ public sealed class TestPartitionWriteAggregator
         public void Gate(int partition) => gates[partition] = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Release(int partition) { if (gates.TryRemove(partition, out TaskCompletionSource? g)) g.TrySetResult(); }
 
-        public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<byte[]> logs)
+        public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
         {
-            Calls.Enqueue((partitionId, logs.Count));
+            Calls.Enqueue((partitionId, entries.Count));
+            CallSignatures.Enqueue([.. entries.Select(e => e.Data.Length > 0 ? e.Data[0] : -1)]);
             if (gates.TryGetValue(partitionId, out TaskCompletionSource? gate))
                 await gate.Task;
             if (ThrowOnReplicate)
@@ -184,13 +233,13 @@ public sealed class TestPartitionWriteAggregator
         }
     }
 
-    private sealed class RecordingRouter : IWriteCompletionRouter
+    /// <summary>Passive completion sink the test submissions record their terminal outcome into (keyed by
+    /// proposal id), replacing the former injected completion router now that completion is submission-owned.</summary>
+    private sealed class RecordingRouter
     {
         public readonly ConcurrentDictionary<int, byte> Completed = new();
         // Value is the transient flag: true = released retryable (MustRetry), false = terminal.
         public readonly ConcurrentDictionary<int, bool> Released = new();
-        public void Complete(KeyValueProposalRequest item) => Completed[item.ProposalId] = 1;
-        public void Release(KeyValueProposalRequest item, bool transient) => Released[item.ProposalId] = transient;
     }
 
     private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 5000)
@@ -220,8 +269,8 @@ public sealed class TestPartitionWriteAggregator
             throw new TimeoutException("condition not met after advancing manual time");
     }
 
-    private static PartitionWriteAggregator Build(RecordingExecutor exec, RecordingRouter router, PartitionWriteAggregatorOptions options, IWriteRangeFence? fence = null, TimeProvider? timeProvider = null) =>
-        new(new ActorSystem(), exec, router, options, fence ?? new StubFence(), NullLogger<IKahuna>.Instance, timeProvider);
+    private static PartitionWriteAggregator Build(RecordingExecutor exec, PartitionWriteAggregatorOptions options, IWriteRangeFence? fence = null, TimeProvider? timeProvider = null) =>
+        new(new ActorSystem(), exec, options, fence ?? new StubFence(), NullLogger<IKahuna>.Instance, timeProvider);
 
     /// <summary>Minimal controllable <see cref="TimeProvider"/>: <see cref="GetTimestamp"/> advances only on
     /// <see cref="Advance"/>, and timers created by <c>Task.Delay(delay, provider)</c> fire when advanced past
@@ -303,7 +352,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 64,       // 64 admitted → count flush → one batch
             LingerMs = 10_000,        // long enough that the timer never fires first
@@ -311,7 +360,7 @@ public sealed class TestPartitionWriteAggregator
         });
 
         for (int i = 0; i < 64; i++)
-            Assert.True(agg.TryEnqueue(Item(2, i)));
+            Assert.True(agg.TryEnqueue(Item(2, i, sink: router)));
 
         await WaitUntil(() => router.Completed.Count == 64);
 
@@ -321,22 +370,51 @@ public sealed class TestPartitionWriteAggregator
     }
 
     [Fact]
+    public async Task Aggregator_MultiEntryBundle_StaysContiguousAndOrdered_InOneProposal()
+    {
+        // A multi-entry submission (markers 10,11,12) sits between two single writes on the same partition. The
+        // three bundle entries must reach the one proposal contiguously and in admission order — never split.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 3,        // three submissions → count flush → one batch
+            LingerMs = 10_000,        // long enough that the timer never fires first
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(2, 1, sink: router)));                 // single (marker 0)
+        Assert.True(agg.TryEnqueue(new BundleSubmission(router, 2, 500, 10, 11, 12))); // ordered bundle
+        Assert.True(agg.TryEnqueue(Item(2, 2, sink: router)));                 // single (marker 0)
+
+        await WaitUntil(() => router.Completed.Count == 3);
+
+        Assert.Single(exec.Calls);
+        Assert.Equal(5, exec.Calls.First().Count);                            // 1 + 3 + 1 entries in one proposal
+        Assert.True(exec.CallSignatures.TryDequeue(out int[]? sig));
+        int start = Array.IndexOf(sig!, 10);
+        Assert.True(start >= 0);
+        Assert.Equal([10, 11, 12], sig!.Skip(start).Take(3).ToArray());        // contiguous, in order
+        Assert.True(router.Completed.ContainsKey(500));                        // bundle completed as a unit
+    }
+
+    [Fact]
     public async Task Aggregator_IndependentSubmissionsSamePartition_ShareOneBatch()
     {
         // Cross-request coalescing: items from two independent many-key submissions plus a single write, all to
         // the same partition and admitted before the linger elapses, share one Raft batch.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 512,
             LingerMs = 200,          // long enough that all nine arrive before the timer fires
             MaxQueuedItemsPerPartition = 1024
         });
 
-        for (int i = 0; i < 4; i++) agg.TryEnqueue(Item(3, i));         // "call A"
-        for (int i = 0; i < 4; i++) agg.TryEnqueue(Item(3, 100 + i));   // "call B"
-        agg.TryEnqueue(Item(3, 999));                                    // single write
+        for (int i = 0; i < 4; i++) agg.TryEnqueue(Item(3, i, sink: router));         // "call A"
+        for (int i = 0; i < 4; i++) agg.TryEnqueue(Item(3, 100 + i, sink: router));   // "call B"
+        agg.TryEnqueue(Item(3, 999, sink: router));                                    // single write
 
         await WaitUntil(() => router.Completed.Count == 9);
 
@@ -349,7 +427,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 4,
             LingerMs = 10_000,
@@ -360,13 +438,13 @@ public sealed class TestPartitionWriteAggregator
         exec.Gate(7); // hold partition 7's Raft call
 
         for (int i = 0; i < 4; i++)
-            agg.TryEnqueue(Item(7, 100 + i)); // count flush → dispatched, then blocked in the executor
+            agg.TryEnqueue(Item(7, 100 + i, sink: router)); // count flush → dispatched, then blocked in the executor
 
         await WaitUntil(() => exec.Calls.Any(c => c.Partition == 7));
 
         // Partition 9 must flush and complete while partition 7 is blocked.
         for (int i = 0; i < 4; i++)
-            agg.TryEnqueue(Item(9, 200 + i));
+            agg.TryEnqueue(Item(9, 200 + i, sink: router));
 
         await WaitUntil(() => router.Completed.ContainsKey(200));
         Assert.False(router.Completed.ContainsKey(100)); // partition 7 still blocked, not completed
@@ -380,7 +458,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 8,
             LingerMs = 10_000,
@@ -388,7 +466,7 @@ public sealed class TestPartitionWriteAggregator
         });
 
         for (int i = 0; i < 8; i++)
-            agg.TryEnqueue(Item(3, 300 + i));
+            agg.TryEnqueue(Item(3, 300 + i, sink: router));
 
         await WaitUntil(() => router.Released.Count == 8);
         Assert.Empty(router.Completed);
@@ -399,7 +477,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 512,
             LingerMs = 0,                          // dispatch the first item immediately
@@ -408,14 +486,14 @@ public sealed class TestPartitionWriteAggregator
 
         exec.Gate(5); // first dispatched batch blocks, so its reservations are not released
 
-        Assert.True(agg.TryEnqueue(Item(5, 500)));  // dispatched (in flight, gated)
+        Assert.True(agg.TryEnqueue(Item(5, 500, sink: router)));  // dispatched (in flight, gated)
         await WaitUntil(() => exec.Calls.Any(c => c.Partition == 5));
-        Assert.True(agg.TryEnqueue(Item(5, 501)));  // queued behind the in-flight batch (reserved 2/2)
-        Assert.False(agg.TryEnqueue(Item(5, 502))); // full → retryable rejection
+        Assert.True(agg.TryEnqueue(Item(5, 501, sink: router)));  // queued behind the in-flight batch (reserved 2/2)
+        Assert.False(agg.TryEnqueue(Item(5, 502, sink: router))); // full → retryable rejection
 
         exec.Release(5);
         await WaitUntil(() => router.Completed.ContainsKey(500) && router.Completed.ContainsKey(501));
-        Assert.True(agg.TryEnqueue(Item(5, 503))); // capacity freed after completion
+        Assert.True(agg.TryEnqueue(Item(5, 503, sink: router))); // capacity freed after completion
     }
 
     // ── hardening ───────────────────────────────────────────────────────────────
@@ -428,15 +506,15 @@ public sealed class TestPartitionWriteAggregator
         StubFence fence = new();
         fence.StaleKeys.Add("moved"); // this key's range moved since admission
 
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3,   // count flush at 3
             LingerMs = 10_000
         }, fence);
 
-        agg.TryEnqueue(Item(4, 1, key: "ok1"));
-        agg.TryEnqueue(Item(4, 2, key: "moved"));
-        agg.TryEnqueue(Item(4, 3, key: "ok3"));
+        agg.TryEnqueue(Item(4, 1, key: "ok1", sink: router));
+        agg.TryEnqueue(Item(4, 2, key: "moved", sink: router));
+        agg.TryEnqueue(Item(4, 3, key: "ok3", sink: router));
 
         await WaitUntil(() => router.Completed.Count == 2);
 
@@ -456,7 +534,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingRouter router = new();
         exec.Gate(6); // hold partition 6's Raft call so its batch stays in flight across the age deadline
 
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,   // the first item dispatches immediately and blocks in the executor
             LingerMs = 0,
@@ -464,9 +542,9 @@ public sealed class TestPartitionWriteAggregator
             MaxQueuedItemsPerPartition = 100
         }, timeProvider: time);
 
-        agg.TryEnqueue(Item(6, 60)); // dispatched immediately, in flight (gated)
+        agg.TryEnqueue(Item(6, 60, sink: router)); // dispatched immediately, in flight (gated)
         await WaitUntil(() => !exec.Calls.IsEmpty);
-        agg.TryEnqueue(Item(6, 61)); // queued behind the in-flight batch
+        agg.TryEnqueue(Item(6, 61, sink: router)); // queued behind the in-flight batch
 
         // Advancing past the age deadline releases the follower while the batch is still gated.
         await AdvanceUntil(time, () => router.Released.ContainsKey(61), stepMs: 600);
@@ -486,22 +564,22 @@ public sealed class TestPartitionWriteAggregator
         RecordingRouter router = new();
         exec.Gate(8); // hold partition 8's Raft call so its batch stays in flight across the stop
 
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
             MaxQueuedItemsPerPartition = 100
         });
 
-        agg.TryEnqueue(Item(8, 20)); // dispatched immediately, in flight (gated)
+        agg.TryEnqueue(Item(8, 20, sink: router)); // dispatched immediately, in flight (gated)
         await WaitUntil(() => !exec.Calls.IsEmpty);
-        agg.TryEnqueue(Item(8, 21)); // queued behind the in-flight batch
-        agg.TryEnqueue(Item(8, 22)); // queued
+        agg.TryEnqueue(Item(8, 21, sink: router)); // queued behind the in-flight batch
+        agg.TryEnqueue(Item(8, 22, sink: router)); // queued
 
         agg.Stop();
 
         await WaitUntil(() => router.Released.ContainsKey(21) && router.Released.ContainsKey(22));
-        Assert.False(agg.TryEnqueue(Item(8, 23))); // new admissions rejected after stop
+        Assert.False(agg.TryEnqueue(Item(8, 23, sink: router))); // new admissions rejected after stop
 
         exec.Release(8);
         await WaitUntil(() => router.Completed.ContainsKey(20)); // the in-flight batch still reports its outcome
@@ -520,20 +598,20 @@ public sealed class TestPartitionWriteAggregator
         RecordingRouter router = new();
         exec.Gate(4); // hold the first item's Raft call so the rest queue up behind it before the drain
 
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
             MaxQueuedItemsPerPartition = stale + 16
         }, fence);
 
-        Assert.True(agg.TryEnqueue(Item(4, 0, key: "k0"))); // dispatched immediately, gated (not stale)
+        Assert.True(agg.TryEnqueue(Item(4, 0, key: "k0", sink: router))); // dispatched immediately, gated (not stale)
         await WaitUntil(() => !exec.Calls.IsEmpty);
 
         for (int i = 1; i <= stale; i++)
         {
             fence.StaleKeys.Add("k" + i);              // mark stale before it can be selected
-            Assert.True(agg.TryEnqueue(Item(4, i, key: "k" + i))); // queued behind the in-flight batch
+            Assert.True(agg.TryEnqueue(Item(4, i, key: "k" + i, sink: router))); // queued behind the in-flight batch
         }
 
         exec.Release(4); // completing the first batch re-drives the all-stale buffer behind it
@@ -577,13 +655,13 @@ public sealed class TestPartitionWriteAggregator
         // never a terminal error.
         RecordingExecutor exec = new() { ThrowOnReplicate = true };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 4, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
 
         for (int i = 0; i < 4; i++)
-            agg.TryEnqueue(Item(3, 400 + i));
+            agg.TryEnqueue(Item(3, 400 + i, sink: router));
 
         await WaitUntil(() => router.Released.Count == 4);
         Assert.All(Enumerable.Range(400, 4), id => Assert.True(router.Released[id])); // transient
@@ -595,13 +673,13 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.ProposalNotFound };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
 
         for (int i = 0; i < 3; i++)
-            agg.TryEnqueue(Item(5, 410 + i));
+            agg.TryEnqueue(Item(5, 410 + i, sink: router));
 
         await WaitUntil(() => router.Released.Count == 3);
         Assert.All(Enumerable.Range(410, 3), id => Assert.True(router.Released[id])); // ProposalNotFound → MustRetry
@@ -612,13 +690,13 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
 
         for (int i = 0; i < 3; i++)
-            agg.TryEnqueue(Item(7, 420 + i));
+            agg.TryEnqueue(Item(7, 420 + i, sink: router));
 
         await WaitUntil(() => router.Released.Count == 3);
         Assert.All(Enumerable.Range(420, 3), id => Assert.False(router.Released[id])); // Errored → terminal
@@ -634,7 +712,7 @@ public sealed class TestPartitionWriteAggregator
 
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
@@ -646,7 +724,7 @@ public sealed class TestPartitionWriteAggregator
             exec.Gate(p);
 
         for (int p = 0; p < partitions; p++)
-            agg.TryEnqueue(Item(p, p)); // dispatched immediately, blocked in the executor
+            agg.TryEnqueue(Item(p, p, sink: router)); // dispatched immediately, blocked in the executor
         await WaitUntil(() => exec.Calls.Count == partitions);
 
         for (int p = 0; p < partitions; p++)
@@ -659,7 +737,7 @@ public sealed class TestPartitionWriteAggregator
         // The lane is still consistent after the concurrent failure storm: a fresh succeeding write completes.
         exec.SucceedResult = true;
         exec.ResultStatus = RaftOperationStatus.Success;
-        agg.TryEnqueue(Item(0, 9999));
+        agg.TryEnqueue(Item(0, 9999, sink: router));
         await WaitUntil(() => router.Completed.ContainsKey(9999));
     }
 
@@ -674,15 +752,15 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(8); // hold the in-flight batch so we can observe StopAsync waiting for it
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1, LingerMs = 0, MaxQueuedItemsPerPartition = 100
         });
 
-        agg.TryEnqueue(Item(8, 80)); // dispatched, in flight (gated)
+        agg.TryEnqueue(Item(8, 80, sink: router)); // dispatched, in flight (gated)
         await WaitUntil(() => !exec.Calls.IsEmpty);
-        agg.TryEnqueue(Item(8, 81)); // queued behind the in-flight batch
-        agg.TryEnqueue(Item(8, 82)); // queued behind
+        agg.TryEnqueue(Item(8, 81, sink: router)); // queued behind the in-flight batch
+        agg.TryEnqueue(Item(8, 82, sink: router)); // queued behind
 
         Task stop = agg.StopAsync(TimeSpan.FromSeconds(10));
 
@@ -709,7 +787,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(2); // hold the partition's Raft call so dispatched batches stay in flight during the burst
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
@@ -722,7 +800,7 @@ public sealed class TestPartitionWriteAggregator
         int admitted = 0, rejected = 0;
         for (int i = 0; i < 500; i++)
         {
-            if (agg.TryEnqueue(Item(2, i)))
+            if (agg.TryEnqueue(Item(2, i, sink: router)))
                 admitted++;
             else
                 rejected++;
@@ -750,19 +828,19 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(3);
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 8, LingerMs = 0, MaxQueuedItemsPerPartition = 100, MaxQueuedBytesPerPartition = 1024
         });
 
-        Assert.True(agg.TryEnqueue(Item(3, 700, bytes: 4096))); // 4x the byte cap → admitted into empty partition
+        Assert.True(agg.TryEnqueue(Item(3, 700, bytes: 4096, sink: router))); // 4x the byte cap → admitted into empty partition
         await WaitUntil(() => !exec.Calls.IsEmpty);             // dispatched alone (gated)
-        Assert.False(agg.TryEnqueue(Item(3, 701, bytes: 16)));  // partition's bytes already exceed the cap → rejected
+        Assert.False(agg.TryEnqueue(Item(3, 701, bytes: 16, sink: router)));  // partition's bytes already exceed the cap → rejected
 
         exec.Release(3);
         await WaitUntil(() => router.Completed.ContainsKey(700));
         await WaitUntil(() => agg.ReservedItems(3) == 0);
-        Assert.True(agg.TryEnqueue(Item(3, 702, bytes: 16)));   // capacity freed after it drained
+        Assert.True(agg.TryEnqueue(Item(3, 702, bytes: 16, sink: router)));   // capacity freed after it drained
     }
 
     [Fact]
@@ -772,13 +850,13 @@ public sealed class TestPartitionWriteAggregator
         // accumulate for the node's lifetime.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1, LingerMs = 0, MaxQueuedItemsPerPartition = 100
         });
 
         for (int p = 0; p < 5; p++)
-            agg.TryEnqueue(Item(p, p));
+            agg.TryEnqueue(Item(p, p, sink: router));
 
         await WaitUntil(() => router.Completed.Count == 5);
         await WaitUntil(() => agg.TrackedPartitionCount == 0); // counters pruned back to zero
@@ -791,7 +869,7 @@ public sealed class TestPartitionWriteAggregator
         // not accumulate gauges that keep dead admission registries reachable.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions());
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions());
 
         int observed = 0;
         using MeterListener listener = new();
@@ -816,14 +894,14 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(7);
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 2, LingerMs = 0, MaxQueuedItemsPerPartition = 100
         });
 
-        agg.TryEnqueue(Item(7, 1)); // dispatched, gated
+        agg.TryEnqueue(Item(7, 1, sink: router)); // dispatched, gated
         await WaitUntil(() => !exec.Calls.IsEmpty);
-        agg.TryEnqueue(Item(7, 2)); // queued behind
+        agg.TryEnqueue(Item(7, 2, sink: router)); // queued behind
         Assert.True(agg.ReservedItems(7) > 0);
 
         exec.Release(7);
@@ -836,13 +914,13 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, router, new PartitionWriteAggregatorOptions
+        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 4, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
 
         for (int i = 0; i < 4; i++)
-            agg.TryEnqueue(Item(9, 90 + i));
+            agg.TryEnqueue(Item(9, 90 + i, sink: router));
 
         await WaitUntil(() => router.Released.Count == 4);
         await WaitUntil(() => agg.ReservedItems(9) == 0); // capacity released even on failure

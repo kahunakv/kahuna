@@ -27,9 +27,9 @@ internal sealed class PartitionWriteMessage
 
     public int PartitionId { get; }
 
-    public KeyValueProposalRequest? Item { get; }
+    public IProposalSubmission? Item { get; }
 
-    public IReadOnlyList<KeyValueProposalRequest>? Batch { get; }
+    public IReadOnlyList<IProposalSubmission>? Batch { get; }
 
     public bool Success { get; }
 
@@ -42,8 +42,8 @@ internal sealed class PartitionWriteMessage
     private PartitionWriteMessage(
         PartitionWriteMessageKind kind,
         int partitionId,
-        KeyValueProposalRequest? item,
-        IReadOnlyList<KeyValueProposalRequest>? batch,
+        IProposalSubmission? item,
+        IReadOnlyList<IProposalSubmission>? batch,
         bool success,
         bool transient,
         RaftOperationStatus status)
@@ -57,13 +57,13 @@ internal sealed class PartitionWriteMessage
         Status = status;
     }
 
-    public static PartitionWriteMessage Submit(KeyValueProposalRequest item) =>
+    public static PartitionWriteMessage Submit(IProposalSubmission item) =>
         new(PartitionWriteMessageKind.Submit, item.PartitionId, item, null, false, false, default);
 
     public static PartitionWriteMessage TimerWake(int partitionId) =>
         new(PartitionWriteMessageKind.TimerWake, partitionId, null, null, false, false, default);
 
-    public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<KeyValueProposalRequest> batch, bool success, bool transient, RaftOperationStatus status) =>
+    public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<IProposalSubmission> batch, bool success, bool transient, RaftOperationStatus status) =>
         new(PartitionWriteMessageKind.BatchComplete, partitionId, null, batch, success, transient, status);
 
     public static readonly PartitionWriteMessage StopSignal =

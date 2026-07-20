@@ -31,7 +31,6 @@ internal sealed class PartitionWriteAggregator
     public PartitionWriteAggregator(
         ActorSystem actorSystem,
         IPartitionBatchExecutor executor,
-        IWriteCompletionRouter completionRouter,
         PartitionWriteAggregatorOptions options,
         IWriteRangeFence fence,
         ILogger<IKahuna> logger,
@@ -60,7 +59,6 @@ internal sealed class PartitionWriteAggregator
                 "kv-write-lane-" + i,
                 laneOptions,
                 executor,
-                completionRouter,
                 admission,
                 options,
                 fence,
@@ -77,7 +75,7 @@ internal sealed class PartitionWriteAggregator
     /// returns MustRetry without a completion message. A true result means the item is owned by the lane and
     /// will terminate exactly once via <c>CompleteProposal</c> or <c>ReleaseProposal</c>.
     /// </summary>
-    public bool TryEnqueue(KeyValueProposalRequest item)
+    public bool TryEnqueue(IProposalSubmission item)
     {
         // Reject once shutdown has begun so the caller unwinds its intent and retries elsewhere, rather than
         // handing a write to a draining lane.

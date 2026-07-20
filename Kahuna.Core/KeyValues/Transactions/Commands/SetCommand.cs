@@ -111,8 +111,12 @@ internal sealed class SetCommand : BaseCommand
         switch (type)
         {
             case KeyValueResponseType.Set:
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((keyName, durability));
+                context.RecordModifiedKey((keyName, durability));
+                // Stage the value for the durable-intent path. Only when there is no TTL: the coordinator cannot
+                // source the absolute expiry HLC here, so a TTL set is left unstaged and the transaction takes the
+                // ticket path rather than dropping the expiry.
+                if (expiresMs <= 0)
+                    context.StageMutation(keyName, result.ToBytes(), revision, HLCTimestamp.Zero);
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
@@ -121,6 +125,9 @@ internal sealed class SetCommand : BaseCommand
                 break;
         }
         
+        // Carry the staged value on the modified result: the durable-intent finalize path reads it to build the
+        // prepared intent for this key, and without it the transaction cannot take the durable path (it falls back
+        // to the legacy ticket path). The client-facing result returned below is separate and unaffected.
         context.ModifiedResult = new()
         {
             Type = type,
@@ -128,6 +135,7 @@ internal sealed class SetCommand : BaseCommand
                 new()
                 {
                     Key = keyName,
+                    Value = result.ToBytes(),
                     Revision = revision,
                     LastModified = lastModified
                 }

@@ -19,7 +19,7 @@ internal sealed class PartitionWriteState
     /// <summary>Sentinel deadline meaning "no wake needed / none armed".</summary>
     public const long NoWake = long.MaxValue;
 
-    private readonly List<KeyValueProposalRequest> pending = [];
+    private readonly List<IProposalSubmission> pending = [];
     private int head;
 
     private long armedWakeDeadline = NoWake;
@@ -45,7 +45,7 @@ internal sealed class PartitionWriteState
     /// window). A single item that already exceeds the byte target opens and immediately flushes so it
     /// dispatches alone.
     /// </summary>
-    public EnqueueResult Enqueue(KeyValueProposalRequest item, int maxItems, long maxBytes)
+    public EnqueueResult Enqueue(IProposalSubmission item, int maxItems, long maxBytes)
     {
         bool opened = PendingCount == 0;
 
@@ -97,14 +97,14 @@ internal sealed class PartitionWriteState
     /// item is always included even if it alone exceeds the byte cap (an oversized item dispatches alone; the
     /// cap is a batching target, not a value-size limit). Returns the selected items in admission order.
     /// </summary>
-    public List<KeyValueProposalRequest> SelectBatch(int maxItems, long maxBytes)
+    public List<IProposalSubmission> SelectBatch(int maxItems, long maxBytes)
     {
-        List<KeyValueProposalRequest> batch = [];
+        List<IProposalSubmission> batch = [];
         long batchBytes = 0;
 
         while (head < pending.Count && batch.Count < maxItems)
         {
-            KeyValueProposalRequest item = pending[head];
+            IProposalSubmission item = pending[head];
             if (batch.Count > 0 && batchBytes + item.ByteLength > maxBytes)
                 break;
 
@@ -128,12 +128,12 @@ internal sealed class PartitionWriteState
     /// exceeds <paramref name="maxDelayMs"/>, relieving queue-age pressure even while a batch is in flight.
     /// FIFO order means the front items are the most aged, so stopping at the first non-expired item is safe.
     /// </summary>
-    public List<KeyValueProposalRequest> PopExpired(long nowTicks, int maxDelayMs)
+    public List<IProposalSubmission> PopExpired(long nowTicks, int maxDelayMs)
     {
-        List<KeyValueProposalRequest> expired = [];
+        List<IProposalSubmission> expired = [];
         while (head < pending.Count && nowTicks - pending[head].EnqueueTicks > maxDelayMs)
         {
-            KeyValueProposalRequest item = pending[head];
+            IProposalSubmission item = pending[head];
             QueuedBytes -= item.ByteLength;
             expired.Add(item);
             head++;
@@ -147,9 +147,9 @@ internal sealed class PartitionWriteState
 
     /// <summary>Removes and returns every still-pending (not yet selected into an in-flight batch) item, for
     /// shutdown drain. In-flight items are untouched — they settle via their own completion.</summary>
-    public List<KeyValueProposalRequest> DrainPending()
+    public List<IProposalSubmission> DrainPending()
     {
-        List<KeyValueProposalRequest> drained = [];
+        List<IProposalSubmission> drained = [];
         for (int i = head; i < pending.Count; i++)
             drained.Add(pending[i]);
 

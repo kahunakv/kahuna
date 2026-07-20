@@ -49,9 +49,9 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
         public void ForceStatus(int partition, RaftOperationStatus status) => forced[partition] = status;
         public void ClearForced(int partition) => forced.TryRemove(partition, out _);
 
-        public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<byte[]> logs)
+        public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
         {
-            Calls.Enqueue((partitionId, logs.Count));
+            Calls.Enqueue((partitionId, entries.Count));
 
             if (gates.TryGetValue(partitionId, out TaskCompletionSource? gate))
                 await gate.Task;
@@ -60,7 +60,7 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
             if (forced.TryGetValue(partitionId, out RaftOperationStatus status))
                 return new RaftReplicationResult(false, status, HLCTimestamp.Zero, 0);
 
-            return await inner.ReplicateAsync(partitionId, logs);
+            return await inner.ReplicateAsync(partitionId, entries);
         }
     }
 

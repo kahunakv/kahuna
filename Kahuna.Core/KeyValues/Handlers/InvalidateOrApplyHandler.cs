@@ -25,7 +25,33 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     public KeyValueResponse? Execute(KeyValueRequest message)
     {
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
+        {
+            // Ordinary replication no-ops when the key is not resident (the next read loads it from disk). Durable
+            // resolution on the leader instead inserts the committed value so a read after the intent settles finds
+            // it — the leader does not otherwise make a durable-materialized value resident.
+            InvalidateOrApplyData insert = message.InvalidateOrApplyData!;
+            if (!insert.ForceResident)
+                return null;
+
+            KeyValueEntry created = new()
+            {
+                Bucket       = GetBucket(message.Key),
+                Value        = insert.Value,
+                Revision     = insert.Revision,
+                Expires      = insert.Expires,
+                LastUsed     = insert.LastUsed,
+                LastModified = insert.LastModified,
+                State        = insert.State
+            };
+
+            context.InsertStoreEntry(message.Key, created);
+            context.AdjustEntryValueBytes(created, 0, created.Value?.Length ?? 0);
+            context.EnqueueExpiry(message.Key, created.Expires);
+            if (created.State is KeyValueState.Deleted or KeyValueState.Undefined)
+                context.EnqueueTombstone(message.Key);
+
             return null;
+        }
 
         // Don't touch an entry whose apply is still owned by a live in-flight operation: the owning
         // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or

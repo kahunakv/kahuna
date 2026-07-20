@@ -15,5 +15,10 @@ internal sealed record InvalidateOrApplyData(
     HLCTimestamp Expires,
     HLCTimestamp LastUsed,
     HLCTimestamp LastModified,
-    KeyValueState State
+    KeyValueState State,
+    // When true, insert the value into the cache even if the key is not resident, instead of the ordinary no-op.
+    // Used by durable-intent resolution on the leader: the committed value is not otherwise made resident there
+    // (the leader applies direct writes via CompleteProposal, not this path), so a read after the intent settles
+    // would miss it. Followers keep the no-op (they load from disk on the next read).
+    bool ForceResident = false
 );

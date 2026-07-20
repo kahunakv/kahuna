@@ -49,8 +49,7 @@ internal sealed class ExtendCommand : BaseCommand
         switch (type)
         {
             case KeyValueResponseType.Extended:
-                context.ModifiedKeys ??= [];
-                context.ModifiedKeys.Add((keyName, durability));
+                context.RecordModifiedKey((keyName, durability));
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:

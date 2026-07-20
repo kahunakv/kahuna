@@ -106,10 +106,11 @@ internal sealed class KeyValueReplicator
         HLCTimestamp expires,
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
-        KeyValueState state)
+        KeyValueState state,
+        bool forceResident = false)
     {
         persistentRouter.Send(
-            KeyValueRequest.ForInvalidateOrApply(key, revision, value, expires, lastUsed, lastModified, state));
+            KeyValueRequest.ForInvalidateOrApply(key, revision, value, expires, lastUsed, lastModified, state, forceResident));
     }
 
     /// <summary>
@@ -118,7 +119,7 @@ internal sealed class KeyValueReplicator
     /// <param name="partitionId">The unique identifier of the partition where the log entry should be replicated.</param>
     /// <param name="log">The log entry containing the data to be replicated.</param>
     /// <returns>Returns <c>true</c> if replication succeeded or the log data was empty; otherwise, <c>false</c> if an error occurred during replication.</returns>
-    public bool Replicate(int partitionId, RaftLog log)
+    public bool Replicate(int partitionId, RaftLog log, bool forceResident = false)
     {
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
@@ -156,7 +157,7 @@ internal sealed class KeyValueReplicator
                     ));
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set);
+                        expires, lastUsed, lastModified, KeyValueState.Set, forceResident);
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -199,7 +200,7 @@ internal sealed class KeyValueReplicator
                     ));
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Deleted);
+                        expires, lastUsed, lastModified, KeyValueState.Deleted, forceResident);
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -236,7 +237,7 @@ internal sealed class KeyValueReplicator
                     ));
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set);
+                        expires, lastUsed, lastModified, KeyValueState.Set, forceResident);
 
                     RecordCompletionReceipt(keyValueMessage);
 
