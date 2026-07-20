@@ -173,6 +173,13 @@ internal sealed class DurableTransactionFinalizer
         if (record is null)
             return Retry();
 
+        // A commit we requested that left the record Undecided was rejected by the state machine's deadline gate
+        // (the only transition that keeps an initialized record Undecided): the attempt's HLC passed the frozen
+        // decision deadline, so the transaction yields to presumed-abort recovery. Surface it — a rising rate means
+        // the deadline is too tight for the current finalize latency and healthy commits are being aborted.
+        if (commit && record.Decision == TransactionDecision.Undecided)
+            DurableTransactionMetrics.LateCommitRejections.Add(1);
+
         return record.Decision switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),

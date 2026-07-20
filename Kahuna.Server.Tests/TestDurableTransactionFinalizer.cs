@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -205,17 +206,56 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     [Fact]
-    public async Task CommitPastDeadline_MustRetry_RecordStaysUndecided()
+    public async Task CommitPastDeadline_MustRetry_RecordStaysUndecided_AndCountsLateRejection()
     {
         HLCTimestamp txId = Ts(1000);
         Seam seam = new();
         (DurableTransactionFinalizer finalizer, TransactionRecordStore records, _) = Build(seam);
 
-        // opId (== attempt HLC) is past the frozen decision deadline (9000): the commit CAS is rejected.
-        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(10000), CancellationToken.None);
+        // opId (== attempt HLC) is past the frozen decision deadline (9000): the commit CAS is rejected, the record
+        // stays Undecided, and the late-commit-rejection metric fires so a too-tight deadline is observable.
+        long lateRejections = await MeasureCounter("kahuna.durable_tx.late_commit_rejections", async () =>
+        {
+            DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(10000), CancellationToken.None);
+            Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        });
 
-        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
         Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+        Assert.Equal(1, lateRejections);
+    }
+
+    [Fact]
+    public async Task CommitWithinDeadline_DoesNotCountLateRejection()
+    {
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, _, _) = Build(seam);
+
+        long lateRejections = await MeasureCounter("kahuna.durable_tx.late_commit_rejections", async () =>
+        {
+            DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+            Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        });
+
+        Assert.Equal(0, lateRejections);
+    }
+
+    // Sums the increments of a named counter on the "Kahuna" meter emitted while <paramref name="action"/> runs.
+    private static async Task<long> MeasureCounter(string instrumentName, Func<Task> action)
+    {
+        long total = 0;
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == "Kahuna" && instrument.Name == instrumentName)
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((_, measurement, _, _) => Interlocked.Add(ref total, measurement));
+        listener.Start();
+
+        await action();
+
+        listener.Dispose();
+        return Interlocked.Read(ref total);
     }
 
     [Fact]

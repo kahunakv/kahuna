@@ -1,5 +1,6 @@
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using DotNext;
 using Kommander;
 using Kommander.Time;
@@ -753,8 +754,17 @@ internal sealed class TransactionCoordinator
                 // Pass the sweep deadline token into the acquire so a slow/stuck participant is cancelled at
                 // the budget instead of blocking Task.WhenAll (and therefore the reaper) indefinitely.
                 await manager.LocateAndTryAcquireRangeLock(
-                    ctx.TransactionId, range.Prefix, range.StartKey, range.StartInclusive,
-                    range.EndKey, range.EndInclusive, renewalTtlMs, range.Durability, mode, sweepToken);
+                    ctx.TransactionId, 
+                    range.Prefix, 
+                    range.StartKey, 
+                    range.StartInclusive,
+                    range.EndKey, 
+                    range.EndInclusive, 
+                    renewalTtlMs, 
+                    range.Durability, 
+                    mode, 
+                    sweepToken
+                );
             }
             catch (OperationCanceledException)
             {
@@ -1234,7 +1244,11 @@ internal sealed class TransactionCoordinator
 
     // ── Durable prepared-intent finalize path (opt-in) ─────────────────────────────
 
-    private const long DurableDecisionDeadlineMarginMs = 30_000;
+    // Rolling p99 of durable-finalize latency, used to size each transaction's decision-deadline margin so the
+    // deadline tracks real finalize cost instead of a fixed guess (too low spuriously aborts slow-but-alive
+    // coordinators; too high delays recovery of dead ones). Latency is a local elapsed-time measurement, not a
+    // distributed-event ordering, so it is sampled with a monotonic stopwatch; the deadline itself is an HLC offset.
+    private readonly FinalizeLatencyEstimator finalizeLatency = new();
 
     private DurableTransactionFinalizer? durableFinalizer;
 
@@ -1283,6 +1297,23 @@ internal sealed class TransactionCoordinator
         manager.ApplyDurableRollback(partitionId, intent, CancellationToken.None);
 
     /// <summary>
+    /// Derives this finalize's decision-deadline margin (ms past the commit timestamp) as
+    /// <c>clamp(multiplier × observed-finalize-p99, floor, ceiling)</c>, giving a healthy commit headroom above
+    /// typical finalize latency while capping how long a dead coordinator's undecided record can block recovery.
+    /// During warmup (no p99 yet) the floor applies. The chosen margin is recorded for tuning observability.
+    /// </summary>
+    private long DeriveDecisionDeadlineMarginMs()
+    {
+        long floor = configuration.DurableDecisionDeadlineFloorMs;
+        long ceiling = Math.Max(configuration.DurableDecisionDeadlineCeilingMs, floor);
+        long derived = (long)configuration.DurableDecisionDeadlineMultiplier * finalizeLatency.P99Ms;
+        long margin = Math.Clamp(derived, floor, ceiling);
+
+        DurableTransactionMetrics.DecisionDeadlineMarginMs.Record(margin);
+        return margin;
+    }
+
+    /// <summary>
     /// Builds the frozen finalize input from the transaction's staged persistent mutations, grouping intents by
     /// their current data partition. Returns false — so the caller falls back to the ticket path — when the
     /// transaction is not all-persistent, has no anchor, or a modified key has no staged value to prepare.
@@ -1311,7 +1342,7 @@ internal sealed class TransactionCoordinator
         const long epoch = 1;
 
         HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
-        HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DurableDecisionDeadlineMarginMs, commitTimestamp.C);
+        HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(), commitTimestamp.C);
 
         Dictionary<string, StagedMutation> stagedByKey = new(staged.Count);
         foreach ((string key, StagedValue value) in staged)
@@ -1332,12 +1363,17 @@ internal sealed class TransactionCoordinator
         // Post-prepare read-set validation: the revision-comparison check (intent-aware — it reads current
         // committed state through the durable-intent-aware read path) catches a read that a concurrent commit made
         // stale, and the write-intent probe catches a concurrent in-flight writer. Both must pass to commit.
+        long startTicks = Stopwatch.GetTimestamp();
         DurableFinalizeOutcome outcome = await DurableFinalizer.FinalizeAsync(
             input,
             validateReadSet: async ct => await ValidateReadSet(context, ct).ConfigureAwait(false)
                 && await CheckReadSetForConflicts(context, ct).ConfigureAwait(false),
             opId,
             cancellationToken).ConfigureAwait(false);
+
+        // Feed the observed finalize latency back into the p99 estimator that sizes future decision deadlines, so
+        // the deadline adapts to real load. Measured monotonically (a local duration, not event ordering).
+        finalizeLatency.Record(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
 
         context.Result = outcome.Result switch
         {

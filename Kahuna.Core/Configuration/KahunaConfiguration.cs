@@ -133,6 +133,29 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
+    /// <summary>
+    /// Lower bound (ms) on the durable-transaction decision-deadline margin — the window past the commit timestamp
+    /// within which a durable commit is still authorized before recovery may presume-abort it. The margin is
+    /// derived per transaction as <c>clamp(DurableDecisionDeadlineMultiplier × observed-finalize-p99,
+    /// floor, ceiling)</c>, so this floor is what a cold or low-latency node uses before enough finalize samples
+    /// exist. Set it comfortably above a healthy finalize's two Raft barriers so normal commits are never
+    /// presumed-aborted; too low spuriously aborts slow-but-alive coordinators under load.
+    /// </summary>
+    public long DurableDecisionDeadlineFloorMs { get; set; } = 5_000;
+
+    /// <summary>
+    /// Hard upper bound (ms) on the durable-transaction decision-deadline margin. Caps how long a genuinely dead
+    /// coordinator's undecided record blocks recovery of its prepared intents, regardless of an anomalous p99.
+    /// Must be &gt;= <see cref="DurableDecisionDeadlineFloorMs"/>.
+    /// </summary>
+    public long DurableDecisionDeadlineCeilingMs { get; set; } = 60_000;
+
+    /// <summary>
+    /// Multiplier applied to the observed finalize p99 when deriving the decision-deadline margin, giving healthy
+    /// commits headroom above typical latency before the deadline expires. Clamped by the floor and ceiling above.
+    /// </summary>
+    public int DurableDecisionDeadlineMultiplier { get; set; } = 4;
+
     public int RevisionsToKeepCached { get; set; }
 
     public TimeSpan CacheEntryTtl { get; set; }

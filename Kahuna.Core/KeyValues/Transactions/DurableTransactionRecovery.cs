@@ -87,6 +87,8 @@ internal sealed class DurableTransactionRecovery
 
         // Undecided past its deadline, or no record at all (orphan prepare): drive a presumed abort and take the
         // outcome that actually won at the canonical record — never assume the abort won.
+        bool deadlineExpiry = record is { Decision: TransactionDecision.Undecided };
+
         AbortTransactionCommand abort = new(
             intent.TransactionId, intent.Epoch, intent.ManifestHash, TransactionAbortClass.PresumedAbort,
             OpId: now, AttemptHlc: now,
@@ -96,6 +98,12 @@ internal sealed class DurableTransactionRecovery
             CreatedAt: record?.CreatedAt ?? now);
 
         TransactionRecord? after = await driveAbort(abort, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+
+        // Count only aborts that actually won for a record left Undecided past its deadline — the signal that the
+        // deadline expired before a healthy coordinator could decide. Orphan-prepare aborts (no record) are a
+        // different cause and excluded; a concurrent commit that won the race is not a deadline-expiry abort.
+        if (deadlineExpiry && after is { Decision: TransactionDecision.Abort })
+            DurableTransactionMetrics.DeadlineExpiryAborts.Add(1);
 
         return after?.Decision switch
         {

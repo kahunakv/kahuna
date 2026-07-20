@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -143,6 +144,74 @@ public sealed class TestDurableTransactionRecovery
 
         Assert.Null(store.Get("acct/1")); // resolved-committed and removed
         Assert.Contains(seam.Calls, c => c.Type == ReplicationTypes.KeyValues);
+    }
+
+    [Fact]
+    public async Task UndecidedPastDeadline_CountsDeadlineExpiryAbort()
+    {
+        PreparedIntentStore store = StoreWith(PendingIntent("acct/1", Ts(5000)));
+        Seam seam = new();
+        DurableTransactionRecovery recovery = Recovery(store, seam,
+            lookup: Record(TransactionDecision.Undecided, Ts(6000)),
+            afterAbort: Record(TransactionDecision.Abort, Ts(6000), TransactionAbortClass.PresumedAbort));
+
+        long aborts = await MeasureCounter("kahuna.durable_tx.deadline_expiry_aborts",
+            () => recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None));
+
+        Assert.Equal(1, aborts);
+    }
+
+    [Fact]
+    public async Task OrphanPrepare_DoesNotCountDeadlineExpiryAbort()
+    {
+        // No canonical record → an orphan prepare (anchor init never landed), not a deadline expiry: it is aborted
+        // but must not be attributed to a deadline that never existed.
+        PreparedIntentStore store = StoreWith(PendingIntent("acct/1", Ts(5000)));
+        Seam seam = new();
+        DurableTransactionRecovery recovery = Recovery(store, seam,
+            lookup: null,
+            afterAbort: Record(TransactionDecision.Abort, Ts(6000), TransactionAbortClass.PresumedAbort));
+
+        long aborts = await MeasureCounter("kahuna.durable_tx.deadline_expiry_aborts",
+            () => recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None));
+
+        Assert.Equal(0, aborts);
+    }
+
+    [Fact]
+    public async Task PresumedAbortRace_CommitWins_DoesNotCountDeadlineExpiryAbort()
+    {
+        // Recovery tried to abort an undecided-past-deadline record but a concurrent commit won: not an abort at
+        // all, so it must not be counted.
+        PreparedIntentStore store = StoreWith(PendingIntent("acct/1", Ts(5000)));
+        Seam seam = new();
+        DurableTransactionRecovery recovery = Recovery(store, seam,
+            lookup: Record(TransactionDecision.Undecided, Ts(6000)),
+            afterAbort: Record(TransactionDecision.Commit, Ts(6000)));
+
+        long aborts = await MeasureCounter("kahuna.durable_tx.deadline_expiry_aborts",
+            () => recovery.SweepAsync(PartitionId, now: Ts(10000), CancellationToken.None));
+
+        Assert.Equal(0, aborts);
+    }
+
+    // Sums the increments of a named counter on the "Kahuna" meter emitted while <paramref name="action"/> runs.
+    private static async Task<long> MeasureCounter(string instrumentName, Func<Task> action)
+    {
+        long total = 0;
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == "Kahuna" && instrument.Name == instrumentName)
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((_, measurement, _, _) => Interlocked.Add(ref total, measurement));
+        listener.Start();
+
+        await action();
+
+        listener.Dispose();
+        return Interlocked.Read(ref total);
     }
 
     [Fact]
