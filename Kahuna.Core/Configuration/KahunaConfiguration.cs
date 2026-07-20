@@ -178,12 +178,12 @@ public sealed class KahunaConfiguration
 
     /// <summary>
     /// Routes all-persistent interactive transactions through the durable prepared-intent 2PC model (durable
-    /// committed intents plus a canonical decision record) instead of the manual-ticket path. Off by default: the
-    /// path is single-node-correct but does not yet route its durable replication to the partition leader on a
-    /// multi-node cluster (unlike the ticket path), so it cannot be the default until that leader routing lands.
+    /// committed intents plus a canonical decision record) instead of the manual-ticket path. On by default:
+    /// durable replication and the committed-intent materialization are routed to the partition leader on a
+    /// multi-node cluster, so the path is correct in both single-node and cluster modes.
     /// The ticket path also remains for ephemeral/mixed transactions and lossless-fallback cases (TTL set, extend).
     /// </summary>
-    public bool EnableDurableIntentTransactions { get; set; }
+    public bool EnableDurableIntentTransactions { get; set; } = true;
 
     /// <summary>
     /// Number of keys a KeyRange descriptor must contain before the auto-split trigger

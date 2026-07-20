@@ -1086,7 +1086,18 @@ public sealed class TestRangeSplit : BaseCluster
         RangeSplitTrigger trigger = kahuna.RangeSplitTrigger;
 
         // First pass: at least one split fires and both children enter the settle window.
-        int splitsFirst = await trigger.TriggerAsync(ct);
+        // Poll rather than assume the very first tick splits. The split path runs
+        // leadership-gated Raft operations (CreatePartitionAsync + cutover) that are not
+        // permitted until the leader has been stable for MinLeaderStability, so under load a
+        // trigger tick issued right after startup can legitimately observe a not-yet-eligible
+        // leader and do nothing. The trigger is idempotent; retry until the first split lands.
+        int splitsFirst = 0;
+        for (int attempt = 0; attempt < 100 && splitsFirst == 0; attempt++)
+        {
+            splitsFirst = await trigger.TriggerAsync(ct);
+            if (splitsFirst == 0)
+                await Task.Delay(50, ct);
+        }
         Assert.True(splitsFirst > 0, $"Expected at least one split on first pass; got {splitsFirst}");
 
         int descriptorsAfterFirst = kahuna.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space);
@@ -1102,7 +1113,15 @@ public sealed class TestRangeSplit : BaseCluster
         // After the settle window elapses, children are re-eligible.
         await Task.Delay(400, ct); // > 300 ms window, with margin for GC/scheduling jitter
 
-        int splitsAfterExpiry = await trigger.TriggerAsync(ct);
+        // Same idempotent-retry rationale as the first pass: the re-eligible children still
+        // split through leadership-gated Raft operations, so poll to first split under load.
+        int splitsAfterExpiry = 0;
+        for (int attempt = 0; attempt < 100 && splitsAfterExpiry == 0; attempt++)
+        {
+            splitsAfterExpiry = await trigger.TriggerAsync(ct);
+            if (splitsAfterExpiry == 0)
+                await Task.Delay(50, ct);
+        }
         Assert.True(splitsAfterExpiry > 0,
             $"Expected re-eligibility after settle window; got {splitsAfterExpiry}");
     }
