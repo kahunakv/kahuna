@@ -50,8 +50,19 @@ internal sealed class ExtendCommand : BaseCommand
         {
             case KeyValueResponseType.Extended:
                 context.RecordModifiedKey((keyName, durability));
+
+                // Stage the extend for the durable-intent path so a transaction containing an extend stays on the
+                // durable path instead of falling back to the ticket path. An extend changes only the expiry, so
+                // the intent carries the key's current value and revision (read back within this transaction, so it
+                // sees the extend's own MVCC snapshot) plus the new relative TTL, resolved to an absolute expiry at
+                // freeze. If the value cannot be read back, staging is skipped and the transaction falls back.
+                (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await manager.LocateAndTryGetValue(
+                    context.TransactionId, keyName, -1, HLCTimestamp.Zero, durability, cancellationToken);
+
+                if (readType == KeyValueResponseType.Get && entry is not null)
+                    context.StageMutation(keyName, entry.Value, entry.Revision, expiresMs);
                 break;
-            
+
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
                 context.Action = KeyValueTransactionAction.Abort;
                 context.Status = KeyValueExecutionStatus.Stop;

@@ -130,6 +130,46 @@ public sealed class TestDurableIntentActivation
     }
 
     [Fact]
+    public async Task ExtendPersistentTransaction_TakesDurablePath_ValuePreservedWithFutureExpiry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (EmbeddedKahunaNode node, TypeCapturingExecutor exec) = await StartNode(ct);
+        await using EmbeddedKahunaNode _ = node;
+
+        // Seed a value with no TTL, then extend it inside a transaction. An extend changes only the expiry, so it
+        // used to fall back to the ticket path; now it stages a durable intent carrying the current value + new
+        // expiry, keeping the transaction on the durable path.
+        (KeyValueResponseType setType, long _rev, HLCTimestamp _lm) = await node.Kahuna.TrySetKeyValue(
+            HLCTimestamp.Zero, "act/ext-1", Encoding.UTF8.GetBytes("v1"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent);
+        Assert.Equal(KeyValueResponseType.Set, setType);
+
+        KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN EXTEND `act/ext-1` 60000 COMMIT END"), null, null);
+        Assert.Equal(KeyValueResponseType.Extended, result.Type);
+
+        int records = ((KahunaManager)node.Kahuna).DurableTransactionRecordStore.Count;
+        Assert.True(records > 0, $"durable records={records}; seen: {string.Join(",", exec.SeenTypes)}");
+        Assert.Contains(ReplicationTypes.PreparedIntent, exec.SeenTypes);
+
+        // After settlement the value is preserved (extend does not change it) and now carries a future expiry.
+        KeyValueResponseType t = KeyValueResponseType.DoesNotExist;
+        ReadOnlyKeyValueEntry? entry = null;
+        for (int attempt = 0; attempt < 100; attempt++)
+        {
+            (t, entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, "act/ext-1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            if (t == KeyValueResponseType.Get && entry!.Expires != HLCTimestamp.Zero)
+                break;
+            await Task.Delay(25, ct);
+        }
+
+        Assert.Equal(KeyValueResponseType.Get, t);
+        Assert.Equal(Encoding.UTF8.GetBytes("v1"), entry!.Value);
+        Assert.NotEqual(HLCTimestamp.Zero, entry.Expires); // extend materialized a future expiry
+    }
+
+    [Fact]
     public async Task MultiKeyPersistentTransaction_TakesDurablePath_AllValuesReadable()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

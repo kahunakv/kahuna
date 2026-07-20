@@ -101,13 +101,14 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         bool ownsIntent = entry.WriteIntent is not null && entry.WriteIntent.TransactionId == data.TransactionId;
 
         // Idempotent skip only when the resident entry already reflects this exact commit: a strictly newer
-        // revision is resident, or the same revision AND the same terminal state. Guarding on revision alone
-        // drops a delete tombstone — a delete does not bump the revision, so its tombstone carries the base
-        // value's revision, and a transactional delete stages via MVCC (no owned write intent) — leaving the key
-        // live at the same revision. Comparing state too lets the same-revision Set→Deleted transition apply.
+        // revision is resident, or the same revision AND the same terminal state AND the same expiry. Guarding on
+        // revision alone drops mutations that reuse the base revision: a delete does not bump the revision (its
+        // tombstone carries the base value's revision, changing the state), and an extend changes only the expiry
+        // at the same revision and state. Both stage via MVCC with no owned write intent, so without the state and
+        // expiry comparison the tombstone or the extended expiry would be skipped as already-applied.
         if (!ownsIntent
             && (entry.Revision > data.Revision
-                || (entry.Revision == data.Revision && entry.State == data.State)))
+                || (entry.Revision == data.Revision && entry.State == data.State && entry.Expires == data.Expires)))
             return null; // already applied
 
         KeyValueProposal proposal = new(
