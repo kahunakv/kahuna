@@ -96,6 +96,40 @@ public sealed class TestDurableTransactionFinalizer
     private static Func<CancellationToken, Task<bool>> Validate(bool ok) => _ => Task.FromResult(ok);
 
     [Fact]
+    public async Task Commit_InvokesCommitApplyPerIntent_AbortInvokesRollbackPerIntent()
+    {
+        // Commit path: the leader commit-apply seam fires for each committed intent.
+        Seam commitSeam = new();
+        List<(int Partition, string Key)> commits = [];
+        DurableTransactionFinalizer commitFinalizer = new(
+            new TransactionRecordStore(), new PreparedIntentStore(), commitSeam.Replicate,
+            applyCommitLocally: (p, i) => { commits.Add((p, i.Key)); return Task.CompletedTask; });
+
+        await commitFinalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Contains((5, "acct/1"), commits);
+        Assert.Contains((8, "idx/name/bob"), commits);
+
+        // Abort path (validation fails): the leader rollback seam fires for each staged intent; commit seam does not.
+        Seam abortSeam = new();
+        List<(int Partition, string Key)> rollbacks = [];
+        List<(int Partition, string Key)> abortCommits = [];
+        DurableTransactionFinalizer abortFinalizer = new(
+            new TransactionRecordStore(), new PreparedIntentStore(), abortSeam.Replicate,
+            applyCommitLocally: (p, i) => { abortCommits.Add((p, i.Key)); return Task.CompletedTask; },
+            applyRollbackLocally: (p, i) => { rollbacks.Add((p, i.Key)); return Task.CompletedTask; });
+
+        DurableFinalizeOutcome outcome = await abortFinalizer.FinalizeAsync(
+            Input(Ts(3000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(false), opId: Ts(4000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Contains((5, "acct/1"), rollbacks);
+        Assert.Contains((8, "idx/name/bob"), rollbacks);
+        Assert.Empty(abortCommits);
+    }
+
+    [Fact]
     public async Task SingleParticipant_Commit()
     {
         HLCTimestamp txId = Ts(1000);

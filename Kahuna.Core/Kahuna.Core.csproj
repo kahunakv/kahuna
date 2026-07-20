@@ -40,7 +40,7 @@
     </PackageReference>
     <PackageReference Include="Nixie" Version="1.2.3" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
-    <PackageReference Include="Kommander" Version="0.20.1" />
+    <PackageReference Include="Kommander" Version="0.20.2" />
     <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
   </ItemGroup>

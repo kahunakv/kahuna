@@ -85,16 +85,17 @@ public sealed class TestDurableIntentActivation
         Assert.True(records > 0, $"durable records={records}; seen: {string.Join(",", seen)}");
         Assert.Contains(ReplicationTypes.TransactionRecord, seen);
         Assert.Contains(ReplicationTypes.PreparedIntent, seen);
+
+        // The committed value is durably readable on the leader after resolution settles (not just during the §6
+        // Pending window): wait past settlement, then read.
+        await Task.Delay(1500, ct);
+        (KeyValueResponseType t, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, "act/row-1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, t);
+        Assert.Equal(Encoding.UTF8.GetBytes("v1"), entry!.Value);
     }
 
-    // KNOWN GAP — the durable path is not wired to the actor's 2PC commit lifecycle. A transaction's staged set
-    // leaves the owning actor entry resident with a live WriteIntent + MVCC entry; the ticket path clears these and
-    // applies the committed value via CompletePhaseTwo. The durable finalize has no such step, so InvalidateOrApply
-    // (which no-ops while a live WriteIntent is present) cannot materialize the value, and the staged state is
-    // orphaned. Reads are served from the prepared intent via §6 only until settlement removes it, after which the
-    // leader read returns DoesNotExist. Un-skip once durable resolution clears the staged write-intent/MVCC and
-    // applies the committed value on the owning actor (the durable analog of CompletePhaseTwo).
-    [Fact(Skip = "Durable path not integrated with the actor 2PC commit lifecycle (staged WriteIntent/MVCC not cleared); see comment.")]
+    [Fact]
     public async Task MultiKeyPersistentTransaction_TakesDurablePath_AllValuesReadable()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

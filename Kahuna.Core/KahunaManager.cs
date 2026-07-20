@@ -188,6 +188,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <see cref="Dispose"/> then performs a best-effort stop for any remaining state.</summary>
     public Task DrainKeyValueWritesAsync(TimeSpan timeout) => keyValues.DrainWritesAsync(timeout);
 
+    public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>
+        keyValues.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

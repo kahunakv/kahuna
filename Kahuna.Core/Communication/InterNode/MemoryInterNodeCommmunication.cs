@@ -882,6 +882,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
     /// <summary>
     /// 
     /// </summary>

@@ -1055,6 +1055,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcCloseTransactionRequest CloseTransaction = 46;
     GrpcImportCompletionReceiptsRequest ImportCompletionReceipts = 47;
     GrpcImportCoordinatorDecisionsRequest ImportCoordinatorDecisions = 48;
+    GrpcDurableOperationRequest DurableOperation = 49;
   }
 }
 
@@ -1108,6 +1109,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcCloseTransactionResponse CloseTransaction = 45;
     GrpcImportCompletionReceiptsResponse ImportCompletionReceipts = 46;
     GrpcImportCoordinatorDecisionsResponse ImportCoordinatorDecisions = 47;
+    GrpcDurableOperationResponse DurableOperation = 48;
   }
 }
 
@@ -1202,6 +1204,19 @@ message GrpcImportCoordinatorDecisionsResponse {
   bool Success = 1;
 }
 
+// A durable-intent 2PC operation forwarded from the coordinator to the partition leader node so it runs where the
+// node is the Raft leader (proposals) and holds the staged write intent (commit/rollback apply).
+message GrpcDurableOperationRequest {
+  int32 PartitionId = 1;
+  int32 Kind = 2;        // 0 = replicate delta, 1 = commit-apply, 2 = rollback-apply
+  string LogType = 3;    // replicate only (the Raft log type)
+  bytes Payload = 4;     // the serialized delta (replicate) or the serialized prepared intent (commit/rollback)
+}
+
+message GrpcDurableOperationResponse {
+  bool Committed = 1;    // replicate: whether the batch committed; commit/rollback: applied
+}
+
 enum GrpcClientBatchType {
   TYPE_NONE = 0;
   TRY_SET_KEY_VALUE = 1;
@@ -1267,6 +1282,7 @@ enum GrpcServerBatchType {
   SERVER_CLOSE_TRANSACTION = 44;
   SERVER_IMPORT_COMPLETION_RECEIPTS = 45;
   SERVER_IMPORT_COORDINATOR_DECISIONS = 46;
+  SERVER_DURABLE_OPERATION = 47;
 }
 
 enum GrpcRangeLockMode {

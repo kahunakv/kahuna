@@ -106,11 +106,38 @@ internal sealed class KeyValueReplicator
         HLCTimestamp expires,
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
-        KeyValueState state,
-        bool forceResident = false)
+        KeyValueState state)
     {
         persistentRouter.Send(
-            KeyValueRequest.ForInvalidateOrApply(key, revision, value, expires, lastUsed, lastModified, state, forceResident));
+            KeyValueRequest.ForInvalidateOrApply(key, revision, value, expires, lastUsed, lastModified, state));
+    }
+
+    /// <summary>
+    /// Applies a durable-intent resolution's committed value on the leader by routing a commit-apply to the owning
+    /// persistent actor: unlike the ordinary follower cache-coherence path, it carries the committing transaction id
+    /// so the actor can clear that transaction's staged write intent and MVCC snapshot and apply the value to the
+    /// base entry (the durable analog of CompletePhaseTwo). The leader otherwise never makes a durable-committed
+    /// value resident, so a read after the intent settles would miss it.
+    /// </summary>
+    public void ApplyDurableCommit(int partitionId, PreparedIntent intent)
+    {
+        persistentRouter.Send(KeyValueRequest.ForInvalidateOrApply(
+            intent.Key, intent.Revision, intent.Value,
+            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
+            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision));
+    }
+
+    /// <summary>
+    /// Routes a durable-intent ABORT cleanup to the owning persistent actor: clears the transaction's staged write
+    /// intent and MVCC snapshot for the key so an aborted transaction does not leave it blocked until the write
+    /// intent lease expires (the durable analog of ApplyConfirmedRollback).
+    /// </summary>
+    public void ApplyDurableRollback(int partitionId, PreparedIntent intent)
+    {
+        persistentRouter.Send(KeyValueRequest.ForInvalidateOrApply(
+            intent.Key, intent.Revision, intent.Value,
+            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
+            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: true));
     }
 
     /// <summary>
@@ -119,7 +146,7 @@ internal sealed class KeyValueReplicator
     /// <param name="partitionId">The unique identifier of the partition where the log entry should be replicated.</param>
     /// <param name="log">The log entry containing the data to be replicated.</param>
     /// <returns>Returns <c>true</c> if replication succeeded or the log data was empty; otherwise, <c>false</c> if an error occurred during replication.</returns>
-    public bool Replicate(int partitionId, RaftLog log, bool forceResident = false)
+    public bool Replicate(int partitionId, RaftLog log)
     {
         if (log.LogData is null || log.LogData.Length == 0)
             return true;
@@ -157,7 +184,7 @@ internal sealed class KeyValueReplicator
                     ));
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set, forceResident);
+                        expires, lastUsed, lastModified, KeyValueState.Set);
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -200,7 +227,7 @@ internal sealed class KeyValueReplicator
                     ));
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Deleted, forceResident);
+                        expires, lastUsed, lastModified, KeyValueState.Deleted);
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -237,7 +264,7 @@ internal sealed class KeyValueReplicator
                     ));
 
                     SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set, forceResident);
+                        expires, lastUsed, lastModified, KeyValueState.Set);
 
                     RecordCompletionReceipt(keyValueMessage);
 

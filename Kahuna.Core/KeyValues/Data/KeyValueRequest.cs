@@ -127,7 +127,8 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal static KeyValueRequest ForInvalidateOrApply(
         string key, long revision, byte[]? value,
         HLCTimestamp expires, HLCTimestamp lastUsed, HLCTimestamp lastModified, KeyValueState state,
-        bool forceResident = false)
+        bool forceResident = false, HLCTimestamp transactionId = default, int partitionId = 0, bool noRevision = false,
+        bool isRollback = false)
     {
         KeyValueRequest req = new(
             KeyValueRequestType.InvalidateOrApply,
@@ -144,7 +145,7 @@ public sealed class KeyValueRequest : IConsistentHashable
             0,
             0,
             null);
-        req.InvalidateOrApplyData = new(revision, value, expires, lastUsed, lastModified, state, forceResident);
+        req.InvalidateOrApplyData = new(revision, value, expires, lastUsed, lastModified, state, forceResident, transactionId, partitionId, noRevision, isRollback);
         return req;
     }
 

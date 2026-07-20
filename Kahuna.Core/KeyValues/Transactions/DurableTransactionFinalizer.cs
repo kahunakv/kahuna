@@ -58,6 +58,17 @@ internal sealed class DurableTransactionFinalizer
     /// canonical decision is already durable, so recovery finishes resolution if a deferred run is lost.</summary>
     public delegate void ResolutionScheduler(Func<CancellationToken, Task> resolution);
 
+    /// <summary>Applies a committed intent's value on the leader's live KV state (clears the committing
+    /// transaction's staged write intent + MVCC snapshot and applies the value to the base entry). The replicated
+    /// key/value record makes followers converge, but the leader does not apply it through the replication callback,
+    /// so this is how the committed value becomes visible on the leader. Null in bare protocol tests (no actor).</summary>
+    public delegate Task ApplyCommitLocally(int partitionId, PreparedIntent intent);
+
+    /// <summary>Clears an aborted transaction's staged write intent + MVCC snapshot on the owning actor (the durable
+    /// analog of ApplyConfirmedRollback), so the key is not blocked until the intent lease expires. Null in bare
+    /// protocol tests (no actor).</summary>
+    public delegate Task ApplyRollbackLocally(int partitionId, PreparedIntent intent);
+
     private readonly TransactionRecordStore recordStore;
 
     private readonly PreparedIntentStore intentStore;
@@ -66,15 +77,23 @@ internal sealed class DurableTransactionFinalizer
 
     private readonly ResolutionScheduler scheduleResolution;
 
+    private readonly ApplyCommitLocally? applyCommitLocally;
+
+    private readonly ApplyRollbackLocally? applyRollbackLocally;
+
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
         PreparedIntentStore intentStore,
         ReplicateDelegate replicate,
-        ResolutionScheduler? resolutionScheduler = null)
+        ResolutionScheduler? resolutionScheduler = null,
+        ApplyCommitLocally? applyCommitLocally = null,
+        ApplyRollbackLocally? applyRollbackLocally = null)
     {
         this.recordStore = recordStore;
         this.intentStore = intentStore;
         this.replicate = replicate;
+        this.applyCommitLocally = applyCommitLocally;
+        this.applyRollbackLocally = applyRollbackLocally;
         // Inline default: resolution completes before FinalizeAsync returns (the pre-deferral behavior).
         this.scheduleResolution = resolutionScheduler
             ?? (static resolution => resolution(CancellationToken.None).GetAwaiter().GetResult());
@@ -182,9 +201,21 @@ internal sealed class DurableTransactionFinalizer
             {
                 foreach (PreparedIntent intent in partition.Intents)
                 {
+                    // Replicate the committed value as an ordinary key/value record so followers converge, then
+                    // apply it on the leader (the leader does not apply it through the replication callback).
                     byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
-                    await replicate(partition.PartitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+                    bool applied = await replicate(partition.PartitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+                    if (applied && applyCommitLocally is not null)
+                        await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
                 }
+            }
+            else
+            {
+                // Abort: nothing materializes, but clear each participant's staged write intent + MVCC on the leader
+                // so the key is not blocked until the intent lease expires.
+                foreach (PreparedIntent intent in partition.Intents)
+                    if (applyRollbackLocally is not null)
+                        await applyRollbackLocally(partition.PartitionId, intent).ConfigureAwait(false);
             }
 
             await SettleIntentsAsync(partition.PartitionId, partition.Intents, commit, cancellationToken).ConfigureAwait(false);

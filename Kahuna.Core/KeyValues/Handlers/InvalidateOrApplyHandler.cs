@@ -24,34 +24,17 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
 
     public KeyValueResponse? Execute(KeyValueRequest message)
     {
+        InvalidateOrApplyData data = message.InvalidateOrApplyData!;
+
+        // Durable-intent resolution apply on the leader. A commit clears the committing transaction's write intent
+        // and MVCC snapshot, applies the committed value, and persists it (the durable analog of CompletePhaseTwo,
+        // inserting the entry when not resident). An abort just clears the transaction's staged write intent and
+        // MVCC snapshot so the key is not blocked until the intent expires (the analog of ApplyConfirmedRollback).
+        if (data.ForceResident)
+            return data.IsRollback ? ApplyDurableRollback(message.Key, data) : ApplyDurableCommit(message.Key, data);
+
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
-        {
-            // Ordinary replication no-ops when the key is not resident (the next read loads it from disk). Durable
-            // resolution on the leader instead inserts the committed value so a read after the intent settles finds
-            // it — the leader does not otherwise make a durable-materialized value resident.
-            InvalidateOrApplyData insert = message.InvalidateOrApplyData!;
-            if (!insert.ForceResident)
-                return null;
-
-            KeyValueEntry created = new()
-            {
-                Bucket       = GetBucket(message.Key),
-                Value        = insert.Value,
-                Revision     = insert.Revision,
-                Expires      = insert.Expires,
-                LastUsed     = insert.LastUsed,
-                LastModified = insert.LastModified,
-                State        = insert.State
-            };
-
-            context.InsertStoreEntry(message.Key, created);
-            context.AdjustEntryValueBytes(created, 0, created.Value?.Length ?? 0);
-            context.EnqueueExpiry(message.Key, created.Expires);
-            if (created.State is KeyValueState.Deleted or KeyValueState.Undefined)
-                context.EnqueueTombstone(message.Key);
-
             return null;
-        }
 
         // Don't touch an entry whose apply is still owned by a live in-flight operation: the owning
         // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or
@@ -80,8 +63,6 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
             }
         }
 
-        InvalidateOrApplyData data = message.InvalidateOrApplyData!;
-
         // Already at or ahead of this revision — nothing to do.
         if (entry.Revision >= data.Revision)
             return null;
@@ -99,6 +80,59 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         context.EnqueueExpiry(message.Key, entry.Expires);
         if (data.State is KeyValueState.Deleted or KeyValueState.Undefined)
             context.EnqueueTombstone(message.Key);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Applies a durable-intent resolution's committed value on the leader: inserts the entry when the key is not
+    /// resident, then runs the shared confirmed-commit apply (clears the committing transaction's write intent and
+    /// MVCC snapshot, archives the superseded revision, applies the value, persists, and records the decision).
+    /// Idempotent: a re-apply after the intent is already cleared and the revision is at or ahead is a no-op.
+    /// </summary>
+    private KeyValueResponse? ApplyDurableCommit(string key, InvalidateOrApplyData data)
+    {
+        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
+        {
+            entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
+            context.InsertStoreEntry(key, entry);
+        }
+
+        bool ownsIntent = entry.WriteIntent is not null && entry.WriteIntent.TransactionId == data.TransactionId;
+        if (!ownsIntent && entry.Revision >= data.Revision)
+            return null; // already applied
+
+        KeyValueProposal proposal = new(
+            data.State == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet,
+            key,
+            data.Value,
+            data.Revision,
+            data.NoRevision,
+            data.Expires,
+            data.LastUsed,
+            data.LastModified,
+            data.State,
+            KeyValueDurability.Persistent);
+
+        HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null, embeddedDecision: null);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Clears an aborted durable transaction's staged write intent and MVCC snapshot on the owning actor so the key
+    /// is not blocked until the intent lease expires (the durable analog of ApplyConfirmedRollback). A no-op when
+    /// the key is not resident or its live write intent belongs to a different transaction.
+    /// </summary>
+    private KeyValueResponse? ApplyDurableRollback(string key, InvalidateOrApplyData data)
+    {
+        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry) || entry is null
+            || entry.WriteIntent is null || entry.WriteIntent.TransactionId != data.TransactionId)
+            return null;
+
+        HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        ApplyConfirmedRollback(entry, data.TransactionId, now);
 
         return null;
     }

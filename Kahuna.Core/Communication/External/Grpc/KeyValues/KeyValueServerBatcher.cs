@@ -250,6 +250,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerDurableOperation:
+                    {
+                        GrpcDurableOperationRequest? req = request.DurableOperation;
+                        Track(DurableOperationDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -928,6 +935,30 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerImportCoordinatorDecisions,
                 RequestId = requestId,
                 ImportCoordinatorDecisions = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task DurableOperationDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcDurableOperationRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcDurableOperationResponse resp = await service.DurableOperationInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerDurableOperation,
+                RequestId = requestId,
+                DurableOperation = resp
             });
         }
         finally

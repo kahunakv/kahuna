@@ -1828,6 +1828,28 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return batchResponse.ImportCoordinatorDecisions?.Success ?? false;
     }
 
+    public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcDurableOperationRequest request = new()
+        {
+            PartitionId = partitionId,
+            Kind = kind,
+            LogType = logType,
+            Payload = UnsafeByteOperations.UnsafeWrap(payload)
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        return batchResponse.DurableOperation?.Committed ?? false;
+    }
+
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
         AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {

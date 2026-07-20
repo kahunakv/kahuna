@@ -157,7 +157,37 @@ internal sealed class KeyValuesManager : IDisposable
     /// retryable outcome). The caller applies the committed delta to its local store, matching the direct-write
     /// path where the producer applies on completion.
     /// </summary>
+    // Durable-operation kinds carried across the inter-node forwarding to the partition leader.
+    private const int DurableOpReplicate = 0;
+    private const int DurableOpCommit = 1;
+    private const int DurableOpRollback = 2;
+
+    /// <summary>
+    /// Resolves whether a durable operation for <paramref name="partitionId"/> must run on a remote leader.
+    /// Returns null when this node is the partition leader (or standalone) — run locally; otherwise the remote
+    /// leader endpoint to forward to. The durable path proposes via the local scheduler and clears the staged write
+    /// intent locally, both of which require the local node to be the partition leader, so on a cluster a coordinator
+    /// that is not the leader forwards the operation to the leader (where records also coalesce across coordinators).
+    /// </summary>
+    private async Task<string?> ResolveDurableLeader(int partitionId, CancellationToken cancellationToken)
+    {
+        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return null;
+
+        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return leader == raft.GetLocalEndpoint() ? null : leader;
+    }
+
     internal async Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is not null)
+            return await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+
+        return await ReplicateDurableLocal(partitionId, logType, data, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Writes.DurableProposalSubmission submission = new(
@@ -173,15 +203,58 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
-    /// Applies a durable resolution's materialized key/value record to the local (leader) KV state — the owning
-    /// actor's cache via InvalidateOrApply and the background writer for persistence, exactly as the replicator
-    /// applies a committed <c>kv</c> log on a follower. The leader applies direct writes through CompleteProposal,
-    /// not the replication callback, so a durable-materialized value that is only replicated (not proposed through
-    /// an actor) would never land in the leader's store without this. Idempotent: the replicator's revision guard
-    /// no-ops a re-apply.
+    /// Runs a durable operation that this node received via inter-node forwarding because it is the partition
+    /// leader: replicate a delta through the local scheduler, or apply a committed/aborted intent's resolution on
+    /// the local (leader) KV state. The intent crosses the wire serialized.
     /// </summary>
-    internal void ApplyMaterializedKeyValue(int partitionId, byte[] kvRecord) =>
-        replicator.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.KeyValues, LogData = kvRecord }, forceResident: true);
+    internal async Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
+    {
+        switch (kind)
+        {
+            case DurableOpReplicate:
+                return await ReplicateDurableLocal(partitionId, logType, payload, cancellationToken).ConfigureAwait(false);
+
+            case DurableOpCommit:
+                replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]);
+                return true;
+
+            case DurableOpRollback:
+                replicator.ApplyDurableRollback(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]);
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Applies a durable-intent resolution's committed value on the leader (clears the committing transaction's
+    /// staged write intent + MVCC snapshot and applies the value to the base entry — the durable analog of
+    /// CompletePhaseTwo). The leader applies direct writes through CompleteProposal, not the replication callback,
+    /// so a durable-committed value would never land in the leader's store without this. Idempotent.
+    /// </summary>
+    internal async Task ApplyDurableCommit(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is not null)
+            await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
+        else
+            replicator.ApplyDurableCommit(partitionId, intent);
+    }
+
+    /// <summary>
+    /// Clears an aborted durable transaction's staged write intent + MVCC snapshot on the owning actor (the durable
+    /// analog of ApplyConfirmedRollback), so the key is not blocked until the intent lease expires. Routed to the
+    /// partition leader on a cluster (that is where the staged write intent lives).
+    /// </summary>
+    internal async Task ApplyDurableRollback(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is not null)
+            await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpRollback, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
+        else
+            replicator.ApplyDurableRollback(partitionId, intent);
+    }
 
     private readonly bool durableIntentTransactionsEnabled;
 

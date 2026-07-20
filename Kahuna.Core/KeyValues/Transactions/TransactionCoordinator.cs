@@ -1239,7 +1239,8 @@ internal sealed class TransactionCoordinator
     private DurableTransactionFinalizer? durableFinalizer;
 
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
-        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, ScheduleDeferredResolution);
+        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, ScheduleDeferredResolution,
+        ApplyDurableCommitLocally, ApplyDurableRollbackLocally);
 
     /// <summary>
     /// Deferred settlement: run a committed/aborted transaction's resolution (materialize committed values, settle
@@ -1265,18 +1266,21 @@ internal sealed class TransactionCoordinator
 
     // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
-    // batching). The finalizer applies committed record/intent deltas to its local stores; a resolution's
-    // materialized key/value record has no such store, and the leader does not apply it through the replication
-    // callback, so it is applied to the leader's KV state explicitly here after it commits.
-    private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
-    {
-        bool committed = await manager.ReplicateDurableThroughScheduler(partitionId, logType, data, cancellationToken).ConfigureAwait(false);
+    // batching). The finalizer applies committed record/intent deltas to its local stores, and the resolution's
+    // committed value to the leader's KV state via ApplyDurableCommitLocally.
+    private Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableThroughScheduler(partitionId, logType, data, cancellationToken);
 
-        if (committed && logType == ReplicationTypes.KeyValues)
-            manager.ApplyMaterializedKeyValue(partitionId, data);
+    // Applies a committed intent's value on the leader (clears the staged write intent/MVCC and applies the value —
+    // the durable analog of CompletePhaseTwo), invoked by the finalizer's resolution after the intent commits.
+    // Routes to the participant partition's leader node on a cluster.
+    private Task ApplyDurableCommitLocally(int partitionId, PreparedIntent intent) =>
+        manager.ApplyDurableCommit(partitionId, intent, CancellationToken.None);
 
-        return committed;
-    }
+    // Clears an aborted transaction's staged write intent/MVCC on the leader (the durable analog of
+    // ApplyConfirmedRollback), invoked by the finalizer's resolution when the decision is abort.
+    private Task ApplyDurableRollbackLocally(int partitionId, PreparedIntent intent) =>
+        manager.ApplyDurableRollback(partitionId, intent, CancellationToken.None);
 
     /// <summary>
     /// Builds the frozen finalize input from the transaction's staged persistent mutations, grouping intents by

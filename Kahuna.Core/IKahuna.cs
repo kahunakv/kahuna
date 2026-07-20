@@ -93,6 +93,11 @@ public interface IKahuna
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys);
 
+    /// <summary>Runs a durable-intent 2PC operation forwarded from a coordinator because this node is the partition
+    /// leader: kind 0 replicates a delta through the local scheduler, kind 1/2 applies a committed/aborted intent's
+    /// resolution on the local KV state. Returns whether it committed/applied.</summary>
+    public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
+
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability);
 
     public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);

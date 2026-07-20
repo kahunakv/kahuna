@@ -2106,6 +2106,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new GrpcImportCoordinatorDecisionsResponse { Success = durable };
     }
 
+    internal async Task<GrpcDurableOperationResponse> DurableOperationInternal(GrpcDurableOperationRequest request, ServerCallContext context)
+    {
+        bool committed = await keyValues.DurableOperationLocal(
+            request.PartitionId, request.Kind, request.LogType, request.Payload.ToByteArray(), context.CancellationToken);
+        return new GrpcDurableOperationResponse { Committed = committed };
+    }
+
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(
         GrpcAcquireSnapshotHoldRequest request, ServerCallContext context) =>
         AcquireSnapshotHold(request, context);
