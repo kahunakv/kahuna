@@ -81,6 +81,8 @@ public sealed class TestDurableAnchorUncertainty
         raft.OnReplicationError    += kahuna.OnReplicationError;
         raft.OnLeaderChanged       += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
 
@@ -221,7 +223,7 @@ public sealed class TestDurableAnchorUncertainty
         {
             foreach (ClusterNode n in nodes)
             {
-                try { await n.Raft.LeaveCluster(dispose: true); }
+                try { await TestClusterNodeRegistry.DisposeAsync(n.Raft); }
                 catch (ObjectDisposedException) { }
             }
         }

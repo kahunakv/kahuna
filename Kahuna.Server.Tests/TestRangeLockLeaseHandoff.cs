@@ -395,7 +395,7 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
     {
         foreach (IRaft raft in rafts)
         {
-            try { await raft.LeaveCluster(true, ct); }
+            try { await TestClusterNodeRegistry.DisposeAsync(raft, ct); }
             catch (ObjectDisposedException) { }
         }
     }

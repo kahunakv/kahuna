@@ -270,7 +270,7 @@ public sealed class TestTryGetHandler
                     state: (int)KeyValueState.Set)
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
 
             // Spawn a real KeyValueActor. backgroundWriter and proposalRouter are null because
             // TryGet never touches them; actorContext is injected by Nixie.
@@ -359,7 +359,7 @@ public sealed class TestTryGetHandler
             // resolve the Ask promise with MustRetry, not feed null into PointReadContinuation.
             FaultyReadBackend backend = new();
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
 
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
@@ -461,7 +461,7 @@ public sealed class TestTryGetHandler
                     state: (int)KeyValueState.Set)
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
 
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
@@ -594,7 +594,7 @@ public sealed class TestTryGetHandler
         {
             RevisionBackend backend = new(targetRevision: 5, Encoding.UTF8.GetBytes("hist-v5"));
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "byrev-actor", null!, null!, backend, raft,
@@ -625,7 +625,7 @@ public sealed class TestTryGetHandler
             // Backend returns null for all GetKeyValueRevision calls.
             RevisionBackend backend = new(targetRevision: -1, null);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "byrev-notfound-actor", null!, null!, backend, raft,
@@ -663,7 +663,7 @@ public sealed class TestTryGetHandler
                 latestValue: Encoding.UTF8.GetBytes("latest-value"),
                 revision: 3, revisionValue: Encoding.UTF8.GetBytes("rev3-value"));
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "cross-resolve-actor", null!, null!, backend, raft,
@@ -725,7 +725,7 @@ public sealed class TestTryGetHandler
             BlockingRevisionBackend backend = new(gate,
                 targetRevision: 3, Encoding.UTF8.GetBytes("shape-value"));
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "shape-actor", null!, null!, backend, raft,

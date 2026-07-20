@@ -199,15 +199,20 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     public IReadOnlyList<CoordinatorDecisionRecord> SnapshotRange(string? startKey, string? endKey)
     {
         List<CoordinatorDecisionRecord> result = [];
+
         foreach (CoordinatorDecisionRecord record in records.Values)
         {
             string anchor = record.RecordAnchorKey;
+
             if (startKey is not null && string.CompareOrdinal(anchor, startKey) < 0)
                 continue;
+
             if (endKey is not null && string.CompareOrdinal(anchor, endKey) >= 0)
                 continue;
+
             result.Add(record);
         }
+
         return result;
     }
 
@@ -230,7 +235,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return CoordinatorDecisionMutationResult.MustRetry;
 
         SemaphoreSlim gate = GateFor(partitionId);
+
         await gate.WaitAsync(ct).ConfigureAwait(false);
+
         try
         {
             // The participant set is immutable once the decision is written. Progress fields
@@ -258,7 +265,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         (int partitionId, _) = resolveAnchorPartition!(recordAnchorKey);
 
         SemaphoreSlim gate = GateFor(partitionId);
+
         await gate.WaitAsync(ct).ConfigureAwait(false);
+
         try
         {
             return await ReplicateThenPublish(
@@ -338,11 +347,13 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     private static IReadOnlyList<DecisionOp> DeltaOps(CoordinatorDecisionDeltaMessage delta)
     {
         List<DecisionOp> ops = new(delta.Entries.Count);
+
         foreach (CoordinatorDecisionDeltaEntry entry in delta.Entries)
         {
             CoordinatorDecisionRecord record = FromMessage(entry.Record);
             ops.Add(entry.Remove ? Remove(record.TransactionId) : Upsert(record));
         }
+
         return ops;
     }
 
@@ -404,8 +415,10 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return;
 
         List<DecisionOp> ops = new(toMerge.Count);
+
         foreach (CoordinatorDecisionRecord record in toMerge)
             ops.Add(Upsert(record));
+
         ApplyOps(ops);
 
         // Imported records arrive by state transfer, not through this partition's WAL, so WAL-tail replay cannot
@@ -415,6 +428,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return;
 
         HashSet<int> affected = [];
+
         foreach (CoordinatorDecisionRecord record in toMerge)
             affected.Add(resolveAnchorPartition(record.RecordAnchorKey).PartitionId);
 
@@ -449,7 +463,9 @@ internal sealed class CoordinatorDecisionStore : IDisposable
         }
 
         SemaphoreSlim gate = GateFor(destinationPartitionId);
+
         await gate.WaitAsync(ct).ConfigureAwait(false);
+
         try
         {
             CoordinatorDecisionMutationResult result =
@@ -580,6 +596,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     {
         if ((int)incoming.Status > (int)existing.Status)
             return true;
+
         if (existing.CompletedAt == HLCTimestamp.Zero && incoming.CompletedAt != HLCTimestamp.Zero)
             return true;
 
@@ -811,9 +828,11 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             return;
 
         Dictionary<HLCTimestamp, CoordinatorDecisionRecord> loaded = [];
+
         foreach (string path in files)
         {
             byte[] data;
+
             try
             {
                 lock (fileLock)
@@ -825,6 +844,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
             }
 
             CoordinatorDecisionSnapshotMessage message;
+
             try
             {
                 message = ReplicationSerializer.UnserializeCoordinatorDecisionSnapshotMessage(data);
@@ -953,11 +973,15 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     {
         if (a.Count != b.Count)
             return false;
+
         for (int i = 0; i < a.Count; i++)
+        {
             if (!string.Equals(a[i].Key, b[i].Key, StringComparison.Ordinal) ||
                 a[i].Durability != b[i].Durability ||
                 a[i].TicketId != b[i].TicketId)
                 return false;
+        }
+
         return true;
     }
 
@@ -965,6 +989,7 @@ internal sealed class CoordinatorDecisionStore : IDisposable
     {
         foreach (SemaphoreSlim gate in partitionGates.Values)
             gate.Dispose();
+            
         partitionGates.Clear();
     }
 }

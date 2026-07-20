@@ -1,3 +1,4 @@
+
 using System.Collections.Concurrent;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -46,6 +47,7 @@ internal sealed class PreparedIntentStore
     public PreparedIntentStore(string? storagePath, string? storageRevision, ILogger<IKahuna>? logger)
     {
         this.logger = logger;
+
         if (!string.IsNullOrEmpty(storagePath))
         {
             snapshotDirectory = storagePath;
@@ -113,13 +115,17 @@ internal sealed class PreparedIntentStore
     public IReadOnlyList<PreparedIntent> DueForRecovery(HLCTimestamp now, int partitionId)
     {
         Func<string, int>? resolver = resolvePartition;
+
         List<PreparedIntent> due = [];
+
         foreach (PreparedIntent intent in intents.Values)
         {
             if (!intent.IsPending || intent.RecoveryDeadline == HLCTimestamp.Zero || intent.RecoveryDeadline > now)
                 continue;
+
             if (resolver is not null && resolver(intent.Key) != partitionId)
                 continue;
+
             due.Add(intent);
         }
 
@@ -159,6 +165,7 @@ internal sealed class PreparedIntentStore
     public static byte[] SerializeDelta(IEnumerable<PreparedIntentCommand> commands)
     {
         PreparedIntentDeltaMessage delta = new();
+
         foreach (PreparedIntentCommand command in commands)
             delta.Commands.Add(ToProto(command));
 
@@ -308,6 +315,7 @@ internal sealed class PreparedIntentStore
             }
 
             PreparedIntentSnapshotMessage message;
+
             try
             {
                 message = ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data);
@@ -351,12 +359,15 @@ internal sealed class PreparedIntentStore
     public IReadOnlyList<PreparedIntent> SnapshotRange(string? startKey, string? endKey)
     {
         List<PreparedIntent> result = [];
+
         foreach (PreparedIntent intent in intents.Values)
         {
             if (startKey is not null && string.CompareOrdinal(intent.Key, startKey) < 0)
                 continue;
+
             if (endKey is not null && string.CompareOrdinal(intent.Key, endKey) >= 0)
                 continue;
+
             result.Add(intent);
         }
 

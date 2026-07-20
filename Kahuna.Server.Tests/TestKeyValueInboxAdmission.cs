@@ -33,7 +33,7 @@ public sealed class TestKeyValueInboxAdmission
         (ActorSystem actorSystem, RaftManager raft, IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor) =
             SpawnBoundedActor(maxInboxSize: 4);
 
-        using (actorSystem)
+        try
         {
             List<Task<KeyValueResponse?>> userTasks = [];
             List<Task<KeyValueResponse?>> controlTasks = [];
@@ -53,8 +53,12 @@ public sealed class TestKeyValueInboxAdmission
             Assert.True(busyUser > 0, "a flood past the inbox bound must reject ordinary requests with ActorBusyException");
             Assert.Equal(0, busyControl);
         }
-
-        ((FairReadScheduler)raft.ReadScheduler).Stop();
+        finally
+        {
+            await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5));
+            actorSystem.Dispose();
+            raft.Dispose();
+        }
     }
 
     [Fact]
@@ -63,7 +67,7 @@ public sealed class TestKeyValueInboxAdmission
         (ActorSystem actorSystem, RaftManager raft, IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor) =
             SpawnBoundedActor(maxInboxSize: 4);
 
-        using (actorSystem)
+        try
         {
             // Saturate the ordinary inbox.
             List<Task<KeyValueResponse?>> flood = [];
@@ -82,8 +86,12 @@ public sealed class TestKeyValueInboxAdmission
 
             await CountActorBusy(flood); // observe the flood so faulted tasks are not left unobserved
         }
-
-        ((FairReadScheduler)raft.ReadScheduler).Stop();
+        finally
+        {
+            await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5));
+            actorSystem.Dispose();
+            raft.Dispose();
+        }
     }
 
     [Fact]

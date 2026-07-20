@@ -45,7 +45,7 @@ public sealed class TestTryGetByBucketHandler
             // path stays entirely in memory.
             NeverReadBackend backend = new();
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-mem-actor", null!, null!, backend, raft,
@@ -84,7 +84,7 @@ public sealed class TestTryGetByBucketHandler
                 ("doc/b", Encoding.UTF8.GetBytes("bbb"), 2L, KeyValueState.Set),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-disk-actor", null!, null!, backend, raft,
@@ -124,7 +124,7 @@ public sealed class TestTryGetByBucketHandler
                 ("cfg/k", Encoding.UTF8.GetBytes("disk-old"), 0L, KeyValueState.Set),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-merge-actor", null!, null!, backend, raft,
@@ -173,7 +173,7 @@ public sealed class TestTryGetByBucketHandler
                 ("data/y", null, 2L, KeyValueState.Deleted),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-deleted-actor", null!, null!, backend, raft,
@@ -221,7 +221,7 @@ public sealed class TestTryGetByBucketHandler
                 ("ord/x", Encoding.UTF8.GetBytes("current"), 1L, KeyValueState.Set, lastModified),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-snap-actor", null!, null!, backend, raft,
@@ -276,7 +276,7 @@ public sealed class TestTryGetByBucketHandler
                 ("inv/a", Encoding.UTF8.GetBytes("item-a"), 1L, KeyValueState.Set, HLCTimestamp.Zero),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-txn-actor", null!, null!, backend, raft,
@@ -347,7 +347,7 @@ public sealed class TestTryGetByBucketHandler
                     // db/k2 has no history at readTs
                 });
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-snap-disk-actor", null!, null!, backend, raft,
@@ -399,7 +399,7 @@ public sealed class TestTryGetByBucketHandler
                 gate: gate,
                 gateEntered: entered);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-mailbox-actor", null!, null!, backend, raft,
@@ -466,7 +466,7 @@ public sealed class TestTryGetByBucketHandler
             RecordingReadScheduler rejecting = new(rejectWithBackpressure: true);
             SchedulerOverridingRaft decoratedRaft = new(raft, rejecting);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-backpressure-actor", null!, null!, backend, decoratedRaft,

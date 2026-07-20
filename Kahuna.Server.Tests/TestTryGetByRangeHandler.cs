@@ -50,7 +50,7 @@ public sealed class TestTryGetByRangeHandler
                 "doc/a", "doc/b", "doc/c"
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-single-actor", null!, null!, backend, raft,
@@ -93,7 +93,7 @@ public sealed class TestTryGetByRangeHandler
                 "doc/a", "doc/b", "doc/c", "doc/d", "doc/e"
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-multi-actor", null!, null!, backend, raft,
@@ -129,7 +129,7 @@ public sealed class TestTryGetByRangeHandler
             // The K-way merge must interleave them: doc/a, doc/b, doc/c, doc/d, doc/e.
             RangeBackend backend = new(["doc/a", "doc/c", "doc/e"]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-merge-actor", null!, null!, backend, raft,
@@ -194,7 +194,7 @@ public sealed class TestTryGetByRangeHandler
             // scan result (it was not in the stage-1 memory snapshot).
             BlockingRangeBackend backend = new(gate, pageEntered, ["rng/a", "rng/b"]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-interleave-actor", null!, null!, backend, raft,
@@ -256,7 +256,7 @@ public sealed class TestTryGetByRangeHandler
                 ["kv/x"] = (Encoding.UTF8.GetBytes("disk-val"), 1L)
             });
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-shadow-actor", null!, null!, backend, raft,
@@ -306,7 +306,7 @@ public sealed class TestTryGetByRangeHandler
         {
             RangeBackend backend = new(["acct/a", "acct/b", "acct/c"]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-acct-actor", null!, null!, backend, raft,
@@ -374,7 +374,7 @@ public sealed class TestTryGetByRangeHandler
             RecordingReadScheduler recording = new(inner: scheduler);
             SchedulerOverridingRaft decoratedRaft = new(raft, recording);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-routing-actor", null!, null!, backend, decoratedRaft,
@@ -431,7 +431,7 @@ public sealed class TestTryGetByRangeHandler
             RecordingReadScheduler rejecting = new(rejectWithBackpressure: true);
             SchedulerOverridingRaft decoratedRaft = new(raft, rejecting);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-backpressure-actor", null!, null!, backend, decoratedRaft,
@@ -614,7 +614,7 @@ public sealed class TestTryGetByRangeHandler
                 asOfLastModified:    snapshotTs,
                 asOfValue:           Encoding.UTF8.GetBytes("v-at-snapshot"));
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-disk-proj-actor", null!, null!, backend, raft,
@@ -662,7 +662,7 @@ public sealed class TestTryGetByRangeHandler
                 asOfValue:           null,
                 asOfState:           KeyValueState.Deleted);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-disk-del-actor", null!, null!, backend, raft,
@@ -700,7 +700,7 @@ public sealed class TestTryGetByRangeHandler
             // snap/012 — LastModified == snapshotTs; visible at the snapshot.
             PostSnapshotPaginationBackend backend = new(snapshotTs, afterTs);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-pagination-actor", null!, null!, backend, raft,

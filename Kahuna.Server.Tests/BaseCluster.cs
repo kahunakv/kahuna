@@ -82,6 +82,8 @@ public abstract class BaseCluster
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
     
@@ -141,6 +143,8 @@ public abstract class BaseCluster
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
     
@@ -199,6 +203,8 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
         return (raft, kahuna);
     }
@@ -316,6 +322,8 @@ public abstract class BaseCluster
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
 
@@ -381,6 +389,8 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
         return (raft, kahuna);
     }
@@ -477,6 +487,8 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
         return (raft, kahuna);
     }
@@ -575,6 +587,8 @@ public abstract class BaseCluster
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
 
@@ -583,7 +597,7 @@ public abstract class BaseCluster
     /// </summary>
     protected static async Task LeaveClusterSingle(IRaft raft)
     {
-        try { await raft.LeaveCluster(dispose: true); }
+        try { await TestClusterNodeRegistry.DisposeAsync(raft); }
         catch (ObjectDisposedException) { }
     }
     
@@ -724,11 +738,11 @@ public abstract class BaseCluster
         );
     }
 
-    private static async Task LeaveCluster(IRaft raft)
+    protected static async Task LeaveCluster(IRaft raft)
     {
         try
         {
-            await raft.LeaveCluster(dispose: true);
+            await TestClusterNodeRegistry.DisposeAsync(raft);
         }
         catch (ObjectDisposedException)
         {

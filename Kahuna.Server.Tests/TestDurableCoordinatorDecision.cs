@@ -602,6 +602,8 @@ public sealed class TestDurableCoordinatorDecision
         raft.OnReplicationError    += kahuna.OnReplicationError;
         raft.OnLeaderChanged       += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
 
@@ -698,7 +700,7 @@ public sealed class TestDurableCoordinatorDecision
         {
             foreach (ClusterNode n in nodes)
             {
-                try { await n.Raft.LeaveCluster(dispose: true, cancellationToken: ct); }
+                try { await TestClusterNodeRegistry.DisposeAsync(n.Raft, ct); }
                 catch (ObjectDisposedException) { }
             }
         }

@@ -91,9 +91,9 @@ public class TestLocks : BaseCluster
         }
         finally
         {
-            await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
+            await LeaveCluster(node1);
+            await LeaveCluster(node2);
+            await LeaveCluster(node3);
         }
     }
 
@@ -154,9 +154,9 @@ public class TestLocks : BaseCluster
         }
         finally
         {
-            await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
+            await LeaveCluster(node1);
+            await LeaveCluster(node2);
+            await LeaveCluster(node3);
         }
     }
 
@@ -201,9 +201,9 @@ public class TestLocks : BaseCluster
             }
             finally
             {
-                await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
-                await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
-                await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(node1);
+                await LeaveCluster(node2);
+                await LeaveCluster(node3);
             }
         });
     }
@@ -262,9 +262,9 @@ public class TestLocks : BaseCluster
         }
         finally
         {
-            await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
+            await LeaveCluster(node1);
+            await LeaveCluster(node2);
+            await LeaveCluster(node3);
         }
     }
 
@@ -329,9 +329,9 @@ public class TestLocks : BaseCluster
         }
         finally
         {
-            await node1.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node2.LeaveCluster(true, TestContext.Current.CancellationToken);
-            await node3.LeaveCluster(true, TestContext.Current.CancellationToken);
+            await LeaveCluster(node1);
+            await LeaveCluster(node2);
+            await LeaveCluster(node3);
         }
     }
 
@@ -426,7 +426,7 @@ public class TestLocks : BaseCluster
         finally
         {
             foreach ((IRaft raft, KahunaManager _) in nodes)
-                await raft.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(raft);
         }
     }
 
@@ -458,7 +458,7 @@ public class TestLocks : BaseCluster
         finally
         {
             foreach ((IRaft raft, KahunaManager _) in nodes)
-                await raft.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(raft);
         }
     }
 
@@ -514,7 +514,7 @@ public class TestLocks : BaseCluster
         finally
         {
             foreach ((IRaft raft, KahunaManager _) in nodes)
-                await raft.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(raft);
         }
     }
 
@@ -583,7 +583,7 @@ public class TestLocks : BaseCluster
         finally
         {
             foreach ((IRaft raft, KahunaManager _) in nodes)
-                await raft.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(raft);
         }
     }
 
@@ -635,7 +635,7 @@ public class TestLocks : BaseCluster
         finally
         {
             foreach ((IRaft raft, KahunaManager _) in nodes)
-                await raft.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(raft);
         }
     }
 
@@ -671,7 +671,7 @@ public class TestLocks : BaseCluster
         finally
         {
             foreach ((IRaft raft, KahunaManager _) in nodes)
-                await raft.LeaveCluster(true, TestContext.Current.CancellationToken);
+                await LeaveCluster(raft);
         }
     }
 }

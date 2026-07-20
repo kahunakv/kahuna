@@ -269,8 +269,33 @@ public sealed class TestPartitionWriteAggregator
             throw new TimeoutException("condition not met after advancing manual time");
     }
 
-    private static PartitionWriteAggregator Build(RecordingExecutor exec, PartitionWriteAggregatorOptions options, IWriteRangeFence? fence = null, TimeProvider? timeProvider = null) =>
-        new(new ActorSystem(), exec, options, fence ?? new StubFence(), NullLogger<IKahuna>.Instance, timeProvider);
+    private sealed class AggregatorHarness : IDisposable
+    {
+        private readonly ActorSystem actorSystem = new();
+        private readonly PartitionWriteAggregator aggregator;
+
+        public AggregatorHarness(RecordingExecutor exec, PartitionWriteAggregatorOptions options, IWriteRangeFence? fence, TimeProvider? timeProvider)
+        {
+            aggregator = new(actorSystem, exec, options, fence ?? new StubFence(), NullLogger<IKahuna>.Instance, timeProvider);
+        }
+
+        public bool TryEnqueue(IProposalSubmission item) => aggregator.TryEnqueue(item);
+        public void Stop() => aggregator.Stop();
+        public Task StopAsync(TimeSpan timeout) => aggregator.StopAsync(timeout);
+        public int ReservedItems(int partitionId) => aggregator.ReservedItems(partitionId);
+        public int TrackedPartitionCount => aggregator.TrackedPartitionCount;
+        public Meter GaugeMeter => aggregator.GaugeMeter;
+
+        public void Dispose()
+        {
+            aggregator.Stop();
+            actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            actorSystem.Dispose();
+        }
+    }
+
+    private static AggregatorHarness Build(RecordingExecutor exec, PartitionWriteAggregatorOptions options, IWriteRangeFence? fence = null, TimeProvider? timeProvider = null) =>
+        new(exec, options, fence, timeProvider);
 
     /// <summary>Minimal controllable <see cref="TimeProvider"/>: <see cref="GetTimestamp"/> advances only on
     /// <see cref="Advance"/>, and timers created by <c>Task.Delay(delay, provider)</c> fire when advanced past
@@ -352,7 +377,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 64,       // 64 admitted → count flush → one batch
             LingerMs = 10_000,        // long enough that the timer never fires first
@@ -376,7 +401,7 @@ public sealed class TestPartitionWriteAggregator
         // three bundle entries must reach the one proposal contiguously and in admission order — never split.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3,        // three submissions → count flush → one batch
             LingerMs = 10_000,        // long enough that the timer never fires first
@@ -405,7 +430,7 @@ public sealed class TestPartitionWriteAggregator
         // the same partition and admitted before the linger elapses, share one Raft batch.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 512,
             LingerMs = 200,          // long enough that all nine arrive before the timer fires
@@ -427,7 +452,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 4,
             LingerMs = 10_000,
@@ -458,7 +483,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 8,
             LingerMs = 10_000,
@@ -477,7 +502,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 512,
             LingerMs = 0,                          // dispatch the first item immediately
@@ -506,7 +531,7 @@ public sealed class TestPartitionWriteAggregator
         StubFence fence = new();
         fence.StaleKeys.Add("moved"); // this key's range moved since admission
 
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3,   // count flush at 3
             LingerMs = 10_000
@@ -534,7 +559,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingRouter router = new();
         exec.Gate(6); // hold partition 6's Raft call so its batch stays in flight across the age deadline
 
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,   // the first item dispatches immediately and blocks in the executor
             LingerMs = 0,
@@ -564,7 +589,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingRouter router = new();
         exec.Gate(8); // hold partition 8's Raft call so its batch stays in flight across the stop
 
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
@@ -598,7 +623,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingRouter router = new();
         exec.Gate(4); // hold the first item's Raft call so the rest queue up behind it before the drain
 
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
@@ -655,7 +680,7 @@ public sealed class TestPartitionWriteAggregator
         // never a terminal error.
         RecordingExecutor exec = new() { ThrowOnReplicate = true };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 4, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
@@ -673,7 +698,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.ProposalNotFound };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
@@ -690,7 +715,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 3, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });
@@ -712,7 +737,7 @@ public sealed class TestPartitionWriteAggregator
 
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
@@ -752,7 +777,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(8); // hold the in-flight batch so we can observe StopAsync waiting for it
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1, LingerMs = 0, MaxQueuedItemsPerPartition = 100
         });
@@ -766,7 +791,7 @@ public sealed class TestPartitionWriteAggregator
 
         // Pending followers are released promptly, but the drain must NOT complete while a batch is in flight.
         await WaitUntil(() => router.Released.ContainsKey(81) && router.Released.ContainsKey(82));
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.False(stop.IsCompleted); // still awaiting the gated in-flight batch
 
         exec.Release(8); // the in-flight batch settles → drain observes quiescence and returns
@@ -787,7 +812,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(2); // hold the partition's Raft call so dispatched batches stay in flight during the burst
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1,
             LingerMs = 0,
@@ -828,7 +853,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(3);
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 8, LingerMs = 0, MaxQueuedItemsPerPartition = 100, MaxQueuedBytesPerPartition = 1024
         });
@@ -850,7 +875,7 @@ public sealed class TestPartitionWriteAggregator
         // accumulate for the node's lifetime.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 1, LingerMs = 0, MaxQueuedItemsPerPartition = 100
         });
@@ -869,7 +894,7 @@ public sealed class TestPartitionWriteAggregator
         // not accumulate gauges that keep dead admission registries reachable.
         RecordingExecutor exec = new();
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions());
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions());
 
         int observed = 0;
         using MeterListener listener = new();
@@ -894,7 +919,7 @@ public sealed class TestPartitionWriteAggregator
         RecordingExecutor exec = new();
         RecordingRouter router = new();
         exec.Gate(7);
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 2, LingerMs = 0, MaxQueuedItemsPerPartition = 100
         });
@@ -914,7 +939,7 @@ public sealed class TestPartitionWriteAggregator
     {
         RecordingExecutor exec = new() { SucceedResult = false, ResultStatus = RaftOperationStatus.Errored };
         RecordingRouter router = new();
-        PartitionWriteAggregator agg = Build(exec, new PartitionWriteAggregatorOptions
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
         {
             MaxBatchItems = 4, LingerMs = 10_000, MaxQueuedItemsPerPartition = 100
         });

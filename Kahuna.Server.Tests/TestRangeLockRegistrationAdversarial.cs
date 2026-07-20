@@ -461,7 +461,7 @@ public sealed class TestRangeLockRegistrationAdversarial : BaseCluster
     {
         foreach ((IRaft raft, KahunaManager _) in nodes)
         {
-            try { await raft.LeaveCluster(true, ct); }
+            try { await TestClusterNodeRegistry.DisposeAsync(raft, ct); }
             catch (ObjectDisposedException) { }
         }
     }

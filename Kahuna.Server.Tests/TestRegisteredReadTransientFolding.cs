@@ -531,6 +531,8 @@ public sealed class TestRegisteredReadTransientFolding
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
 
@@ -580,7 +582,7 @@ public sealed class TestRegisteredReadTransientFolding
     {
         foreach (Node node in nodes)
         {
-            try { await node.Raft.LeaveCluster(dispose: true); }
+            try { await TestClusterNodeRegistry.DisposeAsync(node.Raft); }
             catch (ObjectDisposedException) { }
         }
     }

@@ -46,7 +46,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                 ("svc/b", Encoding.UTF8.GetBytes("vb"), 2L, KeyValueState.Set),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-hit-actor", null!, null!, backend, raft,
@@ -75,7 +75,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
         {
             PrefixBackend backend = new([]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-empty-actor", null!, null!, backend, raft,
@@ -107,7 +107,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                 ("ns/dead", null, 2L, KeyValueState.Deleted),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-deleted-actor", null!, null!, backend, raft,
@@ -138,7 +138,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
         {
             FaultingBackend backend = new();
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-fault-actor", null!, null!, backend, raft,
@@ -169,7 +169,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                 ("app/x", Encoding.UTF8.GetBytes("xval"), 1L, KeyValueState.Set),
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-coalesce-actor", null!, null!, backend, raft,
@@ -247,7 +247,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                     ["p/gone"] = null,
                 });
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-snapshot-actor", null!, null!, backend, raft,

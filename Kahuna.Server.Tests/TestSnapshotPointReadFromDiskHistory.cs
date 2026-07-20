@@ -67,7 +67,7 @@ public class TestSnapshotPointReadFromDiskHistory
         scheduler.Start();
         try
         {
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-get-actor", null!, null!, backend, raft,
@@ -119,7 +119,7 @@ public class TestSnapshotPointReadFromDiskHistory
         scheduler.Start();
         try
         {
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-exists-actor", null!, null!, backend, raft,

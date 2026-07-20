@@ -89,7 +89,7 @@ public sealed class TestPhaseTwoOffMailbox
         const int partitionId = 1;
         await node.Raft.WaitForLeader(partitionId, ct);
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         (IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker,
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, node.Raft, logger);
 
@@ -132,7 +132,7 @@ public sealed class TestPhaseTwoOffMailbox
         Assert.True(prepared.Success);
         Assert.NotEqual(HLCTimestamp.Zero, prepared.TicketId);
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         (IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker,
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, node.Raft, logger);
 
@@ -159,7 +159,7 @@ public sealed class TestPhaseTwoOffMailbox
         RaftManager raft = CreateRaft("phasetwo-commit-idem");
         MemoryPersistenceBackend backend = new();
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
             actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
                 "bg-commit", raft, backend,
@@ -425,7 +425,7 @@ public sealed class TestPhaseTwoOffMailbox
             partitionId, ReplicationTypes.KeyValues, SerializeSet("phasetwo/gate", 0), autoCommit: false, cancellationToken: ct);
         Assert.True(prepared.Success);
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         (IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker,
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, node.Raft, logger);
 
@@ -564,7 +564,7 @@ public sealed class TestPhaseTwoOffMailbox
         RaftManager raft = CreateRaft("invalidate-ordering");
         MemoryPersistenceBackend backend = new();
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
             actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
                 "bg-order", raft, backend, null!, null!, null!, config, logger, new FlushNotificationSink());
@@ -652,7 +652,7 @@ public sealed class TestPhaseTwoOffMailbox
             Phase2CommitTimeout = 500
         });
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker =
             actorSystem.Spawn<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>("notjoined-worker", raft, logger);
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor =
@@ -719,7 +719,7 @@ public sealed class TestPhaseTwoOffMailbox
         await node.Raft.WaitForLeader(partitionId, ct);
 
         MemoryPersistenceBackend backend = new();
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
             actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
                 "bg-r3", node.Raft, backend, null!, null!, null!, config, logger, new FlushNotificationSink());
@@ -938,7 +938,7 @@ public sealed class TestPhaseTwoOffMailbox
         ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
         RaftManager raft = CreateRaft("phasetwo-expired");
 
-        using ActorSystem actorSystem = new();
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         (IActorRef<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest> worker,
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> replyActor) = SpawnWorkerAndSink(actorSystem, raft, logger);
 

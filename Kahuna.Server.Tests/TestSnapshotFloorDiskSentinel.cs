@@ -206,18 +206,14 @@ public sealed class TestSnapshotFloorDiskSentinel
 
         interNode.SetNodes(new() { { raft.GetLocalEndpoint(), kahuna } });
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna, backend);
     }
 
     private static async Task Cleanup(RaftManager raft, KahunaManager kahuna)
     {
-        raft.OnLogRestored         -= kahuna.OnLogRestored;
-        raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
-        raft.OnReplicationError    -= kahuna.OnReplicationError;
-        raft.OnLeaderChanged       -= kahuna.OnLeaderChanged;
-
-        try { await raft.LeaveCluster(dispose: true); } catch (ObjectDisposedException) { }
-        kahuna.Dispose();
+        try { await TestClusterNodeRegistry.DisposeAsync(raft); } catch (ObjectDisposedException) { }
     }
 
     // ── tests ────────────────────────────────────────────────────────────────────────────────

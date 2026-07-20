@@ -82,6 +82,8 @@ public sealed class TestDurablePartialCommitRecovery
         raft.OnReplicationError    += kahuna.OnReplicationError;
         raft.OnLeaderChanged       += kahuna.OnLeaderChanged;
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna);
     }
 
@@ -184,7 +186,7 @@ public sealed class TestDurablePartialCommitRecovery
         {
             foreach (ClusterNode n in nodes)
             {
-                try { await n.Raft.LeaveCluster(dispose: true, cancellationToken: CancellationToken.None); }
+                try { await TestClusterNodeRegistry.DisposeAsync(n.Raft, CancellationToken.None); }
                 catch (ObjectDisposedException) { }
             }
         }

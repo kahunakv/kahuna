@@ -117,7 +117,7 @@ public sealed class TestTryExistsHandler
                     state: (int)KeyValueState.Set)
             ]);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-latest-actor", null!, null!, backend, raft,
@@ -146,7 +146,7 @@ public sealed class TestTryExistsHandler
         {
             MemoryPersistenceBackend backend = new(); // empty — GetKeyValue returns null
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-notfound-actor2", null!, null!, backend, raft,
@@ -180,7 +180,7 @@ public sealed class TestTryExistsHandler
             ManualResetEventSlim gate = new(false);
             BlockingLatestBackend backend = new(gate, Encoding.UTF8.GetBytes("the-value"), revision: 9);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "latest-shape-actor", null!, null!, backend, raft,
@@ -231,7 +231,7 @@ public sealed class TestTryExistsHandler
         {
             RevisionBackend backend = new(targetRevision: 4, value: Encoding.UTF8.GetBytes("ignored"));
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-actor", null!, null!, backend, raft,
@@ -261,7 +261,7 @@ public sealed class TestTryExistsHandler
         {
             RevisionBackend backend = new(targetRevision: -1, value: null);
 
-            using ActorSystem actorSystem = new();
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-notfound-actor", null!, null!, backend, raft,

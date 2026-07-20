@@ -6,18 +6,31 @@ namespace Kahuna.Shared.KeyValue;
 public enum KeyValueResponseType
 {
     Set = 0,
+    
     NotSet = 1,
+
     Extended = 2,
+
     Get = 3,
+
     Deleted = 4,
+
     Locked = 5,
+
     Unlocked = 6,
+
     Prepared = 7,
+
     Committed = 8,
+
     RolledBack = 9,
+
     Exists = 10,
+
     WaitingForReplication = 11,
+
     Errored = 99,
+
     InvalidInput = 100,
     /// <summary>
     /// Overloaded for two distinct cases — callers should handle both:
@@ -39,8 +52,11 @@ public enum KeyValueResponseType
     /// (the transparent back-off path that never surfaces here when the leader handles the retry).
     /// </summary>
     MustRetry = 101,
+
     Aborted = 102,
+
     DoesNotExist = 103,
+
     AlreadyLocked = 104,
 
     /// <summary>

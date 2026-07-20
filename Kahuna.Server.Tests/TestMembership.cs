@@ -161,7 +161,7 @@ public sealed class TestMembership : BaseCluster
         {
             await LeaveClusterSingle(raft1);
             await LeaveClusterSingle(raft2);
-            try { await raft3.LeaveCluster(dispose: true, TestContext.Current.CancellationToken); } catch { }
+            try { await LeaveClusterSingle(raft3); } catch { }
         }
     }
 
@@ -207,7 +207,7 @@ public sealed class TestMembership : BaseCluster
             raftComm.HealPartition("localhost:8003");
             await LeaveClusterSingle(raft1);
             await LeaveClusterSingle(raft2);
-            try { await raft3.LeaveCluster(dispose: true, TestContext.Current.CancellationToken); } catch { }
+            try { await LeaveClusterSingle(raft3); } catch { }
         }
     }
 

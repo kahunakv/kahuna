@@ -131,6 +131,8 @@ public sealed class TestSnapshotFloorPinEndToEnd
         string localEndpoint = raft.GetLocalEndpoint();
         interNode.SetNodes(new() { { localEndpoint, kahuna } });
 
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
         return (raft, kahuna, countingBackend);
     }
 
@@ -224,13 +226,7 @@ public sealed class TestSnapshotFloorPinEndToEnd
         }
         finally
         {
-            raft.OnLogRestored         -= kahuna.OnLogRestored;
-            raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
-            raft.OnReplicationError    -= kahuna.OnReplicationError;
-
-            if (raft is IDisposable dr) dr.Dispose();
-            kahuna.Dispose();
-            backend.Dispose();
+            await TestClusterNodeRegistry.DisposeAsync(raft, TestContext.Current.CancellationToken);
         }
     }
 
@@ -289,13 +285,7 @@ public sealed class TestSnapshotFloorPinEndToEnd
         }
         finally
         {
-            raft.OnLogRestored         -= kahuna.OnLogRestored;
-            raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
-            raft.OnReplicationError    -= kahuna.OnReplicationError;
-
-            if (raft is IDisposable dr) dr.Dispose();
-            kahuna.Dispose();
-            backend.Dispose();
+            await TestClusterNodeRegistry.DisposeAsync(raft, TestContext.Current.CancellationToken);
         }
     }
 
@@ -372,13 +362,7 @@ public sealed class TestSnapshotFloorPinEndToEnd
         }
         finally
         {
-            raft.OnLogRestored         -= kahuna.OnLogRestored;
-            raft.OnReplicationReceived -= kahuna.OnReplicationReceived;
-            raft.OnReplicationError    -= kahuna.OnReplicationError;
-
-            if (raft is IDisposable dr) dr.Dispose();
-            kahuna.Dispose();
-            backend.Dispose();
+            await TestClusterNodeRegistry.DisposeAsync(raft, TestContext.Current.CancellationToken);
         }
     }
 }
