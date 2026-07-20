@@ -11,6 +11,8 @@ sudo update-ca-certificates
 export COMPOSE_FILE=docker/local.yml
 docker compose up --build -d
 
+sleep 30
+
 for port in 8082 8084 8086; do
   ready=0
 

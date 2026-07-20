@@ -76,8 +76,8 @@ public sealed class TestRemoveKeyRange
         {
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",

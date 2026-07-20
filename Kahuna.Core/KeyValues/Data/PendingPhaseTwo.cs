@@ -41,10 +41,6 @@ internal sealed class PendingPhaseTwo
     /// <summary>Transaction record anchor, carried into the completion receipt on a persistent commit.</summary>
     public string? RecordAnchorKey { get; }
 
-    /// <summary>Initial durable coordinator decision, present only on the anchor key of a Durable
-    /// transaction; installed atomically as the anchor commit applies.</summary>
-    public CoordinatorDecisionRecord? EmbeddedDecision { get; }
-
     /// <summary>The caller's ask promise, retained so a deadline sweep can resolve it (retryable) if the
     /// off-mailbox worker dies or its completion message is dropped and never arrives. Set by the
     /// dispatching handler; null in bare-context tests that drive the completion directly.</summary>
@@ -64,8 +60,7 @@ internal sealed class PendingPhaseTwo
         HLCTimestamp currentTime,
         HLCTimestamp ticketId,
         int partitionId,
-        string? recordAnchorKey,
-        CoordinatorDecisionRecord? embeddedDecision
+        string? recordAnchorKey
     )
     {
         OpKind = opKind;
@@ -77,11 +72,10 @@ internal sealed class PendingPhaseTwo
         TicketId = ticketId;
         PartitionId = partitionId;
         RecordAnchorKey = recordAnchorKey;
-        EmbeddedDecision = embeddedDecision;
     }
 
     public static PendingPhaseTwo ForPrepare(HLCTimestamp txId, string key, KeyValueDurability durability)
-        => new(PhaseTwoOpKind.Prepare, txId, key, durability, null, HLCTimestamp.Zero, HLCTimestamp.Zero, 0, null, null);
+        => new(PhaseTwoOpKind.Prepare, txId, key, durability, null, HLCTimestamp.Zero, HLCTimestamp.Zero, 0, null);
 
     public static PendingPhaseTwo ForCommit(
         HLCTimestamp txId,
@@ -91,9 +85,8 @@ internal sealed class PendingPhaseTwo
         HLCTimestamp currentTime,
         HLCTimestamp ticketId,
         int partitionId,
-        string? recordAnchorKey,
-        CoordinatorDecisionRecord? embeddedDecision
-    ) => new(PhaseTwoOpKind.Commit, txId, key, durability, proposal, currentTime, ticketId, partitionId, recordAnchorKey, embeddedDecision);
+        string? recordAnchorKey
+    ) => new(PhaseTwoOpKind.Commit, txId, key, durability, proposal, currentTime, ticketId, partitionId, recordAnchorKey);
 
     public static PendingPhaseTwo ForRollback(
         HLCTimestamp txId,
@@ -102,5 +95,5 @@ internal sealed class PendingPhaseTwo
         HLCTimestamp currentTime,
         HLCTimestamp ticketId,
         int partitionId
-    ) => new(PhaseTwoOpKind.Rollback, txId, key, durability, null, currentTime, ticketId, partitionId, null, null);
+    ) => new(PhaseTwoOpKind.Rollback, txId, key, durability, null, currentTime, ticketId, partitionId, null);
 }

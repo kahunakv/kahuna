@@ -284,7 +284,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     ) : this(actorContext, backgroundWriter, writeAggregator, null, persistenceBackend, raft,
-             keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null, null, null)
+             keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null, null)
     {
     }
 
@@ -301,7 +301,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         ILogger<IKahuna> logger,
         SnapshotFloorStore? snapshotFloorStore,
         CompletionReceiptStore? completionReceiptStore,
-        Transactions.CoordinatorDecisionStore? coordinatorDecisionStore,
         Transactions.PreparedIntentStore? preparedIntentStore,
         Transactions.TransactionRecordStore? transactionRecordStore
     )
@@ -325,7 +324,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             logger,
             snapshotFloorStore,
             completionReceiptStore,
-            coordinatorDecisionStore,
             phaseTwoRouter,
             preparedIntentStore,
             transactionRecordStore

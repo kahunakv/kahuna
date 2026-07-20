@@ -41,8 +41,6 @@ internal sealed class KeyValueReplicator
 
     private readonly CompletionReceiptStore completionReceiptStore;
 
-    private readonly Transactions.CoordinatorDecisionStore? coordinatorDecisionStore;
-
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueReplicator(
@@ -52,7 +50,6 @@ internal sealed class KeyValueReplicator
         KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KeySpaceRegistry keySpaceRegistry,
         CompletionReceiptStore completionReceiptStore,
-        Transactions.CoordinatorDecisionStore? coordinatorDecisionStore,
         ILogger<IKahuna> logger)
     {
         this.backgroundWriter         = backgroundWriter;
@@ -61,17 +58,14 @@ internal sealed class KeyValueReplicator
         this.writeFrequencyRegistry   = writeFrequencyRegistry;
         this.keySpaceRegistry         = keySpaceRegistry;
         this.completionReceiptStore   = completionReceiptStore;
-        this.coordinatorDecisionStore = coordinatorDecisionStore;
         this.logger                   = logger;
     }
 
     /// <summary>
     /// Applies the transactional commit metadata carried on a committed persistent mutation as a follower
     /// replicates the log record: records a durable completion receipt (so a re-commit that lands here after
-    /// the write intent / MVCC entry are gone answers <c>Committed</c> instead of <c>MustRetry</c>) and, on
-    /// the anchor key of a Durable transaction, installs the embedded initial <c>CommitDecided</c> record —
-    /// the same committed entry that carries the anchor value. A non-transactional (single-shot) write
-    /// carries a zero transaction id and no embedded decision, so both are skipped.
+    /// the write intent / MVCC entry are gone answers <c>Committed</c> instead of <c>MustRetry</c>). A
+    /// non-transactional (single-shot) write carries a zero transaction id, which is harmless to record.
     /// </summary>
     private void RecordCompletionReceipt(KeyValueMessage keyValueMessage)
     {
@@ -82,14 +76,6 @@ internal sealed class KeyValueReplicator
             keyValueMessage.Key,
             keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
             KeyValueDurability.Persistent);
-
-        if (coordinatorDecisionStore is not null && keyValueMessage.HasEmbeddedDecision)
-        {
-            CoordinatorDecisionRecord? record =
-                Transactions.CoordinatorDecisionStore.DeserializeRecord(keyValueMessage.EmbeddedDecision.ToByteArray());
-            if (record is not null)
-                coordinatorDecisionStore.InstallFromAnchorCommit(record);
-        }
     }
 
     /// <summary>

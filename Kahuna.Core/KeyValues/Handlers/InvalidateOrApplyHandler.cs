@@ -124,7 +124,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
             KeyValueDurability.Persistent);
 
         HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null, embeddedDecision: null);
+        ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null);
 
         return null;
     }

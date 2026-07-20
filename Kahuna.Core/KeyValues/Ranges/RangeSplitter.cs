@@ -256,21 +256,6 @@ internal sealed class RangeSplitter
                 return SplitOutcome.TransferFailed;
             }
 
-            // ── 7d. Transfer coordinator decision records whose anchor moves to [K,E) into P' ────
-            // Decision records are replicated onto the destination partition's Raft log (routed by
-            // RecordAnchorKey) so a re-drive or finalize routed to P' after cutover finds its record on
-            // whichever node leads P'. Idempotent by transaction id, so a duplicate copy during handoff is
-            // safe. As with receipts, a non-durable handoff aborts the split before cutover.
-            IReadOnlyCollection<CoordinatorDecisionRecord> movedDecisions =
-                manager.GetLocalDecisionsForRange(splitKey, descriptor.EndKey);
-
-            if (!await manager.ImportCoordinatorDecisionsToPartitionLeaderAsync(newPartitionId, movedDecisions, ct))
-            {
-                logger.LogError(
-                    "RangeSplitter: coordinator-decision handoff to P{New} not durable — aborting split before cutover", newPartitionId);
-                return SplitOutcome.TransferFailed;
-            }
-
             // F3 test seam: allow the caller to race a direct write while quiesced.
             if (duringQuiesce is not null)
                 await duringQuiesce();

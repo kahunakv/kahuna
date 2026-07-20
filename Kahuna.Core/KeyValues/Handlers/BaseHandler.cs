@@ -421,8 +421,7 @@ internal abstract class BaseHandler
         HLCTimestamp txId,
         HLCTimestamp currentTime,
         int partitionId,
-        string? recordAnchorKey,
-        Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+        string? recordAnchorKey)
     {
         RemoveMvccEntry(entry, txId);
         TrimExpiredMvccEntries(entry, currentTime);
@@ -470,11 +469,6 @@ internal abstract class BaseHandler
 
         context.RecordCommitted(txId);
         context.CompletionReceiptStore.Record(txId, proposal.Key, recordAnchorKey, KeyValueDurability.Persistent);
-
-        // Atomic with the anchor value + receipt: install the initial CommitDecided record so no node
-        // exposes the committed anchor value without the decision that authorizes the rest of the tx.
-        if (embeddedDecision is not null)
-            context.CoordinatorDecisionStore?.InstallFromAnchorCommit(embeddedDecision);
     }
 
     /// <summary>

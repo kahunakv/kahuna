@@ -91,7 +91,6 @@ internal readonly struct GrpcServerBatcherResponse
 
     public GrpcServerBatcherResponse(GrpcImportCompletionReceiptsResponse importCompletionReceipts) => payload = importCompletionReceipts;
 
-    public GrpcServerBatcherResponse(GrpcImportCoordinatorDecisionsResponse importCoordinatorDecisions) => payload = importCoordinatorDecisions;
 
     public GrpcServerBatcherResponse(GrpcDurableOperationResponse durableOperation) => payload = durableOperation;
 
@@ -191,7 +190,6 @@ internal readonly struct GrpcServerBatcherResponse
 
     public GrpcImportCompletionReceiptsResponse? ImportCompletionReceipts => payload as GrpcImportCompletionReceiptsResponse;
 
-    public GrpcImportCoordinatorDecisionsResponse? ImportCoordinatorDecisions => payload as GrpcImportCoordinatorDecisionsResponse;
 
     public GrpcDurableOperationResponse? DurableOperation => payload as GrpcDurableOperationResponse;
 

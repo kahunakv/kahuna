@@ -1039,8 +1039,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         KeyValueDurability durability,
         long routedGeneration,
         CancellationToken cancellationToken,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
         //GrpcChannel channel = SharedChannels.GetChannel(node);
@@ -1063,10 +1062,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
 
         if (recordAnchorKey is not null)
             request.RecordAnchorKey = recordAnchorKey;
-
-        if (embeddedDecision is not null)
-            request.EmbeddedDecision = UnsafeByteOperations.UnsafeWrap(
-                CoordinatorDecisionStore.SerializeRecord(embeddedDecision));
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
@@ -1805,27 +1800,6 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
 
         return batchResponse.ImportCompletionReceipts?.Success ?? false;
-    }
-
-    public async Task<bool> ImportCoordinatorDecisions(string node, int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken)
-    {
-        GrpcServerBatcher batcher = GetSharedBatcher(node);
-
-        // The full record set (participants, cleanup effects) rides as one serialized snapshot blob.
-        GrpcImportCoordinatorDecisionsRequest request = new()
-        {
-            Records = UnsafeByteOperations.UnsafeWrap(CoordinatorDecisionStore.SerializeRecords(records)),
-            DestinationPartitionId = partitionId
-        };
-
-        GrpcServerBatcherResponse batchResponse;
-
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
-
-        return batchResponse.ImportCoordinatorDecisions?.Success ?? false;
     }
 
     public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)

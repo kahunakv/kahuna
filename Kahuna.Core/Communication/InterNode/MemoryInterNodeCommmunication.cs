@@ -771,12 +771,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         KeyValueDurability durability,
         long routedGeneration,
         CancellationToken cancellationToken,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey, embeddedDecision);
+            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1231,14 +1230,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return forget
                 ? await kahunaNode.ForgetCompletionReceiptsReplicated(partitionId, receipts)
                 : await kahunaNode.ImportCompletionReceiptsReplicated(partitionId, receipts);
-
-        throw new KahunaServerException($"The node {node} does not exist.");
-    }
-
-    public async Task<bool> ImportCoordinatorDecisions(string node, int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records, CancellationToken cancellationToken)
-    {
-        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.ImportCoordinatorDecisionsReplicated(partitionId, records);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

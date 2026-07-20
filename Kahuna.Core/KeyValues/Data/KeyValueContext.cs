@@ -77,13 +77,6 @@ internal sealed class KeyValueContext
     /// </summary>
     public CompletionReceiptStore CompletionReceiptStore { get; }
 
-    /// <summary>
-    /// The node's durable coordinator decision store. On the anchor key's persistent commit the handler
-    /// installs the embedded <c>CommitDecided</c> record here, so the anchor value, its completion receipt,
-    /// and the decision record all land from the one committed proposal. Null only in bare test contexts.
-    /// </summary>
-    public Transactions.CoordinatorDecisionStore? CoordinatorDecisionStore { get; }
-
     /// <summary>The durable prepared-intent store, consulted by reads to apply the read-visibility contract when a
     /// committed value has not yet materialized locally (deferred settlement). Null in bare test contexts.</summary>
     public Transactions.PreparedIntentStore? PreparedIntentStore { get; }
@@ -171,7 +164,6 @@ internal sealed class KeyValueContext
         ILogger<IKahuna> logger,
         SnapshotFloorStore? snapshotFloorStore = null,
         CompletionReceiptStore? completionReceiptStore = null,
-        Transactions.CoordinatorDecisionStore? coordinatorDecisionStore = null,
         IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter = null,
         Transactions.PreparedIntentStore? preparedIntentStore = null,
         Transactions.TransactionRecordStore? transactionRecordStore = null
@@ -193,7 +185,6 @@ internal sealed class KeyValueContext
         Logger = logger;
         SnapshotFloorStore = snapshotFloorStore;
         CompletionReceiptStore = completionReceiptStore ?? new CompletionReceiptStore();
-        CoordinatorDecisionStore = coordinatorDecisionStore;
         PreparedIntentStore = preparedIntentStore;
         TransactionRecordStore = transactionRecordStore;
     }

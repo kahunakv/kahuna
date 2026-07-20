@@ -63,8 +63,8 @@ public abstract class BaseCluster
         {
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -124,8 +124,8 @@ public abstract class BaseCluster
         {
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -185,8 +185,8 @@ public abstract class BaseCluster
         {
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -305,8 +305,8 @@ public abstract class BaseCluster
 
         KahunaConfiguration configuration = new()
         {
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -373,8 +373,8 @@ public abstract class BaseCluster
 
         KahunaConfiguration configuration = new()
         {
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -471,8 +471,8 @@ public abstract class BaseCluster
 
         KahunaConfiguration configuration = new()
         {
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -570,8 +570,8 @@ public abstract class BaseCluster
 
         KahunaConfiguration configuration = new()
         {
-            LocksWorkers = 8,
-            KeyValueWorkers = 8,
+            LocksWorkers = 4,
+            KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
             Storage = "memory",
             StoragePath = "/tmp",
@@ -627,11 +627,19 @@ public abstract class BaseCluster
             { "localhost:8003", raft3 }
         });
         
-        await Task.WhenAll(raft1.JoinCluster(), raft2.JoinCluster(), raft3.JoinCluster());
-
         using CancellationTokenSource assemblyCts = CancellationTokenSource.CreateLinkedTokenSource(
             TestContext.Current.CancellationToken);
         assemblyCts.CancelAfter(TimeSpan.FromSeconds(90 * TimingScale));
+
+        // Pass the scaled assembly token into JoinCluster. Without a token, JoinCluster falls
+        // back to Kommander's hardcoded 60 s internal deadline, which ignores TimingScale and
+        // throws a generic "may have failed to elect a leader" — the exact opaque failure that
+        // showed up on loaded CI. With the token, the join honors the scaled 90 s deadline and
+        // Kommander emits a per-second assembly-state snapshot to the log while it waits.
+        await Task.WhenAll(
+            raft1.JoinCluster(assemblyCts.Token),
+            raft2.JoinCluster(assemblyCts.Token),
+            raft3.JoinCluster(assemblyCts.Token));
 
         for (int i = 0; i <= partitions; i++)
         {

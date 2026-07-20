@@ -1026,10 +1026,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
-        CoordinatorDecisionRecord? embeddedDecision = request.HasEmbeddedDecision
-            ? CoordinatorDecisionStore.DeserializeRecord(request.EmbeddedDecision.ToByteArray())
-            : null;
-
         (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
@@ -1037,8 +1033,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
             request.RoutedGeneration,
-            request.HasRecordAnchorKey ? request.RecordAnchorKey : null,
-            embeddedDecision
+            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
         );
 
         return new()
@@ -2095,15 +2090,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             ? await keyValues.ForgetCompletionReceiptsReplicated(request.DestinationPartitionId, receipts)
             : await keyValues.ImportCompletionReceiptsReplicated(request.DestinationPartitionId, receipts);
         return new GrpcImportCompletionReceiptsResponse { Success = durable };
-    }
-
-    internal async Task<GrpcImportCoordinatorDecisionsResponse> ImportCoordinatorDecisionsInternal(GrpcImportCoordinatorDecisionsRequest request, ServerCallContext context)
-    {
-        IReadOnlyList<CoordinatorDecisionRecord> records =
-            CoordinatorDecisionStore.DeserializeRecords(request.Records.ToByteArray());
-
-        bool durable = await keyValues.ImportCoordinatorDecisionsReplicated(request.DestinationPartitionId, records);
-        return new GrpcImportCoordinatorDecisionsResponse { Success = durable };
     }
 
     internal async Task<GrpcDurableOperationResponse> DurableOperationInternal(GrpcDurableOperationRequest request, ServerCallContext context)

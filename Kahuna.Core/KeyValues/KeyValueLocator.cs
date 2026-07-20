@@ -1226,8 +1226,7 @@ internal sealed class KeyValueLocator
         KeyValueDurability durability,
         CancellationToken cancelationToken,
         long routedGeneration = 0,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
         if (string.IsNullOrEmpty(key))
@@ -1242,7 +1241,7 @@ internal sealed class KeyValueLocator
             routedGeneration = freshGeneration;
 
         if (!raft.Joined || await raft.AmILeader(partitionId, cancelationToken))
-            return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey, embeddedDecision);
+            return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
 
         string leader = await raft.WaitForLeader(partitionId, cancelationToken);
         if (leader == raft.GetLocalEndpoint())
@@ -1250,7 +1249,7 @@ internal sealed class KeyValueLocator
 
         logger.LogPrepareKeyValueRedirected(key, partitionId, leader);
 
-        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, routedGeneration, cancelationToken, recordAnchorKey, embeddedDecision);
+        return await interNodeCommunication.TryPrepareMutations(leader, transactionId, commitId, key, durability, routedGeneration, cancelationToken, recordAnchorKey);
     }
     
     /// <summary>

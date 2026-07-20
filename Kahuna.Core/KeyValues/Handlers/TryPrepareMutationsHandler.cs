@@ -243,8 +243,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
                 TransactionId    = message.TransactionId,
                 Expires          = intentExpires,
                 CommitTimestamp  = mvccEntry.LastModified,
-                RecordAnchorKey  = message.RecordAnchorKey,
-                EmbeddedDecision = message.EmbeddedDecision
+                RecordAnchorKey  = message.RecordAnchorKey
             };
         }
         else
@@ -254,9 +253,6 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             // Stamp the anchor once the coordinator supplies it; a plain pre-prepare lock had none.
             if (message.RecordAnchorKey is not null)
                 entry.WriteIntent.RecordAnchorKey = message.RecordAnchorKey;
-            // Likewise the initial decision, present only on the anchor key of a Durable transaction.
-            if (message.EmbeddedDecision is not null)
-                entry.WriteIntent.EmbeddedDecision = message.EmbeddedDecision;
         }
 
         if (message.Durability != KeyValueDurability.Persistent)
@@ -286,7 +282,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         if (!context.Raft.Joined)
             return (new(KeyValueResponseType.Prepared, HLCTimestamp.Zero), null, 0);
 
-        byte[] serialized = BuildPreparedMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey, message.EmbeddedDecision);
+        byte[] serialized = BuildPreparedMessage(proposalType, proposal, message.TransactionId, message.RecordAnchorKey);
         int partitionId = ResolvePartition(message.Key);
 
         return (null, serialized, partitionId);
@@ -295,7 +291,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
     /// <summary>
     /// Builds and serializes the committed key/value message for a prepared mutation.
     /// </summary>
-    private static byte[] BuildPreparedMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+    private static byte[] BuildPreparedMessage(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp transactionId, string? recordAnchorKey)
     {
         KeyValueMessage kvm = new()
         {
@@ -323,13 +319,6 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
 
         if (recordAnchorKey is not null)
             kvm.RecordAnchorKey = recordAnchorKey;
-
-        // Serialize the initial decision into the committed envelope so a follower's replication apply and a
-        // cold-restart restore install it from the same log record that carries the anchor value. The leader
-        // installs it inline at commit from the write intent; this copy covers every other node.
-        if (embeddedDecision is not null)
-            kvm.EmbeddedDecision = UnsafeByteOperations.UnsafeWrap(
-                Transactions.CoordinatorDecisionStore.SerializeRecord(embeddedDecision));
 
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);

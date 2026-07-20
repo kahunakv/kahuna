@@ -87,13 +87,6 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// </summary>
     public string? RecordAnchorKey { get; internal set; }
 
-    /// <summary>
-    /// The initial durable coordinator decision, carried only on the anchor key's prepare request of a
-    /// Durable transaction. The participant leader stamps it into the write intent so committing the anchor
-    /// installs it atomically with the value and receipt; it is also serialized into the committed envelope
-    /// for follower/restore install. Null for every non-anchor prepare and all best-effort transactions.
-    /// </summary>
-    public Transactions.Data.CoordinatorDecisionRecord? EmbeddedDecision { get; internal set; }
 
     /// <summary>
     ///
@@ -322,7 +315,6 @@ public sealed class KeyValueRequest : IConsistentHashable
         PhaseTwoCompletionData = null;
         RoutedGeneration = 0;
         RecordAnchorKey = null;
-        EmbeddedDecision = null;
     }
 
     public int GetHash()

@@ -59,8 +59,6 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     private readonly CompletionReceiptStore? completionReceiptStore;
 
-    private readonly CoordinatorDecisionStore? coordinatorDecisionStore;
-
     private readonly KahunaConfiguration configuration;
 
     private readonly ILogger<IKahuna> logger;
@@ -140,7 +138,6 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IPersistenceBackend persistenceBackend,
         SnapshotFloorStore? snapshotFloorStore,
         CompletionReceiptStore? completionReceiptStore,
-        CoordinatorDecisionStore? coordinatorDecisionStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         FlushNotificationSink flushNotificationSink
@@ -150,7 +147,6 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.persistenceBackend = persistenceBackend;
         this.snapshotFloorStore = snapshotFloorStore;
         this.completionReceiptStore = completionReceiptStore;
-        this.coordinatorDecisionStore = coordinatorDecisionStore;
         this.configuration = configuration;
         this.logger = logger;
         this.flushNotificationSink = flushNotificationSink;
@@ -278,9 +274,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// </summary>
     internal bool TryCaptureCheckpointSnapshots(int partitionId)
     {
-        bool receiptsDurable = completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
-        bool decisionsDurable = coordinatorDecisionStore?.PersistSnapshot(partitionId) ?? true;
-        return receiptsDurable && decisionsDurable;
+        return completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
     }
 
     /// <summary>

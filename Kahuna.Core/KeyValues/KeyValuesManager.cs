@@ -132,8 +132,6 @@ internal sealed class KeyValuesManager : IDisposable
     /// <summary>Test-only access to the inter-node communication for fault/latency injection.</summary>
     internal IInterNodeCommunication InterNodeCommunication => interNodeCommunication;
 
-    private readonly CoordinatorDecisionStore coordinatorDecisionStore;
-
     // Durable-intent 2PC model: canonical transaction records plus per-key prepared intents. Replication,
     // restore, and per-partition snapshot are wired here so followers and restore reconstruct them; the finalize
     // path that produces these transitions is not yet wired, so in steady state today nothing writes these log
@@ -257,8 +255,6 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
 
-    private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
-
     private readonly IActorRef<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest> preparedIntentRecovery;
 
     private readonly RangeQuiesceStore rangeQuiesceStore = new();
@@ -304,7 +300,6 @@ internal sealed class KeyValuesManager : IDisposable
         ILogger<IKahuna> logger,
         SnapshotFloorStore? externalFloorStore = null,
         CompletionReceiptStore? externalReceiptStore = null,
-        CoordinatorDecisionStore? externalDecisionStore = null,
         Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null
     )
     {
@@ -338,12 +333,6 @@ internal sealed class KeyValuesManager : IDisposable
         // non-empty snapshot treats all key spaces as hash-routed (the default) until the first
         // live RegisterKeyRangeAsync call, causing routing mismatches in the 2PC prepare path.
         SyncKeySpaceRegistryFromRangeMap();
-
-        // Durable coordinator decision records: replicated on the data partition that currently routes
-        // each transaction's record anchor. Constructed before the key-value routers so every actor
-        // shares this one instance and can install the initial record as the anchor commit applies; the
-        // anchor → partition resolver is attached below once the locator exists.
-        coordinatorDecisionStore = externalDecisionStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
         // Durable-intent 2PC stores share the same per-partition snapshot lifecycle; their key/anchor → partition
         // resolvers are attached below once the locator exists.
@@ -400,27 +389,13 @@ internal sealed class KeyValuesManager : IDisposable
 
         locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
 
-        // Now that the locator exists, wire the anchor → data-partition resolver the coordinator-driven
-        // decision mutations fence on. The store itself was constructed earlier (before the key-value
-        // routers) so the actors could share the one instance for install-on-anchor-commit; that install
-        // path needs no resolver, only the coordinator's UpsertAsync/RemoveAsync do.
-        coordinatorDecisionStore.AttachAnchorResolver(locator.LocateRange);
+        // Now that the locator exists, wire the anchor/key → data-partition resolvers the durable-intent stores
+        // fence their coordinator-driven mutations on.
         transactionRecordStore.AttachAnchorResolver(locator.LocateRange);
         preparedIntentStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
 
         // The receipt store's per-partition checkpoint snapshot routes each receipt by its key the same way.
         completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
-
-        // Per-node recovery driver for outstanding durable coordinator decisions. Runs off the request and
-        // key-value actor mailboxes; each sweep drives only records anchored to partitions this node leads,
-        // completing any decision a coordinator could not finish (crash, or not colocated with the anchor
-        // leader so unable to replicate its own progress). Spawned after the locator so it can resolve anchors.
-        coordinatorDecisionRecovery = actorSystem.Spawn<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest>(
-            "coordinator-decision-recovery",
-            this,
-            configuration,
-            logger
-        );
 
         preparedIntentRecovery = actorSystem.Spawn<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest>(
             "prepared-intent-recovery",
@@ -429,8 +404,8 @@ internal sealed class KeyValuesManager : IDisposable
             logger
         );
 
-        restorer = new(backgroundWriter, raft, completionReceiptStore, coordinatorDecisionStore, logger);
-        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, coordinatorDecisionStore, logger);
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger);
+        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the
@@ -495,11 +470,6 @@ internal sealed class KeyValuesManager : IDisposable
     /// The replicated, refcounted, leased MVCC snapshot-floor registry.
     /// </summary>
     internal SnapshotFloorStore SnapshotFloorStore => snapshotFloorStore;
-
-    /// <summary>
-    /// The partition-scoped durable coordinator decision record store.
-    /// </summary>
-    internal CoordinatorDecisionStore CoordinatorDecisionStore => coordinatorDecisionStore;
 
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => completionReceiptStore;
@@ -1033,7 +1003,6 @@ internal sealed class KeyValuesManager : IDisposable
                 logger,
                 snapshotFloorStore,
                 completionReceiptStore,
-                coordinatorDecisionStore,
                 preparedIntentStore,
                 transactionRecordStore
             ));
@@ -1071,7 +1040,6 @@ internal sealed class KeyValuesManager : IDisposable
                 logger,
                 snapshotFloorStore,
                 completionReceiptStore,
-                coordinatorDecisionStore,
                 preparedIntentStore,
                 transactionRecordStore
             ));
@@ -1099,9 +1067,6 @@ internal sealed class KeyValuesManager : IDisposable
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
             return Task.FromResult(snapshotFloorStore.Restore(partitionId, log));
-
-        if (log.LogType == ReplicationTypes.CoordinatorDecision)
-            return Task.FromResult(coordinatorDecisionStore.Restore(partitionId, log));
 
         if (log.LogType == ReplicationTypes.TransactionRecord)
             return Task.FromResult(transactionRecordStore.Restore(partitionId, log));
@@ -1137,9 +1102,6 @@ internal sealed class KeyValuesManager : IDisposable
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
             return Task.FromResult(snapshotFloorStore.Replicate(partitionId, log));
-
-        if (log.LogType == ReplicationTypes.CoordinatorDecision)
-            return Task.FromResult(coordinatorDecisionStore.Replicate(partitionId, log));
 
         if (log.LogType == ReplicationTypes.TransactionRecord)
             return Task.FromResult(transactionRecordStore.Replicate(partitionId, log));
@@ -1206,12 +1168,6 @@ internal sealed class KeyValuesManager : IDisposable
     {
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogDebug("KeyValues: leader for partition {PartitionId} is now {Node}", partitionId, node);
-
-        // On acquiring leadership of a data partition, wake the recovery driver so decisions anchored to that
-        // partition — which only its leader may drive — are re-driven promptly rather than waiting for the next
-        // periodic tick. Partition 0 (meta) holds no decision records.
-        if (partitionId >= RangeMapStore.FirstDataPartitionId && node == raft.GetLocalEndpoint())
-            coordinatorDecisionRecovery.Send(new CoordinatorDecisionRecoveryRequest());
 
         return Task.FromResult(true);
     }
@@ -2562,11 +2518,10 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability,
         CancellationToken cancelationToken,
         long routedGeneration = 0,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
-        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration, recordAnchorKey, embeddedDecision);
+        return locator.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancelationToken, routedGeneration, recordAnchorKey);
     }
     
     /// <summary>
@@ -4498,105 +4453,6 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
-    /// Replicates the receipt forget for every acknowledged-but-not-yet-released participant, each routed to its
-    /// own key's partition leader (receipts live on the participant key's partition, not the anchor's). Returns
-    /// the set of participant keys whose forget was durably acknowledged on every replica; the caller persists
-    /// <c>ReceiptReleased</c> only for those, so a failed forget leaves the participant pending for a later sweep.
-    /// Shared by the request-path drive and the per-partition recovery driver.
-    /// </summary>
-    internal async Task<HashSet<string>> ForgetAckedParticipantReceiptsAsync(
-        HLCTimestamp transactionId,
-        IReadOnlyList<CoordinatorParticipant> participants,
-        CancellationToken cancellationToken)
-    {
-        Dictionary<int, List<CompletionReceiptRecord>> byPartition = [];
-        Dictionary<int, List<string>> keysByPartition = [];
-
-        foreach (CoordinatorParticipant participant in participants)
-        {
-            if (!participant.Acked || participant.ReceiptReleased)
-                continue;
-
-            int partitionId = locator.LocateRange(participant.Key).PartitionId;
-
-            if (!byPartition.TryGetValue(partitionId, out List<CompletionReceiptRecord>? batch))
-            {
-                batch = [];
-                byPartition[partitionId] = batch;
-                keysByPartition[partitionId] = [];
-            }
-
-            batch.Add(new CompletionReceiptRecord(transactionId, participant.Key, null, participant.Durability));
-            keysByPartition[partitionId].Add(participant.Key);
-        }
-
-        HashSet<string> forgotten = [];
-        foreach (KeyValuePair<int, List<CompletionReceiptRecord>> entry in byPartition)
-        {
-            if (await ForgetCompletionReceiptsToPartitionLeaderAsync(entry.Key, entry.Value, cancellationToken).ConfigureAwait(false))
-                foreach (string key in keysByPartition[entry.Key])
-                    forgotten.Add(key);
-        }
-
-        return forgotten;
-    }
-
-    /// <summary>
-    /// Coordinator decision records whose anchor falls in <c>[startKey, endKey)</c> from this node's local
-    /// store. Read locally (the decision store is node-global, like the receipt store).
-    /// </summary>
-    internal IReadOnlyList<CoordinatorDecisionRecord> GetLocalDecisionsForRange(string? startKey, string? endKey)
-        => coordinatorDecisionStore.SnapshotRange(startKey, endKey);
-
-    /// <summary>Merges transferred decision records into this node's local store (state-transfer seeding).</summary>
-    internal void ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport)
-        => coordinatorDecisionStore.ImportRecords(recordsToImport);
-
-    /// <summary>
-    /// Replicates moved decision records onto the destination partition's Raft log, so every replica of the
-    /// destination range holds them and a destination-leader change right after cutover preserves the record.
-    /// Returns whether the handoff was durable; a false return must abort the split/merge cutover.
-    /// </summary>
-    internal Task<bool> ImportCoordinatorDecisionsReplicated(
-        int partitionId,
-        IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport,
-        CancellationToken cancellationToken)
-        => coordinatorDecisionStore.ReplicateImportToPartitionAsync(partitionId, recordsToImport, cancellationToken);
-
-    /// <summary>
-    /// Routes moved decision records to the leader of <paramref name="partitionId"/> for a replicated handoff.
-    /// Forwards via IPC when this node is not the leader. Returns whether the handoff was durable on the
-    /// destination partition; used by split/merge to gate cutover.
-    /// </summary>
-    internal async Task<bool> ImportCoordinatorDecisionsToPartitionLeaderAsync(
-        int partitionId,
-        IReadOnlyCollection<CoordinatorDecisionRecord> recordsToImport,
-        CancellationToken cancellationToken)
-    {
-        if (recordsToImport.Count == 0)
-            return true;
-
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
-            return await ImportCoordinatorDecisionsReplicated(partitionId, recordsToImport, cancellationToken).ConfigureAwait(false);
-
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
-        if (leader == raft.GetLocalEndpoint())
-            return await ImportCoordinatorDecisionsReplicated(partitionId, recordsToImport, cancellationToken).ConfigureAwait(false);
-
-        return await interNodeCommunication.ImportCoordinatorDecisions(leader, partitionId, recordsToImport, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Drives every outstanding coordinator decision record whose anchor's data partition this node currently
-    /// leads: re-commits participants that were not yet acknowledged, records their acks and releases their
-    /// completion receipts, marks a decision <c>Completed</c> once every participant is acknowledged, and purges
-    /// a completed record after the configured retention window once every receipt is released. Runs off the
-    /// request and key-value actor mailboxes (the recovery actor), so a coordinator that died mid-phase-two — or
-    /// one that was never colocated with the anchor leader and so could not replicate its own progress — is
-    /// completed here on the anchor partition's leader. Idempotent against a racing request-path drive: the
-    /// participant commit, receipt forget, decision upsert, and remove are all idempotent.
-    /// </summary>
-    /// <summary>
     /// Participant-side recovery for the durable-intent path: on each partition this node leads, resolves due
     /// unresolved prepared intents to their canonical decision (presuming abort only past the decision deadline,
     /// for anchors this node also leads). No-op unless the durable-intent path is enabled. Runs off the request
@@ -4672,261 +4528,6 @@ internal sealed class KeyValuesManager : IDisposable
             transactionRecordStore.Replicate(anchorPartition, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = delta });
 
         return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
-    }
-
-    internal async Task RecoverOutstandingDecisions(TimeSpan retentionTtl, CancellationToken cancellationToken)
-    {
-        IReadOnlyList<CoordinatorDecisionRecord> all = coordinatorDecisionStore.SnapshotAll();
-        if (all.Count == 0)
-            return;
-
-        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
-        // Group the outstanding records by the data partition their anchor currently routes to, keeping only the
-        // partitions this node leads. A node drives only records anchored to a data partition it currently leads;
-        // in a standalone (not-joined) node it always drives.
-        Dictionary<int, List<CoordinatorDecisionRecord>> byPartition = [];
-        foreach (CoordinatorDecisionRecord record in all)
-        {
-            if (cancellationToken.IsCancellationRequested)
-                return;
-
-            (int partitionId, _) = locator.LocateRange(record.RecordAnchorKey);
-
-            if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
-                continue;
-
-            if (!byPartition.TryGetValue(partitionId, out List<CoordinatorDecisionRecord>? bucket))
-                byPartition[partitionId] = bucket = [];
-            bucket.Add(record);
-        }
-
-        if (byPartition.Count == 0)
-            return;
-
-        // Drive distinct partitions concurrently (bounded), each partition's records serially. A participant that
-        // consumes the whole phase-two commit timeout stalls only its own partition's remaining records — records
-        // anchored to other partitions make progress in parallel instead of head-of-line blocking behind it.
-        using SemaphoreSlim concurrency = new(Math.Min(MaxConcurrentRecoveryPartitions, byPartition.Count));
-        List<Task> partitionDrives = new(byPartition.Count);
-
-        foreach (List<CoordinatorDecisionRecord> bucket in byPartition.Values)
-        {
-            partitionDrives.Add(DrivePartitionRecordsAsync(bucket, now, retentionTtl, concurrency, cancellationToken));
-        }
-
-        await Task.WhenAll(partitionDrives).ConfigureAwait(false);
-    }
-
-    // Drives one partition's outstanding decision records in order, under the shared cross-partition concurrency
-    // bound. Each record's failure is isolated so one bad record does not abandon the rest of its partition.
-    private async Task DrivePartitionRecordsAsync(
-        IReadOnlyList<CoordinatorDecisionRecord> partitionRecords,
-        HLCTimestamp now,
-        TimeSpan retentionTtl,
-        SemaphoreSlim concurrency,
-        CancellationToken cancellationToken)
-    {
-        await concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            foreach (CoordinatorDecisionRecord record in partitionRecords)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                    return;
-
-                try
-                {
-                    await DriveDecisionRecord(record, now, retentionTtl, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Failed to recover coordinator decision {TransactionId}", record.TransactionId);
-                }
-            }
-        }
-        finally
-        {
-            concurrency.Release();
-        }
-    }
-
-    /// <summary>
-    /// Wakes the recovery driver for an immediate sweep (in addition to its periodic tick). Used when a
-    /// missing-session commit finds an outstanding <c>CommitDecided</c> record, so recovery is nudged to finish
-    /// it rather than waiting for the next interval.
-    /// </summary>
-    internal void WakeDecisionRecovery()
-        => coordinatorDecisionRecovery.Send(new CoordinatorDecisionRecoveryRequest());
-
-    /// <summary>
-    /// Releases one frozen decision cleanup effect — a non-modified point/read release, prefix lock, or range
-    /// lock — via the ticket-free release path (routed to the effect key's current partition leader), returning
-    /// whether the response is positive proof the effect is gone. Idempotent: re-releasing an already-released
-    /// effect returns proof (<c>DoesNotExist</c>/<c>AlreadyLocked</c>), so both the live commit and recovery may
-    /// drive it repeatedly. Shared by the coordinator commit path and the per-partition recovery driver.
-    /// </summary>
-    internal async Task<bool> TryReleaseCleanupEffectAsync(
-        HLCTimestamp transactionId, CoordinatorCleanupEffect effect, CancellationToken cancellationToken)
-    {
-        switch (effect.Kind)
-        {
-            case CoordinatorCleanupKind.PrefixLock:
-            {
-                KeyValueResponseType type = await LocateAndTryReleaseExclusivePrefixLock(
-                    transactionId, effect.Key, effect.Durability, cancellationToken).ConfigureAwait(false);
-                return TransactionCoordinator.IsReleaseAcked(type);
-            }
-            case CoordinatorCleanupKind.RangeLock:
-            {
-                KeyValueResponseType type = await LocateAndTryReleaseExclusiveRangeLock(
-                    transactionId, effect.Key, effect.StartKey, effect.StartInclusive, effect.EndKey, effect.EndInclusive,
-                    effect.Durability, cancellationToken).ConfigureAwait(false);
-                return TransactionCoordinator.IsReleaseAcked(type);
-            }
-            default:
-            {
-                (KeyValueResponseType type, string _) = await LocateAndTryReleaseExclusiveLock(
-                    transactionId, effect.Key, effect.Durability, cancellationToken).ConfigureAwait(false);
-                return TransactionCoordinator.IsReleaseAcked(type);
-            }
-        }
-    }
-
-    // Caps how many anchor partitions the recovery sweep drives at once. Bounds fan-out (and downstream commit
-    // load) while still letting an unrelated partition make progress instead of blocking behind a stalled one.
-    private const int MaxConcurrentRecoveryPartitions = 8;
-
-    /// <summary>
-    /// Test-only injection point: awaited at the start of each per-record recovery drive, keyed by the record.
-    /// Lets a test park one partition's drive and prove another partition's drive runs concurrently rather than
-    /// head-of-line blocking behind it. Never wired in production paths.
-    /// </summary>
-    internal Func<CoordinatorDecisionRecord, Task>? RecoveryDriveHook { get; set; }
-
-    private async Task DriveDecisionRecord(
-        CoordinatorDecisionRecord record, HLCTimestamp now, TimeSpan retentionTtl, CancellationToken cancellationToken)
-    {
-        if (RecoveryDriveHook is not null)
-            await RecoveryDriveHook(record).ConfigureAwait(false);
-
-        // Stage 1: re-drive every not-yet-acknowledged participant and durably record the resulting acks (and the
-        // Completed transition) with all receipts still held. The commit is idempotent: an already-applied commit
-        // resolves via the participant's completion receipt, and a lost prepare (leader changed since) returns
-        // MustRetry — left non-acked for a later sweep, never forced. A receipt must not be forgotten until the
-        // ack is durable, or a crash between the two strands the record "unacked" with its proof already gone.
-        List<CoordinatorParticipant> ackedParticipants = new(record.Participants.Count);
-        bool ackChanged = false;
-
-        foreach (CoordinatorParticipant participant in record.Participants)
-        {
-            bool acked = participant.Acked;
-
-            if (!acked)
-            {
-                (KeyValueResponseType response, long _) = await LocateAndTryCommitMutations(
-                    record.TransactionId, participant.Key, participant.TicketId, participant.Durability, cancellationToken)
-                    .ConfigureAwait(false);
-
-                if (response == KeyValueResponseType.Committed)
-                {
-                    acked = true;
-                    ackChanged = true;
-                }
-            }
-
-            ackedParticipants.Add(participant with { Acked = acked });
-        }
-
-        // Stage 1.5: replay every not-yet-released frozen cleanup effect (idempotent), recording proof-of-release.
-        // A crashed coordinator's non-modified point/read releases, prefix locks, and range locks are recovered
-        // here so they never strand; an effect whose partition briefly has no leader stays unreleased for a later
-        // sweep. Completion is gated on these as well as on participant acks.
-        List<CoordinatorCleanupEffect> releasedEffects = new(record.CleanupEffects.Count);
-        bool cleanupChanged = false;
-        foreach (CoordinatorCleanupEffect effect in record.CleanupEffects)
-        {
-            bool released = effect.Released;
-            if (!released && await TryReleaseCleanupEffectAsync(record.TransactionId, effect, cancellationToken).ConfigureAwait(false))
-            {
-                released = true;
-                cleanupChanged = true;
-            }
-
-            releasedEffects.Add(effect with { Released = released });
-        }
-
-        CoordinatorDecisionStatus status = record.Status;
-        HLCTimestamp completedAt = record.CompletedAt;
-        bool statusChanged = false;
-        if (status == CoordinatorDecisionStatus.CommitDecided &&
-            ackedParticipants.All(static p => p.Acked) &&
-            releasedEffects.All(static e => e.Released))
-        {
-            status = CoordinatorDecisionStatus.Completed;
-            completedAt = now;
-            statusChanged = true;
-        }
-
-        CoordinatorDecisionRecord current = record;
-        if (ackChanged || cleanupChanged || statusChanged)
-        {
-            CoordinatorDecisionRecord updated = record with
-            {
-                Participants = ackedParticipants,
-                CleanupEffects = releasedEffects,
-                Status = status,
-                CompletedAt = completedAt
-            };
-            CoordinatorDecisionMutationResult upsertResult =
-                await coordinatorDecisionStore.UpsertAsync(updated, expectedGeneration: 0, cancellationToken).ConfigureAwait(false);
-
-            // The progress is not durable: forget nothing and leave the record at its last durable state; the next
-            // sweep re-drives the idempotent commit/release (the still-held receipt keeps a commit resolvable).
-            if (upsertResult != CoordinatorDecisionMutationResult.Applied)
-                return;
-
-            current = updated;
-        }
-
-        // Stages 2 and 3: the acks are durable, so forgetting each acknowledged participant's receipt is now safe.
-        // The forget is replicated on each participant key's partition, so every replica drops the proof — then
-        // ReceiptReleased is persisted only for the participants whose forget was durably acknowledged. A forget
-        // that did not replicate leaves the participant unreleased for a later idempotent sweep.
-        HashSet<string> forgotten =
-            await ForgetAckedParticipantReceiptsAsync(record.TransactionId, current.Participants, cancellationToken).ConfigureAwait(false);
-
-        List<CoordinatorParticipant> releasedParticipants = new(current.Participants.Count);
-        bool releaseChanged = false;
-        foreach (CoordinatorParticipant participant in current.Participants)
-        {
-            bool released = participant.ReceiptReleased || forgotten.Contains(participant.Key);
-            if (released != participant.ReceiptReleased)
-                releaseChanged = true;
-
-            releasedParticipants.Add(participant with { ReceiptReleased = released });
-        }
-
-        if (releaseChanged)
-        {
-            CoordinatorDecisionRecord releasedRecord = current with { Participants = releasedParticipants };
-            CoordinatorDecisionMutationResult releaseResult =
-                await coordinatorDecisionStore.UpsertAsync(releasedRecord, expectedGeneration: 0, cancellationToken).ConfigureAwait(false);
-
-            if (releaseResult == CoordinatorDecisionMutationResult.Applied)
-                current = releasedRecord;
-        }
-
-        // Purge a completed record only after the retention window and once every receipt release is confirmed.
-        if (current.Status == CoordinatorDecisionStatus.Completed &&
-            current.Participants.All(static p => p.ReceiptReleased) &&
-            current.AllCleanupReleased &&
-            retentionTtl > TimeSpan.Zero &&
-            current.CompletedAt != HLCTimestamp.Zero &&
-            now - current.CompletedAt >= retentionTtl)
-        {
-            await coordinatorDecisionStore.RemoveAsync(current.TransactionId, current.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
-        }
     }
 
     /// <summary>
@@ -5026,8 +4627,7 @@ internal sealed class KeyValuesManager : IDisposable
         string key,
         KeyValueDurability durability,
         long routedGeneration = 0,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -5049,7 +4649,6 @@ internal sealed class KeyValuesManager : IDisposable
 
         request.RoutedGeneration = routedGeneration;
         request.RecordAnchorKey = recordAnchorKey;
-        request.EmbeddedDecision = embeddedDecision;
 
         try
         {
@@ -6154,7 +5753,6 @@ internal sealed class KeyValuesManager : IDisposable
         writeAggregator.Stop();
         rangeMapStore.Dispose();
         snapshotFloorStore.Dispose();
-        coordinatorDecisionStore.Dispose();
         rangeSplitTrigger?.Dispose();
     }
 }

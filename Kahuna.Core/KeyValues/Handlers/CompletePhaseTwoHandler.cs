@@ -138,7 +138,7 @@ internal sealed class CompletePhaseTwoHandler : BaseHandler
         // resident. RecordCommitted (inside ApplyConfirmedCommit) makes this decision authoritative.
         ApplyConfirmedCommit(
             entry, pending.Proposal!, pending.TxId, pending.CurrentTime, pending.PartitionId,
-            pending.RecordAnchorKey, pending.EmbeddedDecision);
+            pending.RecordAnchorKey);
 
         return new KeyValueResponse(KeyValueResponseType.Committed, completion.CommitIndex);
     }

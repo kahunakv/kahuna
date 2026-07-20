@@ -127,15 +127,6 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // single instance is created here and injected into both.
         CompletionReceiptStore completionReceiptStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
 
-        // One coordinator-decision store shared between the background writer (which snapshots it per partition
-        // at checkpoint time, gating the WAL retention floor) and the key-value layer (which installs, replicates,
-        // and drives decision records), mirroring the receipt store. Created here — before the writer is spawned —
-        // so the single instance is injected into both; the key-value layer attaches its anchor resolver later.
-        CoordinatorDecisionStore coordinatorDecisionStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger)
-        {
-            DurableAdmissionCapacity = configuration.DurableDecisionOutstandingMax
-        };
-
         // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.
         FlushNotificationSink flushNotificationSink = new();
@@ -146,14 +137,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
             persistenceBackend,
             snapshotFloorStore,
             completionReceiptStore,
-            coordinatorDecisionStore,
             configuration,
             logger,
             flushNotificationSink
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, coordinatorDecisionStore, writeBatchExecutorDecorator);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, writeBatchExecutorDecorator);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
@@ -711,11 +701,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         long routedGeneration = 0,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
-        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey, embeddedDecision);
+        return keyValues.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey);
     }
 
     /// <summary>
@@ -1166,11 +1155,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         string key,
         KeyValueDurability durability,
         long routedGeneration = 0,
-        string? recordAnchorKey = null,
-        CoordinatorDecisionRecord? embeddedDecision = null
+        string? recordAnchorKey = null
     )
     {
-        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey, embeddedDecision);
+        return keyValues.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
     }
 
     /// <summary>
@@ -1299,9 +1287,6 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => keyValues.CompletionReceiptStore;
 
-    /// <summary>Partition-scoped durable coordinator decision records. Diagnostic/test access.</summary>
-    internal CoordinatorDecisionStore CoordinatorDecisionStore => keyValues.CoordinatorDecisionStore;
-
     /// <summary>Durable prepared-intent store. Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.PreparedIntentStore DurablePreparedIntentStore => keyValues.DurablePreparedIntentStore;
 
@@ -1311,13 +1296,6 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>The first phase-two worker instance, for test injection of
     /// <see cref="Server.KeyValues.KeyValuePhaseTwoActor.BeforeRaftCallHook"/>.</summary>
     internal Server.KeyValues.KeyValuePhaseTwoActor? FirstPhaseTwoWorker => keyValues.FirstPhaseTwoWorker;
-
-    /// <summary>
-    /// Runs one per-partition-leader recovery sweep over outstanding decision records (normally driven by the
-    /// periodic recovery actor and data-partition leadership acquisition). Exposed for deterministic testing.
-    /// </summary>
-    internal Task RecoverOutstandingDecisions(TimeSpan retentionTtl, CancellationToken cancellationToken)
-        => keyValues.RecoverOutstandingDecisions(retentionTtl, cancellationToken);
 
     /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.
@@ -1508,17 +1486,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> records)
-    {
-        keyValues.ImportCoordinatorDecisions(records);
-        return Task.CompletedTask;
-    }
-
     public Task<bool> ImportCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts) =>
         keyValues.ImportCompletionReceiptsReplicated(partitionId, receipts, CancellationToken.None);
-
-    public Task<bool> ImportCoordinatorDecisionsReplicated(int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records) =>
-        keyValues.ImportCoordinatorDecisionsReplicated(partitionId, records, CancellationToken.None);
 
     public Task<bool> ForgetCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts) =>
         keyValues.ForgetCompletionReceiptsReplicated(partitionId, receipts, CancellationToken.None);

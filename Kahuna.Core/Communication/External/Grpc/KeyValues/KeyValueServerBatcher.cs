@@ -243,13 +243,6 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
-                    case GrpcServerBatchType.ServerImportCoordinatorDecisions:
-                    {
-                        GrpcImportCoordinatorDecisionsRequest? req = request.ImportCoordinatorDecisions;
-                        Track(ImportCoordinatorDecisionsDelayed(semaphore, request.RequestId, req, responseStream, context));
-                    }
-                    break;
-
                     case GrpcServerBatchType.ServerDurableOperation:
                     {
                         GrpcDurableOperationRequest? req = request.DurableOperation;
@@ -911,30 +904,6 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerImportCompletionReceipts,
                 RequestId = requestId,
                 ImportCompletionReceipts = resp
-            });
-        }
-        finally
-        {
-            semaphore.Release();
-        }
-    }
-
-    private async Task ImportCoordinatorDecisionsDelayed(
-        SemaphoreSlim semaphore,
-        int requestId,
-        GrpcImportCoordinatorDecisionsRequest request,
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
-        ServerCallContext context)
-    {
-        await semaphore.WaitAsync(context.CancellationToken);
-        try
-        {
-            GrpcImportCoordinatorDecisionsResponse resp = await service.ImportCoordinatorDecisionsInternal(request, context);
-            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-            {
-                Type = GrpcServerBatchType.ServerImportCoordinatorDecisions,
-                RequestId = requestId,
-                ImportCoordinatorDecisions = resp
             });
         }
         finally

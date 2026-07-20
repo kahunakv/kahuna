@@ -167,16 +167,6 @@ internal sealed class RangeMerger
                     "RangeMerger: completion-receipt handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
                 return MergeOutcome.TransferFailed;
             }
-
-            IReadOnlyCollection<CoordinatorDecisionRecord> movedDecisions =
-                manager.GetLocalDecisionsForRange(right.StartKey, right.EndKey);
-
-            if (!await manager.ImportCoordinatorDecisionsToPartitionLeaderAsync(left.PartitionId, movedDecisions, ct))
-            {
-                logger.LogError(
-                    "RangeMerger: coordinator-decision handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
-                return MergeOutcome.TransferFailed;
-            }
         }
         catch (Exception ex)
         {

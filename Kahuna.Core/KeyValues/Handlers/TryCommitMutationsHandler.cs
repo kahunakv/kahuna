@@ -34,7 +34,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
         (KeyValueResponse? terminal, KeyValueEntry? entryOrNull, KeyValueProposal? proposalOrNull,
-            HLCTimestamp currentTime, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+            HLCTimestamp currentTime, string? recordAnchorKey)
             = await ValidateAndBuildCommit(message);
 
         if (terminal is not null)
@@ -86,7 +86,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // commit to, so the commit is an immediate success — apply inline.
         if (!context.Raft.Joined)
         {
-            ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, -1, recordAnchorKey, embeddedDecision);
+            ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, -1, recordAnchorKey);
 
             return new(KeyValueResponseType.Committed, 0);
         }
@@ -97,7 +97,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // mutation is durably committed to Raft before it is applied — never skip CommitLogs, which would
         // silently drop durability. Mirrors the prepare fallback's inline replication.
         if (context.PhaseTwoRouter is null)
-            return await CommitInline(message, entry, proposal, currentTime, partitionId, recordAnchorKey, embeddedDecision);
+            return await CommitInline(message, entry, proposal, currentTime, partitionId, recordAnchorKey);
 
         // Otherwise dispatch the CommitLogs Raft round trip to the off-mailbox worker so this actor is
         // free while it runs; the completion applies the confirmed commit back on the mailbox.
@@ -112,7 +112,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         PendingPhaseTwo pending = PendingPhaseTwo.ForCommit(
             message.TransactionId, message.Key, message.Durability, proposal, currentTime,
-            message.ProposalTicketId, partitionId, recordAnchorKey, embeddedDecision);
+            message.ProposalTicketId, partitionId, recordAnchorKey);
         // Retain the promise + deadline so the collector's sweep can resolve the caller (retryable) if the
         // worker dies or its completion is dropped and never arrives.
         pending.Promise = actorContext.Reply.Value.Promise!;
@@ -172,7 +172,6 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
         {
             string? recordAnchorKey = entry.WriteIntent.RecordAnchorKey;
-            Transactions.Data.CoordinatorDecisionRecord? embeddedDecision = entry.WriteIntent.EmbeddedDecision;
 
             KeyValueProposal proposal = new(
                 message.Type,
@@ -188,7 +187,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             );
 
             ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime,
-                ResolvePartition(message.Key), recordAnchorKey, embeddedDecision);
+                ResolvePartition(message.Key), recordAnchorKey);
 
             return new(KeyValueResponseType.Committed, entry.Revision);
         }
@@ -215,14 +214,14 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     /// receipt is recorded before the apply runs, so it must key idempotency on the live intent, not the receipt.)
     /// </summary>
     private async Task<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal,
-        HLCTimestamp CurrentTime, string? RecordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? EmbeddedDecision)>
+        HLCTimestamp CurrentTime, string? RecordAnchorKey)>
         ValidateAndBuildCommit(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
         {
             context.Logger.LogWarning("Cannot commit mutations for missing transaction id");
 
-            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null, null);
+            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null);
         }
 
         // A completion receipt is authoritative proof this persistent commit already applied here —
@@ -231,7 +230,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         // and regardless of whether the committed value is currently resident or already flushed to
         // disk, so a re-delivered commit resolves Committed up front rather than racing entry loading.
         if (context.CompletionReceiptStore.Contains(message.TransactionId, message.Key, message.Durability))
-            return (new(KeyValueResponseType.Committed, 0), null, null, HLCTimestamp.Zero, null, null);
+            return (new(KeyValueResponseType.Committed, 0), null, null, HLCTimestamp.Zero, null);
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
@@ -241,7 +240,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         {
             context.Logger.LogWarning("Key/Value context is missing for {TransactionId}", message.TransactionId);
 
-            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null, null);
+            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null);
         }
 
         if (entry.WriteIntent is null)
@@ -255,49 +254,43 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
                 // Raft-replicated, so after a leader change the new leader has no write intent and
                 // no MVCC entry — indistinguishable from the ack-loss case without an explicit record.
                 if (context.WasCommittedHere(message.TransactionId))
-                    return (new(KeyValueResponseType.Committed, 0), null, null, HLCTimestamp.Zero, null, null);
+                    return (new(KeyValueResponseType.Committed, 0), null, null, HLCTimestamp.Zero, null);
 
                 // A durable completion receipt (the top-of-handler check) has already resolved the
                 // ack-loss-after-leader-change case to Committed; reaching here means no receipt exists.
                 // Never prepared here: return MustRetry so the coordinator can re-route to the
                 // node (original leader, if it recovered) that still holds the write intent.
-                return (KeyValueStaticResponses.MustRetryResponse, null, null, HLCTimestamp.Zero, null, null);
+                return (KeyValueStaticResponses.MustRetryResponse, null, null, HLCTimestamp.Zero, null);
             }
 
             context.Logger.LogWarning("Write intent is missing for {TransactionId}", message.TransactionId);
 
-            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null, null);
+            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null);
         }
 
         if (entry.WriteIntent.TransactionId != message.TransactionId)
         {
             context.Logger.LogWarning("Write intent conflict between {CurrentTransactionId} and {TransactionId}", entry.WriteIntent.TransactionId, message.TransactionId);
 
-            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null, null);
+            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null);
         }
 
         // Capture the record anchor before the write intent is cleared below; it rides the completion
         // receipt recorded on a confirmed persistent commit.
         string? recordAnchorKey = entry.WriteIntent.RecordAnchorKey;
 
-        // Capture the initial coordinator decision before the write intent is cleared. Present only on the
-        // anchor key of a Durable transaction; installing it as this anchor mutation commits means the
-        // anchor value, its completion receipt, and the CommitDecided record all land from one committed
-        // proposal — no window where a secondary participant could observe the anchor value without a record.
-        Transactions.Data.CoordinatorDecisionRecord? embeddedDecision = entry.WriteIntent.EmbeddedDecision;
-
         if (entry.MvccEntries is null)
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [1]", message.TransactionId);
 
-            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null, null);
+            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null);
         }
 
         if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
         {
             context.Logger.LogWarning("Couldn't find MVCC entry for transaction {TransactionId} [2]", message.TransactionId);
 
-            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null, null);
+            return (KeyValueStaticResponses.ErroredResponse, null, null, HLCTimestamp.Zero, null);
         }
 
         KeyValueProposal proposal = new(
@@ -313,7 +306,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
             message.Durability
         );
 
-        return (null, entry, proposal, currentTime, recordAnchorKey, embeddedDecision);
+        return (null, entry, proposal, currentTime, recordAnchorKey);
     }
 
     /// <summary>
@@ -323,7 +316,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     /// </summary>
     private async Task<KeyValueResponse> CommitInline(
         KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal, HLCTimestamp currentTime,
-        int partitionId, string? recordAnchorKey, Transactions.Data.CoordinatorDecisionRecord? embeddedDecision)
+        int partitionId, string? recordAnchorKey)
     {
         int timeoutMs = context.Configuration.Phase2CommitTimeout;
         using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
@@ -340,7 +333,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
         if (entry.WriteIntent is null || entry.WriteIntent.TransactionId != message.TransactionId)
             return new(KeyValueResponseType.Committed, commitIndex);
 
-        ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, partitionId, recordAnchorKey, embeddedDecision);
+        ApplyConfirmedCommit(entry, proposal, message.TransactionId, currentTime, partitionId, recordAnchorKey);
 
         return new(KeyValueResponseType.Committed, commitIndex);
     }

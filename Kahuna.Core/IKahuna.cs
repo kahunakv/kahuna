@@ -118,7 +118,7 @@ public interface IKahuna
     
     public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancellationToken);
     
-    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, CancellationToken cancellationToken, long routedGeneration = 0, string? recordAnchorKey = null, CoordinatorDecisionRecord? embeddedDecision = null);
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, CancellationToken cancellationToken, long routedGeneration = 0, string? recordAnchorKey = null);
 
     public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp transactionId, HLCTimestamp commitId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string? recordAnchorKey = null);
     
@@ -204,20 +204,11 @@ public interface IKahuna
     /// <summary>Records transferred completion receipts into this node's local receipt store (state-transfer seeding).</summary>
     public Task ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receipts);
 
-    /// <summary>Merges transferred coordinator decision records into this node's local store (state-transfer seeding).</summary>
-    public Task ImportCoordinatorDecisions(IReadOnlyCollection<CoordinatorDecisionRecord> records);
-
     /// <summary>
     /// Replicates a split/merge receipt handoff onto <paramref name="partitionId"/>'s Raft log on this node
     /// (the destination leader), returning whether it was durable. The caller gates cutover on the result.
     /// </summary>
     public Task<bool> ImportCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts);
-
-    /// <summary>
-    /// Replicates a split/merge decision handoff onto <paramref name="partitionId"/>'s Raft log on this node
-    /// (the destination leader), returning whether it was durable. The caller gates cutover on the result.
-    /// </summary>
-    public Task<bool> ImportCoordinatorDecisionsReplicated(int partitionId, IReadOnlyCollection<CoordinatorDecisionRecord> records);
 
     /// <summary>
     /// Replicates a completion-receipt forget onto <paramref name="partitionId"/>'s Raft log on this node (the
@@ -232,7 +223,7 @@ public interface IKahuna
 
     public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability);
 
-    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, long routedGeneration = 0, string? recordAnchorKey = null, CoordinatorDecisionRecord? embeddedDecision = null);
+    public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, long routedGeneration = 0, string? recordAnchorKey = null);
 
     public Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability);
     
