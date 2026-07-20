@@ -52,10 +52,10 @@ internal sealed class DurableTransactionFinalizer
     /// local store on success (idempotent with the replication-callback apply on every replica).</summary>
     public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, CancellationToken cancellationToken);
 
-    /// <summary>Runs the post-decision resolution (materialize committed values, settle intents). The default
-    /// runs it inline so it completes before <see cref="FinalizeAsync"/> returns; production injects a scheduler
-    /// that runs it on a background task, off the commit critical path (deferred settlement). Either way the
-    /// canonical decision is already durable, so recovery finishes resolution if a deferred run is lost.</summary>
+    /// <summary>Runs the post-decision resolution (materialize committed values, settle intents) on a background
+    /// task, off the commit critical path (deferred settlement). When <see langword="null"/>, resolution is instead
+    /// awaited inline so it completes before <see cref="FinalizeAsync"/> returns (synchronous settlement). Either
+    /// way the canonical decision is already durable, so recovery finishes resolution if a deferred run is lost.</summary>
     public delegate void ResolutionScheduler(Func<CancellationToken, Task> resolution);
 
     /// <summary>Applies a committed intent's value on the leader's live KV state (clears the committing
@@ -75,7 +75,8 @@ internal sealed class DurableTransactionFinalizer
 
     private readonly ReplicateDelegate replicate;
 
-    private readonly ResolutionScheduler scheduleResolution;
+    // Null = synchronous settlement: resolution is awaited inline in FinalizeAsync. Non-null = deferred settlement.
+    private readonly ResolutionScheduler? scheduleResolution;
 
     private readonly ApplyCommitLocally? applyCommitLocally;
 
@@ -94,9 +95,8 @@ internal sealed class DurableTransactionFinalizer
         this.replicate = replicate;
         this.applyCommitLocally = applyCommitLocally;
         this.applyRollbackLocally = applyRollbackLocally;
-        // Inline default: resolution completes before FinalizeAsync returns (the pre-deferral behavior).
-        this.scheduleResolution = resolutionScheduler
-            ?? (static resolution => resolution(CancellationToken.None).GetAwaiter().GetResult());
+        // A null scheduler means synchronous settlement (FinalizeAsync awaits resolution inline).
+        this.scheduleResolution = resolutionScheduler;
     }
 
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
@@ -145,11 +145,15 @@ internal sealed class DurableTransactionFinalizer
         }
 
         // ── Resolution: apply the terminal decision to every prepared intent — on commit, materialize each intent
-        // into visible KV state, then settle (resolve + remove) the intent. Under deferred settlement this runs off
-        // the commit critical path: the decision is already durable, reads/writers observe the committed intent via
-        // the §6 visibility contract until materialization lands, and recovery finishes it if a deferred run is
-        // lost. The scheduler decides whether it runs inline (default) or in the background (production). ──
-        scheduleResolution(ct => ResolveAsync(input, ct));
+        // into visible KV state, then settle (resolve + remove) the intent. With synchronous settlement (no
+        // scheduler) it is awaited here so the committed value is materialized before the caller returns — required
+        // for correct cross-node read-your-writes until the cross-node anchor decision lookup exists. A scheduler
+        // runs it in the background (deferred settlement); the decision is already durable and recovery finishes any
+        // lost run. ──
+        if (scheduleResolution is null)
+            await ResolveAsync(input, cancellationToken).ConfigureAwait(false);
+        else
+            scheduleResolution(ct => ResolveAsync(input, ct));
 
         return outcome;
     }

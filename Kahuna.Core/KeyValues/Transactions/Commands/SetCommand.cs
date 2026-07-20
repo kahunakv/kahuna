@@ -112,11 +112,10 @@ internal sealed class SetCommand : BaseCommand
         {
             case KeyValueResponseType.Set:
                 context.RecordModifiedKey((keyName, durability));
-                // Stage the value for the durable-intent path. Only when there is no TTL: the coordinator cannot
-                // source the absolute expiry HLC here, so a TTL set is left unstaged and the transaction takes the
-                // ticket path rather than dropping the expiry.
-                if (expiresMs <= 0)
-                    context.StageMutation(keyName, result.ToBytes(), revision, HLCTimestamp.Zero);
+                // Stage the value for the durable-intent path, carrying the relative TTL (0 = none). The freeze
+                // resolves it to an absolute expiry of commitTimestamp + expiresMs, so a TTL set is durable-atomic
+                // rather than falling back to the ticket path.
+                context.StageMutation(keyName, result.ToBytes(), revision, expiresMs);
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:

@@ -96,6 +96,40 @@ public sealed class TestDurableIntentActivation
     }
 
     [Fact]
+    public async Task TtlPersistentTransaction_TakesDurablePath_ValueReadableWithFutureExpiry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (EmbeddedKahunaNode node, TypeCapturingExecutor exec) = await StartNode(ct);
+        await using EmbeddedKahunaNode _ = node;
+
+        // A persistent TTL set now takes the durable path instead of falling back to the ticket path: the value is
+        // staged and its relative TTL is resolved to an absolute expiry at freeze. A long TTL avoids expiry racing
+        // the read; the point is that a durable record exists and the committed value carries a future expiry.
+        KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SET `act/ttl-1` 'v1' EX 60000 COMMIT END"), null, null);
+        Assert.Equal(KeyValueResponseType.Set, result.Type);
+
+        int records = ((KahunaManager)node.Kahuna).DurableTransactionRecordStore.Count;
+        Assert.True(records > 0, $"durable records={records}; seen: {string.Join(",", exec.SeenTypes)}");
+        Assert.Contains(ReplicationTypes.PreparedIntent, exec.SeenTypes);
+
+        KeyValueResponseType t = KeyValueResponseType.DoesNotExist;
+        ReadOnlyKeyValueEntry? entry = null;
+        for (int attempt = 0; attempt < 100; attempt++)
+        {
+            (t, entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, "act/ttl-1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            if (t == KeyValueResponseType.Get)
+                break;
+            await Task.Delay(25, ct);
+        }
+
+        Assert.Equal(KeyValueResponseType.Get, t);
+        Assert.Equal(Encoding.UTF8.GetBytes("v1"), entry!.Value);
+        Assert.NotEqual(HLCTimestamp.Zero, entry.Expires); // TTL resolved to an absolute expiry, not dropped
+    }
+
+    [Fact]
     public async Task MultiKeyPersistentTransaction_TakesDurablePath_AllValuesReadable()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

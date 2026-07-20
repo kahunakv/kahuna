@@ -1,3 +1,4 @@
+
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -5,8 +6,9 @@ using Kommander.Time;
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>The committed value staged for one modified key, the accurate part of the freeze available to the
-/// coordinator (the mutation's value, revision, and expiry). A null <see cref="Value"/> is a deletion.</summary>
-internal readonly record struct StagedMutation(byte[]? Value, long Revision, HLCTimestamp Expires);
+/// coordinator (the mutation's value, revision, and <b>relative</b> TTL in ms; 0 = no expiry). A null
+/// <see cref="Value"/> is a deletion. The relative TTL is resolved to an absolute expiry HLC at freeze.</summary>
+internal readonly record struct StagedMutation(byte[]? Value, long Revision, long ExpiresMs);
 
 /// <summary>
 /// Builds the frozen <see cref="DurableFinalizeInput"/> for the durable-intent path from a transaction's modified
@@ -45,16 +47,24 @@ internal static class DurableFinalizeInputBuilder
                 return false;
 
         List<TransactionParticipantRef> manifest = new(modifiedKeys.Count);
+
         foreach ((string key, KeyValueDurability durability) in modifiedKeys)
             manifest.Add(new TransactionParticipantRef(key, durability));
 
         long manifestHash = TransactionManifest.ComputeHash(transactionId, epoch, anchorKey, commitTimestamp, manifest);
 
         Dictionary<int, List<PreparedIntent>> byPartition = [];
+
         foreach ((string key, KeyValueDurability _) in modifiedKeys)
         {
             if (!stagedByKey.TryGetValue(key, out StagedMutation staged))
                 return false; // a modified key with no staged value cannot be prepared losslessly — fall back.
+
+            // Resolve the relative TTL to an absolute expiry anchored to the one canonical commit timestamp, so a
+            // TTL write's expiry is deterministic across replicas and independent of any actor's wall clock.
+            HLCTimestamp expires = staged.ExpiresMs > 0
+                ? new HLCTimestamp(commitTimestamp.N, commitTimestamp.L + staged.ExpiresMs, commitTimestamp.C)
+                : HLCTimestamp.Zero;
 
             PreparedIntent intent = new(
                 transactionId, epoch, key, manifestHash, anchorKey, commitTimestamp,
@@ -62,16 +72,19 @@ internal static class DurableFinalizeInputBuilder
                 Value: staged.Value,
                 Bucket: null,
                 Revision: staged.Revision,
-                Expires: staged.Expires,
+                Expires: expires,
                 NoRevision: false,
                 BaseRevision: staged.Revision - 1,
                 BaseState: KeyValueState.Set,
                 RecoveryDeadline: decisionDeadline,
-                Resolution: PreparedIntentResolution.Pending);
+                Resolution: PreparedIntentResolution.Pending
+            );
 
             int partitionId = locate(key);
+
             if (!byPartition.TryGetValue(partitionId, out List<PreparedIntent>? list))
                 byPartition[partitionId] = list = [];
+
             list.Add(intent);
         }
 

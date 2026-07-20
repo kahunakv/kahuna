@@ -1252,31 +1252,16 @@ internal sealed class TransactionCoordinator
 
     private DurableTransactionFinalizer? durableFinalizer;
 
+    // Resolution (materialize committed values, settle intents) runs synchronously before the finalizer returns
+    // (a null scheduler = await inline). Deferred settlement would return after the decision barrier and materialize
+    // in the background, but that requires the cross-node anchor decision lookup: a latest read on another node that
+    // meets a committed-but-unmaterialized foreign intent must resolve it against the remote canonical record.
+    // Without that lookup a back-to-back transaction on a different node reads the stale prior value (a §6.1/§6.4
+    // read-your-writes violation), so settlement is synchronous until the cross-node lookup lands. The finalizer
+    // still supports deferred settlement via its scheduler seam for when it does.
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
-        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, ScheduleDeferredResolution,
+        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, resolutionScheduler: null,
         ApplyDurableCommitLocally, ApplyDurableRollbackLocally);
-
-    /// <summary>
-    /// Deferred settlement: run a committed/aborted transaction's resolution (materialize committed values, settle
-    /// intents) off the commit critical path so the finalizer returns as soon as the canonical decision is durable.
-    /// Reads and writers observe the committed intent through the §6 visibility contract until materialization
-    /// lands. The resolution is detached from the request's cancellation (the client call may have returned) and
-    /// never propagates its failure to the caller; the canonical decision is durable, so the recovery driver
-    /// finishes any resolution this background run drops.
-    /// </summary>
-    private void ScheduleDeferredResolution(Func<CancellationToken, Task> resolution) => _ = RunDeferredResolution(resolution);
-
-    private async Task RunDeferredResolution(Func<CancellationToken, Task> resolution)
-    {
-        try
-        {
-            await resolution(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Deferred durable resolution failed; the recovery driver will complete it");
-        }
-    }
 
     // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
@@ -1346,7 +1331,7 @@ internal sealed class TransactionCoordinator
 
         Dictionary<string, StagedMutation> stagedByKey = new(staged.Count);
         foreach ((string key, StagedValue value) in staged)
-            stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.Expires);
+            stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.ExpiresMs);
 
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
@@ -1377,7 +1362,10 @@ internal sealed class TransactionCoordinator
 
         context.Result = outcome.Result switch
         {
-            DurableFinalizeResult.Committed => new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
+            // On commit, preserve the last statement's result exactly as the ticket path does (its CommitMutations
+            // sets no result on success), so an auto-commit script ending in a read returns that read — not a
+            // synthetic Set. A bare commit with no prior result still reports Set.
+            DurableFinalizeResult.Committed => context.Result ?? new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
             DurableFinalizeResult.Aborted => new KeyValueTransactionResult { Type = KeyValueResponseType.Aborted, Reason = "Transaction conflict" },
             _ => new KeyValueTransactionResult { Type = KeyValueResponseType.MustRetry, Reason = "Durable finalize could not complete; retry" }
         };

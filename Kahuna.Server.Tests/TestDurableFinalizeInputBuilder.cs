@@ -30,8 +30,8 @@ public sealed class TestDurableFinalizeInputBuilder
         out DurableFinalizeInput? input) =>
         DurableFinalizeInputBuilder.TryBuild(TxId, Epoch, "coord", anchor, CommitTs, Deadline, modifiedKeys, staged, Locate, out input);
 
-    private static StagedMutation Set(long revision, byte[] value) => new(value, revision, HLCTimestamp.Zero);
-    private static StagedMutation Delete(long revision) => new(null, revision, HLCTimestamp.Zero);
+    private static StagedMutation Set(long revision, byte[] value) => new(value, revision, ExpiresMs: 0);
+    private static StagedMutation Delete(long revision) => new(null, revision, ExpiresMs: 0);
 
     [Fact]
     public void SinglePersistentKey_Builds()
@@ -120,6 +120,31 @@ public sealed class TestDurableFinalizeInputBuilder
         Assert.True(ok);
         Assert.Equal(KeyValueState.Deleted, input!.Partitions[0].Intents[0].State);
         Assert.Null(input.Partitions[0].Intents[0].Value);
+    }
+
+    [Fact]
+    public void TtlSet_ResolvesRelativeExpiryToCommitTimestampPlusMs()
+    {
+        // A staged relative TTL of 5000ms freezes to an absolute expiry anchored to the commit timestamp, not a
+        // wall clock — so a TTL write is now durable-atomic instead of falling back to the ticket path.
+        bool ok = Build(
+            [("acct/1", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = new StagedMutation([9], 3, ExpiresMs: 5000) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        Assert.True(ok);
+        Assert.Equal(new HLCTimestamp(CommitTs.N, CommitTs.L + 5000, CommitTs.C), input!.Partitions[0].Intents[0].Expires);
+    }
+
+    [Fact]
+    public void NonTtlSet_HasNoExpiry()
+    {
+        Build(
+            [("acct/1", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = Set(3, [9]) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        Assert.Equal(HLCTimestamp.Zero, input!.Partitions[0].Intents[0].Expires);
     }
 
     [Fact]

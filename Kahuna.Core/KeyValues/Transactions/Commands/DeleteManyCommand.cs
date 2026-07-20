@@ -41,7 +41,7 @@ internal sealed class DeleteManyCommand : BaseCommand
             if (response.Type == KeyValueResponseType.Deleted)
             {
                 context.RecordModifiedKey((response.Key ?? "", response.Durability));
-                context.StageMutation(response.Key ?? "", null, response.Revision, HLCTimestamp.Zero); // tombstone
+                context.StageMutation(response.Key ?? "", null, response.Revision, 0); // tombstone; deletes have no TTL
             }
 
             context.ModifiedResult = new()

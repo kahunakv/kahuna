@@ -60,10 +60,11 @@ internal sealed class SetManyCommand : BaseCommand
             
             context.RecordModifiedKey((response.Key ?? "", response.Durability));
 
-            // Stage the value for the durable-intent path (non-TTL only, mirroring the single set).
+            // Stage the value for the durable-intent path, carrying the item's relative TTL (0 = none), mirroring
+            // the single set. The freeze resolves it to an absolute expiry of commitTimestamp + expiresMs.
             if (response.Type == KeyValueResponseType.Set && response.Key is not null
-                && argumentsByKey.TryGetValue(response.Key, out KahunaSetKeyValueRequestItem? argument) && argument.ExpiresMs <= 0)
-                context.StageMutation(response.Key, argument.Value, response.Revision, HLCTimestamp.Zero);
+                && argumentsByKey.TryGetValue(response.Key, out KahunaSetKeyValueRequestItem? argument))
+                context.StageMutation(response.Key, argument.Value, response.Revision, argument.ExpiresMs);
         }
         
         if (context.ModifiedResult is null)

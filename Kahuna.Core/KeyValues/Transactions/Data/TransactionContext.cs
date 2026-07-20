@@ -5,8 +5,10 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>The committed value staged for one modified key on the durable-intent finalize path: the mutation's
-/// value (null = delete tombstone), its revision, and its expiry.</summary>
-public readonly record struct StagedValue(byte[]? Value, long Revision, HLCTimestamp Expires);
+/// value (null = delete tombstone), its revision, and its <b>relative</b> TTL in milliseconds (0 = no expiry). The
+/// relative TTL is resolved to an absolute expiry HLC of <c>commitTimestamp + ExpiresMs</c> at freeze, so a TTL
+/// write's expiry is anchored to the one canonical commit timestamp rather than an actor-local wall clock.</summary>
+public readonly record struct StagedValue(byte[]? Value, long Revision, long ExpiresMs);
 
 /// <summary>
 /// Generic transaction context holding identity, policy, lifecycle state, and confirmed working-set
@@ -94,19 +96,19 @@ internal class TransactionContext
     /// <summary>
     /// Per-key staged committed value for the durable-intent finalize path, accumulated across every mutation
     /// command (unlike <see cref="ModifiedResult"/>, which only reflects the last command's result). A key present
-    /// in <see cref="ModifiedKeys"/> but absent here has no losslessly-stageable value (e.g. an extend, or a TTL
-    /// set whose absolute expiry the coordinator cannot source), so the transaction falls back to the ticket path.
-    /// A null <see cref="StagedValue.Value"/> is a delete tombstone.
+    /// in <see cref="ModifiedKeys"/> but absent here has no losslessly-stageable value (e.g. an extend), so the
+    /// transaction falls back to the ticket path. A null <see cref="StagedValue.Value"/> is a delete tombstone.
     /// </summary>
     public Dictionary<string, StagedValue>? StagedMutations { get; private set; }
 
-    /// <summary>Records the staged committed value of one modified key for the durable-intent path.</summary>
-    public void StageMutation(string key, byte[]? value, long revision, HLCTimestamp expires)
+    /// <summary>Records the staged committed value of one modified key for the durable-intent path. The expiry is
+    /// the write's <b>relative</b> TTL in milliseconds (0 = none); it is resolved to an absolute HLC at freeze.</summary>
+    public void StageMutation(string key, byte[]? value, long revision, long expiresMs)
     {
         lock (registryLock)
         {
             StagedMutations ??= [];
-            StagedMutations[key] = new StagedValue(value, revision, expires);
+            StagedMutations[key] = new StagedValue(value, revision, expiresMs);
         }
     }
 
