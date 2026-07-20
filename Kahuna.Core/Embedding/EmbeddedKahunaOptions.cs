@@ -141,9 +141,6 @@ public sealed class EmbeddedKahunaOptions
 
     public bool EnableSharedExecutorPool { get; set; } = true;
 
-    /// <summary>Route all-persistent interactive transactions through the durable prepared-intent 2PC path (default on).</summary>
-    public bool EnableDurableIntentTransactions { get; set; } = true;
-
     public int PartitionExecutorPoolSize { get; set; }
 
     public string HttpScheme { get; set; } = "https://";

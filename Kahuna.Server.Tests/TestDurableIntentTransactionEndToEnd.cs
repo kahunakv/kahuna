@@ -9,8 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// End-to-end coverage of the opt-in durable prepared-intent 2PC path
-/// (<see cref="Kahuna.Server.Configuration.KahunaConfiguration.EnableDurableIntentTransactions"/>): an
+/// End-to-end coverage of the durable prepared-intent 2PC path (the sole durable-persistent finalize path): an
 /// all-persistent multi-key transaction is finalized through durable committed intents plus a canonical
 /// decision record — no manual Raft ticket — and its values materialize into visible MVCC on commit. Runs on a
 /// real embedded node so the actual coordinator → finalizer → replicate → replicator apply path is exercised.
@@ -35,7 +34,6 @@ public sealed class TestDurableIntentTransactionEndToEnd
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
-            EnableDurableIntentTransactions = true
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("orders/row-1", ct);

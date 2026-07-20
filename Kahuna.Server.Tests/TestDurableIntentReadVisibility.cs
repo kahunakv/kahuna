@@ -42,7 +42,6 @@ public sealed class TestDurableIntentReadVisibility
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
-            EnableDurableIntentTransactions = true
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("vis/committed", ct);
@@ -59,7 +58,6 @@ public sealed class TestDurableIntentReadVisibility
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
-            EnableDurableIntentTransactions = true
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("vis/committed", ct);

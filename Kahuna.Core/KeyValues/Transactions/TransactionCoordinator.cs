@@ -167,6 +167,37 @@ internal sealed class TransactionCoordinator
     /// a lost session) or when no record exists (never created, or its retention window has expired). The record
     /// is read from the node-global decision store, which holds the anchor partition's replicated records.
     /// </summary>
+    // The durable-intent finalize epoch is stable per transaction id: a retried finalize re-drives the same
+    // canonical record (record CAS and intent idempotency converge), so it never mints a second record.
+    private const long DurableFinalizeEpoch = 1;
+
+    /// <summary>
+    /// Consults the durable-intent canonical transaction record for a handle whose in-memory session is gone,
+    /// so a lost interactive durable transaction reports its true outcome instead of <c>Errored</c>: a committed
+    /// record answers <c>Committed</c>; a conflict abort answers <c>Aborted</c>; any other abort or an undecided
+    /// record answers <c>MustRetry</c> (recovery finishes it). Returns false when no record is resident locally
+    /// (the record lives on a remote anchor leader not replicated here, or none was ever created) so the caller
+    /// falls through to the unknown outcome. A cross-node record lookup is a follow-up (the same anchor-lookup
+    /// gap the read path has); a local lookup matches the replication coverage the old decision store had.
+    /// </summary>
+    private bool TryConsultDurableTransactionRecord(TransactionHandle handle, out KeyValueResponseType response)
+    {
+        response = KeyValueResponseType.Errored;
+
+        TransactionRecord? record = manager.DurableTransactionRecordStore.Get(handle.TransactionId, DurableFinalizeEpoch);
+        if (record is null)
+            return false;
+
+        response = record.Decision switch
+        {
+            TransactionDecision.Commit => KeyValueResponseType.Committed,
+            TransactionDecision.Abort when record.AbortClass == TransactionAbortClass.Conflict => KeyValueResponseType.Aborted,
+            _ => KeyValueResponseType.MustRetry // any other abort, or still undecided → recovery completes it
+        };
+
+        return true;
+    }
+
     private bool TryConsultDurableOutcome(TransactionHandle handle, out KeyValueResponseType response)
     {
         response = KeyValueResponseType.Errored;
@@ -212,6 +243,9 @@ internal sealed class TransactionCoordinator
             // by the handle's anchor and consult that record: Completed → Committed; CommitDecided → MustRetry
             // (and nudge recovery to finish it). Only the anchored handle can find a lost session — a stale
             // unanchored handle cannot scan the cluster by transaction id and stays unknown Errored.
+            if (TryConsultDurableTransactionRecord(handle, out KeyValueResponseType durableRecord))
+                return (durableRecord, handle.RecordAnchorKey);
+
             if (TryConsultDurableOutcome(handle, out KeyValueResponseType durable))
                 return (durable, handle.RecordAnchorKey);
 
@@ -367,6 +401,9 @@ internal sealed class TransactionCoordinator
             // A rollback cannot override a durably decided commit: if a decision record exists for this lost
             // session, return its outcome (Completed → Committed, CommitDecided → MustRetry) instead of rolling
             // back a transaction whose anchor is already committed.
+            if (TryConsultDurableTransactionRecord(handle, out KeyValueResponseType durableRecord))
+                return durableRecord;
+
             if (TryConsultDurableOutcome(handle, out KeyValueResponseType durable))
                 return durable;
 
@@ -1160,12 +1197,11 @@ internal sealed class TransactionCoordinator
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
 
-        // Durable prepared-intent path (opt-in): an all-persistent transaction whose staged mutations are all
-        // available is finalized via durable committed intents plus a canonical decision record, with no manual
-        // Raft ticket. Falls through to the legacy ticket path when the input cannot be built (mixed durability,
-        // no anchor, or a modified key without a staged value).
-        if (configuration.EnableDurableIntentTransactions
-            && TryBuildDurableFinalizeInput(context, out DurableFinalizeInput? durableInput, out HLCTimestamp durableOpId))
+        // Durable prepared-intent path: an all-persistent transaction whose staged mutations are all available is
+        // finalized via durable committed intents plus a canonical decision record, with no manual Raft ticket.
+        // This is the only durable-persistent path. Falls through to the legacy ticket path only when the input
+        // cannot be built — a mixed/ephemeral transaction, or (rarely) a persistent mutation with no staged value.
+        if (TryBuildDurableFinalizeInput(context, out DurableFinalizeInput? durableInput, out HLCTimestamp durableOpId))
         {
             await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
             return;
@@ -1320,11 +1356,7 @@ internal sealed class TransactionCoordinator
 
         HLCTimestamp txId = context.TransactionId;
 
-        // The finalize epoch is stable per transaction id: a retried finalize re-drives the same canonical record
-        // (the record CAS and intent idempotency converge), so it must not mint a second record for the same
-        // transaction. A distinct epoch would only be needed if the manifest itself could change between attempts,
-        // which it cannot — the write-set is frozen at commit.
-        const long epoch = 1;
+        const long epoch = DurableFinalizeEpoch;
 
         HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(), commitTimestamp.C);

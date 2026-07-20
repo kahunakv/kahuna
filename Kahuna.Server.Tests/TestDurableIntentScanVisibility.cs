@@ -46,7 +46,6 @@ public sealed class TestDurableIntentScanVisibility
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
-            EnableDurableIntentTransactions = true
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync(Prefix + "/a", ct);

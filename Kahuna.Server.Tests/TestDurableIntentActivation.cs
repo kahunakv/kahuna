@@ -52,7 +52,6 @@ public sealed class TestDurableIntentActivation
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
-            EnableDurableIntentTransactions = true,
             WriteBatchExecutorDecorator = inner => capturing = new TypeCapturingExecutor(inner)
         }, loggerFactory);
         await node.StartAsync(ct);

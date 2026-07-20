@@ -123,8 +123,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RangeSplitLoadPollInterval = options.RangeSplitLoadPollInterval,
             RangeSplitLoadImbalanceMax = options.RangeSplitLoadImbalanceMax,
             RangeSplitIndivisibleCooldown = options.RangeSplitIndivisibleCooldown,
-            RangeSplitSettleWindow = options.RangeSplitSettleWindow,
-            EnableDurableIntentTransactions = options.EnableDurableIntentTransactions
+            RangeSplitSettleWindow = options.RangeSplitSettleWindow
         }, options.WalPath);
 
         this.standaloneComm = new();
@@ -221,8 +220,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RangeSplitLoadPollInterval = options.RangeSplitLoadPollInterval,
             RangeSplitLoadImbalanceMax = options.RangeSplitLoadImbalanceMax,
             RangeSplitIndivisibleCooldown = options.RangeSplitIndivisibleCooldown,
-            RangeSplitSettleWindow = options.RangeSplitSettleWindow,
-            EnableDurableIntentTransactions = options.EnableDurableIntentTransactions
+            RangeSplitSettleWindow = options.RangeSplitSettleWindow
         }, options.WalPath);
 
         this.standaloneComm = null;

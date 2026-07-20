@@ -48,7 +48,6 @@ public sealed class TestDurableIntentWriteVisibility
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
-            EnableDurableIntentTransactions = true
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("wtest/a", ct);

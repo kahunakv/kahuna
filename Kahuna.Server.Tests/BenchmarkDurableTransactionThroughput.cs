@@ -71,7 +71,6 @@ public sealed class BenchmarkDurableTransactionThroughput
                 WalPath = walPath,
                 WalSyncWrites = true,
                 InitialPartitions = 1,
-                EnableDurableIntentTransactions = true,
                 KeyValueWriteLingerMs = 5,
                 WriteBatchExecutorDecorator = inner => counter = new CountingExecutor(inner)
             }, loggerFactory);

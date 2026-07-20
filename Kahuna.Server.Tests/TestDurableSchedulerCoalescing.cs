@@ -49,7 +49,6 @@ public sealed class TestDurableSchedulerCoalescing
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
-            EnableDurableIntentTransactions = true,
             KeyValueWriteLingerMs = 5,
             WriteBatchExecutorDecorator = inner => counter = new CountingExecutor(inner)
         }, loggerFactory);

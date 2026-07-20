@@ -143,7 +143,7 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly PreparedIntentStore preparedIntentStore;
 
     /// <summary>The durable-intent 2PC stores and key→partition routing, exposed to the transaction coordinator's
-    /// durable finalize path (behind <see cref="KahunaConfiguration.EnableDurableIntentTransactions"/>).</summary>
+    /// durable finalize path (the sole durable-persistent finalize path).</summary>
     internal TransactionRecordStore DurableTransactionRecordStore => transactionRecordStore;
 
     internal PreparedIntentStore DurablePreparedIntentStore => preparedIntentStore;
@@ -256,7 +256,6 @@ internal sealed class KeyValuesManager : IDisposable
             replicator.ApplyDurableRollback(partitionId, intent);
     }
 
-    private readonly bool durableIntentTransactionsEnabled;
 
     private readonly IActorRef<CoordinatorDecisionRecoveryActor, CoordinatorDecisionRecoveryRequest> coordinatorDecisionRecovery;
 
@@ -350,7 +349,6 @@ internal sealed class KeyValuesManager : IDisposable
         // resolvers are attached below once the locator exists.
         transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
         preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
-        durableIntentTransactionsEnabled = configuration.EnableDurableIntentTransactions;
 
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
         writeAggregator = new Writes.PartitionWriteAggregator(
@@ -4606,7 +4604,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal async Task RecoverPreparedIntents(CancellationToken cancellationToken)
     {
-        if (!durableIntentTransactionsEnabled || preparedIntentStore.Count == 0)
+        if (preparedIntentStore.Count == 0)
             return;
 
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
