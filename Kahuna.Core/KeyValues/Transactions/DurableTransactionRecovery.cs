@@ -117,19 +117,44 @@ internal sealed class DurableTransactionRecovery
     {
         List<PreparedIntent> group = intents.ToList();
 
+        // Only settle (resolve + remove) an intent whose terminal effect is durably applied. On commit that means
+        // its value materialized: removing an intent whose materialization did not commit would delete the only
+        // durable copy of an already-committed value, so a false/thrown materialization leaves the intent for a
+        // later sweep. On abort there is no value to lose, so every intent is settled.
+        List<PreparedIntent> settleable;
+
         if (commit)
         {
+            settleable = new(group.Count);
             foreach (PreparedIntent intent in group)
             {
-                byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
-                await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+                bool materialized;
+                try
+                {
+                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
+                    materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    materialized = false;
+                }
+
+                if (materialized)
+                    settleable.Add(intent);
             }
         }
+        else
+        {
+            settleable = group;
+        }
+
+        if (settleable.Count == 0)
+            return;
 
         // Resolve and remove each intent atomically (Pending -> resolved -> deleted), so recovery leaves no
         // lingering resolved intent. Idempotent under replay.
-        List<PreparedIntentCommand> settle = new(group.Count * 2);
-        foreach (PreparedIntent intent in group)
+        List<PreparedIntentCommand> settle = new(settleable.Count * 2);
+        foreach (PreparedIntent intent in settleable)
         {
             settle.Add(new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit));
             settle.Add(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key));

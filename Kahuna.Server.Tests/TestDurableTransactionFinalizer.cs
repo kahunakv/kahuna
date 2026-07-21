@@ -319,6 +319,92 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     [Fact]
+    public async Task Commit_MaterializationFails_PreservesIntentForRecovery_DoesNotSettle()
+    {
+        HLCTimestamp txId = Ts(1000);
+        // The committed value's key/value materialization fails to replicate (leadership loss, routing, shutdown).
+        Seam seam = new() { Fail = (_, type) => type == ReplicationTypes.KeyValues };
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = Build(seam);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // The decision is durably Commit, but the intent is the only durable copy of the committed value: it must
+        // be preserved (still pending) for the recovery sweep, never resolved-and-removed — removing it would lose
+        // an already-committed value irreversibly.
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        PreparedIntent? preserved = intents.Get("acct/1");
+        Assert.NotNull(preserved);
+        Assert.Equal(PreparedIntentResolution.Pending, preserved!.Resolution);
+    }
+
+    [Fact]
+    public async Task Commit_PartialMaterializationFailure_SettlesOnlyTheMaterializedIntent()
+    {
+        HLCTimestamp txId = Ts(1000);
+        // Only partition 8's materialization fails; partition 5's succeeds.
+        Seam seam = new() { Fail = (partition, type) => partition == 8 && type == ReplicationTypes.KeyValues };
+        (DurableTransactionFinalizer finalizer, _, PreparedIntentStore intents) = Build(seam);
+
+        await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // The materialized intent is settled and gone; the un-materialized one is preserved for recovery.
+        Assert.Null(intents.Get("acct/1"));
+        Assert.NotNull(intents.Get("idx/name/bob"));
+    }
+
+    [Fact]
+    public async Task ConcurrentTransactions_SameKey_SecondPrepareRejected_Aborts()
+    {
+        Seam seam = new();
+        // Defer settlement so the first transaction's prepared intent stays live on the key while the second runs.
+        Func<CancellationToken, Task>? firstResolution = null;
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) =
+            Build(seam, r => firstResolution ??= r);
+
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.NotNull(intents.Get("acct/1")); // still live: settlement deferred
+
+        // A different transaction prepares the same key while the first still holds a live intent. The state
+        // machine rejects the prepare (one live intent per key), so this transaction owns no recoverable intent
+        // and must NOT commit — it aborts. Before this fix the rejected prepare was reported as acknowledged and
+        // the transaction committed a mutation recovery could never complete.
+        DurableFinalizeOutcome second = await finalizer.FinalizeAsync(
+            Input(Ts(3000), 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
+
+        Assert.NotEqual(DurableFinalizeResult.Committed, second.Result);
+        Assert.Equal(TransactionDecision.Abort, records.Get(Ts(3000), 1)!.Decision);
+    }
+
+    [Fact]
+    public async Task ConcurrentPrepares_SameKey_ExactlyOneOwns()
+    {
+        PreparedIntentStore store = new();
+        const int n = 64;
+        const string key = "hot/key";
+
+        int accepted = 0;
+        await Parallel.ForAsync(0, n, (i, _) =>
+        {
+            PreparedIntent intent = Intent(new HLCTimestamp(0, 5000 + i, 0), 1, key);
+            PreparedIntentApplyResult result = store.Apply(new PrepareIntentCommand(intent));
+            if (result.Outcome == TransactionApplyOutcome.Applied)
+                Interlocked.Increment(ref accepted);
+            return ValueTask.CompletedTask;
+        });
+
+        // The read-decide-write is atomic: exactly one prepare installs the single live intent; every other is
+        // rejected. Without the transition lock two racing prepares could both observe the empty key and both
+        // install, leaving one transaction believing it owns an intent it does not.
+        Assert.Equal(1, accepted);
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
     public void Materializer_ProducesKeyValueRecordStampedWithCommitTimestamp()
     {
         PreparedIntent intent = Intent(Ts(1000), 1, "acct/1") with { Value = [4, 5, 6], Revision = 9, CommitTimestamp = Ts(1234) };

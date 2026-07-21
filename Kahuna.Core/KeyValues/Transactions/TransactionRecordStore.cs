@@ -30,6 +30,12 @@ internal sealed class TransactionRecordStore
 
     private readonly object fileLock = new();
 
+    // Serializes the read-decide-write of a single transition so the compare-and-set is atomic. The concurrent map
+    // makes each dictionary operation safe, but not the read-then-write pair: a commit and an abort for the same
+    // record can be applied concurrently (Raft-ordered apply, producer-side apply, recovery), and without this the
+    // losing transition could observe the pre-decision state and overwrite the winner.
+    private readonly object applyGate = new();
+
     // Resolves a record's anchor key to its current data partition, so a per-partition snapshot/transfer only
     // covers the records this partition owns. Null in the pure/in-memory configuration used by unit tests.
     private Func<string, (int PartitionId, long Generation)>? resolveAnchorPartition;
@@ -61,14 +67,17 @@ internal sealed class TransactionRecordStore
     {
         (HLCTimestamp, long) key = KeyOf(command);
 
-        records.TryGetValue(key, out TransactionRecord? existing);
+        lock (applyGate)
+        {
+            records.TryGetValue(key, out TransactionRecord? existing);
 
-        TransactionRecordApplyResult result = TransactionRecordStateMachine.Apply(existing, command);
+            TransactionRecordApplyResult result = TransactionRecordStateMachine.Apply(existing, command);
 
-        if (result.Outcome == TransactionApplyOutcome.Applied && result.Record is not null)
-            records[key] = result.Record;
+            if (result.Outcome == TransactionApplyOutcome.Applied && result.Record is not null)
+                records[key] = result.Record;
 
-        return result;
+            return result;
+        }
     }
 
     public TransactionRecord? Get(HLCTimestamp transactionId, long epoch) =>

@@ -34,6 +34,12 @@ internal sealed class PreparedIntentStore
 
     private readonly object fileLock = new();
 
+    // Serializes the read-decide-write of a single transition so the compare-and-set is atomic. The concurrent map
+    // makes each dictionary operation safe, but not the read-then-write pair: Raft-ordered apply, follower apply,
+    // the recovery sweep, and producer-side apply can all call Apply concurrently, and two interleaved transitions
+    // on the same key would otherwise both observe the pre-state and clobber each other.
+    private readonly object applyGate = new();
+
     // Resolves an intent's key to its current data partition, so a per-partition snapshot/transfer only covers
     // the intents this partition owns. Null in the pure/in-memory configuration used by unit tests.
     private Func<string, int>? resolvePartition;
@@ -66,19 +72,22 @@ internal sealed class PreparedIntentStore
     {
         string key = KeyOf(command);
 
-        intents.TryGetValue(key, out PreparedIntent? existing);
-
-        PreparedIntentApplyResult result = PreparedIntentStateMachine.Apply(existing, command);
-
-        if (result.Outcome == TransactionApplyOutcome.Applied)
+        lock (applyGate)
         {
-            if (result.Intent is null)
-                intents.TryRemove(key, out _);
-            else
-                intents[key] = result.Intent;
-        }
+            intents.TryGetValue(key, out PreparedIntent? existing);
 
-        return result;
+            PreparedIntentApplyResult result = PreparedIntentStateMachine.Apply(existing, command);
+
+            if (result.Outcome == TransactionApplyOutcome.Applied)
+            {
+                if (result.Intent is null)
+                    intents.TryRemove(key, out _);
+                else
+                    intents[key] = result.Intent;
+            }
+
+            return result;
+        }
     }
 
     /// <summary>The current intent at <paramref name="key"/>, or null.</summary>
@@ -147,6 +156,30 @@ internal sealed class PreparedIntentStore
     public bool Restore(int partitionId, RaftLog log) => ApplyLog(log);
 
     public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
+
+    /// <summary>Applies a delta and reports whether every PREPARE command in it took ownership of its key. Returns
+    /// <see langword="false"/> when any prepare is rejected by the state machine — another transaction already
+    /// holds the key, or the same identity re-prepared a divergent mutation — which is NOT an acknowledged
+    /// prepare: the producer must abort rather than commit a mutation whose recoverable intent it never owned.
+    /// Resolve/remove deltas carry no prepares, so they always report true.</summary>
+    public bool ApplyDeltaAckPrepares(RaftLog log)
+    {
+        if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
+            return true;
+
+        PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(log.LogData);
+
+        bool allPreparesAccepted = true;
+        foreach (PreparedIntentCommandMessage message in delta.Commands)
+        {
+            PreparedIntentCommand command = ToCommand(message);
+            PreparedIntentApplyResult result = Apply(command);
+            if (command is PrepareIntentCommand && result.Outcome == TransactionApplyOutcome.Rejected)
+                allPreparesAccepted = false;
+        }
+
+        return allPreparesAccepted;
+    }
 
     private bool ApplyLog(RaftLog log)
     {

@@ -205,31 +205,47 @@ internal sealed class DurableTransactionFinalizer
 
         foreach (DurablePartitionPrepare partition in input.Partitions)
         {
-            // On commit, materialize each intent's value as an ordinary key/value record so the existing
-            // replicator applies it to visible MVCC/persistence — durably, BEFORE the intent is removed below.
-            // On abort nothing materializes.
-            if (commit)
+            // Only an intent whose terminal effect is durably applied may be settled (resolved + removed). On
+            // commit that means its value is materialized: settling an intent whose materialization did not commit
+            // would delete the only durable copy of an already-committed value, so a false/thrown materialization
+            // leaves the intent for the recovery sweep to retry. On abort there is no value to lose, so every
+            // intent is settled after clearing its staged state.
+            List<PreparedIntent> settleable = new(partition.Intents.Count);
+
+            foreach (PreparedIntent intent in partition.Intents)
             {
-                foreach (PreparedIntent intent in partition.Intents)
+                if (commit)
                 {
-                    // Replicate the committed value as an ordinary key/value record so followers converge, then
-                    // apply it on the leader (the leader does not apply it through the replication callback).
-                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
-                    bool applied = await replicate(partition.PartitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
-                    if (applied && applyCommitLocally is not null)
-                        await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
+                    bool materialized;
+                    try
+                    {
+                        // Replicate the committed value as an ordinary key/value record so followers converge, then
+                        // apply it on the leader (the leader does not apply it through the replication callback).
+                        byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
+                        materialized = await replicate(partition.PartitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+                        if (materialized && applyCommitLocally is not null)
+                            await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        materialized = false;
+                    }
+
+                    if (materialized)
+                        settleable.Add(intent);
                 }
-            }
-            else
-            {
-                // Abort: nothing materializes, but clear each participant's staged write intent + MVCC on the leader
-                // so the key is not blocked until the intent lease expires.
-                foreach (PreparedIntent intent in partition.Intents)
+                else
+                {
+                    // Abort: nothing materializes, but clear each participant's staged write intent + MVCC on the
+                    // leader so the key is not blocked until the intent lease expires.
                     if (applyRollbackLocally is not null)
                         await applyRollbackLocally(partition.PartitionId, intent).ConfigureAwait(false);
+                    settleable.Add(intent);
+                }
             }
 
-            await SettleIntentsAsync(partition.PartitionId, partition.Intents, commit, cancellationToken).ConfigureAwait(false);
+            if (settleable.Count > 0)
+                await SettleIntentsAsync(partition.PartitionId, settleable, commit, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -260,11 +276,15 @@ internal sealed class DurableTransactionFinalizer
 
     private async Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken)
     {
-        bool ok = await replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken).ConfigureAwait(false);
-        if (ok)
-            intentStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = delta });
+        if (!await replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken).ConfigureAwait(false))
+            return false;
 
-        return ok;
+        // A prepare is acknowledged only when its exact intent took ownership of the key. A state-machine
+        // rejection (another transaction already holds the key, or a divergent re-prepare of the same identity)
+        // means no recoverable intent exists for this transaction, so the prepare must count as failed and drive
+        // an abort — never a commit of a mutation recovery could not complete. Resolve/remove deltas carry no
+        // prepares and always acknowledge.
+        return intentStore.ApplyDeltaAckPrepares(new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = delta });
     }
 
     private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
