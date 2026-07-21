@@ -90,7 +90,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     /// MVCC snapshot, archives the superseded revision, applies the value, persists, and records the decision).
     /// Idempotent: a re-apply after the intent is already cleared and the revision is at or ahead is a no-op.
     /// </summary>
-    private KeyValueResponse? ApplyDurableCommit(string key, InvalidateOrApplyData data)
+    private KeyValueResponse ApplyDurableCommit(string key, InvalidateOrApplyData data)
     {
         if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
         {
@@ -109,7 +109,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         if (!ownsIntent
             && (entry.Revision > data.Revision
                 || (entry.Revision == data.Revision && entry.State == data.State && entry.Expires == data.Expires)))
-            return null; // already applied
+            return new(KeyValueResponseType.Committed); // already applied
 
         KeyValueProposal proposal = new(
             data.State == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet,
@@ -126,7 +126,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null);
 
-        return null;
+        return new(KeyValueResponseType.Committed);
     }
 
     /// <summary>
@@ -134,15 +134,15 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     /// is not blocked until the intent lease expires (the durable analog of ApplyConfirmedRollback). A no-op when
     /// the key is not resident or its live write intent belongs to a different transaction.
     /// </summary>
-    private KeyValueResponse? ApplyDurableRollback(string key, InvalidateOrApplyData data)
+    private KeyValueResponse ApplyDurableRollback(string key, InvalidateOrApplyData data)
     {
         if (!context.Store.TryGetValue(key, out KeyValueEntry? entry) || entry is null
             || entry.WriteIntent is null || entry.WriteIntent.TransactionId != data.TransactionId)
-            return null;
+            return new(KeyValueResponseType.RolledBack);
 
         HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         ApplyConfirmedRollback(entry, data.TransactionId, now);
 
-        return null;
+        return new(KeyValueResponseType.RolledBack);
     }
 }

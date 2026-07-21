@@ -274,12 +274,10 @@ internal sealed class KeyValuesManager : IDisposable
                 return await ReplicateDurableLocal(partitionId, logType, payload, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
 
             case DurableOpCommit:
-                replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]);
-                return true;
+                return await replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false);
 
             case DurableOpRollback:
-                replicator.ApplyDurableRollback(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]);
-                return true;
+                return await replicator.ApplyDurableRollback(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false);
 
             default:
                 return false;
@@ -346,13 +344,13 @@ internal sealed class KeyValuesManager : IDisposable
     /// CompletePhaseTwo). The leader applies direct writes through CompleteProposal, not the replication callback,
     /// so a durable-committed value would never land in the leader's store without this. Idempotent.
     /// </summary>
-    internal async Task ApplyDurableCommit(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
+    internal async Task<bool> ApplyDurableCommit(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
-            await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
-        else
-            replicator.ApplyDurableCommit(partitionId, intent);
+            return await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
+
+        return await replicator.ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -360,13 +358,13 @@ internal sealed class KeyValuesManager : IDisposable
     /// analog of ApplyConfirmedRollback), so the key is not blocked until the intent lease expires. Routed to the
     /// partition leader on a cluster (that is where the staged write intent lives).
     /// </summary>
-    internal async Task ApplyDurableRollback(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
+    internal async Task<bool> ApplyDurableRollback(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
-            await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpRollback, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
-        else
-            replicator.ApplyDurableRollback(partitionId, intent);
+            return await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpRollback, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
+
+        return await replicator.ApplyDurableRollback(partitionId, intent).ConfigureAwait(false);
     }
 
 

@@ -1204,12 +1204,12 @@ internal sealed class TransactionCoordinator
     // Applies a committed intent's value on the leader (clears the staged write intent/MVCC and applies the value —
     // the durable analog of CompletePhaseTwo), invoked by the finalizer's resolution after the intent commits.
     // Routes to the participant partition's leader node on a cluster.
-    private Task ApplyDurableCommitLocally(int partitionId, PreparedIntent intent) =>
+    private Task<bool> ApplyDurableCommitLocally(int partitionId, PreparedIntent intent) =>
         manager.ApplyDurableCommit(partitionId, intent, CancellationToken.None);
 
     // Clears an aborted transaction's staged write intent/MVCC on the leader (the durable analog of
     // ApplyConfirmedRollback), invoked by the finalizer's resolution when the decision is abort.
-    private Task ApplyDurableRollbackLocally(int partitionId, PreparedIntent intent) =>
+    private Task<bool> ApplyDurableRollbackLocally(int partitionId, PreparedIntent intent) =>
         manager.ApplyDurableRollback(partitionId, intent, CancellationToken.None);
 
     /// <summary>

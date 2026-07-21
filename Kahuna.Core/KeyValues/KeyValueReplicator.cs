@@ -102,28 +102,45 @@ internal sealed class KeyValueReplicator
     /// Applies a durable-intent resolution's committed value on the leader by routing a commit-apply to the owning
     /// persistent actor: unlike the ordinary follower cache-coherence path, it carries the committing transaction id
     /// so the actor can clear that transaction's staged write intent and MVCC snapshot and apply the value to the
-    /// base entry (the durable analog of CompletePhaseTwo). The leader otherwise never makes a durable-committed
-    /// value resident, so a read after the intent settles would miss it.
+    /// base entry (the durable analog of CompletePhaseTwo). The returned acknowledgement means the actor has
+    /// completed that work; routing/enqueueing alone is not sufficient to settle the durable intent.
     /// </summary>
-    public void ApplyDurableCommit(int partitionId, PreparedIntent intent)
+    public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)
     {
-        persistentRouter.Send(KeyValueRequest.ForInvalidateOrApply(
-            intent.Key, intent.Revision, intent.Value,
-            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
-            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision));
+        try
+        {
+            KeyValueResponse? response = await persistentRouter.Ask(KeyValueRequest.ForInvalidateOrApply(
+                intent.Key, intent.Revision, intent.Value,
+                intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
+                forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision)).ConfigureAwait(false);
+            return response?.Type == KeyValueResponseType.Committed;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
     /// Routes a durable-intent ABORT cleanup to the owning persistent actor: clears the transaction's staged write
     /// intent and MVCC snapshot for the key so an aborted transaction does not leave it blocked until the write
-    /// intent lease expires (the durable analog of ApplyConfirmedRollback).
+    /// intent lease expires (the durable analog of ApplyConfirmedRollback). The returned acknowledgement is
+    /// positive only after the actor has processed the cleanup.
     /// </summary>
-    public void ApplyDurableRollback(int partitionId, PreparedIntent intent)
+    public async Task<bool> ApplyDurableRollback(int partitionId, PreparedIntent intent)
     {
-        persistentRouter.Send(KeyValueRequest.ForInvalidateOrApply(
-            intent.Key, intent.Revision, intent.Value,
-            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
-            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: true));
+        try
+        {
+            KeyValueResponse? response = await persistentRouter.Ask(KeyValueRequest.ForInvalidateOrApply(
+                intent.Key, intent.Revision, intent.Value,
+                intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
+                forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: true)).ConfigureAwait(false);
+            return response?.Type == KeyValueResponseType.RolledBack;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

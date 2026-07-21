@@ -125,7 +125,7 @@ public sealed class TestDurableTransactionFinalizer
         List<(int Partition, string Key)> commits = [];
         DurableTransactionFinalizer commitFinalizer = new(
             commitRecords, commitIntents, commitSeam.Replicate,
-            applyCommitLocally: (p, i) => { commits.Add((p, i.Key)); return Task.CompletedTask; });
+            applyCommitLocally: (p, i) => { commits.Add((p, i.Key)); return Task.FromResult(true); });
 
         await commitFinalizer.FinalizeAsync(
             Input(Ts(1000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
@@ -141,8 +141,8 @@ public sealed class TestDurableTransactionFinalizer
         List<(int Partition, string Key)> abortCommits = [];
         DurableTransactionFinalizer abortFinalizer = new(
             abortRecords, abortIntents, abortSeam.Replicate,
-            applyCommitLocally: (p, i) => { abortCommits.Add((p, i.Key)); return Task.CompletedTask; },
-            applyRollbackLocally: (p, i) => { rollbacks.Add((p, i.Key)); return Task.CompletedTask; });
+            applyCommitLocally: (p, i) => { abortCommits.Add((p, i.Key)); return Task.FromResult(true); },
+            applyRollbackLocally: (p, i) => { rollbacks.Add((p, i.Key)); return Task.FromResult(true); });
 
         DurableFinalizeOutcome outcome = await abortFinalizer.FinalizeAsync(
             Input(Ts(3000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(false), opId: Ts(4000), CancellationToken.None);
@@ -470,6 +470,7 @@ public sealed class TestDurableTransactionFinalizer
 
         Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
         Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+        Assert.NotNull(intents.Get("acct/1"));
     }
 
     [Fact]

@@ -74,12 +74,12 @@ internal sealed class DurableTransactionFinalizer
     /// transaction's staged write intent + MVCC snapshot and applies the value to the base entry). The replicated
     /// key/value record makes followers converge, but the leader does not apply it through the replication callback,
     /// so this is how the committed value becomes visible on the leader. Null in bare protocol tests (no actor).</summary>
-    public delegate Task ApplyCommitLocally(int partitionId, PreparedIntent intent);
+    public delegate Task<bool> ApplyCommitLocally(int partitionId, PreparedIntent intent);
 
     /// <summary>Clears an aborted transaction's staged write intent + MVCC snapshot on the owning actor (the durable
     /// analog of ApplyConfirmedRollback), so the key is not blocked until the intent lease expires. Null in bare
     /// protocol tests (no actor).</summary>
-    public delegate Task ApplyRollbackLocally(int partitionId, PreparedIntent intent);
+    public delegate Task<bool> ApplyRollbackLocally(int partitionId, PreparedIntent intent);
 
     private readonly TransactionRecordStore recordStore;
 
@@ -264,8 +264,8 @@ internal sealed class DurableTransactionFinalizer
             // Only an intent whose terminal effect is durably applied may be settled (resolved + removed). On
             // commit that means its value is materialized: settling an intent whose materialization did not commit
             // would delete the only durable copy of an already-committed value, so a false/thrown materialization
-            // leaves the intent for the recovery sweep to retry. On abort there is no value to lose, so every
-            // intent is settled after clearing its staged state.
+            // leaves the intent for the recovery sweep to retry. On abort the actor must still positively clear
+            // staged state before settlement, otherwise the intent remains for recovery.
             List<PreparedIntent> settleable = new(partition.Intents.Count);
 
             foreach (PreparedIntent intent in partition.Intents)
@@ -280,7 +280,7 @@ internal sealed class DurableTransactionFinalizer
                         byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
                         materialized = await replicate(partition.PartitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
                         if (materialized && applyCommitLocally is not null)
-                            await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
+                            materialized = await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -294,9 +294,19 @@ internal sealed class DurableTransactionFinalizer
                 {
                     // Abort: nothing materializes, but clear each participant's staged write intent + MVCC on the
                     // leader so the key is not blocked until the intent lease expires.
-                    if (applyRollbackLocally is not null)
-                        await applyRollbackLocally(partition.PartitionId, intent).ConfigureAwait(false);
-                    settleable.Add(intent);
+                    bool rolledBack = false;
+                    try
+                    {
+                        rolledBack = applyRollbackLocally is null
+                            || await applyRollbackLocally(partition.PartitionId, intent).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        rolledBack = false;
+                    }
+
+                    if (rolledBack)
+                        settleable.Add(intent);
                 }
             }
 
