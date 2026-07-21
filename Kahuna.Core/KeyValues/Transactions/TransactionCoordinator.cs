@@ -166,27 +166,31 @@ internal sealed class TransactionCoordinator
     /// Consults the durable-intent canonical transaction record for a handle whose in-memory session is gone,
     /// so a lost interactive durable transaction reports its true outcome instead of <c>Errored</c>: a committed
     /// record answers <c>Committed</c>; a conflict abort answers <c>Aborted</c>; any other abort or an undecided
-    /// record answers <c>MustRetry</c> (recovery finishes it). Returns false when no record is resident locally
-    /// (the record lives on a remote anchor leader not replicated here, or none was ever created) so the caller
-    /// falls through to the unknown outcome. A cross-node record lookup is a follow-up (the same anchor-lookup
-    /// gap the read path has); a local lookup matches the replication coverage the old decision store had.
+    /// record answers <c>MustRetry</c> (recovery finishes it). The lookup is routed by the handle's anchor key to
+    /// the anchor partition leader, so the record is found even when it lives on another node — closing the
+    /// cross-node lost-session gap. Returns Found=false only when no record exists at all, so the caller falls
+    /// through to the unknown outcome.
     /// </summary>
-    private bool TryConsultDurableTransactionRecord(TransactionHandle handle, out KeyValueResponseType response)
+    private async Task<(bool Found, KeyValueResponseType Response)> TryConsultDurableTransactionRecord(TransactionHandle handle)
     {
-        response = KeyValueResponseType.Errored;
+        // No anchor ⇒ no persistent write was ever confirmed, so no canonical record can exist to consult.
+        if (string.IsNullOrEmpty(handle.RecordAnchorKey))
+            return (false, KeyValueResponseType.Errored);
 
-        TransactionRecord? record = manager.DurableTransactionRecordStore.Get(handle.TransactionId, DurableFinalizeEpoch);
+        TransactionRecord? record = await manager
+            .LookupDurableRecordRouted(handle.TransactionId, DurableFinalizeEpoch, handle.RecordAnchorKey, CancellationToken.None)
+            .ConfigureAwait(false);
         if (record is null)
-            return false;
+            return (false, KeyValueResponseType.Errored);
 
-        response = record.Decision switch
+        KeyValueResponseType response = record.Decision switch
         {
             TransactionDecision.Commit => KeyValueResponseType.Committed,
             TransactionDecision.Abort when record.AbortClass == TransactionAbortClass.Conflict => KeyValueResponseType.Aborted,
             _ => KeyValueResponseType.MustRetry // any other abort, or still undecided → recovery completes it
         };
 
-        return true;
+        return (true, response);
     }
 
     /// <summary>
@@ -208,9 +212,11 @@ internal sealed class TransactionCoordinator
 
             // The in-memory session is gone (evicted, restarted, or it lived on a node that failed), but an
             // all-persistent transaction's outcome survives as its canonical durable record anchored on the
-            // data partition. Consult that record: committed → Committed; undecided → MustRetry (recovery finishes
-            // it). A record not resident locally stays unknown Errored (a cross-node record lookup is a follow-up).
-            if (TryConsultDurableTransactionRecord(handle, out KeyValueResponseType durableRecord))
+            // data partition. Consult that record — routed to the anchor leader so a remote anchor is found:
+            // committed → Committed; undecided → MustRetry (recovery finishes it). Only a genuinely absent record
+            // stays unknown Errored.
+            (bool found, KeyValueResponseType durableRecord) = await TryConsultDurableTransactionRecord(handle);
+            if (found)
                 return (durableRecord, handle.RecordAnchorKey);
 
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
@@ -355,9 +361,10 @@ internal sealed class TransactionCoordinator
                 return retained.Outcome.Type;
 
             // A rollback cannot override a durably decided commit: if the canonical transaction record exists for
-            // this lost session, return its outcome (committed → Committed, undecided → MustRetry) instead of
-            // rolling back a transaction whose commit may already be durable.
-            if (TryConsultDurableTransactionRecord(handle, out KeyValueResponseType durableRecord))
+            // this lost session (routed to the anchor leader), return its outcome (committed → Committed, undecided
+            // → MustRetry) instead of rolling back a transaction whose commit may already be durable.
+            (bool found, KeyValueResponseType durableRecord) = await TryConsultDurableTransactionRecord(handle);
+            if (found)
                 return durableRecord;
 
             logger.LogWarning("Trying to rollback unknown transaction {TransactionId}", transactionId);

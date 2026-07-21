@@ -190,6 +190,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>
         keyValues.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
 
+    public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
+        keyValues.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

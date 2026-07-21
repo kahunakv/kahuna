@@ -1,4 +1,6 @@
 
+using System.Collections.Concurrent;
+
 using Nixie;
 using Nixie.Routers;
 
@@ -282,6 +284,60 @@ internal sealed class KeyValuesManager : IDisposable
             default:
                 return false;
         }
+    }
+
+    /// <summary>The soft cap on the positive-terminal record-lookup cache; a terminal (Commit/Abort) record is
+    /// immutable so a hit is always valid, but the cache stops growing past this to bound memory.</summary>
+    private const int DurableRecordLookupCacheMax = 8192;
+
+    /// <summary>Positive-terminal cache for routed record lookups: only immutable terminal records are cached (an
+    /// Undecided/absent outcome can still transition and must never be cached across a later decision).</summary>
+    private readonly ConcurrentDictionary<(HLCTimestamp, long), TransactionRecord> durableRecordLookupCache = new();
+
+    /// <summary>
+    /// Serves a canonical transaction-record lookup that was routed to this node because it is the record's anchor
+    /// partition leader: the local record store is authoritative here. Returns the serialized record, or null when
+    /// none exists. The record crosses the wire serialized so the public transport contract never exposes the
+    /// internal record type.
+    /// </summary>
+    internal Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
+    {
+        TransactionRecord? record = transactionRecordStore.Get(transactionId, epoch);
+        return Task.FromResult(record is null ? null : TransactionRecordStore.SerializeRecords([record]));
+    }
+
+    /// <summary>
+    /// Linearizable canonical-record lookup routed by the record's anchor key: resolves the anchor partition, and
+    /// if this node does not lead it, forwards to the leader (whose store is authoritative) instead of consulting a
+    /// node-local projection that would otherwise force a retry-until-settlement. Terminal outcomes are positively
+    /// cached (immutable); Undecided/absent outcomes are never cached.
+    /// </summary>
+    internal async Task<TransactionRecord?> LookupDurableRecordRouted(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
+    {
+        if (durableRecordLookupCache.TryGetValue((transactionId, epoch), out TransactionRecord? cached))
+            return cached;
+
+        int partitionId = locator.LocateRange(anchorKey).PartitionId;
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+        TransactionRecord? record;
+        if (leader is null)
+        {
+            record = transactionRecordStore.Get(transactionId, epoch);
+        }
+        else
+        {
+            byte[]? serialized = await interNodeCommunication
+                .LookupTransactionRecord(leader, partitionId, transactionId, epoch, anchorKey, cancellationToken)
+                .ConfigureAwait(false);
+
+            record = serialized is null ? null : TransactionRecordStore.DeserializeRecords(serialized) is [TransactionRecord r, ..] ? r : null;
+        }
+
+        if (record is { IsTerminal: true } && durableRecordLookupCache.Count < DurableRecordLookupCacheMax)
+            durableRecordLookupCache[(transactionId, epoch)] = record;
+
+        return record;
     }
 
     /// <summary>
@@ -4638,11 +4694,11 @@ internal sealed class KeyValuesManager : IDisposable
         // The scheduler seam is the single ordered apply owner: recovery's settle/materialize deltas apply in Raft
         // order alongside any concurrent finalizer decision for the same record, so the two cannot diverge.
         ReplicateDurableThroughScheduler,
-        // Local anchor record lookup: authoritative only when this node leads the anchor partition (otherwise the
-        // record lives on a remote leader). A local miss falls to the drive-abort path, which is likewise gated on
-        // anchor leadership, so a remote anchor is left for its own leader — never presumed-aborted from stale
-        // local state. Cross-node participant resolution (an inter-node record lookup) is a follow-up.
-        (transactionId, epoch, _, _) => Task.FromResult(transactionRecordStore.Get(transactionId, epoch)),
+        // Anchor record lookup routed to the anchor partition leader: a participant recovering an orphan intent
+        // whose anchor lives on another node now reads the authoritative decision there instead of missing locally
+        // and leaving it for the anchor's own sweep. A remote-anchor commit/abort is resolved directly; only a
+        // genuinely absent/undecided record falls through to the leadership-gated drive-abort path.
+        (transactionId, epoch, anchorKey, cancellationToken) => LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken),
         DriveDurableAbortAsync);
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)

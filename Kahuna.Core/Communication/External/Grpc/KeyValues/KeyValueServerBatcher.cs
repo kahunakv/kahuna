@@ -250,6 +250,13 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerLookupTransactionRecord:
+                    {
+                        GrpcLookupTransactionRecordRequest? req = request.LookupTransactionRecord;
+                        Track(LookupTransactionRecordDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
@@ -928,6 +935,30 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerDurableOperation,
                 RequestId = requestId,
                 DurableOperation = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task LookupTransactionRecordDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcLookupTransactionRecordRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcLookupTransactionRecordResponse resp = await service.LookupTransactionRecordInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerLookupTransactionRecord,
+                RequestId = requestId,
+                LookupTransactionRecord = resp
             });
         }
         finally

@@ -110,6 +110,8 @@ internal readonly struct GrpcServerBatcherRequest
 
     public GrpcServerBatcherRequest(GrpcDurableOperationRequest durableOperation) => payload = durableOperation;
 
+    public GrpcServerBatcherRequest(GrpcLookupTransactionRecordRequest lookupTransactionRecord) => payload = lookupTransactionRecord;
+
     public GrpcTryLockRequest? TryLock => payload as GrpcTryLockRequest;
 
     public GrpcUnlockRequest? Unlock => payload as GrpcUnlockRequest;
@@ -208,4 +210,6 @@ internal readonly struct GrpcServerBatcherRequest
 
 
     public GrpcDurableOperationRequest? DurableOperation => payload as GrpcDurableOperationRequest;
+
+    public GrpcLookupTransactionRecordRequest? LookupTransactionRecord => payload as GrpcLookupTransactionRecordRequest;
 }

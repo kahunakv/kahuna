@@ -84,6 +84,13 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         items.Sort(EnsureLexicographicalOrder);
 
+        // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket. No-op off the
+        // durable path.
+        (items, bool mustRetry) = BucketScanContinuation.OverlayBucketIntents(
+            context, message.Key, items, currentTime, message.ReadTimestamp);
+        if (mustRetry)
+            return KeyValueStaticResponses.MustRetryResponse;
+
         return new(KeyValueResponseType.Get, items);
     }
 
@@ -122,6 +129,12 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         if (items.Count >= KeyValueScanLimits.MaxPrefixScanResults)
         {
             items.Sort(EnsureLexicographicalOrder);
+
+            (items, bool mustRetry) = BucketScanContinuation.OverlayBucketIntents(
+                context, message.Key, items, currentTime, message.ReadTimestamp);
+            if (mustRetry)
+                return KeyValueStaticResponses.MustRetryResponse;
+
             return new(KeyValueResponseType.Get, items);
         }
 

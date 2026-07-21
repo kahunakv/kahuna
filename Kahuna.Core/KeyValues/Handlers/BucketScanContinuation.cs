@@ -1,5 +1,7 @@
 
 using Kahuna.Server.Persistence;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -126,7 +128,49 @@ internal sealed class BucketScanContinuation : ReadContinuation
         }
 
         items.Sort(static (x, y) => string.Compare(x.Item1, y.Item1, StringComparison.Ordinal));
+
+        // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket, so a committed
+        // insert/override/delete not yet materialized is reflected exactly as it would be in the equivalent range
+        // scan. No-op off the durable path.
+        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp);
+        if (mustRetry)
+        {
+            Resolve(KeyValueStaticResponses.MustRetryResponse);
+            return;
+        }
+
         Resolve(new(KeyValueResponseType.Get, items));
+    }
+
+    /// <summary>
+    /// Reconciles a bucket scan's assembled page with the durable prepared intents belonging to the bucket: a
+    /// committed intent overrides/injects, a committed delete or expired committed value excludes, an undecided
+    /// in-bucket intent makes the scan retry. A bucket scan has no pagination cursor, so the merge is invoked with
+    /// the scan's result cap as the limit (no "more" signal) and its capped item list is returned. No-op (returns
+    /// the page unchanged) when the intent store is empty or no intent covers the bucket.
+    /// </summary>
+    internal static (List<(string, ReadOnlyKeyValueEntry)> Items, bool MustRetry) OverlayBucketIntents(
+        KeyValueContext context,
+        string? bucket,
+        List<(string, ReadOnlyKeyValueEntry)> items,
+        HLCTimestamp currentTime,
+        HLCTimestamp readTimestamp)
+    {
+        if (context.PreparedIntentStore is not { } intentStore)
+            return (items, false);
+
+        IReadOnlyList<PreparedIntent> bucketIntents = intentStore.SnapshotBucket(bucket);
+        if (bucketIntents.Count == 0)
+            return (items, false);
+
+        HLCTimestamp snapshotTs = readTimestamp.IsNull() ? currentTime : readTimestamp;
+
+        PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
+            items, bucketIntents, snapshotTs, currentTime,
+            limit: KeyValueScanLimits.MaxPrefixScanResults, kvHasMore: false, kvCeilingKey: null,
+            i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+
+        return (merge.Items, merge.MustRetry);
     }
 
     private static KeyValueEntry BuildEntry(string key, ReadOnlyKeyValueEntry disk) => new()

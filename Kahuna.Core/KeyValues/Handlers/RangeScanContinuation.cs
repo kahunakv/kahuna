@@ -295,26 +295,31 @@ internal sealed class RangeScanContinuation : ReadContinuation
             return; // mailbox is free until the next ResumeRead arrives
         }
 
-        // Durable-intent scan visibility: overlay prepared intents covering this range onto the accumulated page.
-        // No-op when the intent store is empty (durable-intent path disabled). BuildResponse then applies the
-        // page cap/cursor to the merged list, so an injected key counts toward the page and can become the cursor.
+        // Durable-intent scan visibility: overlay prepared intents covering this page's window onto the accumulated
+        // page. No-op when the intent store is empty (durable-intent path disabled). The merge owns the page
+        // cap/cursor over the merged sequence, so an injected key counts toward the page and can become the cursor.
         if (context.PreparedIntentStore is { } intentStore)
         {
-            IReadOnlyList<PreparedIntent> ranged = intentStore.SnapshotRange(startKey ?? prefix, memEnd);
+            // The K-way merge only reaches here after draining every disk page, so the sole "more" signal is the
+            // limit+1 sentinel; the ceiling is the largest accumulated key.
+            bool kvHasMore = accumulated.Count > limit;
+            string? kvCeilingKey = accumulated.Count > 0 ? accumulated[^1].Item1 : null;
+
+            IReadOnlyList<PreparedIntent> ranged =
+                intentStore.SnapshotScanWindow(startKey ?? prefix, startInclusive || startKey is null, memEnd, memEndInclusive);
             if (ranged.Count > 0)
             {
-                bool pageExhausted = accumulated.Count <= limit;
-                (List<(string, ReadOnlyKeyValueEntry)> merged, bool mustRetry) =
-                    PreparedIntentScanMerge.Merge(accumulated, ranged, snapshotTs, pageExhausted,
-                        i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
-                if (mustRetry)
+                PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
+                    accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
+                    i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+                if (merge.MustRetry)
                 {
                     Resolve(new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false)));
                     return;
                 }
 
-                Resolve(BuildResponse(merged, limit, snapshotTs, prefix, durability));
+                Resolve(TryGetByRangeHandler.BuildMergedResponse(prefix, durability, merge, snapshotTs));
                 return;
             }
         }

@@ -95,21 +95,32 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             }
         }
 
-        // Durable-intent scan visibility: overlay prepared intents covering this range onto the page. No-op when
-        // the intent store is empty (durable-intent path disabled).
+        // Durable-intent scan visibility: overlay prepared intents covering this page's window onto the page. No-op
+        // when the intent store is empty (durable-intent path disabled), so ordinary scans are unchanged.
         if (context.PreparedIntentStore is { } intentStore)
         {
-            IReadOnlyList<PreparedIntent> ranged = intentStore.SnapshotRange(memStart, memEnd);
+            // The KV side has more beyond this page when the limit+1 sentinel was fetched or the walk truncated on
+            // its inspection budget; the ceiling is that sentinel/last-inspected key.
+            bool kvHasMore = items.Count > limit || resumeAfterKey is not null;
+            string? kvCeilingKey = resumeAfterKey ?? (items.Count > 0 ? items[^1].Item1 : null);
+
+            // Bound the intent window exactly to the KV rows this page drew from: start-exclusive on a continuation
+            // cursor, end-inclusive per the request, clamped to resumeAfterKey when the walk stopped early so an
+            // intent past the truncation point is deferred to the next page rather than injected here.
+            string? intentEnd = resumeAfterKey ?? memEnd;
+            bool intentEndIncl = resumeAfterKey is not null || memEndIncl;
+
+            IReadOnlyList<PreparedIntent> ranged =
+                intentStore.SnapshotScanWindow(memStart, memStartIncl, intentEnd, intentEndIncl);
             if (ranged.Count > 0)
             {
-                bool pageExhausted = resumeAfterKey is null && items.Count <= limit;
-                (List<(string, ReadOnlyKeyValueEntry)> mergedItems, bool mustRetry) =
-                    PreparedIntentScanMerge.Merge(items, ranged, snapshotTs, pageExhausted,
-                        i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
-                if (mustRetry)
+                PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
+                    items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
+                    i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+                if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));
-                items = mergedItems;
+                return BuildMergedResponse(prefix, message.Durability, merge, snapshotTs);
             }
         }
 
@@ -305,6 +316,26 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             : null;
 
         KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, items, nextCursor, hasMore);
+        return new(KeyValueResponseType.Get, result);
+    }
+
+    /// <summary>
+    /// Builds the paged response from a durable-intent scan-merge outcome. Pagination (item cap and cursor key) is
+    /// already resolved by <see cref="PreparedIntentScanMerge"/> against the merged sequence; this only encodes the
+    /// cursor (stamping <paramref name="snapshotTs"/> so subsequent pages read at the same snapshot). Shared with
+    /// the persistent continuation so both scan paths encode the merged cursor identically.
+    /// </summary>
+    internal static KeyValueResponse BuildMergedResponse(
+        string prefix,
+        KeyValueDurability durability,
+        PreparedIntentScanMerge.ScanMergeResult merge,
+        HLCTimestamp snapshotTs)
+    {
+        string? nextCursor = merge.HasMore && merge.NextCursorKey is not null
+            ? KeyValueRangeCursor.Encode(merge.NextCursorKey, durability, prefix, snapshotTs)
+            : null;
+
+        KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, merge.Items, nextCursor, nextCursor is not null);
         return new(KeyValueResponseType.Get, result);
     }
 

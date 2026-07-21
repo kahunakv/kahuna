@@ -70,6 +70,11 @@ public interface IInterNodeCommunication
     /// commit-apply, 2 rollback-apply) and returns whether it committed/applied.</summary>
     public Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
 
+    /// <summary>Routes a linearizable canonical transaction-record lookup to the partition leader that owns the
+    /// record's anchor key, returning the serialized record (null when absent). Used by the consult sites so a
+    /// remote anchor's decision is authoritative rather than a node-local projection that would otherwise retry.</summary>
+    public Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken);
+
     public Task TryCommitNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken);
     
     public Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken);

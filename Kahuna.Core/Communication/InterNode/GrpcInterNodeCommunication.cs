@@ -1824,6 +1824,31 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         return batchResponse.DurableOperation?.Committed ?? false;
     }
 
+    public async Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcLookupTransactionRecordRequest request = new()
+        {
+            PartitionId = partitionId,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Epoch = epoch,
+            AnchorKey = anchorKey
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcLookupTransactionRecordResponse? response = batchResponse.LookupTransactionRecord;
+        return response is { Found: true } ? response.Record.ToByteArray() : null;
+    }
+
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
         AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {

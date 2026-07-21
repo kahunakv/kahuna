@@ -1056,6 +1056,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcImportCompletionReceiptsRequest ImportCompletionReceipts = 47;
     GrpcImportCoordinatorDecisionsRequest ImportCoordinatorDecisions = 48;
     GrpcDurableOperationRequest DurableOperation = 49;
+    GrpcLookupTransactionRecordRequest LookupTransactionRecord = 50;
   }
 }
 
@@ -1110,6 +1111,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcImportCompletionReceiptsResponse ImportCompletionReceipts = 46;
     GrpcImportCoordinatorDecisionsResponse ImportCoordinatorDecisions = 47;
     GrpcDurableOperationResponse DurableOperation = 48;
+    GrpcLookupTransactionRecordResponse LookupTransactionRecord = 49;
   }
 }
 
@@ -1217,6 +1219,22 @@ message GrpcDurableOperationResponse {
   bool Committed = 1;    // replicate: whether the batch committed; commit/rollback: applied
 }
 
+// A linearizable lookup of a transaction's canonical record, routed from a consult site to the partition leader
+// that owns the record's anchor key so the answer is authoritative rather than a node-local projection.
+message GrpcLookupTransactionRecordRequest {
+  int32 PartitionId = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  int64 Epoch = 5;
+  string AnchorKey = 6;
+}
+
+message GrpcLookupTransactionRecordResponse {
+  bool Found = 1;
+  bytes Record = 2;      // the serialized canonical record when Found; empty otherwise
+}
+
 enum GrpcClientBatchType {
   TYPE_NONE = 0;
   TRY_SET_KEY_VALUE = 1;
@@ -1283,6 +1301,7 @@ enum GrpcServerBatchType {
   SERVER_IMPORT_COMPLETION_RECEIPTS = 45;
   SERVER_IMPORT_COORDINATOR_DECISIONS = 46;
   SERVER_DURABLE_OPERATION = 47;
+  SERVER_LOOKUP_TRANSACTION_RECORD = 48;
 }
 
 enum GrpcRangeLockMode {

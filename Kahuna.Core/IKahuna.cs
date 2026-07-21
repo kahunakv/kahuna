@@ -98,6 +98,10 @@ public interface IKahuna
     /// resolution on the local KV state. Returns whether it committed/applied.</summary>
     public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
 
+    /// <summary>Serves a canonical transaction-record lookup routed here because this node is the record's anchor
+    /// partition leader. Returns the serialized record, or null when no record exists locally.</summary>
+    public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken);
+
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability);
 
     public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);

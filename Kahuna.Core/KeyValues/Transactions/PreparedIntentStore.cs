@@ -407,6 +407,55 @@ internal sealed class PreparedIntentStore
         return result;
     }
 
+    /// <summary>Intents whose key belongs to <paramref name="bucket"/> (its parent prefix) — the set a bucket scan
+    /// (<c>GetByBucket</c>) reconciles against. Uses the intent's own bucket, which the freeze sources from the key
+    /// (its parent prefix), so an intent-only committed key is included/overridden/excluded in a bucket scan exactly
+    /// as it would be in the equivalent range scan.</summary>
+    public IReadOnlyList<PreparedIntent> SnapshotBucket(string? bucket)
+    {
+        List<PreparedIntent> result = [];
+
+        foreach (PreparedIntent intent in intents.Values)
+        {
+            if (string.Equals(intent.Bucket, bucket, StringComparison.Ordinal))
+                result.Add(intent);
+        }
+
+        return result;
+    }
+
+    /// <summary>Intents covering a scan page's window with the scan's own boundary semantics: start-exclusivity for a
+    /// continuation cursor (<paramref name="startInclusive"/> false skips an intent exactly at <paramref name="startKey"/>,
+    /// which the prior page already emitted) and end-inclusivity (<paramref name="endInclusive"/> true keeps an intent
+    /// exactly at <paramref name="endKey"/>). This is distinct from <see cref="SnapshotRange"/>'s fixed half-open
+    /// <c>[start, end)</c> so the overlaid intent set matches exactly the window the scan's KV rows were drawn from —
+    /// without it a boundary intent is re-emitted across pages or an inclusive-end intent is missed.</summary>
+    public IReadOnlyList<PreparedIntent> SnapshotScanWindow(string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    {
+        List<PreparedIntent> result = [];
+
+        foreach (PreparedIntent intent in intents.Values)
+        {
+            if (startKey is not null)
+            {
+                int cmpStart = string.CompareOrdinal(intent.Key, startKey);
+                if (cmpStart < 0 || (!startInclusive && cmpStart == 0))
+                    continue;
+            }
+
+            if (endKey is not null)
+            {
+                int cmpEnd = string.CompareOrdinal(intent.Key, endKey);
+                if (cmpEnd > 0 || (!endInclusive && cmpEnd == 0))
+                    continue;
+            }
+
+            result.Add(intent);
+        }
+
+        return result;
+    }
+
     /// <summary>Folds transferred intents into this partition's set (idempotent by key + resolution authority).</summary>
     public void ImportIntents(IEnumerable<PreparedIntent> incoming)
     {

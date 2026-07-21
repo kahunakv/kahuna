@@ -2099,6 +2099,22 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return new GrpcDurableOperationResponse { Committed = committed };
     }
 
+    internal async Task<GrpcLookupTransactionRecordResponse> LookupTransactionRecordInternal(GrpcLookupTransactionRecordRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+
+        // Runs on the anchor partition leader (the caller routed it here): the local canonical record store is
+        // authoritative. The record crosses the wire serialized; an absent record answers Found=false.
+        byte[]? record = await keyValues.LookupTransactionRecordLocal(
+            request.PartitionId, transactionId, request.Epoch, request.AnchorKey, context.CancellationToken);
+
+        return new GrpcLookupTransactionRecordResponse
+        {
+            Found = record is not null,
+            Record = record is not null ? UnsafeByteOperations.UnsafeWrap(record) : ByteString.Empty
+        };
+    }
+
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(
         GrpcAcquireSnapshotHoldRequest request, ServerCallContext context) =>
         AcquireSnapshotHold(request, context);

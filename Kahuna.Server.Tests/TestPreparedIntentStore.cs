@@ -18,7 +18,7 @@ public sealed class TestPreparedIntentStore
     private static PreparedIntent Intent(
         long txn, long epoch, string key, KeyValueState state = KeyValueState.Set,
         byte[]? value = null, long revision = 1, HLCTimestamp? recoveryDeadline = null,
-        PreparedIntentResolution resolution = PreparedIntentResolution.Pending) =>
+        PreparedIntentResolution resolution = PreparedIntentResolution.Pending, string? bucket = null) =>
         new(
             TransactionId: Ts(txn),
             Epoch: epoch,
@@ -28,7 +28,7 @@ public sealed class TestPreparedIntentStore
             CommitTimestamp: Ts(txn + 100),
             State: state,
             Value: value ?? [1, 2, 3],
-            Bucket: null,
+            Bucket: bucket,
             Revision: revision,
             Expires: HLCTimestamp.Zero,
             NoRevision: false,
@@ -152,6 +152,41 @@ public sealed class TestPreparedIntentStore
 
         Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
         Assert.Equal(PreparedIntentResolution.Pending, store.Get("k")!.Resolution);
+    }
+
+    // ── scan windows ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void SnapshotScanWindow_HonorsStartExclusivityAndEndInclusivity()
+    {
+        PreparedIntentStore store = new();
+        foreach (string k in new[] { "a", "b", "c", "d" })
+            store.Apply(new PrepareIntentCommand(Intent(1000, 1, k)));
+
+        // Half-open [b, d): b included, d excluded.
+        List<string> halfOpen = store.SnapshotScanWindow("b", startInclusive: true, "d", endInclusive: false)
+            .Select(i => i.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
+        Assert.Equal(["b", "c"], halfOpen);
+
+        // Start-exclusive (a continuation cursor at "b") + end-inclusive "d": b skipped, d kept.
+        List<string> exclStart = store.SnapshotScanWindow("b", startInclusive: false, "d", endInclusive: true)
+            .Select(i => i.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
+        Assert.Equal(["c", "d"], exclStart);
+    }
+
+    [Fact]
+    public void SnapshotBucket_FiltersByIntentBucket()
+    {
+        PreparedIntentStore store = new();
+        store.Apply(new PrepareIntentCommand(Intent(1000, 1, "accounts/alice", bucket: "accounts")));
+        store.Apply(new PrepareIntentCommand(Intent(1000, 1, "accounts/bob", bucket: "accounts")));
+        store.Apply(new PrepareIntentCommand(Intent(1000, 1, "orders/1", bucket: "orders")));
+
+        List<string> accounts = store.SnapshotBucket("accounts").Select(i => i.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
+        Assert.Equal(["accounts/alice", "accounts/bob"], accounts);
+
+        Assert.Single(store.SnapshotBucket("orders"));
+        Assert.Empty(store.SnapshotBucket("missing"));
     }
 
     // ── remove ─────────────────────────────────────────────────────────────────────

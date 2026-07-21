@@ -444,6 +444,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcLookupTransactionRecordRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcAcquireSnapshotHoldRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -844,6 +853,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerDurableOperation;
             batchRequest.DurableOperation = itemRequest.DurableOperation;
         }
+        else if (itemRequest.LookupTransactionRecord is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerLookupTransactionRecord;
+            batchRequest.LookupTransactionRecord = itemRequest.LookupTransactionRecord;
+        }
         else if (itemRequest.AcquireSnapshotHold is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireSnapshotHold;
@@ -1111,6 +1125,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerDurableOperation:
                         item.Promise.TrySetResult(new(response.DurableOperation));
+                        break;
+
+                    case GrpcServerBatchType.ServerLookupTransactionRecord:
+                        item.Promise.TrySetResult(new(response.LookupTransactionRecord));
                         break;
 
                     case GrpcServerBatchType.ServerTryAcquireSnapshotHold:

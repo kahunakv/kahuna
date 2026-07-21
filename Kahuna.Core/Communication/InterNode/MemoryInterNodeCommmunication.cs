@@ -889,6 +889,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    public async Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+            return await kahunaNode.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
     /// <summary>
     /// 
     /// </summary>

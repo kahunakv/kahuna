@@ -43,7 +43,10 @@ internal sealed class TryExistsHandler : BaseHandler
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
 
                 case ReadVisibilityAction.UseIntentValue:
+                    // A committed delete, or a committed value whose TTL has elapsed, reports as does-not-exist,
+                    // matching the ordinary exists expiry filter rather than reporting a dead key as present.
                     return foreignIntent.State == KeyValueState.Deleted
+                           || PreparedIntentVisibility.IsExpired(foreignIntent, currentTime)
                         ? KeyValueStaticResponses.DoesNotExistContextResponse
                         : new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
                             null, foreignIntent.Revision, foreignIntent.Expires,

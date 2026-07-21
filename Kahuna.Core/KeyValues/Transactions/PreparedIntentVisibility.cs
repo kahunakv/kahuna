@@ -1,3 +1,4 @@
+using System;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kommander.Time;
 
@@ -63,4 +64,16 @@ internal static class PreparedIntentVisibility
 
         return ReadVisibilityAction.Retry;
     }
+
+    /// <summary>The ordinary-read expiry predicate applied to a committed prepared intent's value: expired iff it
+    /// carries an expiry that is strictly before "now" (<c>Expires != Zero &amp;&amp; (Expires - currentTime) &lt; 0</c>,
+    /// matching every materialized-read exit). A committed-but-expired intent must not be served as live — the read
+    /// treats it as does-not-exist (point) or excludes it (scan), exactly as an expired MVCC head entry. Applied by
+    /// the read egress rather than folded into <see cref="Resolve"/> because expiry is compared against wall-clock
+    /// "now", orthogonal to the commit-timestamp visibility ordering, and the by-revision/writer paths do not filter
+    /// on it. A Zero <paramref name="currentTime"/> opts out (no filter).</summary>
+    public static bool IsExpired(PreparedIntent intent, HLCTimestamp currentTime) =>
+        currentTime != HLCTimestamp.Zero
+        && intent.Expires != HLCTimestamp.Zero
+        && intent.Expires - currentTime < TimeSpan.Zero;
 }
