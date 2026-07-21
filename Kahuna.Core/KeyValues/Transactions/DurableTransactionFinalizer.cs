@@ -7,8 +7,11 @@ using Kommander.Time;
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>The per-partition prepared-intent group of one transaction. The anchor partition additionally carries
-/// the canonical record's initialization (see <see cref="DurableFinalizeInput.AnchorPartitionId"/>).</summary>
-internal sealed record DurablePartitionPrepare(int PartitionId, IReadOnlyList<PreparedIntent> Intents);
+/// the canonical record's initialization (see <see cref="DurableFinalizeInput.AnchorPartitionId"/>). The
+/// <paramref name="Generation"/> is the range-descriptor generation this partition was resolved against at freeze,
+/// used to re-fence the prepare submission at dispatch so a split between freeze and dispatch releases it retryably
+/// instead of appending to a retired partition.</summary>
+internal sealed record DurablePartitionPrepare(int PartitionId, long Generation, IReadOnlyList<PreparedIntent> Intents);
 
 /// <summary>The frozen, immutable inputs of one finalize attempt: identity, the canonical commit timestamp and
 /// decision deadline, the participant manifest, and the per-partition prepared intents. Freezing happens in the
@@ -19,6 +22,7 @@ internal sealed record DurableFinalizeInput(
     string CoordinatorKey,
     string RecordAnchorKey,
     int AnchorPartitionId,
+    long AnchorGeneration,
     HLCTimestamp CommitTimestamp,
     HLCTimestamp DecisionDeadline,
     long ManifestHash,
@@ -53,6 +57,13 @@ internal sealed class DurableTransactionFinalizer
     /// local store on success (idempotent with the replication-callback apply on every replica).</summary>
     public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, CancellationToken cancellationToken);
 
+    /// <summary>Like <see cref="ReplicateDelegate"/> but re-fences the submission at dispatch against the range
+    /// descriptor <paramref name="fenceKey"/> was resolved to at freeze (<paramref name="fenceGeneration"/>): a
+    /// split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
+    /// Used for the pre-decision record initialization, prepare, and decision; null falls back to the unfenced
+    /// replicate (protocol tests, and the post-decision settle/materialize which recovery backstops).</summary>
+    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
     /// <summary>Runs the post-decision resolution (materialize committed values, settle intents) on a background
     /// task, off the commit critical path (deferred settlement). When <see langword="null"/>, resolution is instead
     /// awaited inline so it completes before <see cref="FinalizeAsync"/> returns (synchronous settlement). Either
@@ -73,6 +84,9 @@ internal sealed class DurableTransactionFinalizer
     private readonly TransactionRecordStore recordStore;
 
     private readonly ReplicateDelegate replicate;
+
+    // Fenced replicate for the pre-decision path; null falls back to the unfenced replicate.
+    private readonly ReplicateFencedDelegate? replicateFenced;
 
     // Null = synchronous settlement: resolution is awaited inline in FinalizeAsync. Non-null = deferred settlement.
     private readonly ResolutionScheduler? scheduleResolution;
@@ -101,10 +115,12 @@ internal sealed class DurableTransactionFinalizer
         ApplyCommitLocally? applyCommitLocally = null,
         ApplyRollbackLocally? applyRollbackLocally = null,
         Func<HLCTimestamp>? attemptClock = null,
-        Action<double>? recordDecisionLatencyMs = null)
+        Action<double>? recordDecisionLatencyMs = null,
+        ReplicateFencedDelegate? replicateFenced = null)
     {
         this.recordStore = recordStore;
         this.replicate = replicate;
+        this.replicateFenced = replicateFenced;
         this.applyCommitLocally = applyCommitLocally;
         this.applyRollbackLocally = applyRollbackLocally;
         // A null scheduler means synchronous settlement (FinalizeAsync awaits resolution inline).
@@ -132,7 +148,7 @@ internal sealed class DurableTransactionFinalizer
             input.TransactionId, input.Epoch, input.CoordinatorKey, input.RecordAnchorKey,
             input.CommitTimestamp, input.DecisionDeadline, input.ManifestHash, input.Manifest, opId, input.CreatedAt)]);
 
-        if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, cancellationToken).ConfigureAwait(false))
+        if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false))
             return Retry();
 
         // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
@@ -142,7 +158,7 @@ internal sealed class DurableTransactionFinalizer
         foreach (DurablePartitionPrepare partition in input.Partitions)
         {
             byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-            if (!await ReplicateIntentsAsync(partition.PartitionId, prepareDelta, cancellationToken).ConfigureAwait(false))
+            if (!await ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken).ConfigureAwait(false))
                 allPrepared = false;
         }
 
@@ -208,7 +224,7 @@ internal sealed class DurableTransactionFinalizer
 
         byte[] delta = TransactionRecordStore.SerializeDelta([decision]);
 
-        if (!await ReplicateRecordAsync(input.AnchorPartitionId, delta, cancellationToken).ConfigureAwait(false))
+        if (!await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false))
             return Retry();
 
         // The winner is whatever the canonical record actually reflects after apply, not what we requested — a
@@ -310,9 +326,22 @@ internal sealed class DurableTransactionFinalizer
     // returns that leader's applied outcome. For a prepared-intent delta the returned boolean already folds in
     // prepare acknowledgement, so a rejected prepare (another transaction owns the key) surfaces here as a failed
     // replicate and drives an abort rather than a commit of a mutation recovery could not complete.
-    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
-        replicate(partitionId, ReplicationTypes.TransactionRecord, delta, cancellationToken);
+    // Pre-decision record (initialize / decision): fenced against the anchor's frozen descriptor so a split
+    // between freeze and dispatch releases it retryably instead of landing on a retired partition.
+    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        replicateFenced is not null
+            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration, cancellationToken)
+            : replicate(partitionId, ReplicationTypes.TransactionRecord, delta, cancellationToken);
 
+    // Pre-decision prepare: fenced against the partition group's frozen descriptor. A rejected prepare surfaces as
+    // a failed replicate (the seam folds in prepare acknowledgement) and drives an abort.
+    private Task<bool> ReplicatePrepareAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        replicateFenced is not null
+            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fenceKey, fenceGeneration, cancellationToken)
+            : replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken);
+
+    // Post-decision settle: unfenced. The decision is already durable; a split at this point is resolved by the
+    // recovery sweep, and re-fencing would only strand the settle.
     private Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
         replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken);
 

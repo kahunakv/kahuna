@@ -4,6 +4,13 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
+/// <summary>The actor-confirmed committed value of one modified key, echoed from the participant to the coordinator
+/// so the coordinator can stage it losslessly and finalize the transaction through the durable-intent path (rather
+/// than the manual ticket path). A null <see cref="Value"/> is a deletion. The TTL is relative in ms (0 = none),
+/// resolved to an absolute expiry at freeze. <see cref="NoRevision"/> carries whether the write suppressed history
+/// retention so the durable materialization matches a direct <c>SET NOREV</c>.</summary>
+public readonly record struct StagedMutationEffect(string Key, byte[]? Value, long Revision, long ExpiresMs, bool NoRevision);
+
 /// <summary>
 /// The confirmed outcome of a transaction-scoped operation, carried from the partition leader that
 /// executed it back to the coordinator node so the coordinator can fold the effect into its
@@ -53,6 +60,13 @@ public sealed record OperationCompletionPayload
 
     /// <summary>The items observed by a scan, recorded with point-read-set semantics.</summary>
     public IReadOnlyList<KeyValueTransactionReadKey>? ReadObservations { get; init; }
+
+    /// <summary>
+    /// The actor-confirmed committed values for the persistent modified keys, echoed so the coordinator can stage
+    /// them and take the durable-intent finalize path. Present only for persistent writes; a transaction with an
+    /// unstaged persistent modified key falls back to the manual ticket path (never incorrect, just not batched).
+    /// </summary>
+    public IReadOnlyList<StagedMutationEffect>? StagedMutations { get; init; }
 
     /// <summary>Durability shared by the effect keys/locks above.</summary>
     public KeyValueDurability Durability { get; init; }

@@ -24,6 +24,14 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     // mutation. Null in tests that only assert scheduling, not store state.
     private readonly Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit;
 
+    // The logical key + range-descriptor generation this submission's partition was resolved against at freeze. A
+    // null key opts out of the fence (post-decision settle/materialize, recovery, and state-transfer imports,
+    // which must apply regardless of topology); a non-null key re-fences at dispatch so a split/merge since freeze
+    // releases the submission retryably instead of appending to a partition the range no longer routes to.
+    private readonly string? fenceKey;
+
+    private readonly long fenceGeneration;
+
     public int PartitionId { get; }
 
     public int ByteLength { get; }
@@ -36,12 +44,16 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         int partitionId,
         IReadOnlyList<RaftProposalEntry> entries,
         TaskCompletionSource<bool> completion,
-        Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit = null)
+        Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit = null,
+        string? fenceKey = null,
+        long fenceGeneration = 0)
     {
         PartitionId = partitionId;
         Entries = entries;
         this.completion = completion;
         this.applyOnCommit = applyOnCommit;
+        this.fenceKey = fenceKey;
+        this.fenceGeneration = fenceGeneration;
 
         int bytes = 0;
         for (int i = 0; i < entries.Count; i++)
@@ -53,7 +65,7 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     /// took ownership of its key; false when the batch did not commit or a prepare was rejected.</summary>
     public Task<bool> Committed => completion.Task;
 
-    public bool IsStale(IWriteRangeFence fence) => false;
+    public bool IsStale(IWriteRangeFence fence) => fenceKey is not null && fence.IsStale(fenceKey, fenceGeneration, PartitionId);
 
     /// <summary>The batch committed: apply this submission's records to their stores in Raft-commit order, then
     /// resolve the producer with whether every prepare was acknowledged.</summary>

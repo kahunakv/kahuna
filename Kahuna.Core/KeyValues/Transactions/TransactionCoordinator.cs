@@ -1177,7 +1177,10 @@ internal sealed class TransactionCoordinator
         // Fresh attempt HLC at the decision so a slow prepare can trip the deadline; record latency only to the
         // decision so post-decision settlement never inflates the deadline the next finalize must fit inside.
         attemptClock: () => raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()),
-        recordDecisionLatencyMs: finalizeLatency.Record);
+        recordDecisionLatencyMs: finalizeLatency.Record,
+        // Re-fence the pre-decision record/prepare submissions at dispatch, so a split/merge between freeze and
+        // dispatch releases them retryably instead of appending to a retired partition.
+        replicateFenced: ReplicateDurableFencedAsync);
 
     // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
@@ -1185,6 +1188,11 @@ internal sealed class TransactionCoordinator
     // committed value to the leader's KV state via ApplyDurableCommitLocally.
     private Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
         manager.ReplicateDurableThroughScheduler(partitionId, logType, data, cancellationToken);
+
+    // Fenced variant for the pre-decision record/prepare path: re-resolves the partition against the frozen
+    // generation at dispatch (local aggregator path) so a topology change since freeze releases it retryably.
+    private Task<bool> ReplicateDurableFencedAsync(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, cancellationToken);
 
     // Applies a committed intent's value on the leader (clears the staged write intent/MVCC and applies the value —
     // the durable analog of CompletePhaseTwo), invoked by the finalizer's resolution after the intent commits.
@@ -1243,12 +1251,12 @@ internal sealed class TransactionCoordinator
 
         Dictionary<string, StagedMutation> stagedByKey = new(staged.Count);
         foreach ((string key, StagedValue value) in staged)
-            stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.ExpiresMs);
+            stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.ExpiresMs, value.NoRevision);
 
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
                 commitTimestamp, decisionDeadline, context.ModifiedKeys, stagedByKey,
-                key => manager.LocateDurablePartition(key).PartitionId, out input))
+                manager.LocateDurablePartition, out input))
             return false;
 
         opId = commitTimestamp;

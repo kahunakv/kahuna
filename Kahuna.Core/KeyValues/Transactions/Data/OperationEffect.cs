@@ -52,4 +52,8 @@ internal sealed class OperationEffect
     /// not assert predicate validation — only that these exact items were observed at these revisions.
     /// </summary>
     public IReadOnlyList<KeyValueTransactionReadKey>? ReadObservations { get; init; }
+
+    /// <summary>The actor-confirmed committed values staged for this operation's persistent modified keys, so the
+    /// coordinator folds them into its working set and finalizes through the durable-intent path.</summary>
+    public IReadOnlyList<StagedMutationEffect>? StagedMutations { get; init; }
 }

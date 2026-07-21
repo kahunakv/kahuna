@@ -256,6 +256,24 @@ internal sealed class RangeSplitter
                 return SplitOutcome.TransferFailed;
             }
 
+            // ── 7d. Transfer unresolved durable-intent 2PC state whose key/anchor moves to [K,E) into P' ────
+            // Canonical transaction records and prepared intents are replicated onto the destination partition the
+            // same way as receipts: every replica of P' holds them, so a re-drive, recovery, or finalize routed to
+            // P' after cutover still resolves — even if P''s leader changes. Like the receipt handoff this is NOT
+            // best-effort: a lost decision or unresolved intent would strand the transaction, so a non-durable
+            // handoff aborts the split before cutover.
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords =
+                manager.GetLocalTransactionRecordsForRange(splitKey, descriptor.EndKey);
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents =
+                manager.GetLocalPreparedIntentsForRange(splitKey, descriptor.EndKey);
+
+            if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(newPartitionId, movedRecords, movedIntents, ct))
+            {
+                logger.LogError(
+                    "RangeSplitter: durable transaction-state handoff to P{New} not durable — aborting split before cutover", newPartitionId);
+                return SplitOutcome.TransferFailed;
+            }
+
             // F3 test seam: allow the caller to race a direct write while quiesced.
             if (duringQuiesce is not null)
                 await duringQuiesce();

@@ -60,7 +60,7 @@ internal sealed class ExtendCommand : BaseCommand
                     context.TransactionId, keyName, -1, HLCTimestamp.Zero, durability, cancellationToken);
 
                 if (readType == KeyValueResponseType.Get && entry is not null)
-                    context.StageMutation(keyName, entry.Value, entry.Revision, expiresMs);
+                    context.StageMutation(keyName, entry.Value, entry.Revision, expiresMs, noRevision: false); // extend re-materializes the value under a new revision, retaining history
                 break;
 
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:

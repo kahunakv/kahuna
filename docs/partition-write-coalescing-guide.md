@@ -25,21 +25,30 @@ of clients writing the same partition at once, would otherwise pay that cost per
 
 Kahuna avoids this with a **leader-local partition write aggregator**. Instead of proposing each
 direct write immediately, the owning node collects writes bound for the same Raft partition and
-proposes the collected log records in **one** `ReplicateLogs` call. Writes from different clients,
+proposes the collected log records in **one** `ReplicateEntries` call. Writes from different clients,
 single-key calls, and bulk (`SetMany`/`DeleteMany`) calls all meet in the same partition queue, so
 coalescing is *cross-request*, not limited to one API call.
 
 The result: N direct writes to a partition become a handful of proposals (bounded by batch-size and
 byte caps), collapsing WAL appends, quorum round trips, and `fsync`s in the same proportion.
 
-Three things the aggregator deliberately does **not** touch:
+**The scheduler is shared and heterogeneous.** The same per-partition scheduler also carries the
+durable-intent 2PC records — the canonical transaction record's initialize/decision and each prepared
+intent's prepare/resolve — so concurrent transactions' records to one partition coalesce into the same
+proposal (cross-transaction batching). A batch is therefore a mix of log types for one partition: direct
+`KeyValues` writes and durable `TransactionRecord`/`PreparedIntent` deltas ride one `ReplicateEntries`
+call. Each submission carries its own ordered entries and its own completion adapter, so the scheduler
+batches them without knowing their internals. The durable side is described in the reusable transaction
+coordinator guide; this guide covers the shared scheduling mechanics.
+
+Three things the scheduler deliberately does **not** carry:
 
 - **Ephemeral writes** — they never use Raft; they apply in memory on the owning actor.
-- **Transactional writes** — a write under an open transaction stages an MVCC entry; it is not an
-  auto-committed Raft record yet.
-- **Two-phase commit** — interactive and script transactions propose through their own coordinator
-  path with a shared prepare/commit ticket. That traffic is never merged with auto-commit writes,
-  because independent transactions need independent commit/rollback outcomes.
+- **In-flight transactional staging** — a write under an open transaction stages an MVCC entry (a write
+  intent) on its actor; it becomes an auto-committed record only when the transaction finalizes, and only
+  then (for the durable-intent path) does it reach the scheduler.
+- **The legacy manual-ticket 2PC path** — mixed/ephemeral transactions still finalize through the
+  `CommitLogs`/`RollbackLogs` ticket path, which is not merged into the scheduler's auto-commit batches.
 
 ---
 
@@ -55,10 +64,17 @@ client → gRPC/REST/SDK
        → install ReplicationIntent → hand the envelope to the aggregator
   → PartitionWriteAggregator.TryEnqueue      (synchronous admission; reserve or reject)
   → PartitionWriteAggregatorActor (a "lane")  (queue, linger, batch selection)
-       → one IRaft.ReplicateLogs(partition, [records], autoCommit:true)   (off the mailbox)
+       → one IRaft.ReplicateEntries(partition, [entries], autoCommit:true)   (off the mailbox)
   ← success → CompleteProposal back to the KeyValueActor → applies value, resolves caller
   ← failure → ReleaseProposal back to the KeyValueActor → clears intent, returns MustRetry
 ```
+
+The flow above is the **direct-write** case (a `KeyValueProposalRequest` submission). A durable-intent
+2PC record follows the same lane/batch/complete path but through a `DurableProposalSubmission`: its
+completion applies the record/intent delta to the transaction-record / prepared-intent store in
+Raft-commit order and resolves the finalizer's task, rather than routing `CompleteProposal` to a key
+actor. The batch executor issues one `ReplicateEntries` proposal carrying whatever mix of entry types
+the selected submissions contributed.
 
 The key structural point is that the **owning `KeyValueActor` stages the write and installs the
 replication intent, but does not perform the Raft call**. It serializes the committed record, hands a
@@ -96,13 +112,27 @@ All types live in `Kahuna.Core/KeyValues/Writes/`.
   epoch. It contains no actors, timers, or Raft, so its ordering and batching logic is
   deterministic.
 
-- **`KeyValueProposalRequest`** — the immutable envelope the aggregator carries. It holds the resolved
-  partition, the already-serialized log record and its byte length, the proposal id, the routed
-  generation, the originating actor, the caller promise, and the enqueue tick — **not** the full
-  proposal, which stays in the owning actor's dictionary until completion.
+- **`IProposalSubmission`** — the neutral unit the scheduler queues, batches, and completes. Each
+  submission carries its own ordered log entries, byte cost, flush-time staleness rule, and exactly-once
+  completion adapter, so different producers share one per-partition proposal without the scheduler
+  knowing their internals. A multi-entry submission is an atomic ordered bundle — its entries reach Raft
+  in one proposal, in order, never split.
 
-- **`IPartitionBatchExecutor`** / `RaftPartitionBatchExecutor` — the one Raft round trip for a batch,
-  behind an interface (replaceable in tests).
+- **`KeyValueProposalRequest`** — the direct-write submission. It holds the resolved partition, the
+  already-serialized log record and its byte length, the proposal id, the routed generation, the
+  originating actor, the caller promise, and the enqueue tick — **not** the full proposal, which stays in
+  the owning actor's dictionary until completion. Its completion routes `CompleteProposal`/`ReleaseProposal`
+  back to that actor.
+
+- **`DurableProposalSubmission`** — the durable-intent 2PC submission (a canonical record init/decision, a
+  prepared-intent prepare, or a resolution). Its completion applies the delta to the record/intent store in
+  Raft-commit order and resolves the finalizer's task; a rejected prepare is reported as a non-commit so
+  the finalizer aborts. It re-fences the pre-decision record/prepare against the range map at dispatch, so
+  a split/merge since freeze releases it retryably rather than appending to a retired partition.
+
+- **`IPartitionBatchExecutor`** / `RaftPartitionBatchExecutor` — the one Raft round trip for a batch (one
+  `ReplicateEntries` call carrying the batch's mixed entry types), behind an interface (replaceable in
+  tests).
 
 - **`IWriteCompletionRouter`** / `KeyValueActorCompletionRouter` — delivers each item's terminal
   outcome by sending the existing `CompleteProposal` / `ReleaseProposal` control request to the
@@ -165,8 +195,11 @@ A maintainer changing this subsystem must preserve all of these:
 4. **Partitions progress independently.** A partition being in flight or stalled does not stop another
    from flushing, even when both are owned by the same lane.
 
-5. **One compatibility class per batch.** A batch contains only auto-commit `KeyValues` records for a
-   single partition. Two-phase-commit tickets and other log types never enter it.
+5. **One partition per batch; auto-commit only.** A batch contains only auto-commit records for a single
+   partition, but those records may be **heterogeneous** — direct `KeyValues` writes and durable-intent
+   `TransactionRecord`/`PreparedIntent` deltas coalesce into one proposal. What never enters a batch is a
+   *manual* (non-auto-commit) ticket: the legacy 2PC prepare/commit path keeps its own `CommitLogs`/
+   `RollbackLogs` proposal so independent transactions retain independent commit/rollback outcomes.
 
 6. **Every accepted item terminates exactly once** — a `CompleteProposal` after confirmed success, or
    a `ReleaseProposal` after a pre-dispatch rejection or a confirmed failure. Completion is delivered
@@ -299,7 +332,11 @@ aggregator does not provide exactly-once application on its own.
   serializes one record, and enqueues like set/delete/extend — do not add a second direct Raft path.
   The serializer that builds the committed record is shared; keep it byte-identical to what a
   single-key write produces so followers and cold restore reconstruct the same state.
-- Heterogeneous coalescing across log types (locks, receipts, decision records, independent 2PC
-  tickets) is intentionally out of scope: the current bulk Raft primitive commits one log type under
-  one ticket. Merging independent transactions' tickets would couple their atomic outcomes and is a
-  correctness violation.
+- To put a **new producer** on the shared scheduler, implement `IProposalSubmission` (ordered entries,
+  byte cost, `IsStale`, exactly-once `Complete`/`Release`) and enqueue it — that is how durable-intent
+  2PC records already coalesce with direct writes. A submission's completion must apply its effect and
+  resolve its caller exactly once, and every entry it carries must be auto-commit for the same partition.
+- **Heterogeneous coalescing across auto-commit log types is supported and used** (direct `KeyValues`
+  writes + durable `TransactionRecord`/`PreparedIntent` deltas). What remains out of scope is merging
+  **manual (non-auto-commit) 2PC tickets**: those need independent commit/rollback outcomes, so coupling
+  them into a shared auto-commit batch would be a correctness violation.

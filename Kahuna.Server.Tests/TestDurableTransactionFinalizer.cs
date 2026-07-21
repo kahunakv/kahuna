@@ -61,11 +61,11 @@ public sealed class TestDurableTransactionFinalizer
 
         List<DurablePartitionPrepare> partitions = participants
             .GroupBy(p => p.Partition)
-            .Select(g => new DurablePartitionPrepare(g.Key, g.Select(p => Intent(txId, epoch, p.Key) with { ManifestHash = hash }).ToList()))
+            .Select(g => new DurablePartitionPrepare(g.Key, 0L, g.Select(p => Intent(txId, epoch, p.Key) with { ManifestHash = hash }).ToList()))
             .ToList();
 
         return new DurableFinalizeInput(txId, epoch, "coord", participants[0].Key, participants[0].Partition,
-            Ts(1100), DecisionDeadline: Ts(9000), hash, manifest, partitions, CreatedAt: Ts(1000));
+            AnchorGeneration: 0L, Ts(1100), DecisionDeadline: Ts(9000), hash, manifest, partitions, CreatedAt: Ts(1000));
     }
 
     private static (DurableTransactionFinalizer, TransactionRecordStore, PreparedIntentStore) Build(Seam seam)

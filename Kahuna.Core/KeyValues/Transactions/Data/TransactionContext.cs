@@ -5,10 +5,12 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>The committed value staged for one modified key on the durable-intent finalize path: the mutation's
-/// value (null = delete tombstone), its revision, and its <b>relative</b> TTL in milliseconds (0 = no expiry). The
-/// relative TTL is resolved to an absolute expiry HLC of <c>commitTimestamp + ExpiresMs</c> at freeze, so a TTL
-/// write's expiry is anchored to the one canonical commit timestamp rather than an actor-local wall clock.</summary>
-public readonly record struct StagedValue(byte[]? Value, long Revision, long ExpiresMs);
+/// value (null = delete tombstone), its revision, its <b>relative</b> TTL in milliseconds (0 = no expiry), and
+/// whether the write suppressed history retention (<c>NoRevision</c>). The relative TTL is resolved to an absolute
+/// expiry HLC of <c>commitTimestamp + ExpiresMs</c> at freeze, so a TTL write's expiry is anchored to the one
+/// canonical commit timestamp rather than an actor-local wall clock. <c>NoRevision</c> is carried so a
+/// <c>SET NOREV</c> materializes revision-free on the durable path exactly as a direct write would.</summary>
+public readonly record struct StagedValue(byte[]? Value, long Revision, long ExpiresMs, bool NoRevision);
 
 /// <summary>
 /// Generic transaction context holding identity, policy, lifecycle state, and confirmed working-set
@@ -102,13 +104,15 @@ internal class TransactionContext
     public Dictionary<string, StagedValue>? StagedMutations { get; private set; }
 
     /// <summary>Records the staged committed value of one modified key for the durable-intent path. The expiry is
-    /// the write's <b>relative</b> TTL in milliseconds (0 = none); it is resolved to an absolute HLC at freeze.</summary>
-    public void StageMutation(string key, byte[]? value, long revision, long expiresMs)
+    /// the write's <b>relative</b> TTL in milliseconds (0 = none); it is resolved to an absolute HLC at freeze.
+    /// <paramref name="noRevision"/> carries whether the write suppressed history retention so the materialized
+    /// durable write matches a direct <c>SET NOREV</c>.</summary>
+    public void StageMutation(string key, byte[]? value, long revision, long expiresMs, bool noRevision)
     {
         lock (registryLock)
         {
             StagedMutations ??= [];
-            StagedMutations[key] = new StagedValue(value, revision, expiresMs);
+            StagedMutations[key] = new StagedValue(value, revision, expiresMs, noRevision);
         }
     }
 
@@ -329,6 +333,15 @@ internal class TransactionContext
         {
             foreach ((string, KeyValueDurability) batchModified in modifiedKeys)
                 FoldModifiedKeyLocked(batchModified);
+        }
+
+        // Stage the actor-confirmed committed values for the persistent modified keys, exactly as the script
+        // commands' StageMutation does, so an all-persistent registered transaction finalizes through the
+        // durable-intent path instead of the manual ticket path.
+        if (effect.StagedMutations is { } stagedMutations)
+        {
+            foreach (StagedMutationEffect staged in stagedMutations)
+                StageMutation(staged.Key, staged.Value, staged.Revision, staged.ExpiresMs, staged.NoRevision);
         }
 
         if (effect.PointLock is { } pointLock)

@@ -21,7 +21,7 @@ public sealed class TestDurableFinalizeInputBuilder
     private static readonly HLCTimestamp Deadline = Ts(31100);
 
     // Deterministic key→partition mapping for the tests.
-    private static int Locate(string key) => key.StartsWith("idx/", StringComparison.Ordinal) ? 8 : 5;
+    private static (int, long) Locate(string key) => (key.StartsWith("idx/", StringComparison.Ordinal) ? 8 : 5, 7L);
 
     private static bool Build(
         (string, KeyValueDurability)[] modifiedKeys,
@@ -30,8 +30,10 @@ public sealed class TestDurableFinalizeInputBuilder
         out DurableFinalizeInput? input) =>
         DurableFinalizeInputBuilder.TryBuild(TxId, Epoch, "coord", anchor, CommitTs, Deadline, modifiedKeys, staged, Locate, out input);
 
-    private static StagedMutation Set(long revision, byte[] value) => new(value, revision, ExpiresMs: 0);
-    private static StagedMutation Delete(long revision) => new(null, revision, ExpiresMs: 0);
+    private static StagedMutation Set(long revision, byte[] value) => new(value, revision, ExpiresMs: 0, NoRevision: false);
+
+    private static StagedMutation SetNoRev(long revision, byte[] value) => new(value, revision, ExpiresMs: 0, NoRevision: true);
+    private static StagedMutation Delete(long revision) => new(null, revision, ExpiresMs: 0, NoRevision: false);
 
     [Fact]
     public void SinglePersistentKey_Builds()
@@ -45,7 +47,9 @@ public sealed class TestDurableFinalizeInputBuilder
         Assert.NotNull(input);
         Assert.Equal("acct/1", input!.RecordAnchorKey);
         Assert.Equal(5, input.AnchorPartitionId);
+        Assert.Equal(7L, input.AnchorGeneration); // the descriptor generation captured at freeze, for the dispatch re-fence
         Assert.Single(input.Partitions);
+        Assert.Equal(7L, input.Partitions[0].Generation);
         Assert.Equal(KeyValueState.Set, input.Partitions[0].Intents[0].State);
         Assert.Equal(3, input.Partitions[0].Intents[0].Revision);
     }
@@ -129,11 +133,51 @@ public sealed class TestDurableFinalizeInputBuilder
         // wall clock — so a TTL write is now durable-atomic instead of falling back to the ticket path.
         bool ok = Build(
             [("acct/1", KeyValueDurability.Persistent)],
-            new() { ["acct/1"] = new StagedMutation([9], 3, ExpiresMs: 5000) },
+            new() { ["acct/1"] = new StagedMutation([9], 3, ExpiresMs: 5000, NoRevision: false) },
             "acct/1", out DurableFinalizeInput? input);
 
         Assert.True(ok);
         Assert.Equal(new HLCTimestamp(CommitTs.N, CommitTs.L + 5000, CommitTs.C), input!.Partitions[0].Intents[0].Expires);
+    }
+
+    [Fact]
+    public void NoRevisionSet_PreservesFlagOnIntent()
+    {
+        // A staged SET NOREV freezes with NoRevision set, so the materialized durable write suppresses history
+        // exactly as a direct write would — the flag is no longer dropped at staging.
+        Build(
+            [("acct/1", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = SetNoRev(3, [9]) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        Assert.True(input!.Partitions[0].Intents[0].NoRevision);
+    }
+
+    [Fact]
+    public void OrdinarySet_DoesNotSuppressRevision()
+    {
+        Build(
+            [("acct/1", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = Set(3, [9]) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        Assert.False(input!.Partitions[0].Intents[0].NoRevision);
+    }
+
+    [Fact]
+    public void Intent_CarriesBucketDerivedFromKey()
+    {
+        // The prepared intent's bucket is the key's parent prefix, matching what the actor apply path recomputes,
+        // rather than the null placeholder the freeze previously fabricated. A top-level key (no '/') has none.
+        Build(
+            [("acct/1", KeyValueDurability.Persistent), ("root", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = Set(1, [1]), ["root"] = Set(1, [2]) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        PreparedIntent acct = input!.Partitions.SelectMany(p => p.Intents).Single(i => i.Key == "acct/1");
+        PreparedIntent root = input.Partitions.SelectMany(p => p.Intents).Single(i => i.Key == "root");
+        Assert.Equal("acct", acct.Bucket);
+        Assert.Null(root.Bucket);
     }
 
     [Fact]

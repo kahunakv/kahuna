@@ -194,17 +194,40 @@ internal sealed class KeyValuesManager : IDisposable
             return ok;
         }
 
-        return await ReplicateDurableLocal(partitionId, logType, data, cancellationToken).ConfigureAwait(false);
+        return await ReplicateDurableLocal(partitionId, logType, data, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+    /// <summary>
+    /// Like <see cref="ReplicateDurableThroughScheduler"/> but re-fences the local submission at dispatch against
+    /// the range descriptor <paramref name="fenceKey"/> resolved to at freeze (<paramref name="fenceGeneration"/>):
+    /// a split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
+    /// The re-fence applies on the local aggregator path; a forward to a remote leader carries no fence (the
+    /// remote's freeze-to-dispatch race is a follow-up).
+    /// </summary>
+    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is not null)
+        {
+            bool ok = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+            if (ok && logType == ReplicationTypes.TransactionRecord)
+                transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = logType, LogData = data });
+            return ok;
+        }
+
+        return await ReplicateDurableLocal(partitionId, logType, data, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Writes.DurableProposalSubmission submission = new(
             partitionId,
             [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0)],
             completion,
-            ApplyDurableEntriesOnCommit);
+            ApplyDurableEntriesOnCommit,
+            fenceKey,
+            fenceGeneration);
 
         if (!writeAggregator.TryEnqueue(submission))
             return false;
@@ -245,7 +268,8 @@ internal sealed class KeyValuesManager : IDisposable
         switch (kind)
         {
             case DurableOpReplicate:
-                return await ReplicateDurableLocal(partitionId, logType, payload, cancellationToken).ConfigureAwait(false);
+                // A forwarded durable op is applied on the leader it was routed to; the fence ran on the origin.
+                return await ReplicateDurableLocal(partitionId, logType, payload, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
 
             case DurableOpCommit:
                 replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]);
@@ -1298,6 +1322,11 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     ModifiedKey = applied ? key : null,
                     AcquiredPointLock = applied ? key : null,
+                    // Stage the confirmed value for a persistent write so the coordinator finalizes durably,
+                    // carrying the NoRevision flag so a registered SET NOREV materializes revision-free.
+                    StagedMutations = applied && durability == KeyValueDurability.Persistent
+                        ? [new StagedMutationEffect(key, value, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0)]
+                        : null,
                     Durability = durability,
                     CachedType = type,
                     CachedRevision = revision,
@@ -1378,15 +1407,23 @@ internal sealed class KeyValuesManager : IDisposable
         // would re-issue a SetIfNotExists for an already-set unique key and get a false NotSet. Instead the
         // confirmed keys fold now, the operation completes, and the caller retries the transient keys as a
         // fresh operation. A confirmed write is idempotent under participant-cache replay of the same id.
-        Dictionary<string, KeyValueResponseType> byKey = new(responses.Count, StringComparer.Ordinal);
+        Dictionary<string, (KeyValueResponseType Type, long Revision)> byKey = new(responses.Count, StringComparer.Ordinal);
         foreach (KahunaSetKeyValueResponseItem response in responses)
-            byKey[response.Key ?? ""] = response.Type;
+            byKey[response.Key ?? ""] = (response.Type, response.Revision);
 
         List<(string, KeyValueDurability)> modifiedKeys = [];
+        List<StagedMutationEffect> stagedMutations = [];
         foreach (KahunaSetKeyValueRequestItem item in setManyItems)
         {
-            if (byKey.TryGetValue(item.Key ?? "", out KeyValueResponseType type) && type == KeyValueResponseType.Set)
+            if (byKey.TryGetValue(item.Key ?? "", out (KeyValueResponseType Type, long Revision) result) && result.Type == KeyValueResponseType.Set)
+            {
                 modifiedKeys.Add((item.Key ?? "", item.Durability));
+
+                // Stage the confirmed value + new revision for each persistent write so the coordinator finalizes
+                // the batch through the durable-intent path instead of the manual ticket path.
+                if (item.Durability == KeyValueDurability.Persistent)
+                    stagedMutations.Add(new StagedMutationEffect(item.Key ?? "", item.Value, result.Revision, item.ExpiresMs, (item.Flags & KeyValueFlags.SetNoRevision) != 0));
+            }
         }
 
         // Cache the batch result and drive the completion off the caller token; if it is not acknowledged,
@@ -1397,6 +1434,7 @@ internal sealed class KeyValuesManager : IDisposable
                 new OperationCompletionPayload
                 {
                     ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                    StagedMutations = stagedMutations.Count > 0 ? stagedMutations : null,
                     // A confirmed write folds its implicit point lock, exactly as the single-key path does. An
                     // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
                     // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
@@ -1487,15 +1525,23 @@ internal sealed class KeyValuesManager : IDisposable
         // folds nothing. The registration is NOT cancelled on a partial-transient batch: the caller (a mass
         // deleter) resends only the transient keys on retry as a fresh operation, so the confirmed keys must
         // fold now rather than be discarded for a full re-drive that never comes.
-        Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(responses.Count);
+        Dictionary<(string, KeyValueDurability), (KeyValueResponseType Type, long Revision)> byKey = new(responses.Count);
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
-            byKey[(response.Key ?? "", response.Durability)] = response.Type;
+            byKey[(response.Key ?? "", response.Durability)] = (response.Type, response.Revision);
 
         List<(string, KeyValueDurability)> modifiedKeys = [];
+        List<StagedMutationEffect> stagedMutations = [];
         foreach ((string Key, KeyValueDurability Durability) item in canonicalItems)
         {
-            if (byKey.TryGetValue(item, out KeyValueResponseType type) && type == KeyValueResponseType.Deleted)
+            if (byKey.TryGetValue(item, out (KeyValueResponseType Type, long Revision) result) && result.Type == KeyValueResponseType.Deleted)
+            {
                 modifiedKeys.Add(item);
+
+                // Stage the tombstone (null value) + new revision for each persistent delete so the coordinator
+                // finalizes the batch through the durable-intent path.
+                if (item.Durability == KeyValueDurability.Persistent)
+                    stagedMutations.Add(new StagedMutationEffect(item.Key, null, result.Revision, 0, NoRevision: false));
+            }
         }
 
         // Cache the batch result and drive the completion off the caller token; if it is not acknowledged,
@@ -1505,6 +1551,7 @@ internal sealed class KeyValuesManager : IDisposable
                 new OperationCompletionPayload
                 {
                     ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
+                    StagedMutations = stagedMutations.Count > 0 ? stagedMutations : null,
                     // A confirmed delete folds its implicit point lock, exactly as the single-key path does. An
                     // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
                     // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
@@ -1877,6 +1924,10 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     ModifiedKey = applied ? key : null,
                     AcquiredPointLock = applied ? key : null,
+                    // Stage the tombstone (null value) for a persistent delete so the coordinator finalizes durably.
+                    StagedMutations = applied && durability == KeyValueDurability.Persistent
+                        ? [new StagedMutationEffect(key, null, revision, 0, NoRevision: false)]
+                        : null,
                     Durability = durability,
                     CachedType = type,
                     CachedRevision = revision,
@@ -1886,7 +1937,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         return response;
     }
-    
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryExtend request.
     /// </summary>
@@ -3109,7 +3160,8 @@ internal sealed class KeyValuesManager : IDisposable
             !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
             payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
             payload.Read is not null ||
-            (payload.ReadObservations is { Count: > 0 });
+            (payload.ReadObservations is { Count: > 0 }) ||
+            (payload.StagedMutations is { Count: > 0 });
 
         if (!hasEffect)
             return null;
@@ -3118,6 +3170,7 @@ internal sealed class KeyValuesManager : IDisposable
         {
             ModifiedKey = string.IsNullOrEmpty(payload.ModifiedKey) ? null : (payload.ModifiedKey, durability),
             ModifiedKeys = payload.ModifiedKeys is { Count: > 0 } ? payload.ModifiedKeys : null,
+            StagedMutations = payload.StagedMutations is { Count: > 0 } ? payload.StagedMutations : null,
             PointLock = string.IsNullOrEmpty(payload.AcquiredPointLock) ? null : (payload.AcquiredPointLock, durability),
             AcquiredPointLocks = payload.AcquiredPointLocks is { Count: > 0 } ? payload.AcquiredPointLocks : null,
             RemovePointLock = string.IsNullOrEmpty(payload.ReleasedPointLock) ? null : (payload.ReleasedPointLock, durability),
@@ -4370,6 +4423,47 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal IReadOnlyCollection<CompletionReceiptRecord> GetLocalCompletionReceiptsForRange(string? startKey, string? endKey)
         => completionReceiptStore.SnapshotRange(startKey, endKey);
+
+    /// <summary>Canonical transaction records whose anchor moves into <c>[startKey, endKey)</c> — the durable
+    /// outcomes a split/merge must hand to the destination partition.</summary>
+    internal IReadOnlyList<Transactions.Data.TransactionRecord> GetLocalTransactionRecordsForRange(string? startKey, string? endKey)
+        => transactionRecordStore.SnapshotRange(startKey, endKey);
+
+    /// <summary>Prepared intents whose key moves into <c>[startKey, endKey)</c> — the unresolved 2PC state a
+    /// split/merge must hand to the destination partition.</summary>
+    internal IReadOnlyList<Transactions.Data.PreparedIntent> GetLocalPreparedIntentsForRange(string? startKey, string? endKey)
+        => preparedIntentStore.SnapshotRange(startKey, endKey);
+
+    /// <summary>
+    /// Replicates moved canonical records and prepared intents onto the destination partition through the ordered
+    /// durable seam (which forwards to a remote destination leader), reconstructing them via the ordinary
+    /// deterministic apply so every replica of the destination range holds them after cutover. Returns whether the
+    /// whole handoff was durable; a false return must abort the split/merge cutover, so unresolved 2PC state is
+    /// never stranded on a retired partition. Empty inputs are a no-op success.
+    /// </summary>
+    internal async Task<bool> ImportDurableTransactionStateToPartitionLeaderAsync(
+        int partitionId,
+        IReadOnlyList<Transactions.Data.TransactionRecord> records,
+        IReadOnlyList<Transactions.Data.PreparedIntent> intents,
+        CancellationToken cancellationToken)
+    {
+        if (records.Count > 0)
+        {
+            byte[] recordDelta = TransactionRecordStore.SerializeReconstructionDelta(records);
+            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.TransactionRecord, recordDelta, cancellationToken).ConfigureAwait(false))
+                return false;
+        }
+
+        if (intents.Count > 0)
+        {
+            byte[] intentDelta = PreparedIntentStore.SerializeDelta(
+                intents.Select(i => (Transactions.Data.PreparedIntentCommand)new Transactions.Data.PrepareIntentCommand(i)));
+            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.PreparedIntent, intentDelta, cancellationToken).ConfigureAwait(false))
+                return false;
+        }
+
+        return true;
+    }
 
     /// <summary>Records transferred completion receipts into this node's local store (state-transfer seeding).</summary>
     internal void ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport)

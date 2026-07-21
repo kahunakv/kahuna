@@ -116,6 +116,43 @@ internal sealed class TransactionRecordStore
         return ReplicationSerializer.Serialize(delta);
     }
 
+    /// <summary>
+    /// Serializes a delta of the transitions that faithfully reconstruct each of <paramref name="records"/> on a
+    /// destination partition through the ordinary deterministic apply — used to hand moved records to the
+    /// destination of a split/merge without a bespoke import log type. A manifestless abort tombstone replays its
+    /// abort alone (so it stays manifestless); every other record replays its initialization, then its terminal
+    /// decision (if any) reusing the winning op id and decided-at HLC so the deadline gate re-accepts the commit.
+    /// </summary>
+    public static byte[] SerializeReconstructionDelta(IEnumerable<TransactionRecord> records)
+    {
+        List<TransactionRecordCommand> commands = [];
+
+        foreach (TransactionRecord r in records)
+        {
+            bool manifestlessTombstone = r.Decision == TransactionDecision.Abort && !r.ManifestPresent;
+
+            if (!manifestlessTombstone)
+                commands.Add(new InitializeTransactionCommand(
+                    r.TransactionId, r.Epoch, r.CoordinatorKey, r.RecordAnchorKey,
+                    r.CommitTimestamp, r.DecisionDeadline, r.ManifestHash, r.Participants,
+                    HLCTimestamp.Zero, r.CreatedAt));
+
+            switch (r.Decision)
+            {
+                case TransactionDecision.Commit:
+                    commands.Add(new CommitTransactionCommand(r.TransactionId, r.Epoch, r.ManifestHash, r.WinningOpId, r.DecidedAt));
+                    break;
+
+                case TransactionDecision.Abort:
+                    commands.Add(new AbortTransactionCommand(r.TransactionId, r.Epoch, r.ManifestHash, r.AbortClass, r.WinningOpId, r.DecidedAt,
+                        r.RecordAnchorKey, r.CommitTimestamp, r.DecisionDeadline, r.CreatedAt));
+                    break;
+            }
+        }
+
+        return SerializeDelta(commands);
+    }
+
     private static (HLCTimestamp, long) KeyOf(TransactionRecordCommand command) => command switch
     {
         InitializeTransactionCommand i => (i.TransactionId, i.Epoch),

@@ -151,11 +151,12 @@ internal sealed class RangeMerger
             clampedLocks = [];
         }
 
-        // Replicate the moved range's completion receipts and decision records onto the survivor's Raft log so
-        // every replica of P1 holds them — a re-commit, re-drive, or finalize routed to the survivor after
-        // cutover resolves correctly even if P1's leader changes. Unlike the range-lock transfer this is NOT
-        // best-effort: the survivor becomes the sole route for [B,C) at cutover and P2 is retired, so a lost
-        // receipt/decision would be lost for good. A non-durable handoff aborts the merge before cutover.
+        // Replicate the moved range's completion receipts, canonical transaction records, and prepared intents
+        // onto the survivor's Raft log so every replica of P1 holds them — a re-commit, re-drive, recovery, or
+        // finalize routed to the survivor after cutover resolves correctly even if P1's leader changes. Unlike the
+        // range-lock transfer this is NOT best-effort: the survivor becomes the sole route for [B,C) at cutover and
+        // P2 is retired, so a lost receipt, decision, or unresolved intent would be lost for good. A non-durable
+        // handoff aborts the merge before cutover.
         try
         {
             IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
@@ -165,6 +166,18 @@ internal sealed class RangeMerger
             {
                 logger.LogError(
                     "RangeMerger: completion-receipt handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
+                return MergeOutcome.TransferFailed;
+            }
+
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords =
+                manager.GetLocalTransactionRecordsForRange(right.StartKey, right.EndKey);
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents =
+                manager.GetLocalPreparedIntentsForRange(right.StartKey, right.EndKey);
+
+            if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(left.PartitionId, movedRecords, movedIntents, ct))
+            {
+                logger.LogError(
+                    "RangeMerger: durable transaction-state handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
                 return MergeOutcome.TransferFailed;
             }
         }
