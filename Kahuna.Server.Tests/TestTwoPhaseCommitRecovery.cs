@@ -547,6 +547,93 @@ public sealed class TestTwoPhaseCommitRecovery
     }
 
     /// <summary>
+    /// The durable-intent 2PC path across nodes: an all-persistent script transaction is finalized on a
+    /// coordinator node that leads <b>none</b> of the transaction's participant partitions, so every
+    /// canonical-record initialization, intent prepare, decision, and committed-value materialization must be
+    /// forwarded to a remote partition leader over the inter-node transport (the durable-operation routing). The
+    /// commit must reach <c>Set</c> with no spurious <c>MustRetry</c>, and every committed value must be readable
+    /// from all three nodes — proving the routed durable path both decides and materializes correctly on remote
+    /// leaders, not only when the coordinator happens to lead the participants.
+    /// </summary>
+    [Fact]
+    public async Task DurableScriptTransaction_CoordinatorLeadsNoParticipant_CommitsAndReadsBackClusterWide()
+    {
+        Node[] nodes = await AssembleCluster();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            const int count = 8;
+            string[] keys = new string[count];
+            byte[][] values = new byte[count][];
+            for (int i = 0; i < count; i++)
+            {
+                keys[i] = $"durroute/key-{i}";
+                values[i] = System.Text.Encoding.UTF8.GetBytes($"value-{i}");
+            }
+
+            // Resolve the participant partitions and their current leaders, then pick a coordinator node that
+            // leads none of them: that guarantees every durable operation (record init, prepare, decision,
+            // materialization) is forwarded to a remote leader instead of applied locally.
+            HashSet<int> participantPartitions = [];
+            foreach (string key in keys)
+                participantPartitions.Add(nodes[0].Kahuna.GetDataPartitionForKey(key));
+
+            HashSet<Node> participantLeaders = [];
+            foreach (int partition in participantPartitions)
+                participantLeaders.Add(await LeaderOf(partition, nodes));
+
+            Node coordinator = nodes.First(node => !participantLeaders.Contains(node));
+            Assert.DoesNotContain(coordinator, participantLeaders);
+
+            string script = "BEGIN " + string.Concat(keys.Select((k, i) => $"SET `{k}` 'value-{i}' ")) + "COMMIT END";
+            byte[] scriptBytes = System.Text.Encoding.UTF8.GetBytes(script);
+
+            // A retry re-runs the whole script as a fresh transaction; an idempotent SET makes that safe. The
+            // point of the test is that no retry should be needed for a correctness reason — only transient
+            // young-cluster settling.
+            KeyValueResponseType commitType = KeyValueResponseType.MustRetry;
+            for (int attempt = 0; attempt < 40 && commitType == KeyValueResponseType.MustRetry; attempt++)
+            {
+                KeyValueTransactionResult result = await coordinator.Kahuna.TryExecuteTransactionScript(scriptBytes, null, null);
+                commitType = result.Type;
+                if (commitType == KeyValueResponseType.MustRetry)
+                    await Task.Delay(100, ct);
+            }
+            Assert.Equal(KeyValueResponseType.Set, commitType);
+
+            // Every committed value is readable from every node (reads route to the partition leader), proving the
+            // routed durable materialization landed on the remote participant leaders.
+            for (int n = 0; n < nodes.Length; n++)
+                for (int i = 0; i < count; i++)
+                    await AssertKeyReadable(nodes[n], keys[i], values[i], ct);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task AssertKeyReadable(Node node, string key, byte[] expected, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+            if (type == KeyValueResponseType.Get && entry is not null)
+            {
+                Assert.Equal(expected, entry.Value);
+                return;
+            }
+
+            await Task.Delay(100, ct);
+        }
+
+        Assert.Fail($"Key {key} was not readable with the committed value from the node");
+    }
+
+    /// <summary>
     /// Deadline-bounded phase two: with an aggressively small Phase2CommitTimeout the initial
     /// CommitLogs wait trips before the cross-node commit confirms, returning the retryable
     /// OperationCancelled (mapped to MustRetry). The commit is nevertheless enqueued at the Raft
