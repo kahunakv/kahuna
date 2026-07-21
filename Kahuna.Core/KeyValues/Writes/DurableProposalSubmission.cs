@@ -15,6 +15,15 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 {
     private readonly TaskCompletionSource<bool> completion;
 
+    // The single ordered apply of this submission's durable records to their partition-scoped stores. It runs on
+    // Complete() — the scheduler's per-partition, Raft-commit-ordered completion path — so every durable
+    // transition (record init/decision, prepared-intent prepare/resolve/remove) applies in one place, in log
+    // order, with no unordered producer-side apply that could let a losing transition overwrite the winner. It
+    // returns whether every PREPARE in the bundle was acknowledged (took ownership of its key); a rejected prepare
+    // resolves the producer's Committed task false so the finalizer aborts instead of committing an unrecoverable
+    // mutation. Null in tests that only assert scheduling, not store state.
+    private readonly Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit;
+
     public int PartitionId { get; }
 
     public int ByteLength { get; }
@@ -23,11 +32,16 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 
     public long EnqueueTicks { get; set; }
 
-    public DurableProposalSubmission(int partitionId, IReadOnlyList<RaftProposalEntry> entries, TaskCompletionSource<bool> completion)
+    public DurableProposalSubmission(
+        int partitionId,
+        IReadOnlyList<RaftProposalEntry> entries,
+        TaskCompletionSource<bool> completion,
+        Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit = null)
     {
         PartitionId = partitionId;
         Entries = entries;
         this.completion = completion;
+        this.applyOnCommit = applyOnCommit;
 
         int bytes = 0;
         for (int i = 0; i < entries.Count; i++)
@@ -35,12 +49,15 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         ByteLength = bytes;
     }
 
-    /// <summary>Resolves true once the batch carrying this record committed to Raft.</summary>
+    /// <summary>Resolves true once the batch carrying this record committed to Raft and every prepare it carried
+    /// took ownership of its key; false when the batch did not commit or a prepare was rejected.</summary>
     public Task<bool> Committed => completion.Task;
 
     public bool IsStale(IWriteRangeFence fence) => false;
 
-    public void Complete() => completion.TrySetResult(true);
+    /// <summary>The batch committed: apply this submission's records to their stores in Raft-commit order, then
+    /// resolve the producer with whether every prepare was acknowledged.</summary>
+    public void Complete() => completion.TrySetResult(applyOnCommit is null || applyOnCommit(Entries));
 
     public void Release(bool transient) => completion.TrySetResult(false);
 }

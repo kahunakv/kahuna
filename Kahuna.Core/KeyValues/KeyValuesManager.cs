@@ -180,7 +180,19 @@ internal sealed class KeyValuesManager : IDisposable
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
-            return await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+        {
+            bool ok = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+
+            // The authoritative apply happened on the remote leader (its scheduler is the single ordered owner).
+            // Keep a local projection of the canonical record only, so this node's own decision read-back and
+            // lost-session consult resolve locally until the anchor-routed record lookup replaces it. The record
+            // identity is this transaction's own, so the projection never misrepresents another transaction;
+            // prepared intents are not projected (a remote conflict is already reflected in a false result here).
+            if (ok && logType == ReplicationTypes.TransactionRecord)
+                transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = logType, LogData = data });
+
+            return ok;
+        }
 
         return await ReplicateDurableLocal(partitionId, logType, data, cancellationToken).ConfigureAwait(false);
     }
@@ -191,13 +203,36 @@ internal sealed class KeyValuesManager : IDisposable
         Writes.DurableProposalSubmission submission = new(
             partitionId,
             [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0)],
-            completion);
+            completion,
+            ApplyDurableEntriesOnCommit);
 
         if (!writeAggregator.TryEnqueue(submission))
             return false;
 
         using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
         return await submission.Committed.ConfigureAwait(false);
+    }
+
+    // The scheduler's ordered per-partition completion applies each durable record/intent delta to its store, in
+    // Raft-commit order — the single authoritative apply owner on the leader. Key/value materialization records are
+    // applied by their own leader path (ApplyDurableCommit / the replicator), not here. Returns whether every
+    // PREPARE in the bundle took ownership of its key so a rejected prepare fails the producer's replicate.
+    private bool ApplyDurableEntriesOnCommit(IReadOnlyList<RaftProposalEntry> entries)
+    {
+        bool preparesAcknowledged = true;
+
+        foreach (RaftProposalEntry entry in entries)
+        {
+            RaftLog log = new() { LogType = entry.Type, LogData = entry.Data };
+
+            // The store applies by record/intent identity; the partition argument is unused on the apply path.
+            if (entry.Type == ReplicationTypes.TransactionRecord)
+                transactionRecordStore.Replicate(0, log);
+            else if (entry.Type == ReplicationTypes.PreparedIntent)
+                preparesAcknowledged &= preparedIntentStore.ApplyDeltaAckPrepares(log);
+        }
+
+        return preparesAcknowledged;
     }
 
     /// <summary>
@@ -4503,16 +4538,15 @@ internal sealed class KeyValuesManager : IDisposable
 
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(
         preparedIntentStore,
-        ReplicateDurableAsync,
+        // The scheduler seam is the single ordered apply owner: recovery's settle/materialize deltas apply in Raft
+        // order alongside any concurrent finalizer decision for the same record, so the two cannot diverge.
+        ReplicateDurableThroughScheduler,
         // Local anchor record lookup: authoritative only when this node leads the anchor partition (otherwise the
         // record lives on a remote leader). A local miss falls to the drive-abort path, which is likewise gated on
         // anchor leadership, so a remote anchor is left for its own leader — never presumed-aborted from stale
         // local state. Cross-node participant resolution (an inter-node record lookup) is a follow-up.
         (transactionId, epoch, _, _) => Task.FromResult(transactionRecordStore.Get(transactionId, epoch)),
         DriveDurableAbortAsync);
-
-    private async Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
-        (await raft.ReplicateLogs(partitionId, logType, data, autoCommit: true, expectedGeneration: 0, cancellationToken).ConfigureAwait(false)).Success;
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {
@@ -4523,9 +4557,10 @@ internal sealed class KeyValuesManager : IDisposable
         if (raft.Joined && !await raft.AmILeader(anchorPartition, cancellationToken).ConfigureAwait(false))
             return null;
 
+        // Drive the abort through the ordered scheduler seam (this node leads the anchor partition), which applies
+        // it in Raft order — never overwriting a commit that won earlier in the log. Then read back the winner.
         byte[] delta = TransactionRecordStore.SerializeDelta([abort]);
-        if (await ReplicateDurableAsync(anchorPartition, ReplicationTypes.TransactionRecord, delta, cancellationToken).ConfigureAwait(false))
-            transactionRecordStore.Replicate(anchorPartition, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = delta });
+        await ReplicateDurableThroughScheduler(anchorPartition, ReplicationTypes.TransactionRecord, delta, cancellationToken).ConfigureAwait(false);
 
         return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
     }

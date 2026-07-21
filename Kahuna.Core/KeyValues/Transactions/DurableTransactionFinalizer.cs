@@ -71,8 +71,6 @@ internal sealed class DurableTransactionFinalizer
 
     private readonly TransactionRecordStore recordStore;
 
-    private readonly PreparedIntentStore intentStore;
-
     private readonly ReplicateDelegate replicate;
 
     // Null = synchronous settlement: resolution is awaited inline in FinalizeAsync. Non-null = deferred settlement.
@@ -84,6 +82,8 @@ internal sealed class DurableTransactionFinalizer
 
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
+        // The prepared-intent store is applied by the ordered scheduler-completion path (the single apply owner),
+        // not by the finalizer, so this parameter is retained only for call-site compatibility.
         PreparedIntentStore intentStore,
         ReplicateDelegate replicate,
         ResolutionScheduler? resolutionScheduler = null,
@@ -91,7 +91,6 @@ internal sealed class DurableTransactionFinalizer
         ApplyRollbackLocally? applyRollbackLocally = null)
     {
         this.recordStore = recordStore;
-        this.intentStore = intentStore;
         this.replicate = replicate;
         this.applyCommitLocally = applyCommitLocally;
         this.applyRollbackLocally = applyRollbackLocally;
@@ -265,27 +264,16 @@ internal sealed class DurableTransactionFinalizer
         await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, CancellationToken cancellationToken)
-    {
-        bool ok = await replicate(partitionId, ReplicationTypes.TransactionRecord, delta, cancellationToken).ConfigureAwait(false);
-        if (ok)
-            recordStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = delta });
+    // Both replicate helpers return whatever the replicate seam reports. The seam is the single apply owner: on a
+    // leader it applies the delta through the scheduler's Raft-ordered completion; forwarded to a remote leader it
+    // returns that leader's applied outcome. For a prepared-intent delta the returned boolean already folds in
+    // prepare acknowledgement, so a rejected prepare (another transaction owns the key) surfaces here as a failed
+    // replicate and drives an abort rather than a commit of a mutation recovery could not complete.
+    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
+        replicate(partitionId, ReplicationTypes.TransactionRecord, delta, cancellationToken);
 
-        return ok;
-    }
-
-    private async Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken)
-    {
-        if (!await replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken).ConfigureAwait(false))
-            return false;
-
-        // A prepare is acknowledged only when its exact intent took ownership of the key. A state-machine
-        // rejection (another transaction already holds the key, or a divergent re-prepare of the same identity)
-        // means no recoverable intent exists for this transaction, so the prepare must count as failed and drive
-        // an abort — never a commit of a mutation recovery could not complete. Resolve/remove deltas carry no
-        // prepares and always acknowledge.
-        return intentStore.ApplyDeltaAckPrepares(new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = delta });
-    }
+    private Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
+        replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken);
 
     private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
 }

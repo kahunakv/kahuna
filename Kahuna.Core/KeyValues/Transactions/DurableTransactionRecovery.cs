@@ -160,8 +160,10 @@ internal sealed class DurableTransactionRecovery
             settle.Add(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key));
         }
 
+        // The replicate seam is the single ordered apply owner: on the partition leader it applies this settle
+        // delta through the scheduler's Raft-ordered completion, in the same order as any concurrent finalizer
+        // decision for the same record — so recovery and the live coordinator can never apply out of log order.
         byte[] resolveDelta = PreparedIntentStore.SerializeDelta(settle);
-        if (await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, cancellationToken).ConfigureAwait(false))
-            intentStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = resolveDelta });
+        await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, cancellationToken).ConfigureAwait(false);
     }
 }

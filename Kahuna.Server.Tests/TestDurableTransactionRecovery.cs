@@ -5,6 +5,7 @@ using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
+using Kommander.Data;
 using Kommander.Time;
 
 namespace Kahuna.Server.Tests;
@@ -27,9 +28,16 @@ public sealed class TestDurableTransactionRecovery
     {
         public readonly ConcurrentQueue<(int Partition, string Type)> Calls = new();
 
+        // The intent store the seam applies settle deltas to, mirroring the production scheduler-completion apply
+        // owner: recovery no longer applies itself, so its resolve/remove delta lands through this single ordered
+        // seam. Key/value materialization records are recorded but not applied here (they are a different store).
+        public PreparedIntentStore? Store;
+
         public Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
+            if (Store is not null && logType == ReplicationTypes.PreparedIntent)
+                Store.Replicate(partitionId, new RaftLog { LogType = logType, LogData = data });
             return Task.FromResult(true);
         }
     }
@@ -47,6 +55,7 @@ public sealed class TestDurableTransactionRecovery
     private static DurableTransactionRecovery Recovery(
         PreparedIntentStore store, Seam seam, TransactionRecord? lookup, TransactionRecord? afterAbort)
     {
+        seam.Store = store;
         DurableTransactionRecovery.LookupRecordDelegate lookupDelegate = (_, _, _, _) => Task.FromResult(lookup);
         DurableTransactionRecovery.DriveAbortDelegate driveDelegate = (_, _, _) => Task.FromResult(afterAbort);
         return new DurableTransactionRecovery(store, seam.Replicate, lookupDelegate, driveDelegate);

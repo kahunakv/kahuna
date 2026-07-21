@@ -5,6 +5,7 @@ using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
+using Kommander.Data;
 using Kommander.Time;
 
 namespace Kahuna.Server.Tests;
@@ -25,11 +26,25 @@ public sealed class TestDurableTransactionFinalizer
         public Func<int, string, bool>? Fail { get; set; }
         public readonly ConcurrentQueue<(int Partition, string Type)> Calls = new();
 
+        // The stores the seam applies to, mirroring the production scheduler-completion apply owner: this single
+        // ordered call applies each record/intent delta and reports prepare acknowledgement, so the finalizer no
+        // longer applies itself. Set by Build; null for tests that only assert scheduling.
+        public TransactionRecordStore? Records;
+        public PreparedIntentStore? Intents;
+
         public Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
-            bool fail = Fail is not null && Fail(partitionId, logType);
-            return Task.FromResult(!fail);
+            if (Fail is not null && Fail(partitionId, logType))
+                return Task.FromResult(false);
+
+            RaftLog log = new() { LogType = logType, LogData = data };
+            if (logType == ReplicationTypes.TransactionRecord)
+                Records?.Replicate(partitionId, log);
+            else if (logType == ReplicationTypes.PreparedIntent)
+                return Task.FromResult(Intents is null || Intents.ApplyDeltaAckPrepares(log));
+
+            return Task.FromResult(true);
         }
     }
 
@@ -57,6 +72,8 @@ public sealed class TestDurableTransactionFinalizer
     {
         TransactionRecordStore records = new();
         PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
         return (new DurableTransactionFinalizer(records, intents, seam.Replicate), records, intents);
     }
 
@@ -65,6 +82,8 @@ public sealed class TestDurableTransactionFinalizer
     {
         TransactionRecordStore records = new();
         PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
         return (new DurableTransactionFinalizer(records, intents, seam.Replicate, scheduler), records, intents);
     }
 
@@ -100,10 +119,12 @@ public sealed class TestDurableTransactionFinalizer
     public async Task Commit_InvokesCommitApplyPerIntent_AbortInvokesRollbackPerIntent()
     {
         // Commit path: the leader commit-apply seam fires for each committed intent.
-        Seam commitSeam = new();
+        TransactionRecordStore commitRecords = new();
+        PreparedIntentStore commitIntents = new();
+        Seam commitSeam = new() { Records = commitRecords, Intents = commitIntents };
         List<(int Partition, string Key)> commits = [];
         DurableTransactionFinalizer commitFinalizer = new(
-            new TransactionRecordStore(), new PreparedIntentStore(), commitSeam.Replicate,
+            commitRecords, commitIntents, commitSeam.Replicate,
             applyCommitLocally: (p, i) => { commits.Add((p, i.Key)); return Task.CompletedTask; });
 
         await commitFinalizer.FinalizeAsync(
@@ -113,11 +134,13 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Contains((8, "idx/name/bob"), commits);
 
         // Abort path (validation fails): the leader rollback seam fires for each staged intent; commit seam does not.
-        Seam abortSeam = new();
+        TransactionRecordStore abortRecords = new();
+        PreparedIntentStore abortIntents = new();
+        Seam abortSeam = new() { Records = abortRecords, Intents = abortIntents };
         List<(int Partition, string Key)> rollbacks = [];
         List<(int Partition, string Key)> abortCommits = [];
         DurableTransactionFinalizer abortFinalizer = new(
-            new TransactionRecordStore(), new PreparedIntentStore(), abortSeam.Replicate,
+            abortRecords, abortIntents, abortSeam.Replicate,
             applyCommitLocally: (p, i) => { abortCommits.Add((p, i.Key)); return Task.CompletedTask; },
             applyRollbackLocally: (p, i) => { rollbacks.Add((p, i.Key)); return Task.CompletedTask; });
 
