@@ -59,6 +59,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     private readonly CompletionReceiptStore? completionReceiptStore;
 
+    private readonly TransactionRecordStore? transactionRecordStore;
+
+    private readonly PreparedIntentStore? preparedIntentStore;
+
     private readonly KahunaConfiguration configuration;
 
     private readonly ILogger<IKahuna> logger;
@@ -138,6 +142,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IPersistenceBackend persistenceBackend,
         SnapshotFloorStore? snapshotFloorStore,
         CompletionReceiptStore? completionReceiptStore,
+        TransactionRecordStore? transactionRecordStore,
+        PreparedIntentStore? preparedIntentStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         FlushNotificationSink flushNotificationSink
@@ -147,6 +153,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.persistenceBackend = persistenceBackend;
         this.snapshotFloorStore = snapshotFloorStore;
         this.completionReceiptStore = completionReceiptStore;
+        this.transactionRecordStore = transactionRecordStore;
+        this.preparedIntentStore = preparedIntentStore;
         this.configuration = configuration;
         this.logger = logger;
         this.flushNotificationSink = flushNotificationSink;
@@ -267,14 +275,21 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     }
 
     /// <summary>
-    /// Persists the partition-scoped receipt and decision snapshots a partition's WAL checkpoint must not advance
-    /// past, returning true only when both are durable. This is the sole gate before <c>ReplicateCheckpoint</c>,
-    /// so a false return keeps the retention floor where it is and the entries remain replayable. Extracted so
-    /// the gate is directly testable under injected snapshot failure.
+    /// Persists the partition-scoped snapshots a partition's WAL checkpoint must not advance past — completion
+    /// receipts, canonical transaction records, and prepared intents — returning true only when <b>all</b> are
+    /// durable. This is the sole gate before <c>ReplicateCheckpoint</c>, so a false return keeps the retention
+    /// floor where it is and the entries remain replayable; without gating the record/intent snapshots, a
+    /// checkpoint could compact away the only durable copy of a committed decision or an unresolved intent, and a
+    /// cold restart could not reconstruct it. Every snapshot is attempted (no short-circuit) so a transient
+    /// failure in one does not mask the others; the checkpoint is skipped unless all three succeed.
     /// </summary>
     internal bool TryCaptureCheckpointSnapshots(int partitionId)
     {
-        return completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
+        bool receipts = completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
+        bool records = transactionRecordStore?.PersistSnapshot(partitionId) ?? true;
+        bool intents = preparedIntentStore?.PersistSnapshot(partitionId) ?? true;
+
+        return receipts && records && intents;
     }
 
     /// <summary>

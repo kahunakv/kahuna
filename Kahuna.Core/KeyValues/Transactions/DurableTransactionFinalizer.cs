@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
 using Kommander.Data;
@@ -80,6 +81,16 @@ internal sealed class DurableTransactionFinalizer
 
     private readonly ApplyRollbackLocally? applyRollbackLocally;
 
+    // Mints a fresh HLC immediately before the terminal transition, used as the attempt's AttemptHlc so elapsed
+    // prepare/validate time can actually trip the frozen decision deadline. Null keeps the deprecated behaviour of
+    // reusing the operation id as the attempt HLC — used only by protocol tests that supply an explicit late opId.
+    private readonly Func<HLCTimestamp>? attemptClock;
+
+    // Records the finalize latency measured up to (and including) the canonical decision — deliberately excluding
+    // post-decision resolution/settlement — so the p99 that sizes future decision deadlines is not inflated by
+    // work that happens after the decision. Null in tests that do not observe latency.
+    private readonly Action<double>? recordDecisionLatencyMs;
+
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
         // The prepared-intent store is applied by the ordered scheduler-completion path (the single apply owner),
@@ -88,7 +99,9 @@ internal sealed class DurableTransactionFinalizer
         ReplicateDelegate replicate,
         ResolutionScheduler? resolutionScheduler = null,
         ApplyCommitLocally? applyCommitLocally = null,
-        ApplyRollbackLocally? applyRollbackLocally = null)
+        ApplyRollbackLocally? applyRollbackLocally = null,
+        Func<HLCTimestamp>? attemptClock = null,
+        Action<double>? recordDecisionLatencyMs = null)
     {
         this.recordStore = recordStore;
         this.replicate = replicate;
@@ -96,6 +109,8 @@ internal sealed class DurableTransactionFinalizer
         this.applyRollbackLocally = applyRollbackLocally;
         // A null scheduler means synchronous settlement (FinalizeAsync awaits resolution inline).
         this.scheduleResolution = resolutionScheduler;
+        this.attemptClock = attemptClock;
+        this.recordDecisionLatencyMs = recordDecisionLatencyMs;
     }
 
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
@@ -109,6 +124,8 @@ internal sealed class DurableTransactionFinalizer
         HLCTimestamp opId,
         CancellationToken cancellationToken)
     {
+        long startTicks = Stopwatch.GetTimestamp();
+
         // ── Initialize the canonical record (Undecided) on the anchor partition ──
         // Nothing is durable yet if this fails, so it is a clean retry.
         byte[] initDelta = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
@@ -143,16 +160,35 @@ internal sealed class DurableTransactionFinalizer
             outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken).ConfigureAwait(false);
         }
 
+        // Record the latency up to the decision only — resolution below is excluded so it never inflates the
+        // deadline window that a future finalize's prepare must fit inside.
+        recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+
         // ── Resolution: apply the terminal decision to every prepared intent — on commit, materialize each intent
         // into visible KV state, then settle (resolve + remove) the intent. With synchronous settlement (no
         // scheduler) it is awaited here so the committed value is materialized before the caller returns — required
         // for correct cross-node read-your-writes until the cross-node anchor decision lookup exists. A scheduler
         // runs it in the background (deferred settlement); the decision is already durable and recovery finishes any
-        // lost run. ──
+        // lost run.
+        //
+        // Resolution is best-effort and MUST NOT change the returned outcome: the canonical decision is already
+        // durable, so an exception here (a materialization/apply/settle failure after the commit) is swallowed and
+        // left to the recovery sweep — never allowed to escape and be reported to the caller as a conflict abort. ──
         if (scheduleResolution is null)
-            await ResolveAsync(input, cancellationToken).ConfigureAwait(false);
+        {
+            try
+            {
+                await ResolveAsync(input, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The decision is durable; recovery completes the resolution. Do not let it turn a commit into an abort.
+            }
+        }
         else
+        {
             scheduleResolution(ct => ResolveAsync(input, ct));
+        }
 
         return outcome;
     }
@@ -160,9 +196,14 @@ internal sealed class DurableTransactionFinalizer
     private async Task<DurableFinalizeOutcome> DecideAsync(
         DurableFinalizeInput input, bool commit, TransactionAbortClass abortClass, HLCTimestamp opId, CancellationToken cancellationToken)
     {
+        // Mint a fresh attempt HLC immediately before the transition so a slow prepare/validate can push the
+        // attempt past the frozen decision deadline (the gate that yields a late commit to presumed-abort
+        // recovery). The operation id stays stable for idempotency; only the attempt HLC advances.
+        HLCTimestamp attemptHlc = attemptClock?.Invoke() ?? opId;
+
         TransactionRecordCommand decision = commit
-            ? new CommitTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, opId, opId)
-            : new AbortTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, abortClass, opId, opId,
+            ? new CommitTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc)
+            : new AbortTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, abortClass, opId, attemptHlc,
                 input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline, input.CreatedAt);
 
         byte[] delta = TransactionRecordStore.SerializeDelta([decision]);

@@ -428,6 +428,97 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     [Fact]
+    public async Task Commit_ResolutionApplyThrows_StillReturnsCommitted_PreservesIntent()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        // The leader commit-apply throws after the canonical decision is durable Commit.
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyCommitLocally: (_, _) => throw new InvalidOperationException("materialize boom"));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // A post-decision failure must never surface as an abort or escape: the transaction is committed, and the
+        // intent is preserved for the recovery sweep to materialize.
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.NotNull(intents.Get("acct/1"));
+    }
+
+    [Fact]
+    public async Task Abort_ResolutionApplyThrows_StillReturnsAborted_DoesNotEscape()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        // The abort resolution's leader rollback-apply throws; it must not escape and must not change the outcome.
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyRollbackLocally: (_, _) => throw new InvalidOperationException("rollback boom"));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(false), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+    }
+
+    [Fact]
+    public async Task Commit_FreshAttemptHlcPastDeadline_YieldsToRecovery()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        // A fresh attempt clock returns a time past the frozen decision deadline (9000), even though the operation
+        // id (2000) is well within it. The commit compare-and-set is rejected and the record stays Undecided,
+        // yielding to presumed-abort recovery — proving the deadline is checked against a fresh attempt HLC, not
+        // the commit timestamp that is always in-window.
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate, attemptClock: () => Ts(10000));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+    }
+
+    [Fact]
+    public async Task DecisionLatency_RecordedAtDecision_BeforeResolution()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        bool latencyRecorded = false;
+        Func<CancellationToken, Task>? deferredResolution = null;
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            resolutionScheduler: r => deferredResolution = r,
+            recordDecisionLatencyMs: _ => latencyRecorded = true);
+
+        await finalizer.FinalizeAsync(Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // Latency is recorded once the decision is durable, before resolution runs (here it is only scheduled),
+        // so post-decision settlement time never inflates the deadline estimator.
+        Assert.True(latencyRecorded);
+        Assert.NotNull(deferredResolution);
+    }
+
+    [Fact]
     public void Materializer_ProducesKeyValueRecordStampedWithCommitTimestamp()
     {
         PreparedIntent intent = Intent(Ts(1000), 1, "acct/1") with { Value = [4, 5, 6], Revision = 9, CommitTimestamp = Ts(1234) };

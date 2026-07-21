@@ -127,6 +127,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // single instance is created here and injected into both.
         CompletionReceiptStore completionReceiptStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // Durable-intent 2PC stores are likewise shared between the background writer (which snapshots them durably
+        // at checkpoint time, before the WAL retention floor advances past their delta log entries) and the
+        // key-value layer (which applies and reads them). Created here for the same reason as the receipt store:
+        // the writer is spawned before the KeyValuesManager exists.
+        TransactionRecordStore transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        PreparedIntentStore preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+
         // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.
         FlushNotificationSink flushNotificationSink = new();
@@ -137,13 +144,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
             persistenceBackend,
             snapshotFloorStore,
             completionReceiptStore,
+            transactionRecordStore,
+            preparedIntentStore,
             configuration,
             logger,
             flushNotificationSink
         );
 
         this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, writeBatchExecutorDecorator);
+        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).

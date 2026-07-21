@@ -163,7 +163,7 @@ public sealed class TestPhaseTwoOffMailbox
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
             actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
                 "bg-commit", raft, backend,
-                null!, null!,
+                null!, null!, null!, null!,
                 config, logger, new FlushNotificationSink());
 
         BTree<string, KeyValueEntry> store = new(32);
@@ -515,7 +515,7 @@ public sealed class TestPhaseTwoOffMailbox
         using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
             actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
-                "bg-order", raft, backend, null!, null!, config, logger, new FlushNotificationSink());
+                "bg-order", raft, backend, null!, null!, null!, null!, config, logger, new FlushNotificationSink());
 
         BTree<string, KeyValueEntry> store = new(32);
         KeyValueContext context = new(
@@ -670,7 +670,7 @@ public sealed class TestPhaseTwoOffMailbox
         using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
             actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
-                "bg-r3", node.Raft, backend, null!, null!, config, logger, new FlushNotificationSink());
+                "bg-r3", node.Raft, backend, null!, null!, null!, null!, config, logger, new FlushNotificationSink());
 
         // Note: PhaseTwoRouter defaults to null here — the fallback path under test.
         BTree<string, KeyValueEntry> store = new(32);

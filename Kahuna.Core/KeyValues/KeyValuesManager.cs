@@ -335,6 +335,8 @@ internal sealed class KeyValuesManager : IDisposable
         ILogger<IKahuna> logger,
         SnapshotFloorStore? externalFloorStore = null,
         CompletionReceiptStore? externalReceiptStore = null,
+        TransactionRecordStore? externalRecordStore = null,
+        PreparedIntentStore? externalIntentStore = null,
         Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null
     )
     {
@@ -370,9 +372,10 @@ internal sealed class KeyValuesManager : IDisposable
         SyncKeySpaceRegistryFromRangeMap();
 
         // Durable-intent 2PC stores share the same per-partition snapshot lifecycle; their key/anchor → partition
-        // resolvers are attached below once the locator exists.
-        transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
-        preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        // resolvers are attached below once the locator exists. Shared with the BackgroundWriterActor when provided
+        // (so the writer gates each partition's WAL checkpoint on their durable snapshots), otherwise owned locally.
+        transactionRecordStore = externalRecordStore ?? new TransactionRecordStore(configuration.StoragePath, configuration.StorageRevision, logger);
+        preparedIntentStore = externalIntentStore ?? new PreparedIntentStore(configuration.StoragePath, configuration.StorageRevision, logger);
 
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
         writeAggregator = new Writes.PartitionWriteAggregator(

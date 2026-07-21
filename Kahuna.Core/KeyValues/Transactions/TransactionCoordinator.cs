@@ -1173,7 +1173,11 @@ internal sealed class TransactionCoordinator
     // still supports deferred settlement via its scheduler seam for when it does.
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
         manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, resolutionScheduler: null,
-        ApplyDurableCommitLocally, ApplyDurableRollbackLocally);
+        ApplyDurableCommitLocally, ApplyDurableRollbackLocally,
+        // Fresh attempt HLC at the decision so a slow prepare can trip the deadline; record latency only to the
+        // decision so post-decision settlement never inflates the deadline the next finalize must fit inside.
+        attemptClock: () => raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()),
+        recordDecisionLatencyMs: finalizeLatency.Record);
 
     // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
@@ -1256,17 +1260,25 @@ internal sealed class TransactionCoordinator
         // Post-prepare read-set validation: the revision-comparison check (intent-aware — it reads current
         // committed state through the durable-intent-aware read path) catches a read that a concurrent commit made
         // stale, and the write-intent probe catches a concurrent in-flight writer. Both must pass to commit.
-        long startTicks = Stopwatch.GetTimestamp();
-        DurableFinalizeOutcome outcome = await DurableFinalizer.FinalizeAsync(
-            input,
-            validateReadSet: async ct => await ValidateReadSet(context, ct).ConfigureAwait(false)
-                && await CheckReadSetForConflicts(context, ct).ConfigureAwait(false),
-            opId,
-            cancellationToken).ConfigureAwait(false);
-
-        // Feed the observed finalize latency back into the p99 estimator that sizes future decision deadlines, so
-        // the deadline adapts to real load. Measured monotonically (a local duration, not event ordering).
-        finalizeLatency.Record(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+        // The finalizer records its own decision-scoped latency into finalizeLatency.
+        DurableFinalizeOutcome outcome;
+        try
+        {
+            outcome = await DurableFinalizer.FinalizeAsync(
+                input,
+                validateReadSet: async ct => await ValidateReadSet(context, ct).ConfigureAwait(false)
+                    && await CheckReadSetForConflicts(context, ct).ConfigureAwait(false),
+                opId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // An exception during finalize is never a definite conflict abort. Classify from the canonical record:
+            // if the decision is already durable it is the truth (Committed, or a conflict Abort); otherwise the
+            // outcome is unknown and retryable. This is what stops a post-decision infrastructure failure from
+            // telling the caller it is safe to replay a transaction that actually committed.
+            outcome = ClassifyFromCanonicalRecord(input);
+        }
 
         context.Result = outcome.Result switch
         {
@@ -1276,6 +1288,26 @@ internal sealed class TransactionCoordinator
             DurableFinalizeResult.Committed => context.Result ?? new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
             DurableFinalizeResult.Aborted => new KeyValueTransactionResult { Type = KeyValueResponseType.Aborted, Reason = "Transaction conflict" },
             _ => new KeyValueTransactionResult { Type = KeyValueResponseType.MustRetry, Reason = "Durable finalize could not complete; retry" }
+        };
+    }
+
+    /// <summary>
+    /// Maps the canonical transaction record to a finalize outcome after a finalize threw. A durable Commit is
+    /// Committed, a durable conflict Abort is Aborted, and anything else (undecided, a non-conflict abort, or no
+    /// resident record) is the retryable MustRetry — never a fabricated conflict abort. A remote anchor's record is
+    /// read from this node's local projection; a nonresident record stays MustRetry until recovery or the
+    /// anchor-routed lookup resolves it.
+    /// </summary>
+    private DurableFinalizeOutcome ClassifyFromCanonicalRecord(DurableFinalizeInput input)
+    {
+        TransactionRecord? record = manager.DurableTransactionRecordStore.Get(input.TransactionId, input.Epoch);
+
+        return record?.Decision switch
+        {
+            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
+            TransactionDecision.Abort when record.AbortClass == TransactionAbortClass.Conflict
+                => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, TransactionAbortClass.Conflict),
+            _ => new DurableFinalizeOutcome(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure)
         };
     }
 
