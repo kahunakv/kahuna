@@ -31,10 +31,11 @@ That gives Kahuna three useful properties:
    too late.
 3. Retries can be deduplicated with an operation identity instead of applying the same mutation twice.
 
-For persistent transactions that need a recoverable commit decision, the coordinator can also anchor
-a replicated decision record to the transaction's first persistent modified key. If the live
-coordinator disappears after that decision is installed, the anchor partition's leader can finish
-the remaining participant commits.
+For persistent transactions that need a recoverable commit decision, the coordinator finalizes through
+durable-intent 2PC: a replicated canonical record decides the outcome and each modified key's committed
+value is staged as a replicated intent. If the live coordinator disappears, the participant partition
+leaders finish or presume-abort the transaction from that record — the prepared writes and the decision
+are durable, not just in-memory.
 
 > **Concept — coordinator and participant.** The coordinator owns the transaction-wide decision and
 > working set. A participant is a key/partition that performs one of the transaction's reads, writes,
@@ -151,10 +152,10 @@ The two keys have deliberately different jobs:
 - **`CoordinatorKey`** is created at Begin and remains stable for the session. Routing it finds the
   data-partition leader that owns the live `TransactionContext`.
 - **`RecordAnchorKey`** is assigned exactly once, when the coordinator folds the first confirmed
-  persistent modified key into the working set. It routes the durable decision record after the live
-  session is gone.
+  persistent modified key into the working set. It places the canonical transaction record and routes a
+  consult of it after the live session is gone.
 
-The anchor is a logical user key used for placement; the decision record itself is internal metadata
+The anchor is a logical user key used for placement; the canonical record itself is internal metadata
 and is never written into the user key/value namespace. For a batch, successful modifications are
 folded in canonical request order so the chosen anchor is deterministic. Failed conditional writes,
 read-only transactions, and ephemeral-only changes do not create an anchor.
@@ -248,7 +249,7 @@ durable transaction log.
 - first read observations and any observation instability;
 - registered operations and pending count;
 - locking, read-validation, snapshot, timeout, and decision-durability policies;
-- lifecycle, current finalize attempt, 2PC state, record anchor, and durable-decision state.
+- lifecycle, current finalize attempt, 2PC state, record anchor, and staged durable mutations.
 
 Two query shapes exist for server-side integrations:
 
@@ -336,103 +337,138 @@ conflict.
 
 ## 8. Durable commit decisions
 
-`DecisionDurability.Durable` protects the transaction **after a commit decision exists**. It does not
-persist the active coordinator session or participant prepare state.
+`DecisionDurability.Durable` finalizes an all-persistent transaction through **durable-intent 2PC**
+instead of the in-memory ticket path. It does not persist the active coordinator *session* (its live
+in-memory context still lives only on the coordinator-partition leader), but every step that decides
+the outcome is a replicated Raft record, so the prepared writes and the commit decision survive process
+loss and are finished by recovery on the participant leaders.
 
-The first confirmed persistent modified key becomes the record anchor. Durable prepare and commit
-then use this order:
+Two replicated, per-partition stores carry that state:
 
-1. Prepare all non-anchor participants so their proposal tickets are known.
-2. Prepare the anchor last, embedding an initial `CommitDecided` record with the frozen participant
-   set.
-3. Commit the anchor first. Applying that one committed proposal installs the anchor value, its
-   completion receipt, and the decision record together.
-4. Commit the remaining participants and advance their acknowledgement state on the anchored record.
-5. Mark the record `Completed` after every participant is acknowledged.
+- a **canonical transaction record** (`TransactionRecordStore`) keyed by `(TransactionId, Epoch)` — the
+  single source of truth for the outcome. It moves `Undecided → Commit` or `Undecided → Abort` exactly
+  once, by compare-and-set. It lives on the anchor key's data partition.
+- a **prepared intent** per modified key (`PreparedIntentStore`) — the staged committed value, carried
+  as an idempotent delta on that key's data partition.
 
-Committing the anchor first is the point of no return. Before it commits, the prepared set may still
-roll back. After it commits, the coordinator must never report a definite abort: any participant it
-cannot finish is left for recovery and the caller receives `MustRetry` until the record reaches
-`Completed`.
+The first confirmed persistent modified key is the **record anchor**, and it places the canonical
+record; the modified keys' partitions carry their intents. No manual Raft proposal ticket is used on
+this path.
 
-### Completion receipts
+### The finalize sequence
 
-A persistent participant records a `CompletionReceipt` when its committed value is applied. A
-duplicate commit can consult that receipt after the original MVCC entry and write intent are gone,
-including after replication or restart. This lets recovery distinguish “already committed” from “the
-prepare is missing.” A receipt lookup validates the full immutable receipt identity — transaction, key,
-durability, and (when the caller carries it) the record anchor — so a persistent receipt never
-satisfies an ephemeral request for the same logical key, and vice versa.
+`DurableTransactionFinalizer` drives one transaction to a durable outcome:
 
-Receipts are restored from the committed key/value log and are also snapshotted before WAL retention
-advances. They are not count-evicted. A receipt may be forgotten only after the anchored decision
-durably acknowledges that participant. Forgetting is itself a **replicated participant-partition
-operation**, routed to the leader of each participant *key's* partition (where the receipt lives, not
-the anchor's) and applied on every replica via the shared receipt replication entry with a forget flag,
-so followers drop the proof rather than accumulating it. The decision record persists
-`ReceiptReleased=true` for a participant **only after** that replicated forget is durably acknowledged;
-a forget that cannot be made durable leaves the participant pending for a later idempotent sweep.
-Keep this ordering intact when changing progress persistence:
+1. **Initialize** the canonical record as `Undecided` on the anchor partition, freezing the commit
+   timestamp, the decision deadline, and the participant manifest. Nothing is durable if this fails, so
+   it is a clean retry.
+2. **Prepare barrier** — replicate every partition's prepared intents. Every partition is attempted
+   even if one fails, because a truthful abort needs to know each partition's result.
+3. **Validate** the read set (revision comparison plus a concurrent-writer probe, read through the
+   intent-aware path) — only meaningful once every prepare is durable.
+4. **Decision barrier** — compare-and-set the canonical record: `Commit` only when every prepare is
+   durable **and** validation passed; otherwise `Abort`. A failed prepare is a *retryable* abort; a
+   failed validation is a *conflict* abort.
+5. **Resolve** — apply the terminal decision to every intent: on commit, materialize each intent as an
+   ordinary key/value record (so the normal replicator makes followers converge) and apply it on the
+   leader; on abort, clear the staged write intent/MVCC. Then settle each intent (resolve + remove in
+   one atomic delta).
 
-```text
-participant value + receipt committed
-        -> participant acknowledgement persisted on decision record
-        -> receipt forget replicated on the participant partition
-        -> ReceiptReleased persisted on decision record
-```
+The decision compare-and-set is the point of no return. Because the record is the single authority, the
+finalizer reports whatever the record actually became after apply — a concurrent recovery abort can win
+the race in the log — not what this attempt requested.
 
-### Decision placement and movement
+### The decision deadline
 
-`CoordinatorDecisionStore` replicates decision deltas on the data partition that currently owns the
-anchor key. The record keeps logical participant keys, not fixed partition IDs, so recovery reuses the
-current router after a split, merge, or leadership change.
+Each finalize freezes a **decision deadline** = commit timestamp + a margin derived as
+`clamp(DurableDecisionDeadlineMultiplier × observed-finalize-p99, floor, ceiling)`. The p99 is a
+rolling estimate of real finalize latency (measured with a monotonic stopwatch — a local duration, not
+a distributed event), so the deadline tracks load instead of a fixed guess: too small spuriously aborts
+slow-but-alive coordinators, too large delays recovery of dead ones. During warmup the floor applies.
 
-Range split and merge orchestration hands both decision records and completion receipts to the
-destination partition as part of the pre-cutover handoff. The handoff is **replicated onto the
-destination partition's Raft log**, not merely written into the current leader's memory, so every
-replica of the destination range holds it — a re-commit, re-drive, or finalize routed to the
-destination after cutover still resolves even if the destination leader changes. Decision records ride
-the same decision-delta replication as steady-state progress; completion receipts, which in steady
-state ride their key/value commit and have no standalone log entry, get a dedicated replicated handoff
-entry. Imports are idempotent by transaction/key identity, so a temporary duplicate copy during
-handoff is safe.
+A commit attempt whose HLC has already passed the frozen deadline is rejected by the record state
+machine (the record stays `Undecided`) and yields to presumed-abort recovery; that rejection increments
+a `late_commit_rejections` counter. A rising rate means the deadline is too tight for current latency.
 
-The handoff **gates cutover**: if the receipt or decision transfer cannot be made durable on the
-destination, the split or merge aborts before cutover instead of retiring the source range with the
-only outstanding record lost. Range-lock transfer is separate and remains best-effort (locks are
-in-memory, non-replicated actor state, hardened by a post-cutover confirm-and-reimport loop); only the
-correctness metadata gates cutover.
+### Abort classification
+
+The outcome maps onto the `MustRetry`/`Aborted` contract: only a **conflict** abort (validation found a
+concurrent writer or a stale read) is reported as `Aborted`. Every other abort — a prepare that did not
+replicate, a deadline expiry, a presumed abort — and every infrastructural failure is `MustRetry`, so a
+caller never sees a false conflict for a transient failure.
+
+### Settlement timing
+
+Resolution currently runs **synchronously**: the finalizer awaits it before returning, so a committed
+value is materialized into visible MVCC before the caller gets `Committed`. This is required for correct
+read-your-writes across nodes until a cross-node canonical-record lookup exists — a latest read on
+another node that meets a committed-but-unmaterialized intent has nothing to resolve it against yet, and
+would read the stale prior value. The finalizer keeps a scheduler seam for deferred (background)
+settlement for when that cross-node lookup lands; the canonical decision is already durable either way,
+so recovery finishes any settlement that a background run would have lost.
 
 ### Recovery
 
-Every node runs a `CoordinatorDecisionRecoveryActor`. A node drives only records whose anchor
-partition it currently leads. The actor wakes periodically and when the node gains data-partition
-leadership. For each outstanding record it:
+Every node runs a `PreparedIntentRecoveryActor` that periodically sweeps the **prepared intents on the
+partitions it currently leads** (`DurableTransactionRecovery`). For each unresolved intent past its
+recovery deadline it looks up the transaction's canonical record and:
 
-- re-commits participants that are not acknowledged;
-- uses completion receipts to recognize commits whose original response was lost;
-- advances acknowledgement and receipt-release progress;
-- marks a fully acknowledged decision `Completed`;
-- removes completed records after the retention window and required release progress.
+- record says `Commit` → materialize the value, then settle the intent;
+- record says `Abort` → discard, then settle the intent;
+- record `Undecided` but still within its decision deadline → leave it; the coordinator may still be
+  finalizing;
+- record `Undecided` past its deadline, or **no record at all** (an orphan prepare that outlived a
+  failed initialization) → drive an idempotent presumed-abort at the anchor, then resolve the intent to
+  whatever the record actually became (a concurrent in-flight commit can still win).
 
-The request path and recovery actor may race. Participant commit, decision upsert, receipt removal,
-and record removal are designed to be idempotent, so correctness does not depend on choosing one
-winner.
+Recovery never guesses an outcome and never resolves an intent whose record is undecided but still
+inside its window. The request path and recovery may race; initialize, prepare, decide, materialize, and
+settle are all idempotent, so correctness does not depend on choosing a winner. A deadline-expiry abort
+that actually wins increments `deadline_expiry_aborts`.
+
+### Resolving a commit after the session is gone
+
+If a `Commit`/`Rollback` arrives for a transaction whose live session is gone (evicted, or it lived on a
+failed node), the coordinator first checks the retained terminal-outcome window, then consults the local
+canonical record: `Commit → Committed`, a conflict abort → `Aborted`, undecided or any other abort →
+`MustRetry` (recovery finishes it). A record not resident on this node stays unknown `Errored` rather
+than a fabricated conflict — a **cross-node canonical-record lookup is a follow-up**, matching the
+replication coverage the read path has today.
+
+### Completion receipts
+
+When an intent materializes, the participant records a `CompletionReceipt` on the same key/value commit.
+A duplicate commit or a recovery re-drive can consult that receipt after the original MVCC entry and
+write intent are gone, including after replication or restart, to recognize an "already committed"
+without reapplying. A receipt lookup validates the full immutable identity — transaction, key, and
+durability — so a persistent receipt never satisfies an ephemeral request for the same logical key, and
+vice versa. Receipts are restored from the committed key/value log and snapshotted before WAL retention
+advances, and are not count-evicted.
+
+Range split and merge hand off completion receipts to the destination partition as part of the
+pre-cutover handoff, **replicated onto the destination partition's Raft log** so every replica holds
+them and the handoff **gates cutover** — a split or merge aborts before cutover rather than retire the
+source range with an outstanding receipt lost. Range-lock transfer is separate and best-effort (locks
+are in-memory, non-replicated actor state); only the correctness metadata gates cutover.
 
 ### What durable mode does not recover
 
 Durable mode has clear boundaries:
 
-- If the coordinator disappears **before** the anchor decision is installed, the active session is
-  lost just like a best-effort session.
-- If a participant changes leader **after prepare but before commit**, its in-memory prepared value
-  and proposal ticket may be gone. Recovery cannot recreate that prepare and can remain retryable.
-- Ephemeral modified keys are rejected because neither the value nor a participant receipt can
-  survive process loss.
-- A read-only or otherwise unanchored transaction creates no decision record.
+- The active in-memory **session** is not persisted: if the coordinator-partition leader is lost, the
+  session and its acquired-lock set are gone. A committed transaction is still resolvable from its
+  canonical record; an undecided one is presumed-aborted by recovery after its deadline.
+- **Ephemeral** modified keys are rejected: neither the value nor a receipt can survive process loss, so
+  a durable transaction that modified an ephemeral key is aborted before any intent is staged. A durable
+  transaction with modifications must also have an anchor.
+- A read-only transaction creates no record and needs no recovery.
+- A **cross-node** consult of the canonical record from a non-resident node is not yet implemented; such
+  a duplicate finalize returns `MustRetry`/`Errored` (never a false outcome) until the local record or
+  recovery resolves it.
 
-These boundaries are important when choosing `Durable`: it is durable decision/acknowledgement
-recovery, not durable active-transaction or durable-prepare recovery.
+Unlike the in-memory ticket path, a prepared intent is *durable* here: a participant leader change after
+prepare does not lose the staged value, so recovery on the new leader can still commit or abort it from
+the canonical record.
 
 ---
 
@@ -453,8 +489,8 @@ When the deadline passes, the reaper claims the same finalize slot as explicit f
 - If an operation is still unresolved after the extended deadline, the session expires with unknown
   `Errored` rather than falsely claiming `RolledBack`. A late completion finds no coordinator session,
   receives no success acknowledgement, and its participant intent eventually expires.
-- A durable session with an outstanding commit decision is never rolled back. Recovery finishes the
-  record; the reaper releases its working set only after the record is `Completed`.
+- A durable session whose canonical record is already committed is never rolled back by the reaper. Its
+  outcome is resolvable from the record; the prepared intents are settled by the intent-recovery sweep.
 
 ### Range-lock lease renewal and leader change
 
@@ -495,21 +531,23 @@ takes ownership of the lock set, so the predicate lock never lapses in the gap b
 | Setting or limit | Default | Purpose |
 |---|---:|---|
 | `TransactionOutcomeRetentionMax` | 10,000 | Strict maximum retained terminal outcomes; a non-positive value disables best-effort outcome retention. Independent of the durable-decision admission budget. |
-| `DurableDecisionOutstandingMax` | 100,000 | Strict maximum **outstanding** durable decision records this node admits; a non-positive value disables the bound. Completed records do not count against it. |
-| `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes and completed durable decisions; a non-positive value disables age-based removal. |
-| `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and durable-decision recovery actor. |
+| `DurableDecisionOutstandingMax` | 100,000 | Strict maximum **outstanding** (undecided) canonical transaction records this node admits; a non-positive value disables the bound. Decided records do not count against it. |
+| `DurableDecisionDeadlineFloorMs` | 5,000 | Lower clamp on the per-transaction decision-deadline margin, and the value used during estimator warmup. |
+| `DurableDecisionDeadlineCeilingMs` | 60,000 | Upper clamp on the decision-deadline margin, capping how long a dead coordinator's undecided record can block recovery. Must be ≥ the floor. |
+| `DurableDecisionDeadlineMultiplier` | 4 | Multiplier applied to the observed finalize p99 before clamping to the floor/ceiling. |
+| `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes; a non-positive value disables age-based removal. |
+| `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and the prepared-intent recovery actor. |
 | Pending operations per session | 4,096 | Fixed safety bound on *in-flight* operations; additional registrations receive `RejectedCapacity` (transient — a completion frees a pending slot, so the caller retries in place). |
 | Total operations per session | 65,536 | Fixed bound on *retained* operation records (pending **plus** completed). Completed records are never evicted — they stay for duplicate-response replay — so this counter only rises within a session and the rejection is terminal: registrations beyond it receive `RejectedSessionBudget`, surfaced as `Aborted` (retry as a new transaction, never `MustRetry`). A non-positive value disables the bound. |
 | Participant in-doubt results | 8,192 per node | Fixed bound for normal acknowledgement-loss recovery. |
 | Participant finalize retries | 20 retries, 250 ms apart | Fixed retry window used while committing or rolling back prepared participants. |
 
 Durable admission is bounded by `DurableDecisionOutstandingMax`, counted over **outstanding**
-(not-yet-completed) decision records only — completed records held for the idempotency window are
-evictable retention and never consume admission budget, so retained outcomes do not throttle steady
-durable throughput. A new durable transaction atomically reserves one slot before prepare (concurrent
-admissions can never collectively exceed the budget); when the budget is full it is rejected before
-prepare, and the coordinator never evicts recovery state to make room. This budget is deliberately
-independent of `TransactionOutcomeRetentionMax` (the best-effort terminal-outcome cache).
+(undecided) canonical records only — decided records held for the idempotency window are evictable
+retention and never consume admission budget, so retained outcomes do not throttle steady durable
+throughput. A new durable transaction reserves one slot before prepare; when the budget is full it is
+rejected before prepare, and the coordinator never evicts recovery state to make room. This budget is
+deliberately independent of `TransactionOutcomeRetentionMax` (the best-effort terminal-outcome cache).
 
 ---
 
@@ -534,8 +572,9 @@ and completion as one protocol. Use this checklist:
    declaration must be rejected.
 8. Make cleanup idempotent and state which acknowledgements are mandatory before `RolledBack` may be
    published.
-9. If the operation adds a persistent mutation shape, trace it through prepare, commit receipt,
-   replication/restore, decision recovery, and range split/merge movement.
+9. If the operation adds a persistent mutation shape, trace it through durable prepare, the canonical
+   record decision, resolution/materialization, replication/restore, intent recovery, and range
+   split/merge receipt movement.
 10. Exercise local and remote coordinators, duplicate IDs, lost completion, operation-versus-finalize,
     commit-versus-rollback, restart, and partial participant failure.
 
@@ -548,10 +587,12 @@ and completion as one protocol. Use this checklist:
 - A non-terminal `MustRetry` releases the attempt slot but never reopens data operations.
 - The first confirmed persistent modified key is the immutable anchor. Batch folding order must be
   deterministic and string comparisons must remain ordinal.
-- Once the anchor decision commits, rollback is no longer legal. Partial progress belongs to recovery.
-- Participant sets in a written decision record are frozen; progress updates may change only
-  acknowledgement, receipt-release, cleanup, status, and timestamps.
-- A durable participant acknowledgement must exist before its completion receipt is forgotten.
+- Once the canonical record's compare-and-set commits, rollback is no longer legal. Settling the
+  prepared intents belongs to resolution and recovery.
+- The canonical record moves `Undecided → Commit`/`Abort` exactly once; the commit timestamp, decision
+  deadline, and participant manifest frozen at initialization never change afterward.
+- The finalizer reports whatever the record actually became after apply, never what the attempt
+  requested — a concurrent recovery abort can win the race in the log.
 - Terminal retention is written before the active session is removed, closing the duplicate-finalize
   race.
 - Reapers and recovery use HLC time and the same routing/finalize gates as request traffic.
@@ -571,13 +612,13 @@ SDK or server caller
   -> CompleteOperation
   -> frozen working set
   -> prepare / commit or rollback
-  -> receipt + decision progress
-  -> recovery / reaper / split-merge movement
+  -> canonical record decision + intent resolution
+  -> recovery / reaper / split-merge receipt movement
 ```
 
 A green happy-path test is useful, but the most valuable cases are acknowledgement loss, concurrent
-finalizers, a remote coordinator, a leader change, and a crash after the anchor commits but before all
-participants acknowledge.
+finalizers, a remote coordinator, a leader change, and a crash after the canonical record commits but
+before every prepared intent is materialized and settled.
 
 ---
 
@@ -590,11 +631,16 @@ The coordinator currently relies primarily on structured logs. Useful messages i
 - unacknowledged operation completion retained for retry;
 - read dependency revision changes and write-skew aborts;
 - participant commit/rollback retry exhaustion;
-- outstanding durable decisions deferred to recovery;
-- decision replication, snapshot load/save, and recovery errors;
+- canonical-record and prepared-intent replication errors;
+- prepared-intent recovery sweep failures;
 - completion-receipt snapshot load/save errors;
-- split/merge receipt or decision handoff not durable, aborting cutover;
+- split/merge receipt handoff not durable, aborting cutover;
 - abandoned-session reaping and cleanup failures.
+
+Durable-path health is also exposed as metrics: `late_commit_rejections` (a commit attempt that missed
+its decision deadline), `deadline_expiry_aborts` (recovery presume-aborting an undecided record whose
+deadline passed), and the `decision_deadline_margin_ms` histogram (the adaptive margin being chosen). A
+rising rejection/expiry rate is the signal to widen the deadline configuration.
 
 The focused server tests are organized around the same boundaries:
 
@@ -606,11 +652,13 @@ The focused server tests are organized around the same boundaries:
 | Concurrent commit/rollback/finalize attempts | `TestFinalizeSlot.cs` |
 | Public SDK session behavior | `TestClientTransactionRegisterRemote.cs` |
 | Reaper/finalize-slot interaction | `TestSessionReaping.cs` |
-| Completion receipt persistence and movement | `TestCompletionReceiptDurability.cs`, `TestCompletionReceiptTransfer.cs` |
-| Decision persistence, movement, and recovery | `TestCoordinatorDecisionStore.cs`, `TestCoordinatorDecisionTransfer.cs`, `TestCoordinatorDecisionRecovery.cs` |
-| Replicated, cutover-gating split/merge handoff | `TestSplitMergeCorrectnessHandoff.cs` |
-| Durable commit and restart behavior | `TestDurableCoordinatorDecision.cs`, `TestDurablePersistentRestart.cs` |
-| Partial commit and uncertain anchor outcomes | `TestDurablePartialCommitRecovery.cs`, `TestDurableAnchorUncertainty.cs` |
+| Completion receipt persistence and movement | `TestCompletionReceiptDurability.cs`, `TestCompletionReceiptTransfer.cs`, `TestReceiptReleaseReplication.cs` |
+| Canonical record state machine and store | `TestTransactionRecordStateMachine.cs`, `TestPreparedIntentStore.cs` |
+| Durable finalize protocol and recovery | `TestDurableTransactionFinalizer.cs`, `TestDurableTransactionRecovery.cs`, `TestDurableFinalizeInputBuilder.cs` |
+| Decision-deadline estimator and consult | `TestFinalizeLatencyEstimator.cs`, `TestDurableOutcomeConsultation.cs` |
+| Durable-intent read/scan/write visibility | `TestDurableIntentReadVisibility.cs`, `TestDurableIntentScanVisibility.cs`, `TestDurableIntentWriteVisibility.cs`, `TestPreparedIntentVisibility.cs`, `TestPreparedIntentScanMerge.cs` |
+| Durable activation, persistence, replication, end-to-end | `TestDurableIntentActivation.cs`, `TestDurableIntentPersistence.cs`, `TestDurableIntentReplication.cs`, `TestDurableIntentTransactionEndToEnd.cs`, `TestDurableSchedulerCoalescing.cs` |
+| Two-phase commit and failover recovery | `TestTwoPhaseCommitRecovery.cs`, `TestKeyValueFailoverCoherence.cs` |
 
 Run focused filters first. For example:
 
@@ -640,20 +688,22 @@ the server project does not.
 | `Kahuna.Core/KeyValues/Transactions/Data/OperationDigest.cs` | Stable structured request digests. |
 | `Kahuna.Core/KeyValues/Transactions/Data/OperationCompletionPayload.cs` | Transport-neutral confirmed effects and cached response data. |
 | `Kahuna.Core/KeyValues/Transactions/Data/ParticipantOperationCache.cs` | Node-local recovery for an applied operation whose coordinator completion was not acknowledged. |
-| `Kahuna.Core/KeyValues/KeyValuesManager.cs` | Register-remote wrappers, completion folding, operation-result recovery, and durable-decision recovery loop. |
+| `Kahuna.Core/KeyValues/KeyValuesManager.cs` | Register-remote wrappers, completion folding, operation-result recovery, durable-record/intent replication seam, and the prepared-intent recovery sweep. |
 | `Kahuna.Core/KeyValues/KeyValueLocator.cs` | Coordinator-key, participant-key, and anchor-key routing. |
 | `Kahuna.Core/Communication/External/Grpc/KeyValuesService.cs` | External transaction and internal registration/finalize protocol endpoints. |
 | `Kahuna.Shared/Communication/Grpc/Protos/keyvalues.proto` | Stable wire messages and enum values. |
 | `Kahuna.Core/KeyValues/CompletionReceiptStore.cs` | Persistent-participant completion proof and receipt snapshots. |
-| `Kahuna.Core/KeyValues/Transactions/CoordinatorDecisionStore.cs` | Anchor-partition decision replication, snapshots, import, and retention removal. |
-| `Kahuna.Core/KeyValues/Transactions/Data/CoordinatorDecisionRecord.cs` | Durable record, participants, status, and progress fields. |
-| `Kahuna.Core/KeyValues/CoordinatorDecisionRecoveryActor.cs` | Periodic off-mailbox recovery trigger. |
-| `Kahuna.Core/KeyValues/TransactionReaperActor.cs` | Periodic abandoned-session cleanup trigger. |
-| `Kahuna.Core/KeyValues/Handlers/TryPrepareMutationsHandler.cs` | Prepare tickets and embedded anchor decision. |
-| `Kahuna.Core/KeyValues/Handlers/TryCommitMutationsHandler.cs` | Participant commit, receipt lookup/recording, and inline anchor-decision installation. |
-| `Kahuna.Core/KeyValues/KeyValueReplicator.cs`, `KeyValueRestorer.cs` | Receipt and embedded-decision reconstruction on replication and WAL restore. |
+| `Kahuna.Core/KeyValues/Transactions/TransactionRecordStore.cs`, `TransactionRecordStateMachine.cs` | Canonical `(TransactionId, Epoch)` record: compare-and-set decision, replication, snapshots, and retention removal. |
+| `Kahuna.Core/KeyValues/Transactions/PreparedIntentStore.cs`, `PreparedIntentStateMachine.cs` | Per-key prepared intent: idempotent prepare/resolve/remove deltas and recovery due-set queries. |
+| `Kahuna.Core/KeyValues/Transactions/DurableTransactionFinalizer.cs`, `DurableFinalizeInputBuilder.cs` | The durable-intent finalize protocol (initialize → prepare → validate → decide → resolve) and the frozen input it drives. |
+| `Kahuna.Core/KeyValues/Transactions/DurableTransactionRecovery.cs`, `PreparedIntentMaterializer.cs` | Participant-side recovery sweep and intent-to-key/value materialization. |
+| `Kahuna.Core/KeyValues/Transactions/FinalizeLatencyEstimator.cs`, `DurableTransactionMetrics.cs` | Rolling finalize-p99 estimate that sizes decision deadlines, and the durable-path counters/histogram. |
+| `Kahuna.Core/KeyValues/Transactions/PreparedIntentVisibility.cs`, `PreparedIntentScanMerge.cs`, `Handlers/DurableReadVisibility.cs`, `Handlers/ForeignIntentWriteResolver.cs` | Reading and scanning committed-but-unmaterialized intents, and resolving a foreign intent on a conflicting write. |
+| `Kahuna.Core/KeyValues/PreparedIntentRecoveryActor.cs`, `TransactionReaperActor.cs` | Periodic prepared-intent recovery and abandoned-session cleanup triggers. |
+| `Kahuna.Core/KeyValues/Handlers/TryPrepareMutationsHandler.cs`, `TryCommitMutationsHandler.cs` | Ticket-path prepare/commit and completion-receipt lookup/recording (the durable-intent path materializes through the normal key/value commit). |
+| `Kahuna.Core/KeyValues/KeyValueReplicator.cs`, `KeyValueRestorer.cs` | Receipt reconstruction on replication and WAL restore. |
 | `Kahuna.Core/Persistence/BackgroundWriterActor.cs` | Receipt snapshot ordering before partition checkpoints advance WAL retention. |
-| `Kahuna.Core/KeyValues/Ranges/RangeSplitter.cs`, `RangeMerger.cs` | Replicated, cutover-gating receipt and decision handoff across routing changes. |
+| `Kahuna.Core/KeyValues/Ranges/RangeSplitter.cs`, `RangeMerger.cs` | Replicated, cutover-gating completion-receipt handoff across routing changes. |
 
 ---
 
@@ -665,8 +715,8 @@ only its confirmed effects back to the coordinator, which builds the authoritati
 deduplicates retries. The first commit, rollback, close, or reap closes registration and owns a single
 finalize attempt while concurrent callers mirror its outcome; it drains earlier operations, freezes
 the working set, and runs 2PC or cleanup from that snapshot. Best-effort outcomes remain replayable
-only inside a bounded in-memory window. Durable mode anchors a decision to the first persistent
-modified key, commits that anchor before secondary participants, records persistent completion
-receipts, and lets the anchor partition leader finish an outstanding decision after coordinator loss.
-The active session and participant prepares are still memory-bound, so durability begins at the
-anchor decision—not at Begin.
+only inside a bounded in-memory window. Durable mode finalizes an all-persistent transaction through
+durable-intent 2PC: a canonical `(TransactionId, Epoch)` record decides the outcome by compare-and-set,
+each modified key is staged as a replicated intent, and participant leaders materialize or presume-abort
+those intents from the record — so the prepared writes and the decision survive coordinator loss even
+though the active in-memory session does not. Durability begins at prepare, not at Begin.
