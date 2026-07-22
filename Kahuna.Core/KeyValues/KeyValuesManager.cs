@@ -3732,6 +3732,7 @@ internal sealed class KeyValuesManager : IDisposable
             // The deadline is DefaultTxCompleteTimeout + 1 500 ms buffer.
             int backoffMs = 1;
             long deadline = Environment.TickCount64 + 16_500;
+            bool attemptedRoutedResolve = false;
 
             while (true)
             {
@@ -3747,6 +3748,25 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type != KeyValueResponseType.WaitingForReplication)
                     return (response.Type, response.Entry);
+
+                // A wait caused by a foreign prepared intent whose canonical decision is not resolvable locally (a
+                // remote anchor) would otherwise spin until settlement propagates the decision here. Route the
+                // lookup to the anchor-partition leader once, off the mailbox, and re-issue the read with the
+                // terminal decision so it resolves immediately (the committed value, or the prior value on abort).
+                if (!attemptedRoutedResolve && durability != KeyValueDurability.Ephemeral
+                    && preparedIntentStore.Get(key) is { Resolution: PreparedIntentResolution.Pending } foreignIntent
+                    && foreignIntent.TransactionId != transactionId
+                    && transactionRecordStore.Get(foreignIntent.TransactionId, foreignIntent.Epoch) is null)
+                {
+                    attemptedRoutedResolve = true;
+                    TransactionRecord? record = await LookupDurableRecordRouted(
+                        foreignIntent.TransactionId, foreignIntent.Epoch, foreignIntent.RecordAnchorKey, CancellationToken.None).ConfigureAwait(false);
+                    if (record is { IsTerminal: true })
+                    {
+                        request.ForeignDecisionHint = new ForeignDecisionHint(foreignIntent.TransactionId, foreignIntent.Epoch, record.Decision);
+                        continue; // resolve now, no backoff
+                    }
+                }
 
                 if (Environment.TickCount64 >= deadline)
                     return (KeyValueResponseType.MustRetry, null);

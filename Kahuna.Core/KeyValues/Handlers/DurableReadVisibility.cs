@@ -17,13 +17,25 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal static class DurableReadVisibility
 {
-    public static ReadVisibilityAction Resolve(KeyValueContext context, PreparedIntent intent, HLCTimestamp readTimestamp)
+    public static ReadVisibilityAction Resolve(KeyValueContext context, PreparedIntent intent, HLCTimestamp readTimestamp,
+        ForeignDecisionHint hint = default)
     {
         TransactionDecision decision = intent.Resolution == PreparedIntentResolution.Pending
-            ? context.TransactionRecordStore?.Get(intent.TransactionId, intent.Epoch)?.Decision ?? TransactionDecision.Undecided
+            ? DecisionFor(context, intent, hint)
             : TransactionDecision.Undecided;
 
         return PreparedIntentVisibility.Resolve(intent, readTimestamp, decision);
+    }
+
+    /// <summary>The canonical decision for a pending intent: a routed hint for this exact intent wins (it was
+    /// resolved against the remote anchor leader off the mailbox); otherwise the co-located record store; else
+    /// Undecided (keeps the read at Retry, which triggers the off-mailbox routed lookup on a remote anchor).</summary>
+    private static TransactionDecision DecisionFor(KeyValueContext context, PreparedIntent intent, ForeignDecisionHint hint)
+    {
+        if (hint.Applies(intent.TransactionId, intent.Epoch))
+            return hint.Decision;
+
+        return context.TransactionRecordStore?.Get(intent.TransactionId, intent.Epoch)?.Decision ?? TransactionDecision.Undecided;
     }
 
     /// <summary>

@@ -73,6 +73,11 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <summary>Range scan: fixed snapshot timestamp for consistent paging (Zero = latest).</summary>
     public HLCTimestamp ReadTimestamp { get; internal set; }
 
+    /// <summary>Optional: a foreign prepared intent's canonical decision, resolved off-mailbox by routing to the
+    /// transaction's anchor-partition leader, so a read that meets a still-pending remote-anchor intent resolves
+    /// the outcome instead of retrying until settlement. Default (Zero identity) means no hint.</summary>
+    internal Transactions.Data.ForeignDecisionHint ForeignDecisionHint { get; set; }
+
     /// <summary>
     /// Key-range routing generation the request was resolved on (descriptor fence). 0 = hash space / not
     /// range-routed. Set by the locator for KeyRange write ops; threaded into the proposal so the
@@ -310,6 +315,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         RangeLockImportList = null;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
+        ForeignDecisionHint = default;
         Continuation = null;
         InvalidateOrApplyData = null;
         PhaseTwoCompletionData = null;
