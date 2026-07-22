@@ -532,5 +532,8 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(9, message.Revision);
         // One canonical commit timestamp stamps last-modified.
         Assert.Equal(Ts(1234), new HLCTimestamp(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter));
+        Assert.Equal(intent.TransactionId, new HLCTimestamp(
+            message.TransactionIdNode, message.TransactionIdPhysical, message.TransactionIdCounter));
+        Assert.Equal(intent.RecordAnchorKey, message.RecordAnchorKey);
     }
 }

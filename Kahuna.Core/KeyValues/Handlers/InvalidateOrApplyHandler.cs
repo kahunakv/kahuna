@@ -36,13 +36,13 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
             return null;
 
-        // Don't touch an entry whose apply is still owned by a live in-flight operation: the owning
+        // Don't touch an entry whose apply is still owned by an in-flight operation: the owning
         // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or
         // CompletePhaseTwo (2PC, WriteIntent), which archives the correct superseded revision and
         // adjusts accounting exactly once. Advancing the entry here first would corrupt that archive.
-        // If an intent has expired (the node was leader, stamped the intent, then lost leadership before
-        // the completion ran), clear it and fall through so the committed value is applied — it is
-        // authoritative — matching the expiry-aware pattern used by TryGet, TrySet, TryDelete, etc.
+        // A notification for the transaction that owns the write intent always defers, even if a finite
+        // lease elapsed: the acknowledged force-resident apply owns intent cleanup and archival. An
+        // unrelated expired intent may be cleared before applying the authoritative committed value.
         if (entry.ReplicationIntent is not null || entry.WriteIntent is not null)
         {
             HLCTimestamp now = context.Raft.HybridLogicalClock
@@ -57,29 +57,23 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
 
             if (entry.WriteIntent is not null)
             {
-                if (entry.WriteIntent.Expires - now > TimeSpan.Zero)
+                if (entry.WriteIntent.TransactionId == data.TransactionId)
+                    return null;
+
+                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, now))
                     return null;
                 entry.WriteIntent = null;
             }
         }
 
-        // Already at or ahead of this revision — nothing to do.
-        if (entry.Revision >= data.Revision)
+        bool exactHead = HeadMatches(entry, data);
+
+        // Already at a strictly newer revision, or an exact replay of this committed head.
+        if (IsStrictlyNewer(entry, data) || exactHead)
             return null;
 
-        int previousValueLength = entry.Value?.Length ?? 0;
-
-        entry.Value        = data.Value;
-        entry.Revision     = data.Revision;
-        entry.Expires      = data.Expires;
-        context.TouchEntry(entry, data.LastUsed);
-        entry.LastModified = data.LastModified;
-        entry.State        = data.State;
-
-        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        context.EnqueueExpiry(message.Key, entry.Expires);
-        if (data.State is KeyValueState.Deleted or KeyValueState.Undefined)
-            context.EnqueueTombstone(message.Key);
+        KeyValueProposal proposal = BuildProposal(message.Key, data);
+        ApplyCommittedHead(entry, proposal, data.TransactionId);
 
         return null;
     }
@@ -100,34 +94,71 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
 
         bool ownsIntent = entry.WriteIntent is not null && entry.WriteIntent.TransactionId == data.TransactionId;
 
-        // Idempotent skip only when the resident entry already reflects this exact commit: a strictly newer
-        // revision is resident, or the same revision AND the same terminal state AND the same expiry. Guarding on
-        // revision alone drops mutations that reuse the base revision: a delete does not bump the revision (its
-        // tombstone carries the base value's revision, changing the state), and an extend changes only the expiry
-        // at the same revision and state. Both stage via MVCC with no owned write intent, so without the state and
-        // expiry comparison the tombstone or the extended expiry would be skipped as already-applied.
-        if (!ownsIntent
-            && (entry.Revision > data.Revision
-                || (entry.Revision == data.Revision && entry.State == data.State && entry.Expires == data.Expires)))
-            return new(KeyValueResponseType.Committed); // already applied
+        if (!ownsIntent && IsStrictlyNewer(entry, data))
+            return new(KeyValueResponseType.Committed);
 
-        KeyValueProposal proposal = new(
-            data.State == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet,
-            key,
-            data.Value,
-            data.Revision,
-            data.NoRevision,
-            data.Expires,
-            data.LastUsed,
-            data.LastModified,
-            data.State,
-            KeyValueDurability.Persistent);
+        if (!ownsIntent && HeadMatches(entry, data))
+        {
+            bool appliedByActor = entry.LastAppliedTransactionId == data.TransactionId;
+            bool restoredFromDurableApply = entry.FlushedRevision >= data.Revision
+                && context.CompletionReceiptStore.Contains(
+                    data.TransactionId, key, KeyValueDurability.Persistent);
+
+            // Matching head metadata alone cannot prove that the superseded revision was archived.
+            // Only an actor apply marker or a flushed committed record plus its durable receipt can
+            // settle a replay. Otherwise recovery must retry while retained intent state is consulted.
+            return appliedByActor || restoredFromDurableApply
+                ? new(KeyValueResponseType.Committed)
+                : KeyValueStaticResponses.MustRetryResponse;
+        }
+
+        KeyValueProposal proposal = BuildProposal(key, data);
 
         HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null);
 
         return new(KeyValueResponseType.Committed);
     }
+
+    /// <summary>
+    /// Builds the proposal consumed by the single archival head-advance routine. Delete and extend
+    /// records may reuse a revision number, so callers compare the complete terminal head rather than
+    /// revision alone before deciding a notification is an idempotent replay.
+    /// </summary>
+    private static KeyValueProposal BuildProposal(string key, InvalidateOrApplyData data) => new(
+        data.State == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet,
+        key,
+        data.Value,
+        data.Revision,
+        data.NoRevision,
+        data.Expires,
+        data.LastUsed,
+        data.LastModified,
+        data.State,
+        KeyValueDurability.Persistent);
+
+    /// <summary>
+    /// Compares every mutation field that determines the visible committed head. Value comparison is
+    /// required for no-revision writes, while state and expiry distinguish delete and extend records
+    /// that legitimately reuse the prior revision number.
+    /// </summary>
+    private static bool HeadMatches(KeyValueEntry entry, InvalidateOrApplyData data) =>
+        entry.Revision == data.Revision
+        && entry.State == data.State
+        && entry.Expires == data.Expires
+        && entry.LastModified == data.LastModified
+        && ((entry.Value is null && data.Value is null)
+            || (entry.Value is not null && data.Value is not null
+                && entry.Value.AsSpan().SequenceEqual(data.Value)));
+
+    /// <summary>
+    /// Orders same-revision delete, extend, and no-revision records by their committed HLC. Revision
+    /// comparison alone cannot distinguish those mutations, while accepting an older notification
+    /// after a newer same-revision head would regress the cache.
+    /// </summary>
+    private static bool IsStrictlyNewer(KeyValueEntry entry, InvalidateOrApplyData data) =>
+        entry.Revision > data.Revision
+        || (entry.Revision == data.Revision && entry.LastModified > data.LastModified);
 
     /// <summary>
     /// Clears an aborted durable transaction's staged write intent and MVCC snapshot on the owning actor so the key

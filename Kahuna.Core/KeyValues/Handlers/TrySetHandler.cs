@@ -161,7 +161,9 @@ internal sealed class TrySetHandler : BaseHandler
         // based on it), treat an undecided intent as a live conflict, and ignore an aborted one. No-op off the
         // durable-intent path (null store).
         KeyValueEntry? resolvedEntry = entry;
-        if (ForeignIntentWriteResolver.Resolve(context, message.Key, message.TransactionId, ref resolvedEntry) == ForeignIntentWriteDecision.MustRetry)
+        if (ForeignIntentWriteResolver.Resolve(
+                context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead)
+            == ForeignIntentWriteDecision.MustRetry)
             return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
 
         entry = resolvedEntry!;
@@ -184,7 +186,7 @@ internal sealed class TrySetHandler : BaseHandler
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                     return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
 
                 entry.WriteIntent = null;
@@ -197,7 +199,7 @@ internal sealed class TrySetHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (intent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
                     return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
@@ -217,29 +219,8 @@ internal sealed class TrySetHandler : BaseHandler
     /// </summary>
     private KeyValueResponse ApplyEphemeralSet(KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal)
     {
-        if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);
-
-        if (!proposal.NoRevision)
-        {
-            bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
-            entry.Revisions ??= new();
-            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
-        }
-
-        int previousValueLength = entry.Value?.Length ?? 0;
-
-        entry.Value = proposal.Value;
-        entry.Revision = proposal.Revision;
+        ApplyCommittedHead(entry, proposal, message.TransactionId);
         entry.FlushedRevision = entry.Revision; // ephemeral: no disk, always clean
-        entry.Expires = proposal.Expires;
-        context.TouchEntry(entry, proposal.LastUsed);
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
-
-        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        context.EnqueueExpiry(message.Key, proposal.Expires);
 
         return new(KeyValueResponseType.Set, entry.Revision);
     }

@@ -30,16 +30,28 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     public KeyValueResponse Execute(KeyValueRequest message)
     {
+        if (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0)
+            return KeyValueStaticResponses.ErroredResponse;
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
         // Check if the prefix is already locked by the current transaction
         if (context.LocksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
         {
-            if (writeIntent.TransactionId == message.TransactionId) 
+            if (writeIntent.TransactionId == message.TransactionId)
+            {
+                HLCTimestamp renewedExpiry = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
+                writeIntent.Expires = renewedExpiry;
+                foreach ((string _, KeyValueEntry entry) in context.Store.GetByBucket(message.Key))
+                {
+                    if (entry.WriteIntent?.TransactionId == message.TransactionId)
+                        entry.WriteIntent.Expires = renewedExpiry;
+                }
                 return KeyValueStaticResponses.LockedResponse;
+            }
 
             // Locked by another transaction but check if the lease is still active
-            if (writeIntent.Expires != HLCTimestamp.Zero && writeIntent.Expires - currentTime > TimeSpan.Zero)
+            if (KeyValueWriteIntentLease.IsLive(writeIntent, currentTime))
                 return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, writeIntent.TransactionId);
             
             // The lock is expired, remove it
@@ -59,9 +71,6 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <returns></returns>
     private KeyValueResponse LockExistingKeysByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
     {
-        if (message.TransactionId == HLCTimestamp.Zero)
-            return KeyValueStaticResponses.ErroredResponse;
-
         // Stamp per-key write intents atomically: if any key in the bucket is mid-replication we abort
         // and roll back every intent already written this call, so a mid-loop failure never strands a
         // partial set of intents on the bucket's keys. The single LocksByPrefix.Add below is the O(1)
@@ -94,7 +103,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
 
                 // Another transaction holds a live write intent on this key. Leave it in place —
                 // the LocksByPrefix entry is enough to block that transaction's commit as a phantom.
-                if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                     continue;
             }
 
@@ -104,7 +113,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             entry.WriteIntent = new()
             {
                 TransactionId = message.TransactionId,
-                Expires = message.TransactionId + message.ExpiresMs,
+                Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
             };
 
             context.Logger.LogAssignedWriteIntent(key, message.TransactionId);
@@ -113,7 +122,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         context.LocksByPrefix.Add(message.Key, new()
         {
             TransactionId = message.TransactionId,
-            Expires = message.TransactionId + message.ExpiresMs
+            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs)
         });
 
         return KeyValueStaticResponses.LockedResponse;

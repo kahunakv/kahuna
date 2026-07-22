@@ -86,16 +86,21 @@ internal sealed class KeyValueReplicator
     /// wrong (it could corrupt an ephemeral entry for the same key name) and useless.
     /// </summary>
     private void SendInvalidateOrApply(
+        int partitionId,
         string key,
         byte[]? value,
         long revision,
         HLCTimestamp expires,
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
-        KeyValueState state)
+        KeyValueState state,
+        HLCTimestamp transactionId,
+        bool noRevision)
     {
         persistentRouter.Send(
-            KeyValueRequest.ForInvalidateOrApply(key, revision, value, expires, lastUsed, lastModified, state));
+            KeyValueRequest.ForInvalidateOrApply(
+                key, revision, value, expires, lastUsed, lastModified, state,
+                transactionId: transactionId, partitionId: partitionId, noRevision: noRevision));
     }
 
     /// <summary>
@@ -186,8 +191,10 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.NoRevision
                     ));
 
-                    SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set);
+                    SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Set,
+                        new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
+                        keyValueMessage.NoRevision);
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -229,8 +236,10 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.NoRevision
                     ));
 
-                    SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Deleted);
+                    SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Deleted,
+                        new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
+                        keyValueMessage.NoRevision);
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -266,8 +275,10 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.NoRevision
                     ));
 
-                    SendInvalidateOrApply(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set);
+                    SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Set,
+                        new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
+                        keyValueMessage.NoRevision);
 
                     RecordCompletionReceipt(keyValueMessage);
 

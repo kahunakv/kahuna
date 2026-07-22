@@ -135,7 +135,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (intent.Expires - message.CommitId > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(intent, message.CommitId))
                     return (new(KeyValueResponseType.MustRetry, 0), null, 0);
 
                 context.LocksByPrefix.Remove(entry.Bucket);

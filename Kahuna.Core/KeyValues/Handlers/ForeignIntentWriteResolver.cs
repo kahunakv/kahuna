@@ -35,7 +35,17 @@ internal enum ForeignIntentWriteDecision
 /// </summary>
 internal static class ForeignIntentWriteResolver
 {
-    public static ForeignIntentWriteDecision Resolve(KeyValueContext context, string key, HLCTimestamp transactionId, ref KeyValueEntry? entry)
+    /// <summary>
+    /// Resolves a durable intent owned by another transaction before a new write proceeds. A
+    /// committed value is materialized through <paramref name="applyCommittedHead"/> so it cannot
+    /// bypass revision archival; undecided intent ownership remains retryable.
+    /// </summary>
+    public static ForeignIntentWriteDecision Resolve(
+        KeyValueContext context,
+        string key,
+        HLCTimestamp transactionId,
+        ref KeyValueEntry? entry,
+        Action<KeyValueEntry, KeyValueProposal, HLCTimestamp> applyCommittedHead)
     {
         if (context.PreparedIntentStore?.Get(key) is not { } foreignIntent
             || foreignIntent.TransactionId == transactionId)
@@ -50,22 +60,28 @@ internal static class ForeignIntentWriteResolver
                 if ((entry?.Revision ?? -1) < foreignIntent.Revision)
                 {
                     bool created = entry is null;
-                    entry ??= new() { Bucket = BucketOf(key) };
-
-                    if (foreignIntent.State == KeyValueState.Deleted)
+                    entry ??= new()
                     {
-                        entry.Value = null;
-                        entry.State = KeyValueState.Deleted;
-                    }
-                    else
-                    {
-                        entry.Value = foreignIntent.Value;
-                        entry.State = foreignIntent.State;
-                    }
+                        Bucket = BucketOf(key),
+                        Revision = -1,
+                        State = KeyValueState.Undefined
+                    };
 
-                    entry.Revision = foreignIntent.Revision;
-                    entry.Expires = foreignIntent.Expires;
-                    entry.LastModified = foreignIntent.CommitTimestamp;
+                    KeyValueProposal proposal = new(
+                        foreignIntent.State == KeyValueState.Deleted
+                            ? KeyValueRequestType.TryDelete
+                            : KeyValueRequestType.TrySet,
+                        key,
+                        foreignIntent.Value,
+                        foreignIntent.Revision,
+                        foreignIntent.NoRevision,
+                        foreignIntent.Expires,
+                        foreignIntent.CommitTimestamp,
+                        foreignIntent.CommitTimestamp,
+                        foreignIntent.State,
+                        KeyValueDurability.Persistent);
+
+                    applyCommittedHead(entry, proposal, foreignIntent.TransactionId);
                     entry.FlushedRevision = foreignIntent.Revision;
 
                     if (created)

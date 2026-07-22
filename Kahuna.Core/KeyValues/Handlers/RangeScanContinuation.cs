@@ -383,7 +383,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         // scans fall through to the committed state (the intent does not block the read).
         if (entry?.WriteIntent != null && entry.WriteIntent.TransactionId != transactionId)
         {
-            if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+            if (!KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
             else if (!snapshotTs.IsNull())
             {

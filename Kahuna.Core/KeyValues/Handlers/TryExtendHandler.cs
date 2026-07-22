@@ -30,7 +30,9 @@ internal sealed class TryExtendHandler : BaseHandler
         // Resolve its canonical outcome before treating the key as absent — a committed set materializes into a
         // resident entry to extend, an undecided intent retries, and an aborted or committed-delete intent leaves
         // the key absent. No-op off the durable-intent path.
-        if (ForeignIntentWriteResolver.Resolve(context, message.Key, message.TransactionId, ref entry) == ForeignIntentWriteDecision.MustRetry)
+        if (ForeignIntentWriteResolver.Resolve(
+                context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead)
+            == ForeignIntentWriteDecision.MustRetry)
             return KeyValueStaticResponses.MustRetryResponse;
 
         if (entry is null)
@@ -60,7 +62,7 @@ internal sealed class TryExtendHandler : BaseHandler
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)                
+                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                     return KeyValueStaticResponses.MustRetryResponse;
                 
                 entry.WriteIntent = null;
@@ -73,7 +75,7 @@ internal sealed class TryExtendHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (intent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
                     return KeyValueStaticResponses.MustRetryResponse;
             
                 context.LocksByPrefix.Remove(entry.Bucket);
@@ -136,11 +138,9 @@ internal sealed class TryExtendHandler : BaseHandler
         
         if (message.Durability == KeyValueDurability.Persistent)
             return CreateProposal(message, entry, proposal, currentTime);
-        
-        entry.Expires = proposal.Expires;
-        context.TouchEntry(entry, proposal.LastUsed);
-        entry.LastModified = proposal.LastModified;
-        context.EnqueueExpiry(message.Key, proposal.Expires);
+
+        ApplyCommittedHead(entry, proposal, message.TransactionId);
+        entry.FlushedRevision = entry.Revision;
 
         return new(KeyValueResponseType.Extended, entry.Revision, entry.LastModified);
     }

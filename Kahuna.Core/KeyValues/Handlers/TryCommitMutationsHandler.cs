@@ -47,32 +47,8 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         if (message.Durability != KeyValueDurability.Persistent)
         {
-            if (entry.Revisions is not null)
-                RemoveExpiredRevisions(entry, proposal.Revision);
-
-            if (!proposal.NoRevision)
-            {
-                bool revisionsCreatedEphemeral = entry.Revisions is null || entry.Revisions.Count == 0;
-                entry.Revisions ??= new();
-                // Idempotent archive (see the persistent path below): a revision can recur across a
-                // delete→re-set cycle; Dictionary.Add would throw and corrupt the commit.
-                entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-                context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreatedEphemeral, entry.Value));
-            }
-
-            int previousValueLength = entry.Value?.Length ?? 0;
-
-            entry.Value = proposal.Value;
-            entry.Expires = proposal.Expires;
-            entry.Revision = proposal.Revision;
-            context.TouchEntry(entry, proposal.LastUsed);
-            entry.LastModified = proposal.LastModified;
-            entry.State = proposal.State;
-
-            context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-            context.EnqueueExpiry(message.Key, proposal.Expires);
-            if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
-                context.EnqueueTombstone(message.Key);
+            ApplyCommittedHead(entry, proposal, message.TransactionId);
+            entry.FlushedRevision = entry.Revision;
 
             RemoveMvccEntry(entry, message.TransactionId);
             TrimExpiredMvccEntries(entry, currentTime);

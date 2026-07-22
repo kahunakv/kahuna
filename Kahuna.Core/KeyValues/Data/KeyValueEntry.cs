@@ -71,6 +71,14 @@ internal sealed class KeyValueEntry
     public KeyValueRevisionHistory? Revisions { get; set; }
 
     /// <summary>
+    /// Transaction whose committed mutation most recently advanced this resident head through the
+    /// archival apply path. This actor-local proof distinguishes a completed apply from a cache entry
+    /// that merely happens to have matching revision metadata. It is intentionally transient; a
+    /// disk-loaded entry instead uses its flushed revision plus durable receipt as apply proof.
+    /// </summary>
+    public HLCTimestamp LastAppliedTransactionId { get; set; }
+
+    /// <summary>
     /// Multiversion Concurrency Control (MVCC) values per TransactionId
     /// </summary>
     public Dictionary<HLCTimestamp, KeyValueMvccEntry>? MvccEntries { get; set; }

@@ -72,7 +72,7 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+                if (!KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                     entry.WriteIntent = null;
                 else if (!message.ReadTimestamp.IsNull())
                 {
@@ -89,7 +89,7 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (intent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
                     return KeyValueStaticResponses.MustRetryResponse;
 
                 context.LocksByPrefix.Remove(bucket);

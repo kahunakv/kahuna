@@ -223,7 +223,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
         if (entry.WriteIntent != null && entry.WriteIntent.TransactionId != transactionId)
         {
-            if (entry.WriteIntent.Expires - currentTime <= TimeSpan.Zero)
+            if (!KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
             else if (!readTimestamp.IsNull())
             {

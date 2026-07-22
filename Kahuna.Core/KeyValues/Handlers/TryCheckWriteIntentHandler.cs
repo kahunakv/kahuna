@@ -40,7 +40,7 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
         // Live in-memory write intent from a different transaction — signal conflict to the caller.
         if (entry?.WriteIntent is not null && entry.WriteIntent.TransactionId != message.TransactionId)
         {
-            if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+            if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                 return KeyValueStaticResponses.AbortedResponse;
 
             entry.WriteIntent = null;

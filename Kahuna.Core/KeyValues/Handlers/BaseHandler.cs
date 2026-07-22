@@ -408,6 +408,57 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Advances a resident committed head while preserving the superseded revision under the
+    /// snapshot-floor retention policy. Both leader settlement and follower cache coherence call
+    /// this routine so no replicated head update can bypass archival or accounting. The caller owns
+    /// intent/MVCC cleanup and durable persistence because those responsibilities differ between a
+    /// leader apply and a follower notification.
+    /// </summary>
+    protected void ApplyCommittedHead(
+        KeyValueEntry entry,
+        KeyValueProposal proposal,
+        HLCTimestamp transactionId)
+    {
+        if (entry.Revisions is not null)
+            RemoveExpiredRevisions(entry, proposal.Revision);
+
+        if (!proposal.NoRevision)
+        {
+            bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
+            entry.Revisions ??= new();
+            bool revisionAlreadyArchived = entry.Revisions.TryGetValue(
+                entry.Revision, out KeyValueRevisionEntry previousArchive);
+
+            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(
+                entry.Value, entry.LastModified, entry.Expires, entry.State);
+
+            if (!revisionAlreadyArchived)
+                context.AdjustEstimatedEntryBytes(
+                    entry,
+                    KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
+            else
+                context.AdjustEstimatedEntryBytes(
+                    entry,
+                    (entry.Value?.Length ?? 0) - (previousArchive.Value?.Length ?? 0));
+        }
+
+        int previousValueLength = entry.Value?.Length ?? 0;
+
+        entry.Value = proposal.Value;
+        entry.Expires = proposal.Expires;
+        entry.Revision = proposal.Revision;
+        context.TouchEntry(entry, proposal.LastUsed);
+        entry.LastModified = proposal.LastModified;
+        entry.State = proposal.State;
+        entry.LastAppliedTransactionId = transactionId;
+
+        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
+        context.EnqueueExpiry(proposal.Key, proposal.Expires);
+        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            context.EnqueueTombstone(proposal.Key);
+    }
+
+    /// <summary>
     /// Applies a confirmed persistent commit to a resident entry: clears the transaction's MVCC snapshot
     /// and write intent, archives the superseded revision, advances the entry to the proposal, enqueues
     /// the durable write, records the completion receipt, and — for the anchor key of a Durable
@@ -427,32 +478,7 @@ internal abstract class BaseHandler
         TrimExpiredMvccEntries(entry, currentTime);
         entry.WriteIntent = null;
 
-        if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);
-
-        if (!proposal.NoRevision)
-        {
-            bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
-            entry.Revisions ??= new();
-            // Idempotent archive: a revision number can recur across a delete→re-set cycle for the same
-            // key. Dictionary.Add throws on a duplicate key; overwriting is safe (same revision, same value).
-            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
-        }
-
-        int previousValueLength = entry.Value?.Length ?? 0;
-
-        entry.Value = proposal.Value;
-        entry.Expires = proposal.Expires;
-        entry.Revision = proposal.Revision;
-        context.TouchEntry(entry, proposal.LastUsed);
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
-
-        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        context.EnqueueExpiry(proposal.Key, proposal.Expires);
-        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
-            context.EnqueueTombstone(proposal.Key);
+        ApplyCommittedHead(entry, proposal, txId);
 
         context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,

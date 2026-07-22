@@ -40,6 +40,123 @@ public sealed class TestRegisteredDurableStaging
         return (kahuna, handle);
     }
 
+    /// <summary>
+    /// Drives the public registered API used by database consumers: zero-duration exclusive locks,
+    /// a row-plus-index initial commit, a live snapshot hold, and enough later row transactions to
+    /// move the fork revision beyond ordinary retention. Exact-revision and point/range as-of reads
+    /// must all retain the fork value.
+    /// </summary>
+    [Fact]
+    public async Task ZeroDurationRegisteredWrites_PreserveHeldForkRevisionPastRetention()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 4,
+            RevisionRetention = 2,
+        }, loggerFactory);
+        await node.StartAsync(ct);
+
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+        string suffix = Guid.NewGuid().ToString("N")[..8];
+        string rowPrefix = $"fork/rows/{suffix}";
+        string rowKey = $"{rowPrefix}/row";
+        string indexKey = $"fork/index/{suffix}/value";
+        await node.WaitForLeaderForKeyAsync(rowKey, ct);
+        await node.WaitForLeaderForKeyAsync(indexKey, ct);
+
+        (_, TransactionHandle initial) = await StartTransaction(kahuna, $"fork/init/{suffix}", ct);
+        foreach (string key in new[] { rowKey, indexKey })
+        {
+            (KeyValueResponseType lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+                initial.TransactionId, key, 0, KeyValueDurability.Persistent, ct,
+                initial.CoordinatorKey, TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Locked, lockType);
+        }
+
+        List<KahunaSetKeyValueResponseItem> initialWrites = await kahuna.LocateAndTrySetManyKeyValue(
+        [
+            new()
+            {
+                TransactionId = initial.TransactionId, Key = rowKey, Value = "fork-value"u8.ToArray(),
+                ExpiresMs = 0, Flags = KeyValueFlags.None, Durability = KeyValueDurability.Persistent
+            },
+            new()
+            {
+                TransactionId = initial.TransactionId, Key = indexKey, Value = Encoding.UTF8.GetBytes(rowKey),
+                ExpiresMs = 0, Flags = KeyValueFlags.None, Durability = KeyValueDurability.Persistent
+            }
+        ], ct, initial.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.All(initialWrites, write => Assert.Equal(KeyValueResponseType.Set, write.Type));
+
+        (KeyValueResponseType initialCommit, _) = await kahuna.LocateAndCommitTransaction(initial, ct);
+        Assert.Equal(KeyValueResponseType.Committed, initialCommit);
+
+        (KeyValueResponseType initialReadType, ReadOnlyKeyValueEntry? initialRow) =
+            await kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, rowKey, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, initialReadType);
+        Assert.NotNull(initialRow);
+        long forkRevision = initialRow!.Revision;
+        HLCTimestamp forkTimestamp = initialRow.LastModified;
+
+        (KeyValueResponseType holdType, string holdId, _) =
+            await kahuna.LocateAndAcquireSnapshotHold($"fork-holder/{suffix}", forkTimestamp, 60_000, ct);
+        Assert.Equal(KeyValueResponseType.Set, holdType);
+
+        try
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                (_, TransactionHandle update) = await StartTransaction(kahuna, $"fork/update/{suffix}/{i}", ct);
+                (KeyValueResponseType lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+                    update.TransactionId, rowKey, 0, KeyValueDurability.Persistent, ct,
+                    update.CoordinatorKey, TransactionOperationId.NewRandom());
+                Assert.Equal(KeyValueResponseType.Locked, lockType);
+
+                (KeyValueResponseType setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                    update.TransactionId, rowKey, Encoding.UTF8.GetBytes($"later-{i}"), null, -1,
+                    KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                    coordinatorKey: update.CoordinatorKey,
+                    operationId: TransactionOperationId.NewRandom());
+                Assert.Equal(KeyValueResponseType.Set, setType);
+
+                (KeyValueResponseType commitType, _) = await kahuna.LocateAndCommitTransaction(update, ct);
+                Assert.Equal(KeyValueResponseType.Committed, commitType);
+            }
+
+            (KeyValueResponseType exactType, ReadOnlyKeyValueEntry? exact) =
+                await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, rowKey, forkRevision, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, exactType);
+            Assert.Equal("fork-value"u8.ToArray(), exact!.Value);
+
+            (KeyValueResponseType pointType, ReadOnlyKeyValueEntry? point) =
+                await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, rowKey, -1, forkTimestamp,
+                    KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, pointType);
+            Assert.Equal("fork-value"u8.ToArray(), point!.Value);
+
+            KeyValueGetByRangeResult range = await kahuna.LocateAndGetByRange(
+                HLCTimestamp.Zero, rowPrefix, rowKey, true, rowKey, true, 10,
+                forkTimestamp, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, range.Type);
+            Assert.Single(range.Items);
+            Assert.Equal(rowKey, range.Items[0].Item1);
+            Assert.Equal("fork-value"u8.ToArray(), range.Items[0].Item2.Value);
+        }
+        finally
+        {
+            await kahuna.LocateAndReleaseSnapshotHold(holdId, ct);
+        }
+    }
+
     [Fact]
     public async Task RegisteredSetMany_AllPersistent_FinalizesThroughDurableIntentPath()
     {

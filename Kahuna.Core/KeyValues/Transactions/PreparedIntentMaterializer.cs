@@ -32,7 +32,11 @@ internal static class PreparedIntentMaterializer
             // One canonical commit timestamp stamps last-modified/last-used/time.
             LastModifiedNode = intent.CommitTimestamp.N, LastModifiedPhysical = intent.CommitTimestamp.L, LastModifiedCounter = intent.CommitTimestamp.C,
             LastUsedNode = intent.CommitTimestamp.N, LastUsedPhysical = intent.CommitTimestamp.L, LastUsedCounter = intent.CommitTimestamp.C,
-            TimeNode = intent.CommitTimestamp.N, TimePhysical = intent.CommitTimestamp.L, TimeCounter = intent.CommitTimestamp.C
+            TimeNode = intent.CommitTimestamp.N, TimePhysical = intent.CommitTimestamp.L, TimeCounter = intent.CommitTimestamp.C,
+            TransactionIdNode = intent.TransactionId.N,
+            TransactionIdPhysical = intent.TransactionId.L,
+            TransactionIdCounter = intent.TransactionId.C,
+            RecordAnchorKey = intent.RecordAnchorKey
         };
 
         if (intent.Value is not null)

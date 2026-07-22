@@ -99,7 +99,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         // outcome before treating the key as absent — a committed set materializes into a resident entry (so the
         // tombstone deletes the committed value), an undecided intent retries, and an aborted or committed-delete
         // intent leaves the key absent. No-op off the durable-intent path.
-        if (ForeignIntentWriteResolver.Resolve(context, message.Key, message.TransactionId, ref entry) == ForeignIntentWriteDecision.MustRetry)
+        if (ForeignIntentWriteResolver.Resolve(
+                context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead)
+            == ForeignIntentWriteDecision.MustRetry)
             return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
 
         if (entry is null)
@@ -122,7 +124,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                     return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
 
                 entry.WriteIntent = null;
@@ -135,7 +137,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (intent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
                     return (new(KeyValueResponseType.MustRetry, 0), entry, currentTime);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
@@ -155,15 +157,8 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// </summary>
     private KeyValueResponse ApplyEphemeralDelete(KeyValueRequest message, KeyValueEntry entry, KeyValueProposal proposal)
     {
-        int previousValueLength = entry.Value?.Length ?? 0;
-
-        entry.Value = proposal.Value;
-        context.TouchEntry(entry, proposal.LastUsed);
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
-
-        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        context.EnqueueTombstone(message.Key);
+        ApplyCommittedHead(entry, proposal, message.TransactionId);
+        entry.FlushedRevision = entry.Revision;
 
         return new(KeyValueResponseType.Deleted, entry.Revision, entry.LastModified);
     }

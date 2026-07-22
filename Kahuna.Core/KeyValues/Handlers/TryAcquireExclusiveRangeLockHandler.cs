@@ -21,7 +21,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
     {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        if (message.TransactionId == HLCTimestamp.Zero)
+        if (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0)
             return KeyValueStaticResponses.ErroredResponse;
 
         // Prune abandoned expired range locks on the way in so they neither block a fresh acquire
@@ -72,8 +72,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 }
                 // X → S downgrade or same-mode re-entry: refresh the expiry from *now* so the
                 // caller can extend the lock beyond its original TTL (heartbeat / lease-renewal).
-                if (message.ExpiresMs > 0)
-                    existing.Expires = currentTime + message.ExpiresMs;
+                existing.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
                 return KeyValueStaticResponses.LockedResponse;
             }
 
@@ -112,7 +111,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         KeyValueRangeLock rangeLock = new()
         {
             TransactionId  = message.TransactionId,
-            Expires        = message.TransactionId + message.ExpiresMs,
+            Expires        = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
             StartKey       = message.StartKey,
             StartInclusive = message.StartInclusive,
             EndKey         = message.EndKey,
@@ -135,6 +134,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
     {
         string start = message.StartKey ?? message.Key;
         bool startIncl = message.StartKey is null || message.StartInclusive;
+        HLCTimestamp requestedExpiry = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
 
         // Stamp per-key write intents atomically: a mid-loop replication conflict rolls back every
         // intent written this call, so a failed acquire/promotion never strands intents on the range's
@@ -160,10 +160,13 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             if (entry.WriteIntent is not null)
             {
                 if (entry.WriteIntent.TransactionId == message.TransactionId)
+                {
+                    entry.WriteIntent.Expires = requestedExpiry;
                     continue;
+                }
 
                 // Another tx holds a live write intent — leave it; LocksByRange will block their commit.
-                if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                     continue;
             }
 
@@ -173,7 +176,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             entry.WriteIntent = new()
             {
                 TransactionId = message.TransactionId,
-                Expires       = message.TransactionId + message.ExpiresMs,
+                Expires       = requestedExpiry,
             };
 
             context.Logger.LogAssignedWriteIntentRangeLock(key, message.TransactionId);

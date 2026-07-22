@@ -460,7 +460,8 @@ public sealed class TestPhaseTwoOffMailbox
 
     /// <summary>
     /// The committed-log apply (InvalidateOrApply) must defer to a live 2PC write intent — the phase-two
-    /// completion owns the apply. When the intent has expired (leadership lost), it clears it and applies.
+    /// completion owns the apply. An unrelated expired intent is cleared before the committed value is
+    /// applied through the same archival path used by leader settlement.
     /// </summary>
     [Fact]
     public void InvalidateOrApply_SkipsUnderLiveWriteIntent_AppliesUnderExpired()
@@ -491,12 +492,15 @@ public sealed class TestPhaseTwoOffMailbox
         Assert.Equal("old"u8.ToArray(), entry.Value);
         Assert.NotNull(entry.WriteIntent);
 
-        // Expired write intent (leadership lost before the completion): clear it and apply.
-        entry.WriteIntent!.Expires = HLCTimestamp.Zero;
+        // Expired unrelated write intent (leadership lost before its completion): clear it and apply.
+        entry.WriteIntent!.TransactionId = txId + 1;
+        entry.WriteIntent.Expires = txId - 1;
         handler.Execute(KeyValueRequest.ForInvalidateOrApply(key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set));
         Assert.Equal(5, entry.Revision);
         Assert.Equal("new"u8.ToArray(), entry.Value);
         Assert.Null(entry.WriteIntent);
+        Assert.True(entry.Revisions!.TryGetValue(4, out KeyValueRevisionEntry archived));
+        Assert.Equal("old"u8.ToArray(), archived.Value);
     }
 
     /// <summary>
@@ -547,7 +551,9 @@ public sealed class TestPhaseTwoOffMailbox
 
         // Leader ordering: the committed-log apply arrives BEFORE the phase-two completion.
         InvalidateOrApplyHandler invalidate = new(context);
-        invalidate.Execute(KeyValueRequest.ForInvalidateOrApply(key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set));
+        invalidate.Execute(KeyValueRequest.ForInvalidateOrApply(
+            key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set,
+            transactionId: txId));
 
         // The live write intent deferred the apply — the entry is still at the superseded revision.
         Assert.Equal(4, entry.Revision);
@@ -570,6 +576,129 @@ public sealed class TestPhaseTwoOffMailbox
         Assert.True(entry.Revisions!.TryGetValue(4, out KeyValueRevisionEntry archived));
         Assert.Equal("old"u8.ToArray(), archived.Value);
         Assert.False(entry.Revisions.ContainsKey(5));
+    }
+
+    /// <summary>
+    /// Ordinary committed notifications and acknowledged durable apply can arrive in either order.
+    /// A session-owned intent makes the ordinary path defer to its transaction; the force-resident
+    /// apply archives the predecessor exactly once, and replay of both messages remains idempotent.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DurableApplyAndNotification_InEitherOrder_ArchivePredecessorOnce(bool notificationFirst)
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        KahunaConfiguration config = Config();
+        RaftManager raft = CreateRaft($"durable-apply-order-{notificationFirst}");
+        MemoryPersistenceBackend backend = new();
+
+        using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bgWriter =
+            actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+                $"bg-durable-order-{notificationFirst}", raft, backend,
+                null!, null!, null!, null!,
+                config, logger, new FlushNotificationSink());
+
+        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueContext context = new(
+            null!, store, new(), new(), new(), bgWriter, null!, backend, raft,
+            new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+        string key = $"durable/order/{notificationFirst}";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp oldModified = txId - 1;
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(),
+            Revision = 4,
+            State = KeyValueState.Set,
+            LastUsed = oldModified,
+            LastModified = oldModified,
+            WriteIntent = new() { TransactionId = txId, Expires = HLCTimestamp.Zero },
+            MvccEntries = new()
+            {
+                [txId] = new KeyValueMvccEntry
+                {
+                    Value = "new"u8.ToArray(), Revision = 5, State = KeyValueState.Set,
+                    LastUsed = txId, LastModified = txId
+                }
+            }
+        };
+        store.Insert(key, entry);
+
+        KeyValueRequest notification = KeyValueRequest.ForInvalidateOrApply(
+            key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set,
+            transactionId: txId, partitionId: 1);
+        KeyValueRequest forceApply = KeyValueRequest.ForInvalidateOrApply(
+            key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set,
+            forceResident: true, transactionId: txId, partitionId: 1);
+        InvalidateOrApplyHandler handler = new(context);
+
+        if (notificationFirst)
+        {
+            Assert.Null(handler.Execute(notification));
+            Assert.Equal(4, entry.Revision);
+            Assert.NotNull(entry.WriteIntent);
+            Assert.Equal(KeyValueResponseType.Committed, handler.Execute(forceApply)!.Type);
+        }
+        else
+        {
+            Assert.Equal(KeyValueResponseType.Committed, handler.Execute(forceApply)!.Type);
+            Assert.Null(handler.Execute(notification));
+        }
+
+        // Replay both actor messages. Neither may archive the committed head as its own predecessor.
+        Assert.Null(handler.Execute(notification));
+        Assert.Equal(KeyValueResponseType.Committed, handler.Execute(forceApply)!.Type);
+
+        Assert.Equal(5, entry.Revision);
+        Assert.Equal("new"u8.ToArray(), entry.Value);
+        Assert.Null(entry.WriteIntent);
+        Assert.Null(entry.MvccEntries);
+        Assert.Equal(txId, entry.LastAppliedTransactionId);
+        Assert.NotNull(entry.Revisions);
+        Assert.Equal(1, entry.Revisions!.Count);
+        Assert.True(entry.Revisions.TryGetValue(4, out KeyValueRevisionEntry archived));
+        Assert.Equal("old"u8.ToArray(), archived.Value);
+        Assert.False(entry.Revisions.ContainsKey(5));
+    }
+
+    /// <summary>
+    /// A follower with no local transaction intent still archives its resident predecessor before
+    /// applying cache coherence. Re-delivery recognizes the complete head and does not duplicate it.
+    /// </summary>
+    [Fact]
+    public void FollowerNotification_ArchivesResidentPredecessor_Idempotently()
+    {
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        RaftManager raft = CreateRaft("follower-archive");
+        KeyValueContext context = DirectContext(raft, Config(), logger);
+
+        const string key = "durable/follower";
+        HLCTimestamp txId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp oldModified = txId - 1;
+        KeyValueEntry entry = new()
+        {
+            Value = "old"u8.ToArray(), Revision = 4, State = KeyValueState.Set,
+            LastUsed = oldModified, LastModified = oldModified
+        };
+        context.Store.Insert(key, entry);
+
+        KeyValueRequest notification = KeyValueRequest.ForInvalidateOrApply(
+            key, 5, "new"u8.ToArray(), HLCTimestamp.Zero, txId, txId, KeyValueState.Set,
+            transactionId: txId, partitionId: 1);
+        InvalidateOrApplyHandler handler = new(context);
+
+        Assert.Null(handler.Execute(notification));
+        Assert.Null(handler.Execute(notification));
+
+        Assert.Equal(5, entry.Revision);
+        Assert.Equal(txId, entry.LastAppliedTransactionId);
+        Assert.NotNull(entry.Revisions);
+        Assert.Equal(1, entry.Revisions!.Count);
+        Assert.True(entry.Revisions.TryGetValue(4, out KeyValueRevisionEntry archived));
+        Assert.Equal("old"u8.ToArray(), archived.Value);
     }
 
     /// <summary>

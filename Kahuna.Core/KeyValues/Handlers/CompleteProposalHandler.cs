@@ -1,9 +1,14 @@
 
 using Kahuna.Server.Persistence;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
+/// <summary>
+/// Completes an actor-owned direct-write proposal only after Raft confirms it, advancing the
+/// resident head through the shared archival routine before releasing replication state.
+/// </summary>
 internal sealed class CompleteProposalHandler : BaseHandler
 {
     public CompleteProposalHandler(KeyValueContext context) : base(context)
@@ -49,30 +54,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
         
-        if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);
-
-        if (!proposal.NoRevision)
-        {
-            bool revisionsCreated = entry.Revisions is null;
-            entry.Revisions ??= new();
-            entry.Revisions[entry.Revision] = new KeyValueRevisionEntry(entry.Value, entry.LastModified, entry.Expires, entry.State);
-            context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.EstimateRevisionAddedBytes(revisionsCreated, entry.Value));
-        }
-
-        int previousValueLength = entry.Value?.Length ?? 0;
-
-        entry.Value = proposal.Value;
-        entry.Revision = proposal.Revision;
-        entry.Expires = proposal.Expires;
-        context.TouchEntry(entry, proposal.LastUsed);
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
-
-        context.AdjustEntryValueBytes(entry, previousValueLength, entry.Value?.Length ?? 0);
-        context.EnqueueExpiry(proposal.Key, proposal.Expires);
-        if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
-            context.EnqueueTombstone(proposal.Key);
+        ApplyCommittedHead(entry, proposal, HLCTimestamp.Zero);
 
         context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,

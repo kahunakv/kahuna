@@ -24,7 +24,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 
     public async Task<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        if (message.TransactionId == HLCTimestamp.Zero)
+        if (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0)
             return KeyValueStaticResponses.ErroredResponse;
         
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
@@ -58,18 +58,21 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         if (entry.WriteIntent is not null)
         {
             // if the transactionId is the same owner no need to acquire the lock
-            if (entry.WriteIntent.TransactionId == message.TransactionId) 
+            if (entry.WriteIntent.TransactionId == message.TransactionId)
+            {
+                entry.WriteIntent.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
                 return KeyValueStaticResponses.LockedResponse;
+            }
 
             // Check if the lease is still active
-            if (entry.WriteIntent.Expires != HLCTimestamp.Zero && entry.WriteIntent.Expires - currentTime > TimeSpan.Zero)
+            if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
                 return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, entry.WriteIntent.TransactionId);
         }
 
         entry.WriteIntent = new()
         {
             TransactionId = message.TransactionId,
-            Expires = message.TransactionId + message.ExpiresMs,
+            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
         };
         
         context.Logger.LogAssignedWriteIntent(message.Key, message.TransactionId);

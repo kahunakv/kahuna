@@ -26,3 +26,28 @@ internal sealed class KeyValueWriteIntent
     public string? RecordAnchorKey { get; set; }
 
 }
+
+/// <summary>
+/// Defines the lease contract shared by point and predicate write intents. A zero-duration request
+/// creates a session-owned intent with no clock deadline; it remains live until explicit transaction
+/// cleanup releases it. Positive durations start at the actor's acquisition-time HLC, preventing a
+/// long-running transaction from receiving a lock whose deadline predates the successful acquire.
+/// Keeping this policy centralized prevents readers and writers from disagreeing about whether an
+/// accepted lock is still active.
+/// </summary>
+internal static class KeyValueWriteIntentLease
+{
+    /// <summary>
+    /// Converts a validated lock duration into its stored deadline. Callers must reject negative
+    /// durations before invoking this method.
+    /// </summary>
+    internal static HLCTimestamp FromRequest(HLCTimestamp currentTime, int expiresMs) =>
+        expiresMs == 0 ? HLCTimestamp.Zero : currentTime + expiresMs;
+
+    /// <summary>
+    /// Returns whether an intent still owns its lock. A zero deadline is session-owned rather than
+    /// expired; only a positive deadline at or before the current HLC is stale.
+    /// </summary>
+    internal static bool IsLive(KeyValueWriteIntent intent, HLCTimestamp currentTime) =>
+        intent.Expires == HLCTimestamp.Zero || intent.Expires - currentTime > TimeSpan.Zero;
+}

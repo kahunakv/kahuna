@@ -26,6 +26,74 @@ namespace Kahuna.Server.Tests;
 /// </summary>
 public sealed class TestPredicateLockLifecycle
 {
+    /// <summary>
+    /// A finite lease begins when the actor accepts the lock, not when the transaction started.
+    /// Otherwise a long-running transaction can receive a successful lock that is already stale.
+    /// </summary>
+    [Fact]
+    public async Task PositiveDurationLock_AcquiredLate_StillHasFutureDeadline()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp oldTransaction = now - 60_000;
+        InsertEntry(context, "late/key", now);
+
+        TryAcquireExclusiveLockHandler point = new(context);
+        KeyValueResponse acquired = await point.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusiveLock, oldTransaction, "late/key", 10_000));
+
+        Assert.Equal(KeyValueResponseType.Locked, acquired.Type);
+        Assert.True(context.Store.Get("late/key")!.WriteIntent!.Expires > now);
+    }
+
+    /// <summary>
+    /// A zero-duration transaction lock is session-owned rather than immediately expired. Point,
+    /// prefix, and range acquisition must all store the same sentinel and reject a competing owner
+    /// until the original transaction explicitly releases the lock.
+    /// </summary>
+    [Fact]
+    public async Task ZeroDurationLocks_RemainOwnedUntilTransactionRelease()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());
+        HLCTimestamp owner = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp contender = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        InsertEntry(context, "point/key", owner);
+        TryAcquireExclusiveLockHandler point = new(context);
+        KeyValueResponse pointOwned = await point.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusiveLock, owner, "point/key", 0));
+        KeyValueResponse pointDenied = await point.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusiveLock, contender, "point/key", 0));
+
+        Assert.Equal(KeyValueResponseType.Locked, pointOwned.Type);
+        Assert.Equal(HLCTimestamp.Zero, context.Store.Get("point/key")!.WriteIntent!.Expires);
+        Assert.Equal(KeyValueResponseType.AlreadyLocked, pointDenied.Type);
+
+        InsertEntry(context, "prefix/a", owner);
+        TryAcquireExclusivePrefixLockHandler prefix = new(context);
+        KeyValueResponse prefixOwned = prefix.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusivePrefixLock, owner, "prefix", 0));
+        KeyValueResponse prefixDenied = prefix.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusivePrefixLock, contender, "prefix", 0));
+
+        Assert.Equal(KeyValueResponseType.Locked, prefixOwned.Type);
+        Assert.Equal(HLCTimestamp.Zero, context.LocksByPrefix["prefix"].Expires);
+        Assert.Equal(HLCTimestamp.Zero, context.Store.Get("prefix/a")!.WriteIntent!.Expires);
+        Assert.Equal(KeyValueResponseType.AlreadyLocked, prefixDenied.Type);
+
+        InsertEntry(context, "range/a", owner);
+        TryAcquireExclusiveRangeLockHandler range = new(context);
+        KeyValueResponse rangeOwned = range.Execute(BuildRangeRequest(
+            owner, "range", "range/a", "range/z", 0));
+        KeyValueResponse rangeDenied = range.Execute(BuildRangeRequest(
+            contender, "range", "range/a", "range/z", 0));
+
+        Assert.Equal(KeyValueResponseType.Locked, rangeOwned.Type);
+        Assert.Equal(HLCTimestamp.Zero, context.LocksByRange["range"].Single().Expires);
+        Assert.Equal(HLCTimestamp.Zero, context.Store.Get("range/a")!.WriteIntent!.Expires);
+        Assert.Equal(KeyValueResponseType.AlreadyLocked, rangeDenied.Type);
+    }
+
     [Fact]
     public async Task PrefixLockAcquire_FailsMidLoop_StrandsNoIntents()
     {
