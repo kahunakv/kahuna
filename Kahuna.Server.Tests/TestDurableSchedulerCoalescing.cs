@@ -8,8 +8,8 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Deterministic guard for the spec §7.5 property that the durable-intent path enqueues records through the shared
-/// scheduler without an await-spanning per-partition gate, so concurrent transactions to the same partition coalesce
+/// Deterministic guard that the durable-intent path enqueues records through the shared scheduler without an
+/// await-spanning per-partition gate, so concurrent transactions to the same partition coalesce
 /// into shared proposals instead of serializing one Raft call at a time. Many concurrent durable transactions on one
 /// partition must issue far fewer <c>ReplicateEntries</c> proposals than they would if each transaction's records
 /// (init, prepare, decision, resolution) were proposed separately.

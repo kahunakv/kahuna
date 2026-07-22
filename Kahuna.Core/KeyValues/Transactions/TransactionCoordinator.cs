@@ -19,7 +19,7 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// Has no dependency on the script parser or AST. Script execution uses
 /// <see cref="ScriptTransactionExecutor"/> which composes this coordinator.
 /// </summary>
-internal sealed class TransactionCoordinator
+internal sealed class TransactionCoordinator : IDisposable
 {
     /// <summary>
     /// Grace added on top of a session's own timeout before the reaper reclaims it. Kept at or above
@@ -1175,8 +1175,8 @@ internal sealed class TransactionCoordinator
     // (a null scheduler = await inline). Deferred settlement would return after the decision barrier and materialize
     // in the background, but that requires the cross-node anchor decision lookup: a latest read on another node that
     // meets a committed-but-unmaterialized foreign intent must resolve it against the remote canonical record.
-    // Without that lookup a back-to-back transaction on a different node reads the stale prior value (a §6.1/§6.4
-    // read-your-writes violation), so settlement is synchronous until the cross-node lookup lands. The finalizer
+    // Without that lookup a back-to-back transaction on a different node reads the stale prior value, violating
+    // read-your-writes, so settlement is synchronous until the cross-node lookup lands. The finalizer
     // still supports deferred settlement via its scheduler seam for when it does.
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
         manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, resolutionScheduler: null,
@@ -1187,7 +1187,15 @@ internal sealed class TransactionCoordinator
         recordDecisionLatencyMs: finalizeLatency.Record,
         // Re-fence the pre-decision record/prepare submissions at dispatch, so a split/merge between freeze and
         // dispatch releases them retryably instead of appending to a retired partition.
-        replicateFenced: ReplicateDurableFencedAsync);
+        replicateFenced: ReplicateDurableFencedAsync,
+        maxMaterializationBatchItems: Math.Min(
+            configuration.KeyValueWriteMaxBatchItems,
+            configuration.KeyValueWriteMaxQueuedItemsPerPartition),
+        maxMaterializationBatchBytes: Math.Min(
+            configuration.KeyValueWriteMaxBatchBytes,
+            configuration.KeyValueWriteMaxQueuedBytesPerPartition));
+
+    public void Dispose() => durableFinalizer?.Dispose();
 
     // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction

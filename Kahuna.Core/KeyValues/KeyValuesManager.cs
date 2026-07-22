@@ -5937,6 +5937,7 @@ internal sealed class KeyValuesManager : IDisposable
     {
         // Reject new writes and release any queued-but-not-dispatched ones retryably before tearing down.
         writeAggregator.Stop();
+        txCoordinator.Dispose();
         rangeMapStore.Dispose();
         snapshotFloorStore.Dispose();
         rangeSplitTrigger?.Dispose();

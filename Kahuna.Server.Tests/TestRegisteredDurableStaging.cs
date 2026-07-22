@@ -1,8 +1,13 @@
+using System.Collections.Concurrent;
 using System.Text;
 using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
+using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
+using Kommander;
+using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
@@ -19,6 +24,25 @@ namespace Kahuna.Server.Tests;
 public sealed class TestRegisteredDurableStaging
 {
     private readonly ILoggerFactory loggerFactory;
+
+    private sealed class CountingExecutor : IPartitionBatchExecutor
+    {
+        private readonly IPartitionBatchExecutor inner;
+
+        public CountingExecutor(IPartitionBatchExecutor inner) => this.inner = inner;
+
+        public long Calls;
+        public long Entries;
+        public readonly ConcurrentQueue<string[]> Batches = new();
+
+        public Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        {
+            Interlocked.Increment(ref Calls);
+            Interlocked.Add(ref Entries, entries.Count);
+            Batches.Enqueue(entries.Select(entry => entry.Type).ToArray());
+            return inner.ReplicateAsync(partitionId, entries);
+        }
+    }
 
     public TestRegisteredDurableStaging(ITestOutputHelper outputHelper)
     {
@@ -38,6 +62,57 @@ public sealed class TestRegisteredDurableStaging
 
         Assert.Equal(KeyValueResponseType.Set, startType);
         return (kahuna, handle);
+    }
+
+    [Fact]
+    public async Task RegisteredSetMany_OnePartition_CoalescesMaterializationRecords()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        CountingExecutor? counter = null;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            WriteBatchExecutorDecorator = inner => counter = new CountingExecutor(inner)
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("coalesce/0", ct);
+
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+        (_, TransactionHandle handle) = await StartTransaction(kahuna, "coalesce-registered-setmany", ct);
+        List<KahunaSetKeyValueRequestItem> items = new(10);
+        for (int i = 0; i < 10; i++)
+        {
+            items.Add(new()
+            {
+                TransactionId = handle.TransactionId,
+                Key = $"coalesce/{i}",
+                Value = "v"u8.ToArray(),
+                ExpiresMs = 0,
+                Flags = KeyValueFlags.None,
+                Durability = KeyValueDurability.Persistent
+            });
+        }
+
+        List<KahunaSetKeyValueResponseItem> writes = await kahuna.LocateAndTrySetManyKeyValue(
+            items, ct, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.All(writes, write => Assert.Equal(KeyValueResponseType.Set, write.Type));
+
+        long callsBefore = counter!.Calls;
+        long entriesBefore = counter.Entries;
+        int batchesBefore = counter.Batches.Count;
+        (KeyValueResponseType commitType, _) = await kahuna.LocateAndCommitTransaction(handle, ct);
+
+        Assert.Equal(KeyValueResponseType.Committed, commitType);
+        string[][] commitBatches = counter.Batches.Skip(batchesBefore).ToArray();
+        int materializationEntries = commitBatches.Sum(batch =>
+            batch.Count(type => type == ReplicationTypes.KeyValues));
+        Assert.Equal(items.Count, materializationEntries);
+        Assert.Contains(commitBatches, batch =>
+            batch.Count(type => type == ReplicationTypes.KeyValues) > 1);
+        Assert.True(counter.Calls - callsBefore < counter.Entries - entriesBefore);
     }
 
     /// <summary>

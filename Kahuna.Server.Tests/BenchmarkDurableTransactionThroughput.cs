@@ -12,13 +12,10 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Performance benchmark for the durable-intent 2PC path's cross-transaction batching (spec §13). It drives real
-/// durable transactions through the coordinator on an embedded node with a REAL rocksdb WAL and sync writes (each
-/// Raft proposal pays a real fsync), and counts the <c>ReplicateEntries</c> proposals the shared partition write
-/// scheduler actually issues. The spec's acceptance is that <b>proposal calls per committed transaction fall as
-/// same-partition concurrency rises</b> — concurrent transactions at the same protocol barrier coalesce their
-/// records into one proposal (one fsync). It prints a report at several concurrency levels; it is a manual
-/// benchmark (run via --filter), not a fixed-threshold assertion.
+/// Measures same-partition coalescing for concurrent one-key durable transactions. It drives real transactions
+/// through the coordinator on an embedded node with a RocksDB WAL and synchronous writes, then counts the
+/// <c>ReplicateEntries</c> proposals issued by the shared partition write scheduler. It prints a report at several
+/// concurrency levels and asserts the structural coalescing trend without imposing a machine-speed threshold.
 /// </summary>
 [Collection("ClusterTests")]
 public sealed class BenchmarkDurableTransactionThroughput
@@ -52,12 +49,14 @@ public sealed class BenchmarkDurableTransactionThroughput
     private static string F(double v) => v.ToString("F2", CultureInfo.InvariantCulture);
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Benchmark_DurableTransactionCoalescing_ByConcurrency()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        output.WriteLine("=== Durable-intent 2PC cross-transaction batching (rocksdb WAL, sync writes) ===");
+        output.WriteLine("=== One-key durable transactions (rocksdb WAL, sync writes) ===");
         output.WriteLine($"{"concurrency",-12}{"txns",-8}{"proposals",-12}{"prop/txn",-10}{"entries",-10}{"ent/prop",-10}{"txns/s",-10}");
+        List<double> proposalsPerTransaction = new();
 
         foreach (int concurrency in new[] { 1, 4, 16, 64 })
         {
@@ -96,8 +95,7 @@ public sealed class BenchmarkDurableTransactionThroughput
             for (int w = 0; w < wavesWarmup; w++)
                 await RunWave();
 
-            // Let warmup deferred resolutions settle so they are not counted in the measured window. (Do not call
-            // the write-drain here — it stops the aggregator.)
+            // Let warmup work drain so it does not affect the measured proposal count.
             await Task.Delay(800, ct);
 
             long callsBefore = counter!.Calls;
@@ -107,9 +105,9 @@ public sealed class BenchmarkDurableTransactionThroughput
             for (int w = 0; w < wavesMeasured; w++)
                 await RunWave();
 
-            sw.Stop(); // commit-path wall time (deferred resolution runs off this path)
+            sw.Stop();
 
-            // Let the deferred resolutions complete so their proposals are counted in the proposal total.
+            // Allow any scheduler work still completing after the client result to be counted.
             await Task.Delay(1500, ct);
 
             long proposals = counter.Calls - callsBefore;
@@ -119,14 +117,15 @@ public sealed class BenchmarkDurableTransactionThroughput
             double entPerProp = proposals == 0 ? 0 : entries / (double)proposals;
             double txnsPerSec = txns / sw.Elapsed.TotalSeconds;
             long records = ((KahunaManager)node.Kahuna).DurableTransactionRecordStore.Count;
+            proposalsPerTransaction.Add(perTxn);
 
             output.WriteLine($"{concurrency,-12}{txns,-8}{proposals,-12}{F(perTxn),-10}{entries,-10}{F(entPerProp),-10}{F(txnsPerSec),-10}  [totalCalls={counter.Calls} durableRecords={records}]");
         }
 
         output.WriteLine("");
-        output.WriteLine("Acceptance (spec §13): proposals/txn should fall as concurrency rises (records of concurrent");
-        output.WriteLine("transactions at the same barrier coalesce into one proposal = one fsync).");
+        output.WriteLine("Proposal calls per transaction should fall as concurrency rises because records at the");
+        output.WriteLine("same protocol barrier can share one proposal.");
 
-        Assert.True(true);
+        Assert.True(proposalsPerTransaction[^1] < proposalsPerTransaction[0]);
     }
 }

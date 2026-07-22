@@ -122,10 +122,10 @@ public sealed class TestDurableTransactionFinalizer
         TransactionRecordStore commitRecords = new();
         PreparedIntentStore commitIntents = new();
         Seam commitSeam = new() { Records = commitRecords, Intents = commitIntents };
-        List<(int Partition, string Key)> commits = [];
+        ConcurrentQueue<(int Partition, string Key)> commits = new();
         DurableTransactionFinalizer commitFinalizer = new(
             commitRecords, commitIntents, commitSeam.Replicate,
-            applyCommitLocally: (p, i) => { commits.Add((p, i.Key)); return Task.FromResult(true); });
+            applyCommitLocally: (p, i) => { commits.Enqueue((p, i.Key)); return Task.FromResult(true); });
 
         await commitFinalizer.FinalizeAsync(
             Input(Ts(1000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
@@ -137,12 +137,12 @@ public sealed class TestDurableTransactionFinalizer
         TransactionRecordStore abortRecords = new();
         PreparedIntentStore abortIntents = new();
         Seam abortSeam = new() { Records = abortRecords, Intents = abortIntents };
-        List<(int Partition, string Key)> rollbacks = [];
-        List<(int Partition, string Key)> abortCommits = [];
+        ConcurrentQueue<(int Partition, string Key)> rollbacks = new();
+        ConcurrentQueue<(int Partition, string Key)> abortCommits = new();
         DurableTransactionFinalizer abortFinalizer = new(
             abortRecords, abortIntents, abortSeam.Replicate,
-            applyCommitLocally: (p, i) => { abortCommits.Add((p, i.Key)); return Task.FromResult(true); },
-            applyRollbackLocally: (p, i) => { rollbacks.Add((p, i.Key)); return Task.FromResult(true); });
+            applyCommitLocally: (p, i) => { abortCommits.Enqueue((p, i.Key)); return Task.FromResult(true); },
+            applyRollbackLocally: (p, i) => { rollbacks.Enqueue((p, i.Key)); return Task.FromResult(true); });
 
         DurableFinalizeOutcome outcome = await abortFinalizer.FinalizeAsync(
             Input(Ts(3000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(false), opId: Ts(4000), CancellationToken.None);
@@ -180,6 +180,207 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
         Assert.Null(intents.Get("acct/1"));
         Assert.Null(intents.Get("idx/name/bob"));
+    }
+
+    [Fact]
+    public async Task PrepareBarrier_SubmitsEveryParticipantBeforeAwaitingResults()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        TaskCompletionSource preparedStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releasePrepares = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int preparesStarted = 0;
+
+        async Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+        {
+            if (logType == ReplicationTypes.PreparedIntent && Interlocked.Increment(ref preparesStarted) == 2)
+                preparedStarted.TrySetResult();
+
+            if (logType == ReplicationTypes.PreparedIntent)
+                await releasePrepares.Task.WaitAsync(cancellationToken);
+
+            return await seam.Replicate(partitionId, logType, data, cancellationToken);
+        }
+
+        DurableTransactionFinalizer finalizer = new(records, intents, Replicate);
+        Task<DurableFinalizeOutcome> finalize = finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), Ts(2000), CancellationToken.None);
+
+        await preparedStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        Assert.False(finalize.IsCompleted);
+
+        releasePrepares.TrySetResult();
+        Assert.Equal(DurableFinalizeResult.Committed, (await finalize).Result);
+    }
+
+    [Fact]
+    public async Task Commit_SubmitsMaterializationsInCappedWindows()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        TaskCompletionSource firstWindowStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseFirstWindow = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int materializationsStarted = 0;
+
+        async Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+        {
+            if (logType == ReplicationTypes.KeyValues)
+            {
+                int started = Interlocked.Increment(ref materializationsStarted);
+                if (started == 3)
+                    firstWindowStarted.TrySetResult();
+
+                if (started <= 3)
+                    await releaseFirstWindow.Task.WaitAsync(cancellationToken);
+            }
+
+            return await seam.Replicate(partitionId, logType, data, cancellationToken);
+        }
+
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents, Replicate, maxMaterializationBatchItems: 3);
+        Task<DurableFinalizeOutcome> finalize = finalizer.FinalizeAsync(
+            Input(Ts(1000), 1,
+                (5, "acct/1"), (5, "acct/2"), (5, "acct/3"), (5, "acct/4"),
+                (5, "acct/5"), (5, "acct/6"), (5, "acct/7")),
+            Validate(true), Ts(2000), CancellationToken.None);
+
+        await firstWindowStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        Assert.Equal(3, Volatile.Read(ref materializationsStarted));
+        Assert.False(finalize.IsCompleted);
+
+        releaseFirstWindow.TrySetResult();
+        Assert.Equal(DurableFinalizeResult.Committed, (await finalize).Result);
+        Assert.Equal(7, Volatile.Read(ref materializationsStarted));
+    }
+
+    [Fact]
+    public async Task Commit_SubmitsOversizedMaterializationsAlone()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        int activeMaterializations = 0;
+        int maxActiveMaterializations = 0;
+        int materializations = 0;
+
+        async Task<bool> Replicate(
+            int partitionId,
+            string logType,
+            byte[] data,
+            CancellationToken cancellationToken)
+        {
+            if (logType != ReplicationTypes.KeyValues)
+                return await seam.Replicate(partitionId, logType, data, cancellationToken);
+
+            Interlocked.Increment(ref materializations);
+            int active = Interlocked.Increment(ref activeMaterializations);
+            UpdateMaximum(ref maxActiveMaterializations, active);
+            try
+            {
+                await Task.Delay(10, cancellationToken);
+                return await seam.Replicate(partitionId, logType, data, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref activeMaterializations);
+            }
+        }
+
+        using DurableTransactionFinalizer finalizer = new(
+            records,
+            intents,
+            Replicate,
+            maxMaterializationBatchItems: 10,
+            maxMaterializationBatchBytes: 1);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "large/1"), (5, "large/2"), (5, "large/3")),
+            Validate(true),
+            Ts(2000),
+            CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(3, Volatile.Read(ref materializations));
+        Assert.Equal(1, Volatile.Read(ref maxActiveMaterializations));
+    }
+
+    [Fact]
+    public async Task ConcurrentTransactions_ShareLocalApplyLimit()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        TaskCompletionSource limitReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseApplies = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int appliesStarted = 0;
+        int activeApplies = 0;
+        int maxActiveApplies = 0;
+
+        async Task<bool> Apply(int _, PreparedIntent __)
+        {
+            int active = Interlocked.Increment(ref activeApplies);
+            UpdateMaximum(ref maxActiveApplies, active);
+            if (Interlocked.Increment(ref appliesStarted) == 32)
+                limitReached.TrySetResult();
+
+            try
+            {
+                await releaseApplies.Task.WaitAsync(TestContext.Current.CancellationToken);
+                return true;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref activeApplies);
+            }
+        }
+
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate, applyCommitLocally: Apply);
+        (int Partition, string Key)[] firstParticipants = Enumerable.Range(0, 40)
+            .Select(i => (5, $"apply/first/{i}"))
+            .ToArray();
+        (int Partition, string Key)[] secondParticipants = Enumerable.Range(0, 40)
+            .Select(i => (5, $"apply/second/{i}"))
+            .ToArray();
+
+        Task<DurableFinalizeOutcome> first = finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, firstParticipants), Validate(true), Ts(2000), CancellationToken.None);
+        Task<DurableFinalizeOutcome> second = finalizer.FinalizeAsync(
+            Input(Ts(3000), 1, secondParticipants), Validate(true), Ts(4000), CancellationToken.None);
+
+        await limitReached.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(32, Volatile.Read(ref appliesStarted));
+        Assert.Equal(32, Volatile.Read(ref activeApplies));
+        Assert.Equal(32, Volatile.Read(ref maxActiveApplies));
+
+        releaseApplies.TrySetResult();
+        DurableFinalizeOutcome[] outcomes = await Task.WhenAll(first, second);
+        Assert.All(outcomes, outcome => Assert.Equal(DurableFinalizeResult.Committed, outcome.Result));
+        Assert.Equal(80, Volatile.Read(ref appliesStarted));
+    }
+
+    private static void UpdateMaximum(ref int maximum, int candidate)
+    {
+        int observed = Volatile.Read(ref maximum);
+        while (candidate > observed)
+        {
+            int prior = Interlocked.CompareExchange(ref maximum, candidate, observed);
+            if (prior == observed)
+                return;
+            observed = prior;
+        }
     }
 
     [Fact]

@@ -45,13 +45,18 @@ internal readonly record struct DurableFinalizeOutcome(DurableFinalizeResult Res
 /// <summary>
 /// Drives one transaction's finalize under the durable-intent 2PC model: initialize the canonical
 /// record, prepare every participant's durable intent (prepare barrier), validate the read-set, decide the
-/// canonical outcome by compare-and-set, then resolve each intent. This slice does one Raft request per
-/// operation (cross-transaction batching is a later slice); it owns the protocol sequencing and the outcome
+/// canonical outcome by compare-and-set, then resolve each intent. It owns the protocol sequencing and outcome
 /// mapping, behind a replicate seam so the same logic runs against real Raft in production and synchronously in
 /// tests. It never truncates a log: abort is a canonical decision, not a rollback.
 /// </summary>
-internal sealed class DurableTransactionFinalizer
+internal sealed class DurableTransactionFinalizer : IDisposable
 {
+    // Local apply is actor work, not Raft I/O. This gate is shared by every finalize using this finalizer, so
+    // concurrent transactions cannot multiply their individual fan-out into an unbounded actor-inbox flood.
+    private const int MaxConcurrentLocalApplies = 32;
+
+    private readonly SemaphoreSlim localApplyGate = new(MaxConcurrentLocalApplies);
+
     /// <summary>Replicates a partition's serialized delta of the given log type and returns whether it committed
     /// durably. In production this is an auto-commit Raft round trip; the finalizer applies the delta to the
     /// local store on success (idempotent with the replication-callback apply on every replica).</summary>
@@ -105,6 +110,10 @@ internal sealed class DurableTransactionFinalizer
     // work that happens after the decision. Null in tests that do not observe latency.
     private readonly Action<double>? recordDecisionLatencyMs;
 
+    private readonly int maxMaterializationBatchItems;
+
+    private readonly long maxMaterializationBatchBytes;
+
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
         // The prepared-intent store is applied by the ordered scheduler-completion path (the single apply owner),
@@ -116,7 +125,9 @@ internal sealed class DurableTransactionFinalizer
         ApplyRollbackLocally? applyRollbackLocally = null,
         Func<HLCTimestamp>? attemptClock = null,
         Action<double>? recordDecisionLatencyMs = null,
-        ReplicateFencedDelegate? replicateFenced = null)
+        ReplicateFencedDelegate? replicateFenced = null,
+        int maxMaterializationBatchItems = 512,
+        long maxMaterializationBatchBytes = 4 * 1024 * 1024)
     {
         this.recordStore = recordStore;
         this.replicate = replicate;
@@ -127,6 +138,8 @@ internal sealed class DurableTransactionFinalizer
         this.scheduleResolution = resolutionScheduler;
         this.attemptClock = attemptClock;
         this.recordDecisionLatencyMs = recordDecisionLatencyMs;
+        this.maxMaterializationBatchItems = Math.Max(1, maxMaterializationBatchItems);
+        this.maxMaterializationBatchBytes = Math.Max(1, maxMaterializationBatchBytes);
     }
 
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
@@ -154,13 +167,13 @@ internal sealed class DurableTransactionFinalizer
         // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
         // failure — its outcome is needed to drive a truthful abort). A prepared-then-aborted intent is cleaned
         // up by resolution/recovery; a failed prepare forces the transaction to abort. ──
-        bool allPrepared = true;
-        foreach (DurablePartitionPrepare partition in input.Partitions)
+        Task<bool>[] prepareTasks = input.Partitions.Select(partition =>
         {
             byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-            if (!await ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken).ConfigureAwait(false))
-                allPrepared = false;
-        }
+            return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
+        }).ToArray();
+        bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
+        bool allPrepared = prepareResults.All(static prepared => prepared);
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
         bool validated = allPrepared && await validateReadSet(cancellationToken).ConfigureAwait(false);
@@ -259,61 +272,147 @@ internal sealed class DurableTransactionFinalizer
 
         bool commit = record.Decision == TransactionDecision.Commit;
 
-        foreach (DurablePartitionPrepare partition in input.Partitions)
+        await Task.WhenAll(input.Partitions.Select(partition => ResolvePartitionAsync(partition, commit, localApplyGate, cancellationToken))).ConfigureAwait(false);
+    }
+
+    private async Task ResolvePartitionAsync(
+        DurablePartitionPrepare partition,
+        bool commit,
+        SemaphoreSlim localApplyGate,
+        CancellationToken cancellationToken)
+    {
+        // Only an intent whose terminal effect is durably applied may be settled (resolved + removed). On
+        // commit that means its value is materialized: settling an intent whose materialization did not commit
+        // would delete the only durable copy of an already-committed value, so a false/thrown materialization
+        // leaves the intent for the recovery sweep to retry. On abort the actor must still positively clear
+        // staged state before settlement, otherwise the intent remains for recovery.
+        List<PreparedIntent> settleable;
+        if (commit)
         {
-            // Only an intent whose terminal effect is durably applied may be settled (resolved + removed). On
-            // commit that means its value is materialized: settling an intent whose materialization did not commit
-            // would delete the only durable copy of an already-committed value, so a false/thrown materialization
-            // leaves the intent for the recovery sweep to retry. On abort the actor must still positively clear
-            // staged state before settlement, otherwise the intent remains for recovery.
-            List<PreparedIntent> settleable = new(partition.Intents.Count);
+            // Fill scheduler-sized windows before awaiting them. Each window can coalesce into a capped proposal,
+            // while a transaction larger than the scheduler's admission capacity advances without allocating or
+            // admitting its whole working set at once.
+            bool[] materialized = await MaterializePartitionAsync(partition, cancellationToken).ConfigureAwait(false);
 
-            foreach (PreparedIntent intent in partition.Intents)
+            if (applyCommitLocally is not null)
+                materialized = await ApplyLocallyAsync(
+                    partition.PartitionId,
+                    partition.Intents,
+                    materialized,
+                    (partitionId, intent) => applyCommitLocally(partitionId, intent),
+                    localApplyGate,
+                    cancellationToken).ConfigureAwait(false);
+
+            settleable = partition.Intents.Where((_, index) => materialized[index]).ToList();
+        }
+        else
+        {
+            bool[] rolledBack = applyRollbackLocally is null
+                ? Enumerable.Repeat(true, partition.Intents.Count).ToArray()
+                : await ApplyLocallyAsync(
+                    partition.PartitionId,
+                    partition.Intents,
+                    Enumerable.Repeat(true, partition.Intents.Count).ToArray(),
+                    (partitionId, intent) => applyRollbackLocally(partitionId, intent),
+                    localApplyGate,
+                    cancellationToken).ConfigureAwait(false);
+
+            settleable = partition.Intents.Where((_, index) => rolledBack[index]).ToList();
+        }
+
+        if (settleable.Count > 0)
+            await SettleIntentsAsync(partition.PartitionId, settleable, commit, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool[]> MaterializePartitionAsync(DurablePartitionPrepare partition, CancellationToken cancellationToken)
+    {
+        bool[] materialized = new bool[partition.Intents.Count];
+        int next = 0;
+
+        while (next < partition.Intents.Count)
+        {
+            List<(int Index, byte[] Record)> window = new(Math.Min(maxMaterializationBatchItems, partition.Intents.Count - next));
+            long windowBytes = 0;
+
+            while (next < partition.Intents.Count && window.Count < maxMaterializationBatchItems)
             {
-                if (commit)
-                {
-                    bool materialized;
-                    try
-                    {
-                        // Replicate the committed value as an ordinary key/value record so followers converge, then
-                        // apply it on the leader (the leader does not apply it through the replication callback).
-                        byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
-                        materialized = await replicate(partition.PartitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
-                        if (materialized && applyCommitLocally is not null)
-                            materialized = await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        materialized = false;
-                    }
+                byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next]);
+                if (window.Count > 0 && windowBytes + record.Length > maxMaterializationBatchBytes)
+                    break;
 
-                    if (materialized)
-                        settleable.Add(intent);
-                }
-                else
-                {
-                    // Abort: nothing materializes, but clear each participant's staged write intent + MVCC on the
-                    // leader so the key is not blocked until the intent lease expires.
-                    bool rolledBack = false;
-                    try
-                    {
-                        rolledBack = applyRollbackLocally is null
-                            || await applyRollbackLocally(partition.PartitionId, intent).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        rolledBack = false;
-                    }
+                window.Add((next, record));
+                windowBytes += record.Length;
+                next++;
 
-                    if (rolledBack)
-                        settleable.Add(intent);
-                }
+                if (windowBytes >= maxMaterializationBatchBytes)
+                    break;
             }
 
-            if (settleable.Count > 0)
-                await SettleIntentsAsync(partition.PartitionId, settleable, commit, cancellationToken).ConfigureAwait(false);
+            Task<bool>[] tasks = window
+                .Select(item => MaterializeAsync(partition.PartitionId, item.Record, cancellationToken))
+                .ToArray();
+            bool[] results = await Task.WhenAll(tasks).ConfigureAwait(false);
+            for (int i = 0; i < results.Length; i++)
+                materialized[window[i].Index] = results[i];
+        }
+
+        return materialized;
+    }
+
+    private async Task<bool> MaterializeAsync(int partitionId, byte[] kvRecord, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Replicate the committed value as an ordinary key/value record so followers converge. The leader
+            // applies it separately through its owning actor after the durable record is acknowledged.
+            return await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            return false;
         }
     }
+
+    private static async Task<bool[]> ApplyLocallyAsync(
+        int partitionId,
+        IReadOnlyList<PreparedIntent> intents,
+        IReadOnlyList<bool> durableEffects,
+        Func<int, PreparedIntent, Task<bool>> apply,
+        SemaphoreSlim gate,
+        CancellationToken cancellationToken)
+    {
+        bool[] applied = new bool[intents.Count];
+
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, intents.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrentLocalApplies },
+            async (index, _) =>
+            {
+                if (!durableEffects[index])
+                    return;
+
+                try
+                {
+                    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        applied[index] = await apply(partitionId, intents[index]).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
+                }
+                catch
+                {
+                    applied[index] = false;
+                }
+            }).ConfigureAwait(false);
+
+        return applied;
+    }
+
+    public void Dispose() => localApplyGate.Dispose();
 
     // Resolves and removes each intent in one atomic delta (applied in order Pending -> resolved -> deleted), so
     // no "resolved-but-not-removed" state can linger to block a later write to the key or serve a stale value.
