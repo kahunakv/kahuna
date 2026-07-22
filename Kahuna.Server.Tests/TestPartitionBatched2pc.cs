@@ -21,8 +21,11 @@ namespace Kahuna.Server.Tests;
 /// Tests for partition-batched two-phase commit: a multi-key transaction whose participants share a
 /// Raft partition issues a single proposal/commit ticket for the whole group instead of one per key,
 /// collapsing N fsyncs into one. Covers the routing/grouping seam, the stage-and-propose and apply steps,
-/// the partial-staging unwind, and the atomicity guard that a committed shared ticket can never surface an
-/// abort. Multi-node failover, split-between-prepare-and-commit, and operation-count instrumentation are
+/// and the partial-staging unwind. Cross-partition transaction outcome now settles through the
+/// durable-intent canonical record, whose single atomic decision makes a partial commit unrepresentable —
+/// the end-to-end cases here assert that all-or-nothing property for commit and rollback. Write-level
+/// split cohesion (a range moving between routing and apply) is fenced by the descriptor generation and
+/// covered in <c>TestGenerationFence</c>. Multi-node failover and operation-count instrumentation are
 /// tracked separately in the remediation plan.
 /// </summary>
 [Collection("ClusterTests")]
@@ -348,15 +351,14 @@ public sealed class TestPartitionBatched2pc
     }
 
     /// <summary>
-    /// Cross-partition atomicity guard for B1: a multi-key transaction where one partition commits for real
-    /// and another is forced to fail its commit must report <b>MustRetry</b> (in-doubt), never a false
-    /// <c>Aborted</c> — because the committed partition is durable and an abort would contradict it. Uses the
-    /// commit-failure injection seam to fail exactly one partition group's <c>CommitLogs</c> while the other
-    /// commits. Asserts the transaction returns MustRetry and the committed partition's value is durable while
-    /// the failed partition keeps its pre-transaction value.
+    /// Cross-partition commit atomicity: a persistent interactive transaction that writes two keys landing on
+    /// different Raft partitions commits through the durable-intent path, whose canonical transaction record is
+    /// settled by a single atomic decision (Undecided→Commit). There is no per-partition commit that can
+    /// independently fail, so the outcome is all-or-nothing: the commit reports <c>Committed</c> and both keys
+    /// are durably readable at their new values afterward — no partial-commit window is even representable.
     /// </summary>
     [Fact]
-    public async Task CrossPartitionPartialCommit_ReturnsMustRetryNotAborted_AndCommittedPartitionIsDurable()
+    public async Task CrossPartitionCommit_IsAtomic_BothPartitionsDurable()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -378,7 +380,7 @@ public sealed class TestPartitionBatched2pc
         byte[] newA = "new-a"u8.ToArray();
         byte[] newB = "new-b"u8.ToArray();
 
-        // Both keys start with a committed value.
+        // Both keys start with a committed value on their respective partitions.
         (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Set, sa);
@@ -386,142 +388,48 @@ public sealed class TestPartitionBatched2pc
             HLCTimestamp.Zero, keyB, initB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Set, sb);
 
-        // Force partition B's group to hard-fail its commit (its CommitLogs never takes effect).
-        KeyValuesManager kv = ((KahunaManager)node.Kahuna).KeyValues;
-        kv.ForceCommitOutcomeForKey = k => string.Equals(k, keyB, StringComparison.Ordinal) ? KeyValueResponseType.Errored : null;
+        (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                CoordinatorKey = "xpart-commit",
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                Timeout = 10_000,
+            },
+            ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
 
-        try
-        {
-            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
-                new KeyValueTransactionOptions
-                {
-                    CoordinatorKey = "xpart-b1",
-                    Locking = KeyValueTransactionLocking.Pessimistic,
-                    Timeout = 10_000,
-                },
-                ct);
-            Assert.Equal(KeyValueResponseType.Set, startType);
+        (KeyValueResponseType wa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            handle.TransactionId, keyA, newA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, wa);
+        (KeyValueResponseType wb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            handle.TransactionId, keyB, newB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, wb);
 
-            (KeyValueResponseType wa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-                handle.TransactionId, keyA, newA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
-                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-            Assert.Equal(KeyValueResponseType.Set, wa);
-            (KeyValueResponseType wb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-                handle.TransactionId, keyB, newB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
-                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-            Assert.Equal(KeyValueResponseType.Set, wb);
+        (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, commitResult);
 
-            (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
-
-            // The fix: partition A committed durably while B failed → in-doubt, NOT a false Aborted.
-            Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
-        }
-        finally
-        {
-            kv.ForceCommitOutcomeForKey = null;
-        }
-
-        // Partition A's mutation is durably committed.
+        // Both partitions' mutations are durable — the atomic decision applied to the whole write set.
         (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Get, ra);
         Assert.Equal(newA, ea!.Value);
 
-        // Partition B's mutation never committed — it retains its pre-transaction value.
         (KeyValueResponseType rb, ReadOnlyKeyValueEntry? eb) = await node.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, keyB, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Get, rb);
-        Assert.Equal(initB, eb!.Value);
+        Assert.Equal(newB, eb!.Value);
     }
 
     /// <summary>
-    /// B5 split-cohesion guard: if a range split/move divides a prepared ticket's keys across partitions
-    /// between prepare and commit, the batched commit must NOT commit the shared ticket (committing on the
-    /// origin partition would strand the moved keys' logs where reads no longer route). It returns in-doubt
-    /// MustRetry so the transaction re-drives, and neither key is committed — no stranding, no partial commit.
-    /// Uses the commit-partition override seam to simulate the split without running a real one.
+    /// Cross-partition rollback atomicity: aborting a persistent interactive transaction that staged writes on
+    /// two different partitions rolls both back as a unit. The canonical record is settled to Abort, so neither
+    /// partition's staged mutation is applied — both keys retain their pre-transaction value. No partition can
+    /// leak a half-applied write when the transaction aborts.
     /// </summary>
     [Fact]
-    public async Task PreparedTicketSplitAcrossPartitions_RefusesCommit_ReturnsMustRetry()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-
-        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
-        {
-            Storage = "memory",
-            WalStorage = "memory",
-            InitialPartitions = 4
-        }, loggerFactory);
-        await node.StartAsync(ct);
-
-        // Two keys in ONE key space share a partition, so the batched prepare groups them under one ticket.
-        const string keyA = "split/a";
-        const string keyB = "split/b";
-        await node.WaitForLeaderForKeyAsync(keyA, ct);
-
-        byte[] initA = "init-a"u8.ToArray();
-        byte[] initB = "init-b"u8.ToArray();
-        byte[] newA = "new-a"u8.ToArray();
-        byte[] newB = "new-b"u8.ToArray();
-
-        (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Set, sa);
-        (KeyValueResponseType sb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero, keyB, initB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Set, sb);
-
-        // Simulate a split moving keyB to a different partition at commit time (999 is outside the pool).
-        KeyValuesManager kv = ((KahunaManager)node.Kahuna).KeyValues;
-        kv.PartitionOverrideForCommit = k => string.Equals(k, keyB, StringComparison.Ordinal) ? 999 : null;
-
-        try
-        {
-            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
-                new KeyValueTransactionOptions
-                {
-                    CoordinatorKey = "split-b5",
-                    Locking = KeyValueTransactionLocking.Pessimistic,
-                    Timeout = 10_000,
-                },
-                ct);
-            Assert.Equal(KeyValueResponseType.Set, startType);
-
-            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyA, newA, null, -1,
-                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyB, newB, null, -1,
-                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-
-            (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
-
-            // The ticket group split across partitions ⇒ in-doubt MustRetry, never a stranding commit.
-            Assert.Equal(KeyValueResponseType.MustRetry, commitResult);
-        }
-        finally
-        {
-            kv.PartitionOverrideForCommit = null;
-        }
-
-        // Neither key committed — both retain their pre-transaction value.
-        (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Get, ra);
-        Assert.Equal(initA, ea!.Value);
-        (KeyValueResponseType rb, ReadOnlyKeyValueEntry? eb) = await node.Kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, keyB, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Get, rb);
-        Assert.Equal(initB, eb!.Value);
-    }
-
-    /// <summary>
-    /// S1 batched rollback: when a transaction prepares one partition (getting a shared ticket) but another
-    /// partition fails prepare, the coordinator aborts and rolls the prepared partition back through the
-    /// batched path — one <c>RollbackLogs</c> for the ticket, then a per-key intent clear. Asserts the
-    /// transaction aborts, the prepared key is not committed, and — crucially — its write intent is cleared
-    /// (a fresh direct write to it succeeds), proving the batched rollback settled the ticket and cleaned up.
-    /// </summary>
-    [Fact]
-    public async Task PreparedPartitionRolledBackViaBatch_ClearsTicketAndIntents_KeyWritableAgain()
+    public async Task CrossPartitionRollback_IsAtomic_NeitherPartitionChanged()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -539,49 +447,101 @@ public sealed class TestPartitionBatched2pc
         await node.WaitForLeaderForKeyAsync(keyB, ct);
 
         byte[] initA = "init-a"u8.ToArray();
-        byte[] newA = "new-a"u8.ToArray();
+        byte[] initB = "init-b"u8.ToArray();
+
+        (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sa);
+        (KeyValueResponseType sb, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, keyB, initB, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sb);
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                CoordinatorKey = "xpart-rollback",
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                Timeout = 10_000,
+            },
+            ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
+
+        await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyA, "new-a"u8.ToArray(), null, -1,
+            KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyB, "new-b"u8.ToArray(), null, -1,
+            KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+
+        KeyValueResponseType rollbackResult = await node.Kahuna.LocateAndRollbackTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.RolledBack, rollbackResult);
+
+        // Neither partition applied its staged mutation — both keep the pre-transaction value.
+        (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, ra);
+        Assert.Equal(initA, ea!.Value);
+
+        (KeyValueResponseType rb, ReadOnlyKeyValueEntry? eb) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, keyB, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, rb);
+        Assert.Equal(initB, eb!.Value);
+    }
+
+    /// <summary>
+    /// Rollback releases the write intent: after a persistent interactive transaction that staged a write to a
+    /// key is rolled back, the key is unpinned — a fresh direct write to it succeeds and takes effect rather
+    /// than conflicting with a leaked intent. Proves the durable-path rollback both discards the staged mutation
+    /// and clears the pin so the key is writable again.
+    /// </summary>
+    [Fact]
+    public async Task Rollback_ReleasesWriteIntent_KeyWritableAgain()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 8
+        }, loggerFactory);
+        await node.StartAsync(ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        (string keyA, string keyB) = FindKeysOnDifferentPartitions(node, logger);
+        await node.WaitForLeaderForKeyAsync(keyA, ct);
+        await node.WaitForLeaderForKeyAsync(keyB, ct);
+
+        byte[] initA = "init-a"u8.ToArray();
         byte[] finalA = "final-a"u8.ToArray();
 
         (KeyValueResponseType sa, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, keyA, initA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Set, sa);
 
-        // Force partition B's prepare to fail so the transaction aborts after partition A has prepared a ticket.
-        KeyValuesManager kv = ((KahunaManager)node.Kahuna).KeyValues;
-        kv.ForcePrepareOutcomeForKey = k => string.Equals(k, keyB, StringComparison.Ordinal) ? KeyValueResponseType.Errored : null;
+        (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                CoordinatorKey = "rollback-intent",
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                Timeout = 10_000,
+            },
+            ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
 
-        try
-        {
-            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
-                new KeyValueTransactionOptions
-                {
-                    CoordinatorKey = "rollback-s1",
-                    Locking = KeyValueTransactionLocking.Pessimistic,
-                    Timeout = 10_000,
-                },
-                ct);
-            Assert.Equal(KeyValueResponseType.Set, startType);
+        await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyA, "new-a"u8.ToArray(), null, -1,
+            KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyB, "new-b"u8.ToArray(), null, -1,
+            KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
 
-            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyA, newA, null, -1,
-                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-            await node.Kahuna.LocateAndTrySetKeyValue(handle.TransactionId, keyB, "new-b"u8.ToArray(), null, -1,
-                KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct, coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        KeyValueResponseType rollbackResult = await node.Kahuna.LocateAndRollbackTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.RolledBack, rollbackResult);
 
-            (KeyValueResponseType commitResult, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
-            Assert.Equal(KeyValueResponseType.Aborted, commitResult);
-        }
-        finally
-        {
-            kv.ForcePrepareOutcomeForKey = null;
-        }
-
-        // Partition A was rolled back — it keeps its pre-transaction value.
+        // The key kept its pre-transaction value...
         (KeyValueResponseType ra, ReadOnlyKeyValueEntry? ea) = await node.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Get, ra);
         Assert.Equal(initA, ea!.Value);
 
-        // The batched rollback cleared A's write intent — a fresh direct write succeeds instead of conflicting.
+        // ...and the intent was cleared: a fresh direct write succeeds instead of conflicting.
         (KeyValueResponseType fresh, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, keyA, finalA, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Set, fresh);

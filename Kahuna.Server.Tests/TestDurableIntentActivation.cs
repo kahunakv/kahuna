@@ -74,19 +74,13 @@ public sealed class TestDurableIntentActivation
         List<string> seen = [.. exec.SeenTypes];
 
         // Activation, definitively: the transaction took the durable finalize path (a canonical record exists) and
-        // its records replicated through the shared scheduler. Reading the value back is intentionally not asserted
-        // here — it depends on the durable resolution materializing on the leader, a separate known bug tracked by
-        // the multi-key test below.
-        // Activation, definitively: the transaction took the durable finalize path (a canonical record exists) and
-        // its records replicated through the shared scheduler. Reading the value back is intentionally not asserted
-        // here — it depends on the durable resolution materializing on the leader, a separate known bug tracked by
-        // the multi-key test below.
+        // its init/prepare records replicated through the shared scheduler.
         Assert.True(records > 0, $"durable records={records}; seen: {string.Join(",", seen)}");
         Assert.Contains(ReplicationTypes.TransactionRecord, seen);
         Assert.Contains(ReplicationTypes.PreparedIntent, seen);
 
-        // The committed value is durably readable on the leader after resolution settles (not just during the §6
-        // Pending window): wait past settlement, then read.
+        // The committed value is durably readable on the leader once resolution settles (not just while the prepared
+        // intent is still pending): wait past settlement, then read.
         await Task.Delay(1500, ct);
         (KeyValueResponseType t, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, "act/row-1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);

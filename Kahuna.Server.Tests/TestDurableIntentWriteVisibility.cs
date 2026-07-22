@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Deferred-settlement writer visibility (§6.3): a non-transactional write that meets a foreign durable prepared
+/// Deferred-settlement writer visibility: a non-transactional write that meets a foreign durable prepared
 /// intent must resolve its canonical outcome before replacing it — a committed intent materializes (so the write's
 /// existence checks and next revision are based on the committed value), an undecided intent forces a retry, and an
 /// aborted intent is ignored. Drives the real LocateAndTrySetKeyValue entry point with injected intents.

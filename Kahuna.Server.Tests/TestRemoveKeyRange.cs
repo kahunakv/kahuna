@@ -193,7 +193,7 @@ public sealed class TestRemoveKeyRange
         Assert.Fail($"Timed out waiting for descriptor of '{keySpace}' to appear.");
     }
 
-    // ── T1: RemoveKeyRangeAsync_DropsAllDescriptorsForSpace_OnLeader ─────────────
+    // ── RemoveKeyRangeAsync_DropsAllDescriptorsForSpace_OnLeader ─────────────
 
     [Fact]
     public async Task RemoveKeyRangeAsync_DropsAllDescriptorsForSpace_OnLeader()
@@ -224,7 +224,7 @@ public sealed class TestRemoveKeyRange
         }
     }
 
-    // ── T1: RemoveKeyRangeAsync_ForwardedFromNonLeader_RemovesOnLeader ───────────
+    // ── RemoveKeyRangeAsync_ForwardedFromNonLeader_RemovesOnLeader ───────────
 
     [Fact]
     public async Task RemoveKeyRangeAsync_ForwardedFromNonLeader_RemovesOnLeader()
@@ -256,7 +256,7 @@ public sealed class TestRemoveKeyRange
         }
     }
 
-    // ── T1: RemoveKeyRangeAsync_AbsentSpace_IsIdempotentNoOp ─────────────────────
+    // ── RemoveKeyRangeAsync_AbsentSpace_IsIdempotentNoOp ─────────────────────
 
     [Fact]
     public async Task RemoveKeyRangeAsync_AbsentSpace_IsIdempotentNoOp()
@@ -280,11 +280,11 @@ public sealed class TestRemoveKeyRange
         }
     }
 
-    // ── T1: RemoveKeyRangeAsync_BelowMinPartitions_IsNoOp ────────────────────────
+    // ── RemoveKeyRangeAsync_BelowMinPartitions_IsNoOp ────────────────────────
     // Verified via the guard in RemoveKeyRangeAsync — no cluster needed; same guard mirrors
     // RegisterKeyRangeAsync's own early-out at InitialPartitions < FirstDataPartitionId.
 
-    // ── T2: ReconcileTo_RemovesSpacesNotInLiveSet_KeepsLiveOnes ─────────────────
+    // ── ReconcileTo_RemovesSpacesNotInLiveSet_KeepsLiveOnes ─────────────────
 
     [Fact]
     public void ReconcileTo_RemovesSpacesNotInLiveSet_KeepsLiveOnes()
@@ -306,7 +306,7 @@ public sealed class TestRemoveKeyRange
         Assert.Equal(RoutingMode.Hash, registry.GetMode("t:i:6"));
     }
 
-    // ── T2: SyncFromRangeMap_AfterDescriptorRemoval_ClearsRoutingMode ────────────
+    // ── SyncFromRangeMap_AfterDescriptorRemoval_ClearsRoutingMode ────────────
 
     [Fact]
     public async Task SyncFromRangeMap_AfterDescriptorRemoval_ClearsRoutingMode()
@@ -344,7 +344,7 @@ public sealed class TestRemoveKeyRange
         }
     }
 
-    // ── T2: SyncFromRangeMap_NeverDropsLiveKeySpace ──────────────────────────────
+    // ── SyncFromRangeMap_NeverDropsLiveKeySpace ──────────────────────────────
 
     [Fact]
     public async Task SyncFromRangeMap_NeverDropsLiveKeySpace()
@@ -379,7 +379,7 @@ public sealed class TestRemoveKeyRange
         }
     }
 
-    // ── T1: RemoveKeyRangeAsync_RemovesAllGenerationsAfterSplit ─────────────────
+    // ── RemoveKeyRangeAsync_RemovesAllGenerationsAfterSplit ─────────────────
     // Simulates multiple descriptor generations by directly mutating the range map.
 
     [Fact]
@@ -419,7 +419,7 @@ public sealed class TestRemoveKeyRange
         }
     }
 
-    // ── T3: RemoveKeyRangeAsync_WhileQuiesced_ReturnsFalse ───────────────────────
+    // ── RemoveKeyRangeAsync_WhileQuiesced_ReturnsFalse ───────────────────────
 
     [Fact]
     public async Task RemoveKeyRangeAsync_WhileQuiesced_ReturnsFalse()

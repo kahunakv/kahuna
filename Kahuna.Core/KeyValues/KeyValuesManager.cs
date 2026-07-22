@@ -36,30 +36,6 @@ internal sealed class KeyValuesManager : IDisposable
 {
     private const int MaxRetries = 3;
 
-    /// <summary>
-    /// Test seam (null in production): forces the batched commit outcome for a participant group, short-
-    /// circuiting its <c>CommitLogs</c> so the ticket genuinely does not commit. Lets a test drive a real
-    /// cross-partition partial commit — one partition commits for real while another is forced to fail — and
-    /// assert the coordinator never reports Aborted once any participant has committed. Keyed by the group's
-    /// routing key; return null to leave the group's real commit untouched.
-    /// </summary>
-    internal Func<string, KeyValueResponseType?>? ForceCommitOutcomeForKey;
-
-    /// <summary>
-    /// Test seam (null in production): overrides the commit-time partition a key resolves to, simulating a
-    /// range split/move between prepare and commit so a test can drive the split-cohesion guard in
-    /// <c>CommitTicketGroup</c> without running a real split. Return null to use real routing.
-    /// </summary>
-    internal Func<string, int?>? PartitionOverrideForCommit;
-
-    /// <summary>
-    /// Test seam (null in production): forces a partition group's batched prepare outcome without staging or
-    /// proposing it. Lets a test make one partition fail prepare while another prepares for real, so the
-    /// coordinator aborts and rolls back the prepared partition's shared ticket — exercising the batched
-    /// rollback. Keyed by the group's routing key; return null to leave the group's real staging untouched.
-    /// </summary>
-    internal Func<string, KeyValueResponseType?>? ForcePrepareOutcomeForKey;
-    
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
@@ -4966,12 +4942,6 @@ internal sealed class KeyValuesManager : IDisposable
         string? recordAnchorKey
     )
     {
-        // Test seam: force this group's prepare outcome without staging or proposing, so a test can fail one
-        // partition's prepare while another prepares for real and drive the coordinator's rollback of the
-        // prepared partition.
-        if (ForcePrepareOutcomeForKey?.Invoke(items[0].key) is KeyValueResponseType forcedPrepare)
-            return items.Select(i => (forcedPrepare, HLCTimestamp.Zero, i.key, i.durability)).ToList();
-
         // Exception-safe wrapper: any throw during staging or propose unwinds every intent staged so far, so a
         // partition batch that faults mid-flight cannot leak an entry-pinning intent. The staged list is owned
         // here so the catch can unwind whatever the core managed to stage.
@@ -5274,11 +5244,6 @@ internal sealed class KeyValuesManager : IDisposable
         HLCTimestamp ticket,
         List<(string key, KeyValueDurability durability)> group)
     {
-        // Test seam: force this group's outcome without committing, so a cross-partition partial-commit test
-        // can fail one partition while another commits for real.
-        if (ForceCommitOutcomeForKey?.Invoke(group[0].key) is KeyValueResponseType forced)
-            return group.Select(g => (forced, g.key, -1L, g.durability)).ToList();
-
         // Every key of a ticket shared one partition when the batch was proposed. Re-resolve them now: if a
         // range split or move has divided them across partitions since prepare, the shared ticket can no
         // longer be committed on a single partition without stranding the moved keys' logs on a partition that
@@ -5356,7 +5321,7 @@ internal sealed class KeyValuesManager : IDisposable
         DataPartitionRouter router = new(raft);
         RangeMap rangeMap = rangeMapStore.Current;
 
-        int Resolve(string key) => PartitionOverrideForCommit?.Invoke(key) ?? RangeRouting.Locate(keySpaceRegistry, rangeMap, router, key).PartitionId;
+        int Resolve(string key) => RangeRouting.Locate(keySpaceRegistry, rangeMap, router, key).PartitionId;
 
         partitionId = Resolve(group[0].key);
         for (int i = 1; i < group.Count; i++)

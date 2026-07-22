@@ -766,7 +766,7 @@ public sealed class TestPartitionWriteAggregator
         await WaitUntil(() => router.Completed.ContainsKey(9999));
     }
 
-    // ── observable async drain (B4 / Task 8) ──────────────────────────────────
+    // ── observable async drain ─────────────────────────────────────────────────
 
     [Fact]
     public async Task Aggregator_StopAsync_AwaitsInFlight_ReleasesPending_NoLeak()

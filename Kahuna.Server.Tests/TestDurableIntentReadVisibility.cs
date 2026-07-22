@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// End-to-end coverage of the read-path §6 visibility wiring: with a lingering durable prepared intent (as would
+/// End-to-end coverage of the read-path durable-intent visibility wiring: with a lingering durable prepared intent (as would
 /// exist under deferred settlement), a latest read consults the canonical outcome — a committed intent serves its
 /// prepared value even though nothing materialized into MVCC, an undecided intent makes the read wait, and an
 /// aborted intent is invisible. Intents are injected directly to simulate the pre-materialization window.
