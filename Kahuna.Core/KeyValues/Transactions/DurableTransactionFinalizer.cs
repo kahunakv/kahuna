@@ -59,15 +59,18 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     /// <summary>Replicates a partition's serialized delta of the given log type and returns whether it committed
     /// durably. In production this is an auto-commit Raft round trip; the finalizer applies the delta to the
-    /// local store on success (idempotent with the replication-callback apply on every replica).</summary>
-    public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, CancellationToken cancellationToken);
+    /// local store on success (idempotent with the replication-callback apply on every replica). The
+    /// <paramref name="admissionClass"/> tells the shared write scheduler whether this is ordinary work
+    /// (record init, prepare) or terminal work that finishes an already-prepared transaction (decision, settle,
+    /// materialize) — terminal work draws on reserve capacity so an ordinary-write burst cannot starve it.</summary>
+    public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken);
 
     /// <summary>Like <see cref="ReplicateDelegate"/> but re-fences the submission at dispatch against the range
     /// descriptor <paramref name="fenceKey"/> was resolved to at freeze (<paramref name="fenceGeneration"/>): a
     /// split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
     /// Used for the pre-decision record initialization, prepare, and decision; null falls back to the unfenced
     /// replicate (protocol tests, and the post-decision settle/materialize which recovery backstops).</summary>
-    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken);
 
     /// <summary>Runs the post-decision resolution (materialize committed values, settle intents) on a background
     /// task, off the commit critical path (deferred settlement). When <see langword="null"/>, resolution is instead
@@ -161,7 +164,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             input.TransactionId, input.Epoch, input.CoordinatorKey, input.RecordAnchorKey,
             input.CommitTimestamp, input.DecisionDeadline, input.ManifestHash, input.Manifest, opId, input.CreatedAt)]);
 
-        if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false))
+        if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Ordinary, cancellationToken).ConfigureAwait(false))
             return Retry();
 
         // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
@@ -237,7 +240,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         byte[] delta = TransactionRecordStore.SerializeDelta([decision]);
 
-        if (!await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false))
+        // The decision is terminal work finishing an already-prepared transaction: admit it as Terminal so an
+        // ordinary-write burst saturating the anchor partition can never reject it.
+        if (!await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
             return Retry();
 
         // The winner is whatever the canonical record actually reflects after apply, not what we requested — a
@@ -364,8 +369,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         try
         {
             // Replicate the committed value as an ordinary key/value record so followers converge. The leader
-            // applies it separately through its owning actor after the durable record is acknowledged.
-            return await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+            // applies it separately through its owning actor after the durable record is acknowledged. This is
+            // post-decision materialization — terminal work — so it draws on reserve capacity and is never
+            // starved by an ordinary-write burst.
+            return await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -437,22 +444,25 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // replicate and drives an abort rather than a commit of a mutation recovery could not complete.
     // Pre-decision record (initialize / decision): fenced against the anchor's frozen descriptor so a split
     // between freeze and dispatch releases it retryably instead of landing on a retired partition.
-    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+    // The record initialize is ordinary work; the decision is terminal work that finishes an already-prepared
+    // transaction. The caller passes the class so the decision draws on reserve capacity and can never be
+    // rejected by an ordinary-write burst on the anchor partition.
+    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
         replicateFenced is not null
-            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration, cancellationToken)
-            : replicate(partitionId, ReplicationTypes.TransactionRecord, delta, cancellationToken);
+            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration, admissionClass, cancellationToken)
+            : replicate(partitionId, ReplicationTypes.TransactionRecord, delta, admissionClass, cancellationToken);
 
     // Pre-decision prepare: fenced against the partition group's frozen descriptor. A rejected prepare surfaces as
-    // a failed replicate (the seam folds in prepare acknowledgement) and drives an abort.
+    // a failed replicate (the seam folds in prepare acknowledgement) and drives an abort. Ordinary work.
     private Task<bool> ReplicatePrepareAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
         replicateFenced is not null
-            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fenceKey, fenceGeneration, cancellationToken)
-            : replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken);
+            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fenceKey, fenceGeneration, Writes.WriteAdmissionClass.Ordinary, cancellationToken)
+            : replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Ordinary, cancellationToken);
 
-    // Post-decision settle: unfenced. The decision is already durable; a split at this point is resolved by the
-    // recovery sweep, and re-fencing would only strand the settle.
+    // Post-decision settle: unfenced and terminal. The decision is already durable; a split at this point is
+    // resolved by the recovery sweep, and re-fencing would only strand the settle.
     private Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
-        replicate(partitionId, ReplicationTypes.PreparedIntent, delta, cancellationToken);
+        replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken);
 
     private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
 }

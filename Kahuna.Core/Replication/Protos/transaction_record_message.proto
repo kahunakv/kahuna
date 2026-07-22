@@ -10,6 +10,7 @@ enum TransactionRecordCommandKindMessage {
   TRANSACTION_RECORD_INITIALIZE = 0; // freeze immutable identity, create Undecided
   TRANSACTION_RECORD_COMMIT     = 1; // Undecided -> Commit (within the decision deadline)
   TRANSACTION_RECORD_ABORT      = 2; // Undecided|absent -> Abort (may create a tombstone from absence)
+  TRANSACTION_RECORD_PURGE      = 3; // terminal -> removed (retention GC; rejects a purge of an Undecided record)
 }
 
 message TransactionParticipantRefMessage {

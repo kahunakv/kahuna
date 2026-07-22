@@ -35,12 +35,12 @@ public sealed class TestRegisteredDurableStaging
         public long Entries;
         public readonly ConcurrentQueue<string[]> Batches = new();
 
-        public Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Calls);
             Interlocked.Add(ref Entries, entries.Count);
             Batches.Enqueue(entries.Select(entry => entry.Type).ToArray());
-            return inner.ReplicateAsync(partitionId, entries);
+            return inner.ReplicateAsync(partitionId, entries, cancellationToken);
         }
     }
 

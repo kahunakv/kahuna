@@ -43,5 +43,17 @@ internal sealed class PreparedIntentRecoveryActor : IActor<PreparedIntentRecover
         {
             logger.LogError(ex, "Failed to recover prepared intents");
         }
+
+        // Same serial tick reclaims durable-2PC metadata whose retention window has elapsed (terminal records +
+        // their participants' completion receipts), so both stores return to a steady-state floor instead of
+        // growing for the node's lifetime. Isolated from recovery so a GC fault never stalls recovery.
+        try
+        {
+            await manager.CollectDurableTransactionRecords(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to collect durable transaction records");
+        }
     }
 }

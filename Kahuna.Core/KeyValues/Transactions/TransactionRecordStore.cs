@@ -75,6 +75,8 @@ internal sealed class TransactionRecordStore
 
             if (result.Outcome == TransactionApplyOutcome.Applied && result.Record is not null)
                 records[key] = result.Record;
+            else if (result.Outcome == TransactionApplyOutcome.Removed)
+                records.TryRemove(key, out _);
 
             return result;
         }
@@ -158,6 +160,7 @@ internal sealed class TransactionRecordStore
         InitializeTransactionCommand i => (i.TransactionId, i.Epoch),
         CommitTransactionCommand c => (c.TransactionId, c.Epoch),
         AbortTransactionCommand a => (a.TransactionId, a.Epoch),
+        PurgeTransactionCommand p => (p.TransactionId, p.Epoch),
         _ => throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown transaction-record command")
     };
 
@@ -211,6 +214,14 @@ internal sealed class TransactionRecordStore
                     CreatedAtNode = a.CreatedAt.N, CreatedAtPhysical = a.CreatedAt.L, CreatedAtCounter = a.CreatedAt.C
                 };
 
+            case PurgeTransactionCommand p:
+                return new()
+                {
+                    Kind = TransactionRecordCommandKindMessage.TransactionRecordPurge,
+                    TransactionIdNode = p.TransactionId.N, TransactionIdPhysical = p.TransactionId.L, TransactionIdCounter = p.TransactionId.C,
+                    Epoch = p.Epoch
+                };
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown transaction-record command");
         }
@@ -248,6 +259,9 @@ internal sealed class TransactionRecordStore
                     new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter),
                     new HLCTimestamp(m.DecisionDeadlineNode, m.DecisionDeadlinePhysical, m.DecisionDeadlineCounter),
                     new HLCTimestamp(m.CreatedAtNode, m.CreatedAtPhysical, m.CreatedAtCounter));
+
+            case TransactionRecordCommandKindMessage.TransactionRecordPurge:
+                return new PurgeTransactionCommand(txId, m.Epoch);
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(m), m.Kind, "unknown transaction-record command kind");

@@ -111,6 +111,10 @@ public sealed class EmbeddedKahunaOptions
 
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
+    public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
+
+    public long DurablePreparedIntentMaxBytes { get; set; } = 1L * 1024 * 1024 * 1024;
+
     public int MaxEntriesPerActor { get; set; } = 50_000;
 
     public long MaxBytesPerActor { get; set; } = 256L * 1024 * 1024;

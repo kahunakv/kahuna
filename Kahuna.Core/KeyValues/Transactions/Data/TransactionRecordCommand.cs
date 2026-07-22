@@ -57,3 +57,13 @@ internal sealed record AbortTransactionCommand(
     HLCTimestamp CommitTimestamp,
     HLCTimestamp DecisionDeadline,
     HLCTimestamp CreatedAt) : TransactionRecordCommand;
+
+/// <summary>
+/// Removes a <b>terminal</b> record once its retention window has elapsed and its participants' completion
+/// receipts have been released — the retention GC transition. It is rejected against an <c>Undecided</c> record
+/// (an in-flight transaction's record is never dropped) and is an idempotent no-op against an already-absent one,
+/// so every replica converges to the same removed state in Raft log order.
+/// </summary>
+internal sealed record PurgeTransactionCommand(
+    HLCTimestamp TransactionId,
+    long Epoch) : TransactionRecordCommand;

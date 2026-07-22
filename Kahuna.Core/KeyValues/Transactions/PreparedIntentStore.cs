@@ -81,9 +81,16 @@ internal sealed class PreparedIntentStore
             if (result.Outcome == TransactionApplyOutcome.Applied)
             {
                 if (result.Intent is null)
+                {
                     intents.TryRemove(key, out _);
+                    if (existing is not null)
+                        Interlocked.Add(ref totalBytes, -IntentBytes(existing));
+                }
                 else
+                {
                     intents[key] = result.Intent;
+                    Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
+                }
             }
 
             return result;
@@ -142,6 +149,15 @@ internal sealed class PreparedIntentStore
     }
 
     public int Count => intents.Count;
+
+    // Running sum of resident intent value bytes, maintained on every install/update/remove across Apply and the
+    // load/import merge, so durable admission can bound resident prepared-intent memory without an O(n) scan.
+    private long totalBytes;
+
+    /// <summary>Resident prepared-intent value bytes across this node (durable admission bound / observability).</summary>
+    public long TotalBytes => Interlocked.Read(ref totalBytes);
+
+    private static long IntentBytes(PreparedIntent intent) => intent.Value?.Length ?? 0;
 
     private static string KeyOf(PreparedIntentCommand command) => command switch
     {
@@ -371,6 +387,7 @@ internal sealed class PreparedIntentStore
         if (!intents.TryGetValue(incoming.Key, out PreparedIntent? existing))
         {
             intents[incoming.Key] = incoming;
+            Interlocked.Add(ref totalBytes, IntentBytes(incoming));
             return;
         }
 
@@ -382,7 +399,10 @@ internal sealed class PreparedIntentStore
         }
 
         if (existing.IsPending && incoming.IsResolved)
+        {
             intents[incoming.Key] = incoming;
+            Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
+        }
     }
 
     // ── state transfer (split/merge) ────────────────────────────────────────────────

@@ -3,6 +3,7 @@ using System.Diagnostics.Metrics;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
 using Kommander.Data;
@@ -33,7 +34,7 @@ public sealed class TestDurableTransactionRecovery
         // seam. Key/value materialization records are recorded but not applied here (they are a different store).
         public PreparedIntentStore? Store;
 
-        public Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken ct)
+        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
             if (Store is not null && logType == ReplicationTypes.PreparedIntent)

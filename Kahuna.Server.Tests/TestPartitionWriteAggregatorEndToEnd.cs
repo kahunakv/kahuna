@@ -49,18 +49,24 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
         public void ForceStatus(int partition, RaftOperationStatus status) => forced[partition] = status;
         public void ClearForced(int partition) => forced.TryRemove(partition, out _);
 
-        public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        public async Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
         {
             Calls.Enqueue((partitionId, entries.Count));
 
             if (gates.TryGetValue(partitionId, out TaskCompletionSource? gate))
-                await gate.Task;
+                await gate.Task.WaitAsync(cancellationToken);
 
             // A forced status short-circuits real Raft (the write does not commit) — for failure/cleanup tests.
+            // Every entry carries the forced failure status with LogIndex -1 (nothing appended).
             if (forced.TryGetValue(partitionId, out RaftOperationStatus status))
-                return new RaftReplicationResult(false, status, HLCTimestamp.Zero, 0);
+            {
+                List<RaftEntryResult> failed = new(entries.Count);
+                for (int i = 0; i < entries.Count; i++)
+                    failed.Add(new RaftEntryResult(status, -1, HLCTimestamp.Zero));
+                return new RaftBatchReplicationResult(false, status, HLCTimestamp.Zero, failed);
+            }
 
-            return await inner.ReplicateAsync(partitionId, entries);
+            return await inner.ReplicateAsync(partitionId, entries, cancellationToken);
         }
     }
 

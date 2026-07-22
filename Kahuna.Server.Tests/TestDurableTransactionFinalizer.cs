@@ -3,6 +3,7 @@ using System.Diagnostics.Metrics;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
 using Kommander.Data;
@@ -32,7 +33,7 @@ public sealed class TestDurableTransactionFinalizer
         public TransactionRecordStore? Records;
         public PreparedIntentStore? Intents;
 
-        public Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken ct)
+        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
             if (Fail is not null && Fail(partitionId, logType))
@@ -194,7 +195,7 @@ public sealed class TestDurableTransactionFinalizer
         TaskCompletionSource releasePrepares = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int preparesStarted = 0;
 
-        async Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+        async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
         {
             if (logType == ReplicationTypes.PreparedIntent && Interlocked.Increment(ref preparesStarted) == 2)
                 preparedStarted.TrySetResult();
@@ -202,7 +203,7 @@ public sealed class TestDurableTransactionFinalizer
             if (logType == ReplicationTypes.PreparedIntent)
                 await releasePrepares.Task.WaitAsync(cancellationToken);
 
-            return await seam.Replicate(partitionId, logType, data, cancellationToken);
+            return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
         }
 
         DurableTransactionFinalizer finalizer = new(records, intents, Replicate);
@@ -228,7 +229,7 @@ public sealed class TestDurableTransactionFinalizer
         TaskCompletionSource releaseFirstWindow = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int materializationsStarted = 0;
 
-        async Task<bool> Replicate(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+        async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
         {
             if (logType == ReplicationTypes.KeyValues)
             {
@@ -240,7 +241,7 @@ public sealed class TestDurableTransactionFinalizer
                     await releaseFirstWindow.Task.WaitAsync(cancellationToken);
             }
 
-            return await seam.Replicate(partitionId, logType, data, cancellationToken);
+            return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
         }
 
         using DurableTransactionFinalizer finalizer = new(
@@ -276,10 +277,11 @@ public sealed class TestDurableTransactionFinalizer
             int partitionId,
             string logType,
             byte[] data,
+            WriteAdmissionClass admissionClass,
             CancellationToken cancellationToken)
         {
             if (logType != ReplicationTypes.KeyValues)
-                return await seam.Replicate(partitionId, logType, data, cancellationToken);
+                return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
 
             Interlocked.Increment(ref materializations);
             int active = Interlocked.Increment(ref activeMaterializations);
@@ -287,7 +289,7 @@ public sealed class TestDurableTransactionFinalizer
             try
             {
                 await Task.Delay(10, cancellationToken);
-                return await seam.Replicate(partitionId, logType, data, cancellationToken);
+                return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
             }
             finally
             {

@@ -20,6 +20,12 @@ internal interface IProposalSubmission
     /// <summary>The physical Raft partition these records replicate to.</summary>
     int PartitionId { get; }
 
+    /// <summary>Which admission budget this submission draws on. Ordinary work (direct writes, durable
+    /// initialize/prepare) is bounded strictly by the base budget; terminal work (decision, settle,
+    /// materialization, recovery, transfer) may draw on the reserve headroom so it is never starved by an
+    /// ordinary-write burst.</summary>
+    WriteAdmissionClass AdmissionClass { get; }
+
     /// <summary>Serialized byte cost (sum over <see cref="Entries"/>), for byte-budgeted batching and admission.</summary>
     int ByteLength { get; }
 

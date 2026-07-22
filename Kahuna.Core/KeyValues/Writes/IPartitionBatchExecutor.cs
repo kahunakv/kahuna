@@ -12,7 +12,11 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// </summary>
 internal interface IPartitionBatchExecutor
 {
-    Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries);
+    /// <summary>Replicates the batch and returns Kommander's index-aligned per-entry result, so the caller can
+    /// complete or release each submission by its <b>own</b> entries' outcomes rather than one batch-level
+    /// boolean. <paramref name="cancellationToken"/> carries the scheduler's execution deadline and shutdown
+    /// signal; a cancelled call surfaces as a retryable outcome.</summary>
+    Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -30,15 +34,12 @@ internal sealed class RaftPartitionBatchExecutor : IPartitionBatchExecutor
 
     public RaftPartitionBatchExecutor(IRaft raft) => this.raft = raft;
 
-    public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+    public async Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
     {
         RaftProposalEntry[] array = entries as RaftProposalEntry[] ?? [.. entries];
 
-        RaftBatchReplicationResult batch = await raft.ReplicateEntries(partitionId, array).ConfigureAwait(false);
-
-        // The aggregator consumes one batch-level outcome (Success/Status). LogIndex/TicketId are unused here;
-        // surface the proposal's shared ticket and the first appended entry's index for diagnostics/correlation.
-        long logIndex = batch.Entries.Count > 0 ? batch.Entries[0].LogIndex : -1;
-        return new RaftReplicationResult(batch.Success, batch.Status, batch.TicketId, logIndex);
+        // Return the full per-entry result; the aggregator maps each submission's contiguous entry slice to its
+        // own outcome. The scheduler's execution-deadline/shutdown token bounds the round trip.
+        return await raft.ReplicateEntries(partitionId, array, cancellationToken).ConfigureAwait(false);
     }
 }

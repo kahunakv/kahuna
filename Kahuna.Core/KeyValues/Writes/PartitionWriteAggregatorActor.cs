@@ -44,6 +44,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
     private readonly long stampsPerMs;
 
+    // The node's shutdown signal: cancels in-flight batch round trips so a hung executor cannot hold shutdown
+    // past the drain timeout. Linked per-batch with the execution deadline.
+    private readonly CancellationToken shutdownToken;
+
     private readonly Dictionary<int, PartitionWriteState> states = [];
 
     private bool stopping;
@@ -59,7 +63,8 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         PartitionWriteAggregatorOptions options,
         IWriteRangeFence fence,
         ILogger<IKahuna> logger,
-        TimeProvider timeProvider
+        TimeProvider timeProvider,
+        CancellationToken shutdownToken
     )
     {
         this.self = context.Self;
@@ -69,6 +74,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         this.fence = fence;
         this.logger = logger;
         this.timeProvider = timeProvider;
+        this.shutdownToken = shutdownToken;
         stampsPerMs = Math.Max(1, timeProvider.TimestampFrequency / 1000);
     }
 
@@ -149,19 +155,33 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         state.OnBatchComplete();
         admission.DecInFlight();
 
+        IReadOnlyList<BatchSubmissionOutcome> outcomes = message.Outcomes!;
+
         // Rate-limited failure logging runs here, on the single-threaded lane mailbox — never on the detached,
-        // concurrent RunBatch path — so its per-lane counters are not raced across partitions' completions.
-        if (!message.Success)
-            LogFailureRateLimited(message.PartitionId, message.Batch!.Count, message.Status);
+        // concurrent RunBatch path — so its per-lane counters are not raced across partitions' completions. A
+        // batch settles per submission now: log if any submission failed, with a representative status.
+        int failed = 0;
+        RaftOperationStatus failStatus = RaftOperationStatus.Success;
+        for (int i = 0; i < outcomes.Count; i++)
+            if (!outcomes[i].Committed)
+            {
+                failed++;
+                failStatus = outcomes[i].Status;
+            }
 
-        foreach (IProposalSubmission item in message.Batch!)
+        if (failed > 0)
+            LogFailureRateLimited(message.PartitionId, failed, failStatus);
+
+        // Complete or release each submission by its OWN entries' outcome, so a per-entry failure releases only
+        // that submission while its batch-mates commit. Every path frees the admission reservation.
+        foreach (BatchSubmissionOutcome outcome in outcomes)
         {
-            if (message.Success)
-                item.Complete();
+            if (outcome.Committed)
+                outcome.Item.Complete();
             else
-                item.Release(message.Transient);
+                outcome.Item.Release(outcome.Transient);
 
-            admission.Release(message.PartitionId, item.ByteLength);
+            admission.Release(message.PartitionId, outcome.Item.ByteLength);
         }
 
         // Re-drive the buffer that accumulated behind the just-completed batch, then re-arm a wake so any
@@ -273,33 +293,108 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     }
 
     /// <summary>Detached Raft round trip for one batch. Owns only the immutable batch + payloads; never touches
-    /// lane state. Converts every failure into a normal completion and sends it back as priority control.</summary>
+    /// lane state. Bounds the round trip with a linked deadline+shutdown token so it cannot outlive queue age or
+    /// hang shutdown, maps each submission to its own entries' outcome, and sends the per-submission results back
+    /// as priority control — every failure converted into a normal completion.</summary>
     private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries)
     {
-        bool success;
-        bool threw = false;
-        RaftOperationStatus status;
         long start = Environment.TickCount64;
 
+        RaftBatchReplicationResult? result = null;
+        bool threw = false;
+
+        // Link the per-batch execution deadline to the node shutdown signal. Building the linked source can race a
+        // concurrent abrupt disposal of the shutdown source; treat that (and an already-signalled shutdown) as a
+        // cancelled round trip so every submission releases retryably instead of throwing on the detached path.
+        CancellationTokenSource? cts = null;
         try
         {
-            RaftReplicationResult result = await executor.ReplicateAsync(partitionId, entries);
-            success = result.Success;
-            status = result.Status;
+            cts = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+            if (options.BatchExecutionTimeoutMs > 0)
+                cts.CancelAfter(options.BatchExecutionTimeoutMs);
+
+            result = await executor.ReplicateAsync(partitionId, entries, cts.Token);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Batched write propose threw Partition={Partition} Count={Count}", partitionId, entries.Length);
-            success = false;
-            status = RaftOperationStatus.Errored;
+            // A cancelled round trip (execution deadline or shutdown) is a normal, uncertain outcome — logged at
+            // debug, retryable — not a warning. Any other throw is an uncertain round-trip fault, also retryable.
+            if (shutdownToken.IsCancellationRequested || cts is { IsCancellationRequested: true } || ex is ObjectDisposedException)
+            {
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug("Batched write propose cancelled Partition={Partition} Count={Count}", partitionId, entries.Length);
+            }
+            else
+                logger.LogWarning(ex, "Batched write propose threw Partition={Partition} Count={Count}", partitionId, entries.Length);
             threw = true;
         }
+        finally
+        {
+            cts?.Dispose();
+        }
 
-        (bool committed, bool transient) = ClassifyOutcome(success, status, threw);
+        List<BatchSubmissionOutcome> outcomes = MapOutcomes(batch, entries.Length, result, threw);
 
-        PartitionWriteAggregatorMetrics.BatchSettled(committed, transient, Environment.TickCount64 - start);
+        bool anyCommitted = false, anyFailed = false, anyTransient = false;
+        foreach (BatchSubmissionOutcome o in outcomes)
+        {
+            if (o.Committed) anyCommitted = true;
+            else { anyFailed = true; anyTransient |= o.Transient; }
+        }
 
-        self.Send(PartitionWriteMessage.BatchComplete(partitionId, batch, committed, transient, status));
+        // One batch-level effectiveness sample: committed if every submission committed; transient if any failure
+        // was retryable. (A mixed batch is rare — only per-entry fencing produces it — and records as a failure.)
+        PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Environment.TickCount64 - start);
+
+        self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes));
+    }
+
+    /// <summary>
+    /// Maps each submission's contiguous entry slice in the index-aligned per-entry result to that submission's
+    /// terminal outcome. A submission commits only when every one of its own entries committed; any failed entry
+    /// releases the whole submission (bundles are atomic), classified retryable unless the failing status is
+    /// provably permanent. A thrown/cancelled round trip, or a result whose per-entry list does not align with
+    /// the dispatched entries, releases every submission retryably — an uncertain outcome never loses a write.
+    /// </summary>
+    private static List<BatchSubmissionOutcome> MapOutcomes(
+        IReadOnlyList<IProposalSubmission> batch, int entryCount, RaftBatchReplicationResult? result, bool threw)
+    {
+        List<BatchSubmissionOutcome> outcomes = new(batch.Count);
+
+        if (threw || result is null || result.Entries.Count != entryCount)
+        {
+            RaftOperationStatus status = result?.Status ?? RaftOperationStatus.Errored;
+            (bool committed, bool transient) = ClassifyOutcome(false, status, threw: true);
+            foreach (IProposalSubmission item in batch)
+                outcomes.Add(new BatchSubmissionOutcome(item, committed, transient, status));
+            return outcomes;
+        }
+
+        int offset = 0;
+        foreach (IProposalSubmission item in batch)
+        {
+            int count = item.Entries.Count;
+            bool ok = true;
+            RaftOperationStatus failStatus = RaftOperationStatus.Success;
+
+            for (int i = 0; i < count; i++)
+            {
+                RaftOperationStatus entryStatus = result.Entries[offset + i].Status;
+                if (entryStatus != RaftOperationStatus.Success)
+                {
+                    ok = false;
+                    failStatus = entryStatus;
+                    break;
+                }
+            }
+
+            (bool committed, bool transient) = ClassifyOutcome(ok, failStatus, threw: false);
+            outcomes.Add(new BatchSubmissionOutcome(item, committed, transient, ok ? RaftOperationStatus.Success : failStatus));
+
+            offset += count;
+        }
+
+        return outcomes;
     }
 
     private void SweepExpired(int partitionId, PartitionWriteState state)

@@ -35,12 +35,12 @@ public sealed class TestDurableIntentActivation
 
         public TypeCapturingExecutor(IPartitionBatchExecutor inner) => this.inner = inner;
 
-        public Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
         {
             foreach (RaftProposalEntry entry in entries)
                 SeenTypes.Add(entry.Type);
 
-            return inner.ReplicateAsync(partitionId, entries);
+            return inner.ReplicateAsync(partitionId, entries, cancellationToken);
         }
     }
 

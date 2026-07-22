@@ -22,8 +22,8 @@ namespace Kahuna.Server.Tests;
 /// </summary>
 public sealed class TestPartitionWriteAggregator
 {
-    private static RecordingSubmission Item(int partitionId, int proposalId, int bytes = 16, long ageMs = 0, string? key = null, RecordingRouter? sink = null) =>
-        new(sink, partitionId, proposalId, key ?? "k" + proposalId, new byte[bytes], Environment.TickCount64 - ageMs);
+    private static RecordingSubmission Item(int partitionId, int proposalId, int bytes = 16, long ageMs = 0, string? key = null, RecordingRouter? sink = null, WriteAdmissionClass admissionClass = WriteAdmissionClass.Ordinary) =>
+        new(sink, partitionId, proposalId, key ?? "k" + proposalId, new byte[bytes], Environment.TickCount64 - ageMs, admissionClass);
 
     private sealed class StubFence : IWriteRangeFence
     {
@@ -40,16 +40,18 @@ public sealed class TestPartitionWriteAggregator
 
         public int ProposalId { get; }
         public int PartitionId { get; }
+        public WriteAdmissionClass AdmissionClass { get; }
         public int ByteLength { get; }
         public IReadOnlyList<RaftProposalEntry> Entries { get; }
         public long EnqueueTicks { get; set; }
 
-        public RecordingSubmission(RecordingRouter? sink, int partitionId, int proposalId, string key, byte[] serialized, long enqueueTicks)
+        public RecordingSubmission(RecordingRouter? sink, int partitionId, int proposalId, string key, byte[] serialized, long enqueueTicks, WriteAdmissionClass admissionClass = WriteAdmissionClass.Ordinary)
         {
             this.sink = sink;
             this.key = key;
             PartitionId = partitionId;
             ProposalId = proposalId;
+            AdmissionClass = admissionClass;
             ByteLength = serialized.Length;
             Entries = [new RaftProposalEntry(ReplicationTypes.KeyValues, serialized, AutoCommit: true, ExpectedGeneration: 0)];
             EnqueueTicks = enqueueTicks;
@@ -67,6 +69,7 @@ public sealed class TestPartitionWriteAggregator
         private readonly RecordingRouter? sink;
         public int ProposalId { get; }
         public int PartitionId { get; }
+        public WriteAdmissionClass AdmissionClass => WriteAdmissionClass.Ordinary;
         public int ByteLength { get; }
         public IReadOnlyList<RaftProposalEntry> Entries { get; }
         public long EnqueueTicks { get; set; }
@@ -217,19 +220,38 @@ public sealed class TestPartitionWriteAggregator
         public bool SucceedResult = true;
         public RaftOperationStatus ResultStatus = RaftOperationStatus.Success;
         public bool ThrowOnReplicate;
+        // Per-entry failure injection: flattened entry indices that report a failure status while the batch as a
+        // whole succeeds (the per-entry-fence shape), so a test can drive partial-entry completion.
+        public readonly HashSet<int> FailEntryIndices = [];
+        public RaftOperationStatus FailEntryStatus = RaftOperationStatus.PartitionMoved;
 
         public void Gate(int partition) => gates[partition] = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Release(int partition) { if (gates.TryRemove(partition, out TaskCompletionSource? g)) g.TrySetResult(); }
 
-        public async Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        public async Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
         {
             Calls.Enqueue((partitionId, entries.Count));
             CallSignatures.Enqueue([.. entries.Select(e => e.Data.Length > 0 ? e.Data[0] : -1)]);
             if (gates.TryGetValue(partitionId, out TaskCompletionSource? gate))
-                await gate.Task;
+                // Honor the scheduler's execution-deadline/shutdown token so a gated ("hung") batch can be cancelled.
+                await gate.Task.WaitAsync(cancellationToken);
             if (ThrowOnReplicate)
                 throw new InvalidOperationException("simulated Raft round-trip failure");
-            return new RaftReplicationResult(SucceedResult, ResultStatus, HLCTimestamp.Zero, 1);
+
+            // Index-aligned per-entry result: a batch-level success reports Success for every entry; a batch-level
+            // failure reports the chosen status with LogIndex -1 for every entry (nothing appended). A per-entry
+            // failure (batch still succeeds) marks only the listed indices with the fence status and LogIndex -1.
+            RaftOperationStatus status = SucceedResult ? RaftOperationStatus.Success : ResultStatus;
+            List<RaftEntryResult> results = new(entries.Count);
+            for (int i = 0; i < entries.Count; i++)
+            {
+                if (SucceedResult && FailEntryIndices.Contains(i))
+                    results.Add(new RaftEntryResult(FailEntryStatus, -1, HLCTimestamp.Zero));
+                else
+                    results.Add(new RaftEntryResult(status, SucceedResult ? i : -1, HLCTimestamp.Zero));
+            }
+
+            return new RaftBatchReplicationResult(SucceedResult, status, HLCTimestamp.Zero, results);
         }
     }
 
@@ -993,5 +1015,137 @@ public sealed class TestPartitionWriteAggregator
         KahunaConfiguration ok = new() { KeyValueWriteMaxQueueDelayMs = 8_000 };
         ConfigurationValidator.Validate(ok);
         Assert.Equal(8_000, ok.KeyValueWriteMaxQueueDelayMs);
+    }
+
+    // ── terminal reserve / global admission / per-entry / deadline ───────────────
+
+    [Fact]
+    public void TerminalReserve_PerPartition_AdmitsTerminalWhenOrdinaryFull()
+    {
+        // A partition saturated with ordinary writes still admits terminal work (a durable transaction's
+        // decision/settle) from the reserve headroom — so an already-prepared transaction can always be finished.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        // Large linger so nothing dispatches: every admitted item stays reserved for the assertions.
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            LingerMs = 60_000, MaxBatchItems = 512,
+            MaxQueuedItemsPerPartition = 2, TerminalReserveItemsPerPartition = 1
+        });
+
+        Assert.True(agg.TryEnqueue(Item(5, 1, sink: router)));   // ordinary
+        Assert.True(agg.TryEnqueue(Item(5, 2, sink: router)));   // ordinary — partition now at its base item cap
+        Assert.False(agg.TryEnqueue(Item(5, 3, sink: router)));  // ordinary rejected: base cap full, reserve is off-limits to it
+        Assert.True(agg.TryEnqueue(Item(5, 4, sink: router, admissionClass: WriteAdmissionClass.Terminal)));   // admitted via reserve
+        Assert.False(agg.TryEnqueue(Item(5, 5, sink: router, admissionClass: WriteAdmissionClass.Terminal)));  // reserve now exhausted too
+
+        Assert.Equal(3, agg.ReservedItems(5)); // 2 ordinary + 1 terminal
+    }
+
+    [Fact]
+    public void TerminalReserve_Global_AdmitsTerminalWhenOrdinaryGlobalFull()
+    {
+        // The same guarantee at the node-global level: ordinary writes spread across partitions that saturate the
+        // global item budget cannot reject a terminal submission, which draws on the global reserve.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            LingerMs = 60_000, MaxBatchItems = 512,
+            MaxQueuedItemsPerPartition = 1000, MaxQueuedBytesPerPartition = 1L << 30,
+            MaxQueuedItemsGlobal = 2, TerminalReserveItemsGlobal = 1
+        });
+
+        Assert.True(agg.TryEnqueue(Item(1, 1, sink: router)));   // ordinary, global = 1
+        Assert.True(agg.TryEnqueue(Item(2, 2, sink: router)));   // ordinary, global = 2 (at global base cap)
+        Assert.False(agg.TryEnqueue(Item(3, 3, sink: router)));  // ordinary rejected: global base cap full
+        Assert.True(agg.TryEnqueue(Item(4, 4, sink: router, admissionClass: WriteAdmissionClass.Terminal))); // via global reserve
+    }
+
+    [Fact]
+    public async Task PerEntryFailure_ReleasesOnlyFailedSubmission_OthersCommit()
+    {
+        // A batch settles per submission by its own entries: a per-entry fence failure on one entry releases only
+        // that submission (retryably) while its batch-mates commit — never collapsing the batch to one outcome.
+        RecordingExecutor exec = new();
+        exec.FailEntryIndices.Add(1); // the middle entry is fenced out (PartitionMoved), batch otherwise succeeds
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            LingerMs = 60_000, MaxBatchItems = 3, MaxQueuedItemsPerPartition = 100
+        });
+
+        agg.TryEnqueue(Item(6, 10, sink: router));
+        agg.TryEnqueue(Item(6, 11, sink: router));
+        agg.TryEnqueue(Item(6, 12, sink: router)); // the 3rd hits MaxBatchItems=3 → one dispatched batch of 3 entries
+
+        await WaitUntil(() => router.Completed.Count == 2 && router.Released.Count == 1);
+        Assert.True(router.Completed.ContainsKey(10));
+        Assert.True(router.Completed.ContainsKey(12));
+        Assert.True(router.Released.ContainsKey(11)); // the fenced entry's submission
+        Assert.True(router.Released[11]);             // PartitionMoved is retryable → released transient, not terminal
+
+        await WaitUntil(() => agg.ReservedItems(6) == 0); // every submission terminated once; capacity freed
+    }
+
+    [Fact]
+    public void HardOperationLimit_RejectsOversizedSubmission()
+    {
+        // A submission larger than the hard per-operation ceiling is rejected (retryable backpressure), not
+        // dispatched alone; a value below the ceiling is admitted.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            LingerMs = 60_000, MaxBatchBytes = 500, MaxOperationBytes = 1000, MaxQueuedItemsPerPartition = 100
+        });
+
+        Assert.False(agg.TryEnqueue(Item(1, 1, bytes: 2000, sink: router))); // over the ceiling → rejected
+        Assert.True(agg.TryEnqueue(Item(1, 2, bytes: 400, sink: router)));   // under the ceiling → admitted
+    }
+
+    [Fact]
+    public async Task HungExecutor_StopAsync_CancelsInFlight_ReleasesAndReturns()
+    {
+        // A hung in-flight batch must not hold shutdown open: StopAsync waits out its drain deadline, then cancels
+        // the round trip so the batch settles retryably and every reservation is freed.
+        RecordingExecutor exec = new();
+        exec.Gate(3); // the batch never completes on its own
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 1, LingerMs = 0, MaxQueuedItemsPerPartition = 100,
+            BatchExecutionTimeoutMs = 60_000 // long, so only the shutdown cancellation aborts the hung batch
+        });
+
+        agg.TryEnqueue(Item(3, 30, sink: router)); // dispatched, in flight, hung on the gate
+        await WaitUntil(() => !exec.Calls.IsEmpty);
+
+        long start = Environment.TickCount64;
+        await agg.StopAsync(TimeSpan.FromMilliseconds(300));
+        Assert.True(Environment.TickCount64 - start < 5000); // returned promptly, not blocked on the hung executor
+
+        await WaitUntil(() => router.Released.ContainsKey(30)); // the cancelled batch released its submission
+        Assert.True(router.Released[30]);                       // cancellation is retryable
+        await WaitUntil(() => agg.ReservedItems(3) == 0);       // capacity freed
+    }
+
+    [Fact]
+    public void Config_NormalizesReservesAndClampsOperationCeiling()
+    {
+        KahunaConfiguration c = new()
+        {
+            KeyValueWriteTerminalReserveItemsPerPartition = -5,        // negative → 0
+            KeyValueWriteTerminalReserveBytesGlobal = -10,            // negative → 0
+            KeyValueWriteMaxBatchBytes = 8 * 1024 * 1024,
+            KeyValueWriteMaxQueuedBytesPerPartition = 64L * 1024 * 1024,
+            KeyValueWriteMaxOperationBytes = 1024                     // below the batch target → raised to it
+        };
+
+        ConfigurationValidator.Validate(c);
+
+        Assert.Equal(0, c.KeyValueWriteTerminalReserveItemsPerPartition);
+        Assert.Equal(0, c.KeyValueWriteTerminalReserveBytesGlobal);
+        Assert.True(c.KeyValueWriteMaxOperationBytes >= c.KeyValueWriteMaxBatchBytes);
     }
 }

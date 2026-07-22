@@ -132,7 +132,7 @@ internal sealed class DurableTransactionRecovery
                 try
                 {
                     byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
-                    materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, cancellationToken).ConfigureAwait(false);
+                    materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -164,6 +164,6 @@ internal sealed class DurableTransactionRecovery
         // delta through the scheduler's Raft-ordered completion, in the same order as any concurrent finalizer
         // decision for the same record — so recovery and the live coordinator can never apply out of log order.
         byte[] resolveDelta = PreparedIntentStore.SerializeDelta(settle);
-        await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, cancellationToken).ConfigureAwait(false);
+        await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
     }
 }

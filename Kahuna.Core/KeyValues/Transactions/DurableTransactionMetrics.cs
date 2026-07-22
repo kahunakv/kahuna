@@ -48,4 +48,69 @@ internal static class DurableTransactionMetrics
             "kahuna.durable_tx.decision_deadline_margin_ms",
             unit: "ms",
             description: "Decision-deadline margin (ms past commit timestamp) frozen for each durable finalize.");
+
+    /// <summary>
+    /// Terminal transaction records reclaimed by the retention GC sweep (removed after their retention window
+    /// elapsed and their participants' receipts were released). Its rate against admitted durable transactions
+    /// shows whether reclamation keeps pace with inflow; a persistently lagging value is the early signal of the
+    /// metadata growth this GC exists to bound, visible long before a heap dump.
+    /// </summary>
+    internal static readonly Counter<long> GcRecordsReclaimed =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.gc_records_reclaimed",
+            description: "Terminal transaction records removed by the retention GC sweep.");
+
+    /// <summary>
+    /// Participant completion receipts released by the retention GC sweep. Receipts are otherwise never evicted,
+    /// so this is the counter that proves the completion-receipt store returns to a steady-state floor rather
+    /// than growing for the node's lifetime.
+    /// </summary>
+    internal static readonly Counter<long> GcReceiptsReleased =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.gc_receipts_released",
+            description: "Participant completion receipts released by the retention GC sweep.");
+
+    /// <summary>
+    /// Durable transactions refused admission because the node was at <c>DurableDecisionOutstandingMax</c>
+    /// outstanding durable finalizes. Each is a retryable <c>MustRetry</c> that prepared nothing. A sustained
+    /// non-zero rate means inflow exceeds the admission bound — the backpressure that keeps prepared state, and
+    /// the write scheduler's terminal-class reserve, within their budgets.
+    /// </summary>
+    internal static readonly Counter<long> AdmissionRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.admission_rejections",
+            description: "Durable transactions refused admission at the outstanding-decision cap.");
+
+    internal static void RecordsReclaimed(int count) => GcRecordsReclaimed.Add(count);
+
+    internal static void ReceiptsReleased(int count) => GcReceiptsReleased.Add(count);
+
+    /// <summary>
+    /// Registers resident-state observable gauges — canonical record count, completion-receipt count, resident
+    /// prepared-intent count and bytes, and outstanding durable transactions — on a fresh, <b>instance-owned</b>
+    /// <see cref="Meter"/> returned to the caller. The callbacks capture the stores/coordinator, so the caller
+    /// must dispose the returned meter on teardown or a disposed node's state stays reachable (mirrors the write
+    /// aggregator's instance-meter ownership). These gauges make the retained metadata this GC bounds visible
+    /// continuously, long before a heap dump; the counters above stay on the shared static meter.
+    /// </summary>
+    internal static Meter RegisterGauges(
+        Func<long> recordCount,
+        Func<long> receiptCount,
+        Func<long> preparedIntentCount,
+        Func<long> preparedIntentBytes,
+        Func<long> outstandingDurable)
+    {
+        Meter gaugeMeter = new("Kahuna", "1.0");
+        gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_records", recordCount,
+            description: "Canonical transaction records resident on this node (awaiting retention GC).");
+        gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_receipts", receiptCount,
+            description: "Completion receipts resident on this node (released by GC after retention).");
+        gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_prepared_intents", preparedIntentCount,
+            description: "Prepared intents resident on this node (bounded by durable admission).");
+        gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_prepared_intent_bytes", preparedIntentBytes,
+            unit: "By", description: "Resident prepared-intent value bytes on this node (bounded by durable admission).");
+        gaugeMeter.CreateObservableGauge("kahuna.durable_tx.outstanding", outstandingDurable,
+            description: "Durable transactions currently being driven through finalize (admission-gated).");
+        return gaugeMeter;
+    }
 }

@@ -31,10 +31,10 @@ public sealed class TestDurableSchedulerCoalescing
 
         public CountingExecutor(IPartitionBatchExecutor inner) => this.inner = inner;
 
-        public Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Calls);
-            return inner.ReplicateAsync(partitionId, entries);
+            return inner.ReplicateAsync(partitionId, entries, cancellationToken);
         }
     }
 

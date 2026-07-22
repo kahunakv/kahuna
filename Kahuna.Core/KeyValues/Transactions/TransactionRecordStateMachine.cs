@@ -14,7 +14,11 @@ internal enum TransactionApplyOutcome
 
     /// <summary>The transition is not permitted (would overwrite a terminal decision, violate identity, create a
     /// commit from absence, or arrive past the decision deadline). No change; the invariant is preserved.</summary>
-    Rejected
+    Rejected,
+
+    /// <summary>The transition removed the record (retention GC of a terminal record). The result carries a null
+    /// record; the store drops the entry.</summary>
+    Removed
 }
 
 /// <summary>The result of applying one transition: the outcome plus the record as it stands afterward.</summary>
@@ -57,8 +61,26 @@ internal static class TransactionRecordStateMachine
             InitializeTransactionCommand init => ApplyInitialize(existing, init),
             CommitTransactionCommand commit => ApplyCommit(existing, commit),
             AbortTransactionCommand abort => ApplyAbort(existing, abort),
+            PurgeTransactionCommand purge => ApplyPurge(existing, purge),
             _ => Rejected(existing, "unknown command")
         };
+
+    private static TransactionRecordApplyResult ApplyPurge(TransactionRecord? existing, PurgeTransactionCommand purge)
+    {
+        // Already gone: an idempotent replay of a purge that a prior apply already performed.
+        if (existing is null)
+            return new(TransactionApplyOutcome.IdempotentNoop, null, null);
+
+        if (existing.TransactionId != purge.TransactionId || existing.Epoch != purge.Epoch)
+            return Rejected(existing, "purge targets a different (TransactionId, Epoch) than the record");
+
+        // Never drop an in-flight transaction's record — only a terminal decision is safe to GC. An Undecided
+        // record must be driven to a decision (or presume-aborted) by recovery, not removed.
+        if (!existing.IsTerminal)
+            return Rejected(existing, "purge of an undecided record");
+
+        return Removed();
+    }
 
     private static TransactionRecordApplyResult ApplyInitialize(TransactionRecord? existing, InitializeTransactionCommand init)
     {
@@ -207,4 +229,7 @@ internal static class TransactionRecordStateMachine
 
     private static TransactionRecordApplyResult Rejected(TransactionRecord? record, string? reason) =>
         new(TransactionApplyOutcome.Rejected, record, reason);
+
+    private static TransactionRecordApplyResult Removed() =>
+        new(TransactionApplyOutcome.Removed, null, null);
 }

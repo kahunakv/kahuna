@@ -118,6 +118,18 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly PreparedIntentStore preparedIntentStore;
 
+    // Retention GC of durable-2PC metadata (records + participant receipts): the window a terminal record is kept
+    // before it and its receipts are reclaimed, and the per-pass cap that bounds one sweep's work.
+    private readonly TimeSpan durableRecordRetentionTtl;
+
+    private readonly int durableRecordGcMaxPerPass;
+
+    private readonly int durableRecoveryMaxPartitionsPerPass;
+
+    // Instance-owned meter for the durable-2PC resident-state gauges; disposed on teardown so a disposed node's
+    // stores are not kept reachable by the gauge callbacks.
+    private readonly System.Diagnostics.Metrics.Meter durableGaugeMeter;
+
     /// <summary>The durable-intent 2PC stores and key→partition routing, exposed to the transaction coordinator's
     /// durable finalize path (the sole durable-persistent finalize path).</summary>
     internal TransactionRecordStore DurableTransactionRecordStore => transactionRecordStore;
@@ -154,7 +166,7 @@ internal sealed class KeyValuesManager : IDisposable
         return leader == raft.GetLocalEndpoint() ? null : leader;
     }
 
-    internal async Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, CancellationToken cancellationToken)
+    internal async Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
@@ -172,7 +184,7 @@ internal sealed class KeyValuesManager : IDisposable
             return ok;
         }
 
-        return await ReplicateDurableLocal(partitionId, logType, data, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
+        return await ReplicateDurableLocal(partitionId, logType, data, admissionClass, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -182,7 +194,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// The re-fence applies on the local aggregator path; a forward to a remote leader carries no fence (the
     /// remote's freeze-to-dispatch race is a follow-up).
     /// </summary>
-    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
@@ -193,16 +205,17 @@ internal sealed class KeyValuesManager : IDisposable
             return ok;
         }
 
-        return await ReplicateDurableLocal(partitionId, logType, data, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        return await ReplicateDurableLocal(partitionId, logType, data, admissionClass, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Writes.DurableProposalSubmission submission = new(
             partitionId,
             [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0)],
             completion,
+            admissionClass,
             ApplyDurableEntriesOnCommit,
             fenceKey,
             fenceGeneration);
@@ -247,7 +260,10 @@ internal sealed class KeyValuesManager : IDisposable
         {
             case DurableOpReplicate:
                 // A forwarded durable op is applied on the leader it was routed to; the fence ran on the origin.
-                return await ReplicateDurableLocal(partitionId, logType, payload, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
+                // The admission class is not carried on the durable-operation wire, so admit a forwarded op as
+                // Terminal: cross-node settlement of an already-prepared transaction must never be starved by
+                // local ordinary-write saturation. (Wiring the origin's class across the wire is a follow-up.)
+                return await ReplicateDurableLocal(partitionId, logType, payload, Writes.WriteAdmissionClass.Terminal, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
 
             case DurableOpCommit:
                 return await replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false);
@@ -431,6 +447,10 @@ internal sealed class KeyValuesManager : IDisposable
         transactionRecordStore = externalRecordStore ?? new TransactionRecordStore(configuration.StoragePath, configuration.StorageRevision, logger);
         preparedIntentStore = externalIntentStore ?? new PreparedIntentStore(configuration.StoragePath, configuration.StorageRevision, logger);
 
+        durableRecordRetentionTtl = configuration.TransactionOutcomeRetentionTtl;
+        durableRecordGcMaxPerPass = configuration.DurableRecordGcMaxPerPass;
+        durableRecoveryMaxPartitionsPerPass = configuration.DurableRecoveryMaxPartitionsPerPass;
+
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
         writeAggregator = new Writes.PartitionWriteAggregator(
             actorSystem,
@@ -442,6 +462,14 @@ internal sealed class KeyValuesManager : IDisposable
                 MaxBatchBytes = configuration.KeyValueWriteMaxBatchBytes,
                 MaxQueuedItemsPerPartition = configuration.KeyValueWriteMaxQueuedItemsPerPartition,
                 MaxQueuedBytesPerPartition = configuration.KeyValueWriteMaxQueuedBytesPerPartition,
+                TerminalReserveItemsPerPartition = configuration.KeyValueWriteTerminalReserveItemsPerPartition,
+                TerminalReserveBytesPerPartition = configuration.KeyValueWriteTerminalReserveBytesPerPartition,
+                MaxQueuedItemsGlobal = configuration.KeyValueWriteMaxQueuedItemsGlobal,
+                MaxQueuedBytesGlobal = configuration.KeyValueWriteMaxQueuedBytesGlobal,
+                TerminalReserveItemsGlobal = configuration.KeyValueWriteTerminalReserveItemsGlobal,
+                TerminalReserveBytesGlobal = configuration.KeyValueWriteTerminalReserveBytesGlobal,
+                MaxOperationBytes = configuration.KeyValueWriteMaxOperationBytes,
+                BatchExecutionTimeoutMs = configuration.KeyValueWriteBatchExecutionTimeoutMs,
                 MaxQueueDelayMs = configuration.KeyValueWriteMaxQueueDelayMs,
                 AggregatorInboxSize = configuration.MaxKeyValueWriteAggregatorInboxSize,
                 LaneCount = Math.Max(1, configuration.KeyValueWorkers)
@@ -462,6 +490,15 @@ internal sealed class KeyValuesManager : IDisposable
 
         txCoordinator = new(this, configuration, raft, logger);
         scriptExecutor = new(this, configuration, raft, logger, txCoordinator);
+
+        // Resident-state gauges for the durable-2PC stores + the admission counter, on an instance-owned meter
+        // disposed on teardown so a disposed node's stores are not kept reachable by gauge callbacks.
+        durableGaugeMeter = Transactions.DurableTransactionMetrics.RegisterGauges(
+            () => transactionRecordStore.Count,
+            () => completionReceiptStore.Count,
+            () => preparedIntentStore.Count,
+            () => preparedIntentStore.TotalBytes,
+            () => txCoordinator.OutstandingDurableCount);
 
         // Periodic reaper for interactive transaction sessions abandoned without commit/rollback.
         actorSystem.Spawn<TransactionReaperActor, TransactionReaperRequest>(
@@ -4480,7 +4517,9 @@ internal sealed class KeyValuesManager : IDisposable
         if (records.Count > 0)
         {
             byte[] recordDelta = TransactionRecordStore.SerializeReconstructionDelta(records);
-            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.TransactionRecord, recordDelta, cancellationToken).ConfigureAwait(false))
+            // Topology-transfer imports must land during cutover regardless of local write pressure — admit as
+            // Terminal so an ordinary-write burst on the destination cannot reject the handoff.
+            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.TransactionRecord, recordDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
                 return false;
         }
 
@@ -4488,7 +4527,7 @@ internal sealed class KeyValuesManager : IDisposable
         {
             byte[] intentDelta = PreparedIntentStore.SerializeDelta(
                 intents.Select(i => (Transactions.Data.PreparedIntentCommand)new Transactions.Data.PrepareIntentCommand(i)));
-            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.PreparedIntent, intentDelta, cancellationToken).ConfigureAwait(false))
+            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.PreparedIntent, intentDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
                 return false;
         }
 
@@ -4631,11 +4670,18 @@ internal sealed class KeyValuesManager : IDisposable
         if (due.Count == 0)
             return;
 
+        // Cap the cross-partition fan-out per pass so a large backlog spread over many partitions is drained
+        // across successive collection ticks rather than fanning out to every partition (and its recovery
+        // lookups) at once. Deferred partitions' intents stay due and are picked up next pass.
+        int partitionCap = durableRecoveryMaxPartitionsPerPass;
+
         HashSet<int> partitions = [];
         foreach (PreparedIntent intent in due)
         {
             if (cancellationToken.IsCancellationRequested)
                 return;
+            if (partitionCap > 0 && partitions.Count >= partitionCap)
+                break;
 
             int partitionId = locator.LocateRange(intent.Key).PartitionId;
             if (partitions.Contains(partitionId))
@@ -4663,6 +4709,121 @@ internal sealed class KeyValuesManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Retention GC for durable-2PC metadata: on the anchor partitions this node leads, reclaims terminal
+    /// transaction records whose retention window has elapsed, releasing each transaction's participant completion
+    /// receipts first and then purging the record. Both stores grow one entry per persistent write / per
+    /// transaction and are otherwise never reclaimed, so without this sweep they retain for the node's lifetime.
+    ///
+    /// <para>The retention window is the safety gate: a completion receipt answers a re-delivered commit's
+    /// idempotency check (<c>Committed</c> vs. ambiguous <c>MustRetry</c>) after the prepare state is gone, so a
+    /// receipt is only released once no such re-delivery can still arrive — the window (
+    /// <see cref="KahunaConfiguration.TransactionOutcomeRetentionTtl"/>) is far longer than the write-intent
+    /// lease and any leader-change replay. A record is purged only after every one of its participants' receipts
+    /// was released durably; a failed release retains the record for the next pass (missing proof ⇒ retain).</para>
+    /// </summary>
+    internal async Task CollectDurableTransactionRecords(CancellationToken cancellationToken)
+    {
+        if (transactionRecordStore.Count == 0)
+            return;
+
+        TimeSpan retentionTtl = durableRecordRetentionTtl;
+        if (retentionTtl <= TimeSpan.Zero)
+            return; // age-based GC disabled
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // Transactions whose local prepared intents have not settled yet: their settlement is still in flight, so
+        // do not GC their record even if the (generous) retention window has nominally elapsed.
+        HashSet<(HLCTimestamp, long)> settlementPending = [];
+        foreach (PreparedIntent intent in preparedIntentStore.Snapshot())
+            settlementPending.Add((intent.TransactionId, intent.Epoch));
+
+        int cap = durableRecordGcMaxPerPass;
+        int reclaimed = 0;
+        Dictionary<int, List<PurgeTransactionCommand>> purgesByAnchor = [];
+
+        foreach (TransactionRecord record in transactionRecordStore.Snapshot())
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+            if (cap > 0 && reclaimed >= cap)
+                break;
+
+            if (!record.IsTerminal || record.DecidedAt == HLCTimestamp.Zero)
+                continue; // undecided records belong to recovery, never GC
+            if (now - record.DecidedAt < retentionTtl)
+                continue; // retention window not elapsed
+            if (settlementPending.Contains((record.TransactionId, record.Epoch)))
+                continue; // settlement still in progress locally
+
+            int anchorPartition = locator.LocateRange(record.RecordAnchorKey).PartitionId;
+            if (raft.Joined && !await raft.AmILeader(anchorPartition, cancellationToken).ConfigureAwait(false))
+                continue; // only the anchor leader drives this record's GC
+
+            // Release the participants' completion receipts before removing the record. If any release is not
+            // durable, retain the record and retry next pass rather than purging it while a proof still exists.
+            if (!await ReleaseCompletionReceiptsForRecord(record, cancellationToken).ConfigureAwait(false))
+                continue;
+
+            if (!purgesByAnchor.TryGetValue(anchorPartition, out List<PurgeTransactionCommand>? purges))
+                purgesByAnchor[anchorPartition] = purges = [];
+            purges.Add(new PurgeTransactionCommand(record.TransactionId, record.Epoch));
+            reclaimed++;
+        }
+
+        // Replicate the purges per anchor partition (one delta each) through the ordered durable seam. Terminal
+        // class: GC cleanup must land and must not be starved by ordinary write pressure on the anchor partition.
+        foreach ((int partitionId, List<PurgeTransactionCommand> purges) in purgesByAnchor)
+        {
+            try
+            {
+                byte[] delta = TransactionRecordStore.SerializeDelta(purges);
+                await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.TransactionRecord, delta,
+                    Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+                DurableTransactionMetrics.RecordsReclaimed(purges.Count);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Durable transaction-record GC purge failed for partition {Partition}", partitionId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forgets the persistent participants' completion receipts for a transaction, routed to and replicated on
+    /// each participant partition's leader. Only persistent participants ever recorded a receipt; an aborted
+    /// transaction wrote none, so its forgets are harmless no-ops. Returns false if any partition's forget was
+    /// not durable, so the caller retains the record for a later pass.
+    /// </summary>
+    private async Task<bool> ReleaseCompletionReceiptsForRecord(TransactionRecord record, CancellationToken cancellationToken)
+    {
+        Dictionary<int, List<CompletionReceiptRecord>> byPartition = [];
+        foreach (TransactionParticipantRef participant in record.Participants)
+        {
+            if (participant.Durability != KeyValueDurability.Persistent)
+                continue;
+
+            int partitionId = locator.LocateRange(participant.Key).PartitionId;
+            if (!byPartition.TryGetValue(partitionId, out List<CompletionReceiptRecord>? list))
+                byPartition[partitionId] = list = [];
+            list.Add(new CompletionReceiptRecord(record.TransactionId, participant.Key, record.RecordAnchorKey, KeyValueDurability.Persistent));
+        }
+
+        if (byPartition.Count == 0)
+            return true; // manifestless tombstone or ephemeral-only: nothing to release
+
+        foreach ((int partitionId, List<CompletionReceiptRecord> receipts) in byPartition)
+        {
+            if (!await ForgetCompletionReceiptsToPartitionLeaderAsync(partitionId, receipts, cancellationToken).ConfigureAwait(false))
+                return false;
+
+            DurableTransactionMetrics.ReceiptsReleased(receipts.Count);
+        }
+
+        return true;
+    }
+
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(
         preparedIntentStore,
         // The scheduler seam is the single ordered apply owner: recovery's settle/materialize deltas apply in Raft
@@ -4687,7 +4848,8 @@ internal sealed class KeyValuesManager : IDisposable
         // Drive the abort through the ordered scheduler seam (this node leads the anchor partition), which applies
         // it in Raft order — never overwriting a commit that won earlier in the log. Then read back the winner.
         byte[] delta = TransactionRecordStore.SerializeDelta([abort]);
-        await ReplicateDurableThroughScheduler(anchorPartition, ReplicationTypes.TransactionRecord, delta, cancellationToken).ConfigureAwait(false);
+        // A recovery-driven abort is terminal work resolving an already-prepared transaction — admit as Terminal.
+        await ReplicateDurableThroughScheduler(anchorPartition, ReplicationTypes.TransactionRecord, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
 
         return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
     }
@@ -5906,5 +6068,6 @@ internal sealed class KeyValuesManager : IDisposable
         rangeMapStore.Dispose();
         snapshotFloorStore.Dispose();
         rangeSplitTrigger?.Dispose();
+        durableGaugeMeter.Dispose();
     }
 }

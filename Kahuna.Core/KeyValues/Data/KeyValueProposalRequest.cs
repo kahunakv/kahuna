@@ -24,6 +24,10 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
 
     public int PartitionId { get; }
 
+    /// <summary>A direct client write is ordinary work: it adds new pending state and is bounded strictly by the
+    /// base admission budget.</summary>
+    public WriteAdmissionClass AdmissionClass => WriteAdmissionClass.Ordinary;
+
     public int ProposalId { get; }
 
     public KeyValueDurability Durability { get; }

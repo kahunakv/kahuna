@@ -34,6 +34,8 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 
     public int PartitionId { get; }
 
+    public WriteAdmissionClass AdmissionClass { get; }
+
     public int ByteLength { get; }
 
     public IReadOnlyList<RaftProposalEntry> Entries { get; }
@@ -44,11 +46,13 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         int partitionId,
         IReadOnlyList<RaftProposalEntry> entries,
         TaskCompletionSource<bool> completion,
+        WriteAdmissionClass admissionClass,
         Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit = null,
         string? fenceKey = null,
         long fenceGeneration = 0)
     {
         PartitionId = partitionId;
+        AdmissionClass = admissionClass;
         Entries = entries;
         this.completion = completion;
         this.applyOnCommit = applyOnCommit;

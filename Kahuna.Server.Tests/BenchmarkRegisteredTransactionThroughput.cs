@@ -34,11 +34,11 @@ public sealed class BenchmarkRegisteredTransactionThroughput
         public long Calls;
         public long Entries;
 
-        public Task<RaftReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries)
+        public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Calls);
             Interlocked.Add(ref Entries, entries.Count);
-            return inner.ReplicateAsync(partitionId, entries);
+            return inner.ReplicateAsync(partitionId, entries, cancellationToken);
         }
     }
 

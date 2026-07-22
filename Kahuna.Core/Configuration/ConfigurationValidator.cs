@@ -107,6 +107,22 @@ public static class ConfigurationValidator
         if (configuration.KeyValueWriteMaxBatchBytes > configuration.KeyValueWriteMaxQueuedBytesPerPartition)
             configuration.KeyValueWriteMaxBatchBytes = (int)Math.Min(configuration.KeyValueWriteMaxBatchBytes, configuration.KeyValueWriteMaxQueuedBytesPerPartition);
 
+        // Terminal reserves are additive headroom; a negative value would shrink the base budget, not add to it.
+        if (configuration.KeyValueWriteTerminalReserveItemsPerPartition < 0)
+            configuration.KeyValueWriteTerminalReserveItemsPerPartition = 0;
+        if (configuration.KeyValueWriteTerminalReserveBytesPerPartition < 0)
+            configuration.KeyValueWriteTerminalReserveBytesPerPartition = 0;
+        if (configuration.KeyValueWriteTerminalReserveItemsGlobal < 0)
+            configuration.KeyValueWriteTerminalReserveItemsGlobal = 0;
+        if (configuration.KeyValueWriteTerminalReserveBytesGlobal < 0)
+            configuration.KeyValueWriteTerminalReserveBytesGlobal = 0;
+
+        // The hard per-operation ceiling must admit at least a full batch's worth of bytes, or a legitimately
+        // large single value below the batch target could never be admitted. A value <= 0 disables the ceiling.
+        if (configuration.KeyValueWriteMaxOperationBytes > 0
+            && configuration.KeyValueWriteMaxOperationBytes < configuration.KeyValueWriteMaxBatchBytes)
+            configuration.KeyValueWriteMaxOperationBytes = configuration.KeyValueWriteMaxBatchBytes;
+
         // The pre-dispatch residence bound must leave real headroom below the write-intent lease for the wake
         // scheduling plus the Raft round trip, so a queue-age-released write can never be proposed after its
         // intent could already have expired.

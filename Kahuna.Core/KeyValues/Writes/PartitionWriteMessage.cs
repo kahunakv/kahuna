@@ -17,6 +17,12 @@ internal enum PartitionWriteMessageKind
     Stop
 }
 
+/// <summary>The settled outcome of one submission in a dispatched batch, mapped from that submission's own
+/// contiguous entry slice in the index-aligned per-entry Raft result. A submission whose every entry committed is
+/// <see cref="Committed"/>; a submission with any failed entry is released, retryably per <see cref="Transient"/>,
+/// carrying the failing entry's <see cref="Status"/> for diagnostics.</summary>
+internal readonly record struct BatchSubmissionOutcome(IProposalSubmission Item, bool Committed, bool Transient, RaftOperationStatus Status);
+
 /// <summary>
 /// The single lane-actor message. Submit is an ordinary admission; TimerWake and BatchComplete are priority
 /// control messages so a hot inbox can never strand a linger flush or a completed batch's release.
@@ -29,43 +35,30 @@ internal sealed class PartitionWriteMessage
 
     public IProposalSubmission? Item { get; }
 
-    public IReadOnlyList<IProposalSubmission>? Batch { get; }
-
-    public bool Success { get; }
-
-    /// <summary>For a failed batch, whether the caller should retry (MustRetry) rather than see a terminal
-    /// error — classified once at settle time by the lane's single outcome mapper.</summary>
-    public bool Transient { get; }
-
-    public RaftOperationStatus Status { get; }
+    /// <summary>Per-submission settled outcomes for a completed batch, one per submission dispatched.</summary>
+    public IReadOnlyList<BatchSubmissionOutcome>? Outcomes { get; }
 
     private PartitionWriteMessage(
         PartitionWriteMessageKind kind,
         int partitionId,
         IProposalSubmission? item,
-        IReadOnlyList<IProposalSubmission>? batch,
-        bool success,
-        bool transient,
-        RaftOperationStatus status)
+        IReadOnlyList<BatchSubmissionOutcome>? outcomes)
     {
         Kind = kind;
         PartitionId = partitionId;
         Item = item;
-        Batch = batch;
-        Success = success;
-        Transient = transient;
-        Status = status;
+        Outcomes = outcomes;
     }
 
     public static PartitionWriteMessage Submit(IProposalSubmission item) =>
-        new(PartitionWriteMessageKind.Submit, item.PartitionId, item, null, false, false, default);
+        new(PartitionWriteMessageKind.Submit, item.PartitionId, item, null);
 
     public static PartitionWriteMessage TimerWake(int partitionId) =>
-        new(PartitionWriteMessageKind.TimerWake, partitionId, null, null, false, false, default);
+        new(PartitionWriteMessageKind.TimerWake, partitionId, null, null);
 
-    public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<IProposalSubmission> batch, bool success, bool transient, RaftOperationStatus status) =>
-        new(PartitionWriteMessageKind.BatchComplete, partitionId, null, batch, success, transient, status);
+    public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<BatchSubmissionOutcome> outcomes) =>
+        new(PartitionWriteMessageKind.BatchComplete, partitionId, null, outcomes);
 
     public static readonly PartitionWriteMessage StopSignal =
-        new(PartitionWriteMessageKind.Stop, 0, null, null, false, false, default);
+        new(PartitionWriteMessageKind.Stop, 0, null, null);
 }

@@ -40,6 +40,7 @@ internal static class PartitionWriteAggregatorMetrics
         Meter.CreateHistogram<double>("kahuna.kv.write.raft_duration", unit: "ms", description: "Aggregator Raft-call duration.");
 
     private static readonly KeyValuePair<string, object?> ReasonQueueFull = new("reason", "queue_full");
+    private static readonly KeyValuePair<string, object?> ReasonOversized = new("reason", "oversized");
     private static readonly KeyValuePair<string, object?> ReasonInboxFull = new("reason", "inbox_full");
     private static readonly KeyValuePair<string, object?> ReasonStopping = new("reason", "stopping");
     private static readonly KeyValuePair<string, object?> ReasonFenceStale = new("reason", "fence_stale");
@@ -49,6 +50,7 @@ internal static class PartitionWriteAggregatorMetrics
     private static readonly KeyValuePair<string, object?> OutcomePermanent = new("outcome", "permanent");
 
     internal static void RejectedQueueFull() => Rejections.Add(1, ReasonQueueFull);
+    internal static void RejectedOversized() => Rejections.Add(1, ReasonOversized);
     internal static void RejectedInboxFull() => Rejections.Add(1, ReasonInboxFull);
     internal static void RejectedStopping() => Rejections.Add(1, ReasonStopping);
     internal static void ReleasedFenceStale() => Rejections.Add(1, ReasonFenceStale);

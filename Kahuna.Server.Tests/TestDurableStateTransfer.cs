@@ -205,13 +205,13 @@ public sealed class TestDurableStateTransfer : BaseCluster
         fence.StaleKeys.Add("k:moved");
         RaftProposalEntry[] entries = [new(ReplicationTypes.TransactionRecord, [1], AutoCommit: true, ExpectedGeneration: 0)];
 
-        DurableProposalSubmission unfenced = new(1, entries, new TaskCompletionSource<bool>(), applyOnCommit: null, fenceKey: null);
+        DurableProposalSubmission unfenced = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, applyOnCommit: null, fenceKey: null);
         Assert.False(unfenced.IsStale(fence));
 
-        DurableProposalSubmission moved = new(1, entries, new TaskCompletionSource<bool>(), applyOnCommit: null, fenceKey: "k:moved", fenceGeneration: 3);
+        DurableProposalSubmission moved = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, applyOnCommit: null, fenceKey: "k:moved", fenceGeneration: 3);
         Assert.True(moved.IsStale(fence));
 
-        DurableProposalSubmission stable = new(1, entries, new TaskCompletionSource<bool>(), applyOnCommit: null, fenceKey: "k:stable", fenceGeneration: 3);
+        DurableProposalSubmission stable = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, applyOnCommit: null, fenceKey: "k:stable", fenceGeneration: 3);
         Assert.False(stable.IsStale(fence));
     }
 }

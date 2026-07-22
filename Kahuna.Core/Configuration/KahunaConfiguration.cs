@@ -91,6 +91,39 @@ public sealed class KahunaConfiguration
     /// <summary>Maximum admitted serialized bytes retained per partition, including in flight.</summary>
     public long KeyValueWriteMaxQueuedBytesPerPartition { get; set; } = 32L * 1024 * 1024;
 
+    /// <summary>Extra per-partition item headroom above the per-partition cap reserved for terminal work (a
+    /// durable transaction's decision/settle), so a partition saturated with ordinary writes still admits the
+    /// step that finishes an already-prepared transaction. Must not be negative.</summary>
+    public int KeyValueWriteTerminalReserveItemsPerPartition { get; set; } = 256;
+
+    /// <summary>Extra per-partition byte headroom above the per-partition byte cap reserved for terminal work.</summary>
+    public long KeyValueWriteTerminalReserveBytesPerPartition { get; set; } = 4L * 1024 * 1024;
+
+    /// <summary>Node-global maximum admitted items across all partitions for ordinary writes; a burst spread over
+    /// many partitions cannot retain unbounded memory in aggregate. A value &lt;= 0 disables the global bound.</summary>
+    public long KeyValueWriteMaxQueuedItemsGlobal { get; set; } = 131_072;
+
+    /// <summary>Node-global maximum admitted serialized bytes across all partitions for ordinary writes.
+    /// A value &lt;= 0 disables the global byte bound.</summary>
+    public long KeyValueWriteMaxQueuedBytesGlobal { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>Extra node-global item headroom above the global cap reserved for terminal work, so global
+    /// ordinary saturation cannot reject settlement anywhere on the node. Must not be negative.</summary>
+    public long KeyValueWriteTerminalReserveItemsGlobal { get; set; } = 8_192;
+
+    /// <summary>Extra node-global byte headroom above the global byte cap reserved for terminal work.</summary>
+    public long KeyValueWriteTerminalReserveBytesGlobal { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>Hard ceiling on a single admitted write's serialized bytes; a larger write is rejected with a
+    /// retryable MustRetry rather than dispatched alone. Must be &gt;= the batch byte target so a legitimately
+    /// large value below the ceiling still dispatches alone. A value &lt;= 0 disables the hard ceiling.</summary>
+    public long KeyValueWriteMaxOperationBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>Maximum wall-clock time a dispatched aggregator batch's Raft round trip may take before the
+    /// scheduler cancels it (the cancelled batch settles retryably). Bounds an in-flight batch so it cannot
+    /// outlive queue age or hang shutdown. A value &lt;= 0 disables the deadline.</summary>
+    public int KeyValueWriteBatchExecutionTimeoutMs { get; set; } = 30_000;
+
     /// <summary>Maximum time an admitted write may wait before dispatch; on expiry it is released as
     /// MustRetry. Must stay well below the write-intent lease so a released item is never proposed late.</summary>
     public int KeyValueWriteMaxQueueDelayMs { get; set; } = 1_000;
@@ -132,6 +165,40 @@ public sealed class KahunaConfiguration
     /// value &lt;= 0 <b>disables</b> the bound (unbounded admission).
     /// </summary>
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
+
+    /// <summary>
+    /// Maximum terminal transaction records the retention GC sweep reclaims in one collection pass, per node.
+    /// Bounds the work (and the participant receipt-forget fan-out) a single sweep performs so a large backlog —
+    /// e.g. after a restart or a burst — is drained across successive passes instead of monopolizing one tick.
+    /// A value &lt;= 0 disables the per-pass cap (drain everything eligible each pass).
+    /// </summary>
+    public int DurableRecordGcMaxPerPass { get; set; } = 4_096;
+
+    /// <summary>
+    /// Maximum partitions the prepared-intent recovery sweep drives in one collection pass, per node. Bounds the
+    /// cross-partition fan-out (and the concurrent recovery lookups it issues) so a restart backlog spread across
+    /// many partitions is drained across successive passes instead of one tick fanning out to every partition at
+    /// once. A value &lt;= 0 disables the per-pass cap. Due intents on the deferred partitions remain due and are
+    /// picked up next pass.
+    /// </summary>
+    public int DurableRecoveryMaxPartitionsPerPass { get; set; } = 64;
+
+    /// <summary>
+    /// Strict upper bound on the number of prepared intents resident across all partitions on this node. Checked
+    /// at durable admission: a transaction whose prepares would push the resident count past this bound is
+    /// refused with a retryable <c>MustRetry</c> before it prepares, so slow settlement cannot let resident
+    /// prepared-intent state grow without limit. Complements <see cref="DurableDecisionOutstandingMax"/> (which
+    /// bounds concurrent transactions) by bounding the intents those transactions hold. A value &lt;= 0 disables
+    /// the count bound.
+    /// </summary>
+    public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
+
+    /// <summary>
+    /// Strict upper bound on the resident prepared-intent value bytes across all partitions on this node, checked
+    /// at durable admission alongside <see cref="DurablePreparedIntentMaxCount"/>. Bounds the memory a burst of
+    /// large-value transactions can pin in unsettled intents. A value &lt;= 0 disables the byte bound.
+    /// </summary>
+    public long DurablePreparedIntentMaxBytes { get; set; } = 1L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// Lower bound (ms) on the durable-transaction decision-deadline margin — the window past the commit timestamp

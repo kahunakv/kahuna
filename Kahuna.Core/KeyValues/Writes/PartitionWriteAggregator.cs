@@ -10,7 +10,7 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// — from any client, single or many-key call — meet in the same lane's partition queue and share as few Raft
 /// proposals as the batch/queue bounds allow.
 /// </summary>
-internal sealed class PartitionWriteAggregator
+internal sealed class PartitionWriteAggregator : IDisposable
 {
     private readonly IActorRef<PartitionWriteAggregatorActor, PartitionWriteMessage, PartitionWriteAck>[] lanes;
 
@@ -21,6 +21,12 @@ internal sealed class PartitionWriteAggregator
     private readonly TimeProvider timeProvider;
 
     private readonly long stampsPerMs;
+
+    private readonly long maxOperationBytes;
+
+    /// <summary>Cancels in-flight batch round trips on shutdown so a hung executor cannot hold the drain open past
+    /// its timeout. Handed to every lane; cancelled by <see cref="SignalStop"/>.</summary>
+    private readonly CancellationTokenSource shutdownCts = new();
 
     /// <summary>Instance-owned meter carrying this aggregator's observable gauges; disposed on <see cref="Stop"/>
     /// so a disposed node's admission registry is not kept reachable by gauge callbacks.</summary>
@@ -40,7 +46,17 @@ internal sealed class PartitionWriteAggregator
         laneCount = Math.Max(1, options.LaneCount);
         this.timeProvider = timeProvider ?? TimeProvider.System;
         stampsPerMs = Math.Max(1, this.timeProvider.TimestampFrequency / 1000);
-        admission = new PartitionAdmissionRegistry(options.MaxQueuedItemsPerPartition, options.MaxQueuedBytesPerPartition);
+        maxOperationBytes = options.MaxOperationBytes;
+        admission = new PartitionAdmissionRegistry(
+            options.MaxQueuedItemsPerPartition,
+            options.MaxQueuedBytesPerPartition,
+            options.TerminalReserveItemsPerPartition,
+            options.TerminalReserveBytesPerPartition,
+            options.MaxQueuedItemsGlobal,
+            options.MaxQueuedBytesGlobal,
+            options.TerminalReserveItemsGlobal,
+            options.TerminalReserveBytesGlobal,
+            options.MaxOperationBytes);
 
         // Submit is an ordinary bounded admission; TimerWake/BatchComplete/Stop are control and bypass the bound
         // so a saturated lane can still flush a linger deadline, release a completed batch's capacity, and be
@@ -63,7 +79,8 @@ internal sealed class PartitionWriteAggregator
                 options,
                 fence,
                 logger,
-                this.timeProvider
+                this.timeProvider,
+                shutdownCts.Token
             );
 
         gaugeMeter = PartitionWriteAggregatorMetrics.RegisterGauges(admission);
@@ -85,7 +102,15 @@ internal sealed class PartitionWriteAggregator
             return false;
         }
 
-        if (!admission.TryReserve(item.PartitionId, item.ByteLength))
+        // Hard per-operation ceiling: a submission larger than the limit is rejected (retryable) rather than
+        // dispatched alone. The registry also guards this, but reject here to record the precise reason.
+        if (maxOperationBytes > 0 && item.ByteLength > maxOperationBytes)
+        {
+            PartitionWriteAggregatorMetrics.RejectedOversized();
+            return false;
+        }
+
+        if (!admission.TryReserve(item.PartitionId, item.ByteLength, item.AdmissionClass))
         {
             PartitionWriteAggregatorMetrics.RejectedQueueFull();
             return false;
@@ -112,13 +137,19 @@ internal sealed class PartitionWriteAggregator
 
     /// <summary>
     /// Begins shutdown: new admissions are rejected and each lane releases its still-pending items retryably.
-    /// In-flight batches are left to report their real Raft outcome. Called on manager disposal.
+    /// In-flight batches are left to report their real Raft outcome (each already bounded by the per-batch
+    /// execution deadline, so a hung one cannot linger indefinitely). Prefer <see cref="StopAsync"/> for an
+    /// observable drain; this is the synchronous disposal fallback.
     /// </summary>
     public void Stop()
     {
         SignalStop();
         DisposeMeter();
     }
+
+    /// <summary>Disposes via the same synchronous <see cref="Stop"/> path (idempotent), so the facade satisfies
+    /// deterministic disposal of its shutdown token source and gauge meter.</summary>
+    public void Dispose() => Stop();
 
     /// <summary>
     /// Asynchronous, observable drain: rejects new admissions, delivers the priority stop that releases every
@@ -132,11 +163,15 @@ internal sealed class PartitionWriteAggregator
     {
         SignalStop();
 
+        // Let in-flight batches settle naturally (so they report their real Raft outcome), bounded by the drain
+        // timeout. Only if the deadline elapses with work still in flight do we cancel it — a stuck executor must
+        // not hang shutdown forever, but a batch that would settle promptly should not be aborted early.
         long deadlineTicks = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
         while ((admission.TotalReservedItems() != 0 || admission.InFlightPartitions != 0)
                && Environment.TickCount64 < deadlineTicks)
             await Task.Delay(10).ConfigureAwait(false);
 
+        CancelShutdown();
         DisposeMeter();
     }
 
@@ -151,9 +186,20 @@ internal sealed class PartitionWriteAggregator
             lane.TrySend(PartitionWriteMessage.StopSignal);
     }
 
+    /// <summary>Cancels in-flight batch round trips so a hung executor cannot outlast teardown; a cancelled batch
+    /// settles retryably and frees its capacity. Tolerates a second call after the token source was disposed.</summary>
+    private void CancelShutdown()
+    {
+        try { shutdownCts.Cancel(); } catch (ObjectDisposedException) { /* already disposed */ }
+    }
+
     /// <summary>Disposes the instance meter so its observable gauges stop publishing and release their capture
-    /// of the admission registry. Idempotent (Meter.Dispose tolerates repeated calls).</summary>
-    private void DisposeMeter() => gaugeMeter.Dispose();
+    /// of the admission registry, and the shutdown token source. Idempotent (both tolerate repeated calls).</summary>
+    private void DisposeMeter()
+    {
+        gaugeMeter.Dispose();
+        shutdownCts.Dispose();
+    }
 
     /// <summary>Currently reserved items for a partition — capacity accounting that must return to zero once
     /// every admitted write has completed or been released. Test/observability only.</summary>

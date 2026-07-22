@@ -277,4 +277,65 @@ public sealed class TestTransactionRecordStateMachine
         long differentAnchor = TransactionManifest.ComputeHash(TxId, Epoch, "acct/99", Ts(2000), [a, b]);
         Assert.NotEqual(h1, differentAnchor);
     }
+
+    // ── purge (retention GC) ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Purge_CommittedRecord_Removes()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+        rec = TransactionRecordStateMachine.Apply(rec, Commit(rec.ManifestHash, Ts(500), Ts(2100))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, new PurgeTransactionCommand(TxId, Epoch));
+
+        Assert.Equal(TransactionApplyOutcome.Removed, r.Outcome);
+        Assert.Null(r.Record); // the store drops the entry on a Removed outcome
+    }
+
+    [Fact]
+    public void Purge_AbortTombstone_Removes()
+    {
+        // A manifestless abort tombstone (created from absence) is terminal and may be reclaimed.
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(
+            null, Abort(Hash(Manifest(), Ts(2000)), TransactionAbortClass.Conflict, Ts(500), Ts(2100), Ts(2000), Ts(9000))).Record!;
+        Assert.Equal(TransactionDecision.Abort, rec.Decision);
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, new PurgeTransactionCommand(TxId, Epoch));
+
+        Assert.Equal(TransactionApplyOutcome.Removed, r.Outcome);
+    }
+
+    [Fact]
+    public void Purge_UndecidedRecord_Rejected_RecordRetained()
+    {
+        // An in-flight (Undecided) record is never dropped — recovery must drive it to a decision first.
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, new PurgeTransactionCommand(TxId, Epoch));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Same(rec, r.Record);
+    }
+
+    [Fact]
+    public void Purge_AbsentRecord_IsIdempotentNoop()
+    {
+        // Replay of a purge whose removal already applied: no record, no change, not a rejection.
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(null, new PurgeTransactionCommand(TxId, Epoch));
+
+        Assert.Equal(TransactionApplyOutcome.IdempotentNoop, r.Outcome);
+        Assert.Null(r.Record);
+    }
+
+    [Fact]
+    public void Purge_IdentityMismatch_Rejected()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+        rec = TransactionRecordStateMachine.Apply(rec, Commit(rec.ManifestHash, Ts(500), Ts(2100))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, new PurgeTransactionCommand(Ts(9999), Epoch));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Same(rec, r.Record);
+    }
 }

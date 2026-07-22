@@ -57,6 +57,16 @@ internal sealed class TransactionCoordinator : IDisposable
     internal readonly ConcurrentDictionary<HLCTimestamp, TransactionContext> sessions = new();
 
     /// <summary>
+    /// Count of durable transactions currently being driven through finalize on this node — reserved before a
+    /// transaction prepares and released when its attempt ends (decision installed, or the attempt gave up). It
+    /// bounds concurrent durable inflow to <c>DurableDecisionOutstandingMax</c>, so a burst backpressures with
+    /// <see cref="KeyValueResponseType.MustRetry"/> instead of admitting unbounded prepared state. Sized so the
+    /// write scheduler's terminal-class reserve (per-partition and global) always has room for every admitted
+    /// transaction's eventual decision/settle; a value &lt;= 0 in configuration disables the gate.
+    /// </summary>
+    private int outstandingDurable;
+
+    /// <summary>
     /// Best-effort retention of finalized outcomes after their session leaves <see cref="sessions"/>. A
     /// duplicate commit/rollback that arrives once the session is gone replays the recorded terminal answer
     /// (Committed/RolledBack/expired) instead of an unknown result. Bounded by size and HLC age (configuration
@@ -1201,13 +1211,13 @@ internal sealed class TransactionCoordinator : IDisposable
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
     // batching). The finalizer applies committed record/intent deltas to its local stores, and the resolution's
     // committed value to the leader's KV state via ApplyDurableCommitLocally.
-    private Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, CancellationToken cancellationToken) =>
-        manager.ReplicateDurableThroughScheduler(partitionId, logType, data, cancellationToken);
+    private Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
 
     // Fenced variant for the pre-decision record/prepare path: re-resolves the partition against the frozen
     // generation at dispatch (local aggregator path) so a topology change since freeze releases it retryably.
-    private Task<bool> ReplicateDurableFencedAsync(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, cancellationToken);
+    private Task<bool> ReplicateDurableFencedAsync(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken);
 
     // Applies a committed intent's value on the leader (clears the staged write intent/MVCC and applies the value —
     // the durable analog of CompletePhaseTwo), invoked by the finalizer's resolution after the intent commits.
@@ -1280,6 +1290,34 @@ internal sealed class TransactionCoordinator : IDisposable
 
     private async Task DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
     {
+        // Admission gate 1 — resident prepared-intent count/bytes: refuse before preparing if this transaction's
+        // intents would push resident prepared-intent state past its node bound, so slow settlement cannot let it
+        // grow without limit. A read-only check (no reservation to unwind), so it runs before the slot reserve.
+        if (!AdmitPreparedIntents(input))
+        {
+            DurableTransactionMetrics.AdmissionRejections.Add(1);
+            context.Result = new KeyValueTransactionResult
+            {
+                Type = KeyValueResponseType.MustRetry,
+                Reason = "Durable prepared-intent capacity reached; retry"
+            };
+            return;
+        }
+
+        // Admission gate 2 — reserve one outstanding-durable slot before prepare. At capacity the transaction is
+        // refused with a retryable MustRetry (nothing prepared, no state installed), so a burst applies
+        // backpressure instead of admitting unbounded prepared intents / canonical records.
+        if (!TryReserveDurableSlot())
+        {
+            DurableTransactionMetrics.AdmissionRejections.Add(1);
+            context.Result = new KeyValueTransactionResult
+            {
+                Type = KeyValueResponseType.MustRetry,
+                Reason = "Durable admission at capacity; retry"
+            };
+            return;
+        }
+
         // Post-prepare read-set validation: the revision-comparison check (intent-aware — it reads current
         // committed state through the durable-intent-aware read path) catches a read that a concurrent commit made
         // stale, and the write-intent probe catches a concurrent in-flight writer. Both must pass to commit.
@@ -1302,6 +1340,11 @@ internal sealed class TransactionCoordinator : IDisposable
             // telling the caller it is safe to replay a transaction that actually committed.
             outcome = ClassifyFromCanonicalRecord(input);
         }
+        finally
+        {
+            // The attempt has ended (decision installed or given up); free the slot for the next transaction.
+            ReleaseDurableSlot();
+        }
 
         context.Result = outcome.Result switch
         {
@@ -1321,6 +1364,67 @@ internal sealed class TransactionCoordinator : IDisposable
     /// read from this node's local projection; a nonresident record stays MustRetry until recovery or the
     /// anchor-routed lookup resolves it.
     /// </summary>
+    /// <summary>Reserves one outstanding-durable admission slot, or returns false if the node is at
+    /// <c>DurableDecisionOutstandingMax</c>. A non-positive cap disables the gate (always admits). The CAS loop
+    /// makes the reservation atomic under concurrent admissions, so the count can never exceed the cap.</summary>
+    private bool TryReserveDurableSlot()
+    {
+        int max = configuration.DurableDecisionOutstandingMax;
+        if (max <= 0)
+            return true;
+
+        while (true)
+        {
+            int current = Volatile.Read(ref outstandingDurable);
+            if (current >= max)
+                return false;
+            if (Interlocked.CompareExchange(ref outstandingDurable, current + 1, current) == current)
+                return true;
+        }
+    }
+
+    /// <summary>Releases a slot reserved by <see cref="TryReserveDurableSlot"/>. A no-op when the gate is
+    /// disabled, so a disabled-then-enabled reconfiguration cannot underflow the counter.</summary>
+    private void ReleaseDurableSlot()
+    {
+        if (configuration.DurableDecisionOutstandingMax <= 0)
+            return;
+
+        Interlocked.Decrement(ref outstandingDurable);
+    }
+
+    /// <summary>Current count of durable transactions being driven through finalize (test/observability).</summary>
+    internal int OutstandingDurableCount => Volatile.Read(ref outstandingDurable);
+
+    /// <summary>Whether admitting this transaction's prepared intents keeps resident prepared-intent count and
+    /// bytes within their node bounds. A non-positive cap disables that dimension. The check reads the current
+    /// resident totals without reserving, so a rare concurrent admission can overshoot slightly — acceptable for
+    /// a soft memory backpressure bound whose transaction count is already capped by the outstanding gate.</summary>
+    private bool AdmitPreparedIntents(DurableFinalizeInput input)
+    {
+        int maxCount = configuration.DurablePreparedIntentMaxCount;
+        long maxBytes = configuration.DurablePreparedIntentMaxBytes;
+        if (maxCount <= 0 && maxBytes <= 0)
+            return true;
+
+        int txCount = 0;
+        long txBytes = 0;
+        foreach (DurablePartitionPrepare partition in input.Partitions)
+            foreach (PreparedIntent intent in partition.Intents)
+            {
+                txCount++;
+                txBytes += intent.Value?.Length ?? 0;
+            }
+
+        PreparedIntentStore store = manager.DurablePreparedIntentStore;
+        if (maxCount > 0 && store.Count + txCount > maxCount)
+            return false;
+        if (maxBytes > 0 && store.TotalBytes + txBytes > maxBytes)
+            return false;
+
+        return true;
+    }
+
     private DurableFinalizeOutcome ClassifyFromCanonicalRecord(DurableFinalizeInput input)
     {
         TransactionRecord? record = manager.DurableTransactionRecordStore.Get(input.TransactionId, input.Epoch);
