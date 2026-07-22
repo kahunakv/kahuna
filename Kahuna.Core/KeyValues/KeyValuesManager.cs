@@ -85,6 +85,21 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly CompletionReceiptStore completionReceiptStore;
 
+    // Counts persistent keys settled through the manual two-phase-commit ticket path (the actor
+    // TryCommit/TryRollback mutation handlers that issue CommitLogs/RollbackLogs). A crash-atomic
+    // transaction is finalized through the durable-intent path instead, so this must stay at zero for
+    // every all-persistent or mixed transaction — the invariant that makes the manual ticket path
+    // dead code for persistent keys. Ephemeral keys legitimately settle here (their in-memory commit)
+    // and are not counted. Instance-scoped so a test can assert it per node without cross-test noise.
+    private long manualTicketPersistentSettlements;
+
+    /// <summary>
+    /// Number of persistent keys that have been settled through the manual two-phase-commit ticket path
+    /// on this node. Zero across an all-persistent or mixed transaction proves that path was never taken —
+    /// the persistent subset went through the durable-intent path instead.
+    /// </summary>
+    public long ManualTicketPersistentSettlementCount => Interlocked.Read(ref manualTicketPersistentSettlements);
+
     /// <summary>
     /// Test-only injection point: when set and it returns true for a destination partition,
     /// <see cref="ImportCompletionReceiptsReplicated"/> reports failure without replicating, simulating a
@@ -5367,14 +5382,17 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> TryCommitMutations(
         HLCTimestamp transactionId, 
-        string key, 
-        HLCTimestamp proposalTicketId, 
+        string key,
+        HLCTimestamp proposalTicketId,
         KeyValueDurability durability
     )
     {
+        if (durability == KeyValueDurability.Persistent)
+            Interlocked.Increment(ref manualTicketPersistentSettlements);
+
         KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TryCommitMutations, 
-            transactionId, 
+            KeyValueRequestType.TryCommitMutations,
+            transactionId,
             HLCTimestamp.Zero,
             key, 
             null, 
@@ -5441,6 +5459,9 @@ internal sealed class KeyValuesManager : IDisposable
 
         foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in keys)
         {
+            if (key.durability == KeyValueDurability.Persistent)
+                Interlocked.Increment(ref manualTicketPersistentSettlements);
+
             if (key.durability == KeyValueDurability.Persistent && key.proposalTicketId != HLCTimestamp.Zero && raft.Joined)
             {
                 if (byTicket.TryGetValue(key.proposalTicketId, out List<(string key, KeyValueDurability durability)>? group))
@@ -5617,14 +5638,17 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public async Task<(KeyValueResponseType, long)> TryRollbackMutations(
         HLCTimestamp transactionId, 
-        string key, 
-        HLCTimestamp proposalTicketId, 
+        string key,
+        HLCTimestamp proposalTicketId,
         KeyValueDurability durability
     )
     {
+        if (durability == KeyValueDurability.Persistent)
+            Interlocked.Increment(ref manualTicketPersistentSettlements);
+
         KeyValueRequest request = new(
-            KeyValueRequestType.TryRollbackMutations, 
-            transactionId, 
+            KeyValueRequestType.TryRollbackMutations,
+            transactionId,
             HLCTimestamp.Zero,
             key, 
             null, 
@@ -5674,6 +5698,9 @@ internal sealed class KeyValuesManager : IDisposable
 
         foreach ((string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) key in keys)
         {
+            if (key.durability == KeyValueDurability.Persistent)
+                Interlocked.Increment(ref manualTicketPersistentSettlements);
+
             if (key.durability == KeyValueDurability.Persistent && key.proposalTicketId != HLCTimestamp.Zero && raft.Joined)
             {
                 if (byTicket.TryGetValue(key.proposalTicketId, out List<(string key, KeyValueDurability durability)>? group))

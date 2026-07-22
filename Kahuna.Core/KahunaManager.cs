@@ -1305,6 +1305,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <summary>Durable transaction-record store (canonical decisions). Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.TransactionRecordStore DurableTransactionRecordStore => keyValues.DurableTransactionRecordStore;
 
+    /// <summary>
+    /// Persistent keys settled through the manual two-phase-commit ticket path on this node. Stays at zero for
+    /// every all-persistent or mixed transaction, which finalize through the durable-intent path instead;
+    /// non-zero would mean a crash-atomic mutation took the retired manual path. Diagnostic/test access.
+    /// </summary>
+    public long ManualTicketPersistentSettlementCount => keyValues.ManualTicketPersistentSettlementCount;
+
     /// <summary>The first phase-two worker instance, for test injection of
     /// <see cref="Server.KeyValues.KeyValuePhaseTwoActor.BeforeRaftCallHook"/>.</summary>
     internal Server.KeyValues.KeyValuePhaseTwoActor? FirstPhaseTwoWorker => keyValues.FirstPhaseTwoWorker;

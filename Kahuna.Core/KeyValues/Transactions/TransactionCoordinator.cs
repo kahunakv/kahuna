@@ -1106,20 +1106,10 @@ internal sealed class TransactionCoordinator : IDisposable
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
 
-        // Durable prepared-intent path: an all-persistent transaction whose staged mutations are all available is
-        // finalized via durable committed intents plus a canonical decision record, with no manual Raft ticket.
-        // This is the only durable-persistent path. Falls through to the legacy ticket path only when the input
-        // cannot be built — a mixed/ephemeral transaction, or (rarely) a persistent mutation with no staged value.
-        if (TryBuildDurableFinalizeInput(context, out DurableFinalizeInput? durableInput, out HLCTimestamp durableOpId))
-        {
-            await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        // A durable transaction must be all-persistent and have an anchor: the durable-intent path cannot make an
-        // ephemeral mutation crash-atomic, so a mixed or anchorless durable transaction is rejected before any
-        // write intent is placed. (An all-persistent durable transaction is finalized by the durable-intent path
-        // above; reaching here means the input could not be staged — fall to the ticket path, best-effort.)
+        // A Durable-mode transaction promises crash-atomicity, which an ephemeral (in-memory) mutation cannot
+        // provide — so a Durable transaction that modified any ephemeral key is rejected outright, before the
+        // split below (which would otherwise commit those ephemeral keys in memory keyed on the persistent
+        // decision — correct only for the default BestEffort mode). A Durable transaction must also have an anchor.
         if (context.DecisionDurability == DecisionDurability.Durable)
         {
             if (context.ModifiedKeys.Any(static k => k.Item2 != KeyValueDurability.Persistent))
@@ -1133,6 +1123,68 @@ internal sealed class TransactionCoordinator : IDisposable
                 context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction with modifications must have a record anchor" };
                 return;
             }
+        }
+
+        // Split the working set: the persistent (crash-atomic) keys are finalized through the durable-intent path
+        // (canonical decision record + prepared intents, no manual Raft ticket); the ephemeral keys are committed
+        // or rolled back in memory keyed on that decision, never touching CommitLogs. An all-persistent transaction
+        // takes the durable path alone; an all-ephemeral one has no persistent subset and falls through to the
+        // (ticket-free, in-memory) ephemeral path below.
+        List<(string Key, KeyValueDurability Durability)> persistentKeys = [];
+        List<(string Key, KeyValueDurability Durability)> ephemeralKeys = [];
+        foreach ((string, KeyValueDurability) modified in context.ModifiedKeys)
+            (modified.Item2 == KeyValueDurability.Persistent ? persistentKeys : ephemeralKeys).Add(modified);
+
+        if (TryBuildDurableFinalizeInput(context, persistentKeys, out DurableFinalizeInput? durableInput, out HLCTimestamp durableOpId))
+        {
+            if (ephemeralKeys.Count == 0)
+            {
+                await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            // Mixed transaction. Prepare the ephemeral subset first, so an ephemeral prepare failure aborts the
+            // whole transaction before anything persistent is decided — preserving all-or-nothing on the abort
+            // side. Then finalize the persistent subset durably and let its decision drive the ephemeral commit.
+            (bool ephemeralOk, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? ephemeralMutations) =
+                await PrepareMutations(context, cancellationToken, ephemeralKeys).ConfigureAwait(false);
+
+            if (ephemeralMutations is null)
+                return;
+
+            if (!ephemeralOk)
+            {
+                if (context.AsyncRelease)
+                    _ = RollbackMutations(context, ephemeralMutations, CancellationToken.None);
+                else
+                    await RollbackMutations(context, ephemeralMutations, cancellationToken).ConfigureAwait(false);
+                return; // context.Result already set to Aborted by PrepareMutations
+            }
+
+            DurableFinalizeResult durableResult = await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
+
+            // The durable decision is the transaction's outcome. On a durable commit, apply the ephemeral writes in
+            // memory (near-always succeeds; the persistent commit is already durable and truthful regardless); on a
+            // conflict abort or retryable result, discard them.
+            if (durableResult == DurableFinalizeResult.Committed)
+                await CommitMutations(context, ephemeralMutations, cancellationToken).ConfigureAwait(false);
+            else if (context.AsyncRelease)
+                _ = RollbackMutations(context, ephemeralMutations, CancellationToken.None);
+            else
+                await RollbackMutations(context, ephemeralMutations, cancellationToken).ConfigureAwait(false);
+
+            return;
+        }
+
+        // A transaction with persistent modifications that could not be finalized durably — a persistent key with
+        // no staged value the coordinator can replay losslessly — must not commit its persistent writes through the
+        // manual ticket path, which is being retired. It aborts (retryable at the caller) rather than committing
+        // persistence through a soon-to-be-removed mechanism. Only the all-ephemeral case falls through below to the
+        // in-memory (ticket-free) commit path; every persistent-bearing transaction is finalized durably or aborts.
+        if (persistentKeys.Count > 0)
+        {
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Persistent mutation could not be staged for a durable commit" };
+            return;
         }
 
         {
@@ -1293,12 +1345,18 @@ internal sealed class TransactionCoordinator : IDisposable
     /// their current data partition. Returns false — so the caller falls back to the ticket path — when the
     /// transaction is not all-persistent, has no anchor, or a modified key has no staged value to prepare.
     /// </summary>
-    private bool TryBuildDurableFinalizeInput(TransactionContext context, out DurableFinalizeInput? input, out HLCTimestamp opId)
+    // Builds a durable finalize input from the transaction's PERSISTENT modified keys (the crash-atomic subset).
+    // For an all-persistent transaction this is every modified key; for a mixed transaction it is the persistent
+    // subset only — the ephemeral keys are committed/rolled back in memory keyed on this decision. Returns false
+    // (fall back) when there is no persistent key, no anchor, or a persistent key with no staged value.
+    private bool TryBuildDurableFinalizeInput(TransactionContext context,
+        IReadOnlyCollection<(string Key, KeyValueDurability Durability)> persistentKeys,
+        out DurableFinalizeInput? input, out HLCTimestamp opId)
     {
         input = null;
         opId = HLCTimestamp.Zero;
 
-        if (context.ModifiedKeys is null || context.RecordAnchorKey is null)
+        if (persistentKeys.Count == 0 || context.RecordAnchorKey is null)
             return false;
 
         // Staged values are accumulated per key across every mutation command (not from ModifiedResult, which
@@ -1321,7 +1379,7 @@ internal sealed class TransactionCoordinator : IDisposable
 
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
-                commitTimestamp, decisionDeadline, context.ModifiedKeys, stagedByKey,
+                commitTimestamp, decisionDeadline, persistentKeys, stagedByKey,
                 manager.LocateDurablePartition, out input))
             return false;
 
@@ -1329,7 +1387,9 @@ internal sealed class TransactionCoordinator : IDisposable
         return true;
     }
 
-    private async Task DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    // Finalizes the persistent (durable) subset of a transaction and returns its terminal decision, so a mixed
+    // transaction's caller can commit or roll back the ephemeral subset accordingly. Sets context.Result too.
+    private async Task<DurableFinalizeResult> DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
     {
         // Admission gate 1 — resident prepared-intent count/bytes: refuse before preparing if this transaction's
         // intents would push resident prepared-intent state past its node bound, so slow settlement cannot let it
@@ -1342,7 +1402,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 Type = KeyValueResponseType.MustRetry,
                 Reason = "Durable prepared-intent capacity reached; retry"
             };
-            return;
+            return DurableFinalizeResult.MustRetry;
         }
 
         // Admission gate 2 — reserve one outstanding-durable slot before prepare. At capacity the transaction is
@@ -1356,7 +1416,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 Type = KeyValueResponseType.MustRetry,
                 Reason = "Durable admission at capacity; retry"
             };
-            return;
+            return DurableFinalizeResult.MustRetry;
         }
 
         // Post-prepare read-set validation: the revision-comparison check (intent-aware — it reads current
@@ -1396,6 +1456,8 @@ internal sealed class TransactionCoordinator : IDisposable
             DurableFinalizeResult.Aborted => new KeyValueTransactionResult { Type = KeyValueResponseType.Aborted, Reason = "Transaction conflict" },
             _ => new KeyValueTransactionResult { Type = KeyValueResponseType.MustRetry, Reason = "Durable finalize could not complete; retry" }
         };
+
+        return outcome.Result;
     }
 
     /// <summary>
@@ -1688,11 +1750,18 @@ internal sealed class TransactionCoordinator : IDisposable
     /// </summary>
     internal async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareMutations(
         TransactionContext context,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        IReadOnlyList<(string Key, KeyValueDurability Durability)>? keysToPrepare = null
     )
     {
         if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return (false, null);
+
+        // Prepare a caller-supplied subset (the ephemeral keys of a mixed transaction, prepared separately from the
+        // durable persistent subset) or, by default, every modified key (the legacy all-in-one ticket path).
+        IReadOnlyList<(string Key, KeyValueDurability Durability)> keys = keysToPrepare ?? [.. context.ModifiedKeys];
+        if (keys.Count == 0)
+            return (true, []);
 
         if (!context.SetState(KeyValueTransactionState.Preparing, KeyValueTransactionState.Pending))
             throw new KahunaAbortedException("Failed to set transaction state to Preparing");
@@ -1713,9 +1782,9 @@ internal sealed class TransactionCoordinator : IDisposable
 
         HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
 
-        if (context.ModifiedKeys.Count == 1)
+        if (keys.Count == 1)
         {
-            (string key, KeyValueDurability durability) = context.ModifiedKeys.First();
+            (string key, KeyValueDurability durability) = keys[0];
 
             (KeyValueResponseType type, HLCTimestamp ticketId, string _, KeyValueDurability _) = await manager.LocateAndTryPrepareMutations(
                 context.TransactionId,
@@ -1743,7 +1812,7 @@ internal sealed class TransactionCoordinator : IDisposable
         List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> proposalResponses = await manager.LocateAndTryPrepareManyMutations(
             context.TransactionId,
             commitId,
-            context.ModifiedKeys.ToList(),
+            [.. keys],
             cancellationToken,
             context.RecordAnchorKey
         );
