@@ -111,6 +111,8 @@ public sealed class EmbeddedKahunaOptions
 
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
+    public bool DurableDeferredSettlement { get; set; }
+
     public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
 
     public long DurablePreparedIntentMaxBytes { get; set; } = 1L * 1024 * 1024 * 1024;

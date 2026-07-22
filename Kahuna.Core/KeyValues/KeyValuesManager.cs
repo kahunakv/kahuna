@@ -2056,6 +2056,20 @@ internal sealed class KeyValuesManager : IDisposable
 
         bool applied = type == KeyValueResponseType.Extended;
 
+        // Stage the extend for the durable-intent path so a registered transaction containing an extend stays on
+        // the durable path instead of falling back to the ticket path. An extend changes only the expiry, so the
+        // staged effect carries the key's current value and revision — read back within this transaction so it
+        // sees the extend's own MVCC snapshot — plus the new relative TTL. If the value cannot be read back,
+        // staging is skipped and the transaction falls back (correct, just not batched). Mirrors the script ExtendCommand.
+        IReadOnlyList<StagedMutationEffect>? stagedMutations = null;
+        if (applied && durability == KeyValueDurability.Persistent)
+        {
+            (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) =
+                await locator.LocateAndTryGetValue(transactionId, key, -1, HLCTimestamp.Zero, durability, cancellationToken);
+            if (readType == KeyValueResponseType.Get && entry is not null)
+                stagedMutations = [new StagedMutationEffect(key, entry.Value, entry.Revision, expiresMs, NoRevision: false)];
+        }
+
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
         if (!await CompleteRegisteredOperation(
@@ -2064,6 +2078,7 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     ModifiedKey = applied ? key : null,
                     AcquiredPointLock = applied ? key : null,
+                    StagedMutations = stagedMutations,
                     Durability = durability,
                     CachedType = type,
                     CachedRevision = revision,
@@ -3377,6 +3392,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
+            bool attemptedRoutedResolve = false;
             foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
@@ -3393,6 +3409,17 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     await Task.Delay(delay);
                     continue;
+                }
+
+                // A MustRetry caused by a foreign prepared intent whose canonical record is remote: resolve the
+                // decision off the mailbox once and re-issue so a committed intent is materialized (write proceeds)
+                // instead of bouncing the caller until settlement.
+                if (response.Type == KeyValueResponseType.MustRetry
+                    && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                {
+                    attemptedRoutedResolve = true;
+                    if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                        continue;
                 }
 
                 return (response.Type, response.Revision, response.Ticket);
@@ -3595,6 +3622,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
+            bool attemptedRoutedResolve = false;
             foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
@@ -3611,6 +3639,17 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     await Task.Delay(delay);
                     continue;
+                }
+
+                // A MustRetry caused by a foreign prepared intent whose canonical record is remote: resolve the
+                // decision off the mailbox once and re-issue so a committed intent is materialized (write proceeds)
+                // instead of bouncing the caller until settlement.
+                if (response.Type == KeyValueResponseType.MustRetry
+                    && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                {
+                    attemptedRoutedResolve = true;
+                    if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                        continue;
                 }
 
                 return (response.Type, response.Revision, response.Ticket);
@@ -3656,6 +3695,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
+            bool attemptedRoutedResolve = false;
             foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
@@ -3672,6 +3712,17 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     await Task.Delay(delay);
                     continue;
+                }
+
+                // A MustRetry caused by a foreign prepared intent whose canonical record is remote: resolve the
+                // decision off the mailbox once and re-issue so a committed intent is materialized (write proceeds)
+                // instead of bouncing the caller until settlement.
+                if (response.Type == KeyValueResponseType.MustRetry
+                    && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                {
+                    attemptedRoutedResolve = true;
+                    if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                        continue;
                 }
 
                 return (response.Type, response.Revision, response.Ticket);
@@ -3753,19 +3804,11 @@ internal sealed class KeyValuesManager : IDisposable
                 // remote anchor) would otherwise spin until settlement propagates the decision here. Route the
                 // lookup to the anchor-partition leader once, off the mailbox, and re-issue the read with the
                 // terminal decision so it resolves immediately (the committed value, or the prior value on abort).
-                if (!attemptedRoutedResolve && durability != KeyValueDurability.Ephemeral
-                    && preparedIntentStore.Get(key) is { Resolution: PreparedIntentResolution.Pending } foreignIntent
-                    && foreignIntent.TransactionId != transactionId
-                    && transactionRecordStore.Get(foreignIntent.TransactionId, foreignIntent.Epoch) is null)
+                if (await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
                 {
                     attemptedRoutedResolve = true;
-                    TransactionRecord? record = await LookupDurableRecordRouted(
-                        foreignIntent.TransactionId, foreignIntent.Epoch, foreignIntent.RecordAnchorKey, CancellationToken.None).ConfigureAwait(false);
-                    if (record is { IsTerminal: true })
-                    {
-                        request.ForeignDecisionHint = new ForeignDecisionHint(foreignIntent.TransactionId, foreignIntent.Epoch, record.Decision);
+                    if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
                         continue; // resolve now, no backoff
-                    }
                 }
 
                 if (Environment.TickCount64 >= deadline)
@@ -3780,7 +3823,35 @@ internal sealed class KeyValuesManager : IDisposable
             KeyValueRequestPool.Return(request);
         }
     }
-    
+
+    /// <summary>
+    /// Off-mailbox resolution of a remote-anchor foreign intent's decision for a stalled read: when the read's
+    /// <c>WaitingForReplication</c> wait is caused by a foreign prepared intent whose canonical record is not local,
+    /// route the lookup to the anchor-partition leader once and, on a terminal decision, stamp a
+    /// <see cref="ForeignDecisionHint"/> on the request so a re-issued read resolves it immediately instead of
+    /// spinning until settlement. Returns true when a routed attempt was made this iteration (whether or not it
+    /// produced a terminal decision), so the caller records it and stops re-routing. Ephemeral reads carry no
+    /// durable intents, and a hint is only set when the intent's canonical record genuinely lives elsewhere.
+    /// </summary>
+    private async Task<bool> TryRouteForeignDecision(KeyValueRequest request, string key, HLCTimestamp transactionId, KeyValueDurability durability, bool alreadyAttempted)
+    {
+        if (alreadyAttempted || durability == KeyValueDurability.Ephemeral)
+            return false;
+
+        if (preparedIntentStore.Get(key) is not { Resolution: PreparedIntentResolution.Pending } foreignIntent
+            || foreignIntent.TransactionId == transactionId
+            || transactionRecordStore.Get(foreignIntent.TransactionId, foreignIntent.Epoch) is not null)
+            return false;
+
+        TransactionRecord? record = await LookupDurableRecordRouted(
+            foreignIntent.TransactionId, foreignIntent.Epoch, foreignIntent.RecordAnchorKey, CancellationToken.None).ConfigureAwait(false);
+
+        if (record is { IsTerminal: true })
+            request.ForeignDecisionHint = new ForeignDecisionHint(foreignIntent.TransactionId, foreignIntent.Epoch, record.Decision);
+
+        return true;
+    }
+
     /// <summary>
     /// Passes a Exists request to the key/value actor for the given keyValue name.
     /// </summary>
@@ -3819,6 +3890,7 @@ internal sealed class KeyValuesManager : IDisposable
         {
             int backoffMs = 1;
             long deadline = Environment.TickCount64 + 16_500;
+            bool attemptedRoutedResolve = false;
 
             while (true)
             {
@@ -3834,6 +3906,15 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type != KeyValueResponseType.WaitingForReplication)
                     return (response.Type, response.Entry);
+
+                // Resolve a remote-anchor foreign intent's decision once, off the mailbox, and re-issue with the
+                // hint so the read resolves immediately instead of spinning until settlement (see TryGetValue).
+                if (await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                {
+                    attemptedRoutedResolve = true;
+                    if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                        continue;
+                }
 
                 if (Environment.TickCount64 >= deadline)
                     return (KeyValueResponseType.MustRetry, null);
@@ -3942,6 +4023,10 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
+            // Resolve a remote-anchor concurrent writer's decision off the mailbox first, so a committed/aborted
+            // intent whose record lives on another node is not mis-flagged as a live undecided conflict here.
+            await TryRouteForeignDecision(request, key, transactionId, durability, alreadyAttempted: false);
+
             KeyValueResponse? response = durability == KeyValueDurability.Ephemeral
                 ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
                 : await AskKeyValueActor(persistentKeyValuesRouter, request);

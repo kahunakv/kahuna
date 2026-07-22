@@ -145,6 +145,53 @@ public sealed class TestDurableReadRoutedResolution : BaseCluster
         }
     }
 
+    [Fact]
+    public async Task CrossNodeExists_CommittedUnsettledIntent_RoutesAnchorDecision_ReportsExists()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 8, raftLogger, kahunaLogger);
+
+        (IRaft Raft, IKahuna Kahuna)[] nodes = [(r1, k1), (r2, k2), (r3, k3)];
+        try
+        {
+            (string key, IKahuna keyLeader, string anchor, IKahuna anchorLeader) = await FindCrossNodeKeyAndAnchor(nodes, ct);
+
+            HLCTimestamp txId = new(0, 7_000, 0);
+            const long epoch = 1;
+            HLCTimestamp commitTs = new(0, 7_100, 0);
+            HLCTimestamp deadline = new(0, 9_000, 0);
+            HLCTimestamp opId = new(0, 7_050, 0);
+
+            List<TransactionParticipantRef> manifest = [new(key, KeyValueDurability.Persistent)];
+            long hash = TransactionManifest.ComputeHash(txId, epoch, anchor, commitTs, manifest);
+
+            TransactionRecordStore recordStore = ((KahunaManager)anchorLeader).DurableTransactionRecordStore;
+            recordStore.Apply(new InitializeTransactionCommand(txId, epoch, "coord", anchor, commitTs, deadline, hash, manifest, opId, new HLCTimestamp(0, 7_000, 0)));
+            recordStore.Apply(new CommitTransactionCommand(txId, epoch, hash, opId, commitTs));
+
+            PreparedIntentStore intentStore = ((KahunaManager)keyLeader).DurablePreparedIntentStore;
+            PreparedIntent intent = new(
+                txId, epoch, key, hash, anchor, commitTs,
+                KeyValueState.Set, "v"u8.ToArray(), Bucket: null, Revision: 1, Expires: HLCTimestamp.Zero,
+                NoRevision: false, BaseRevision: 0, BaseState: KeyValueState.Set,
+                RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending);
+            intentStore.Apply(new PrepareIntentCommand(intent));
+
+            // Exists on the key leader routes the committed decision from the anchor leader and reports the key as
+            // existing, instead of retrying until settlement.
+            (KeyValueResponseType type, _) = await keyLeader.LocateAndTryExistsValue(
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Exists, type);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
     // Finds a key and a distinct anchor key whose partitions are led by two different nodes, so a read of the key
     // must route the anchor-record lookup cross-node.
     private static async Task<(string Key, IKahuna KeyLeader, string Anchor, IKahuna AnchorLeader)> FindCrossNodeKeyAndAnchor(

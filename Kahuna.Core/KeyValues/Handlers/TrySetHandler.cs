@@ -162,7 +162,7 @@ internal sealed class TrySetHandler : BaseHandler
         // durable-intent path (null store).
         KeyValueEntry? resolvedEntry = entry;
         if (ForeignIntentWriteResolver.Resolve(
-                context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead)
+                context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
             return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
 

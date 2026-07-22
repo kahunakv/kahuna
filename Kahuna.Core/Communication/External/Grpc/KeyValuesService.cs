@@ -1827,6 +1827,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Read = request.Read is null ? null : ToReadKey(request.Read),
             ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList(),
             ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList(),
+            StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList(),
             Durability = (KeyValueDurability)request.Durability,
             CachedType = (KeyValueResponseType)request.CachedType,
             CachedRevision = request.CachedRevision,
@@ -1883,6 +1884,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     private static KeyValueTransactionReadKey ToReadKey(GrpcTransactionReadKey g) =>
         new() { Key = g.Key, Durability = (KeyValueDurability)g.Durability, Exists = g.Exists, Revision = g.Revision };
+
+    // An absent Value is a deletion (null); a present one — even empty — is a real value.
+    internal static StagedMutationEffect FromGrpcStagedMutation(GrpcStagedMutationEffect g) =>
+        new(g.Key, g.HasValue ? g.Value.ToByteArray() : null, g.Revision, g.ExpiresMs, g.NoRevision);
 
     private static GrpcTransactionWorkingSet ToGrpcWorkingSet(TransactionWorkingSet ws)
     {

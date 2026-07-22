@@ -44,14 +44,11 @@ internal static class DurableReadVisibility
     /// already commit or abort is not "in flight": commit-staleness is caught by revision-based read validation and
     /// an abort is no conflict, so neither is flagged here.
     /// </summary>
-    public static bool IsUndecidedWriter(KeyValueContext context, PreparedIntent intent)
+    public static bool IsUndecidedWriter(KeyValueContext context, PreparedIntent intent, ForeignDecisionHint hint = default)
     {
         if (intent.Resolution != PreparedIntentResolution.Pending)
             return false;
 
-        TransactionDecision decision =
-            context.TransactionRecordStore?.Get(intent.TransactionId, intent.Epoch)?.Decision ?? TransactionDecision.Undecided;
-
-        return decision == TransactionDecision.Undecided;
+        return DecisionFor(context, intent, hint) == TransactionDecision.Undecided;
     }
 }

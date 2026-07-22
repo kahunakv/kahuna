@@ -45,13 +45,14 @@ internal static class ForeignIntentWriteResolver
         string key,
         HLCTimestamp transactionId,
         ref KeyValueEntry? entry,
-        Action<KeyValueEntry, KeyValueProposal, HLCTimestamp> applyCommittedHead)
+        Action<KeyValueEntry, KeyValueProposal, HLCTimestamp> applyCommittedHead,
+        Transactions.Data.ForeignDecisionHint hint = default)
     {
         if (context.PreparedIntentStore?.Get(key) is not { } foreignIntent
             || foreignIntent.TransactionId == transactionId)
             return ForeignIntentWriteDecision.Proceed;
 
-        switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero))
+        switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero, hint))
         {
             case ReadVisibilityAction.Retry:
                 return ForeignIntentWriteDecision.MustRetry;

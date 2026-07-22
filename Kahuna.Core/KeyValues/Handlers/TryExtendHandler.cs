@@ -31,7 +31,7 @@ internal sealed class TryExtendHandler : BaseHandler
         // resident entry to extend, an undecided intent retries, and an aborted or committed-delete intent leaves
         // the key absent. No-op off the durable-intent path.
         if (ForeignIntentWriteResolver.Resolve(
-                context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead)
+                context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
             return KeyValueStaticResponses.MustRetryResponse;
 

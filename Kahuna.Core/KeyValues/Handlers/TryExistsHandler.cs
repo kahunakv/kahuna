@@ -37,7 +37,7 @@ internal sealed class TryExistsHandler : BaseHandler
             && foreignIntent.TransactionId != message.TransactionId)
         {
             HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
-            switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs))
+            switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs, message.ForeignDecisionHint))
             {
                 case ReadVisibilityAction.Retry:
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
@@ -282,7 +282,7 @@ internal sealed class TryExistsHandler : BaseHandler
             && foreignIntent.TransactionId != message.TransactionId
             && foreignIntent.Revision == message.CompareRevision)
         {
-            switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero))
+            switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero, message.ForeignDecisionHint))
             {
                 case ReadVisibilityAction.Retry:
                     return KeyValueStaticResponses.WaitingForReplicationResponse;

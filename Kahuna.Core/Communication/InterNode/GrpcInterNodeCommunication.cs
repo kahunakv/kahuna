@@ -1526,6 +1526,8 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             request.ReadObservations.AddRange(payload.ReadObservations.Select(ToGrpcReadKey));
         if (payload.ModifiedKeys is not null)
             request.ModifiedKeys.AddRange(payload.ModifiedKeys.Select(m => new GrpcTransactionModifiedKey { Key = m.Key, Durability = (GrpcKeyValueDurability)m.Durability }));
+        if (payload.StagedMutations is not null)
+            request.StagedMutations.AddRange(payload.StagedMutations.Select(ToGrpcStagedMutation));
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
@@ -1596,6 +1598,24 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         Exists = read.Exists,
         Revision = read.Revision
     };
+
+    // A null Value means a deletion; leave the optional proto field absent so the receiver can distinguish it from
+    // an empty value. The staged value is a committed, immutable snapshot, so wrapping it without a copy is safe.
+    internal static GrpcStagedMutationEffect ToGrpcStagedMutation(StagedMutationEffect effect)
+    {
+        GrpcStagedMutationEffect grpc = new()
+        {
+            Key = effect.Key,
+            Revision = effect.Revision,
+            ExpiresMs = effect.ExpiresMs,
+            NoRevision = effect.NoRevision
+        };
+
+        if (effect.Value is not null)
+            grpc.Value = UnsafeByteOperations.UnsafeWrap(effect.Value);
+
+        return grpc;
+    }
 
     private static TransactionWorkingSet FromGrpcWorkingSet(GrpcTransactionWorkingSet grpc)
     {

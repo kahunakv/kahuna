@@ -52,7 +52,7 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
         // and an abort is no conflict — so it is not flagged here. No-op off the durable-intent path.
         if (context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
             && foreignIntent.TransactionId != message.TransactionId
-            && DurableReadVisibility.IsUndecidedWriter(context, foreignIntent))
+            && DurableReadVisibility.IsUndecidedWriter(context, foreignIntent, message.ForeignDecisionHint))
             return KeyValueStaticResponses.AbortedResponse;
 
         return KeyValueStaticResponses.DoesNotExistContextResponse;

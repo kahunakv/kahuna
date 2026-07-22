@@ -793,6 +793,19 @@ message GrpcTransactionReadKey
   int64 Revision = 4;
 }
 
+// The actor-confirmed committed value of one persistent modified key, echoed from the participant to the
+// coordinator so it can stage the mutation losslessly and finalize through the durable-intent path (not the
+// manual ticket path). An absent Value is a deletion (distinct from an empty value); ExpiresMs is the relative
+// TTL in ms (0 = none); NoRevision carries whether the write suppressed history retention.
+message GrpcStagedMutationEffect
+{
+  string Key = 1;
+  optional bytes Value = 2;
+  int64 Revision = 3;
+  int64 ExpiresMs = 4;
+  bool NoRevision = 5;
+}
+
 message GrpcCommitTransactionResponse
 {
   optional string ServedFrom = 1;
@@ -901,6 +914,7 @@ message GrpcCompleteOperationRequest
   optional GrpcTransactionReadKey Read = 14;
   repeated GrpcTransactionReadKey ReadObservations = 15;
   repeated GrpcTransactionModifiedKey ModifiedKeys = 22;
+  repeated GrpcStagedMutationEffect StagedMutations = 23;
   GrpcKeyValueDurability Durability = 16;
   GrpcKeyValueResponseType CachedType = 17;
   int64 CachedRevision = 18;

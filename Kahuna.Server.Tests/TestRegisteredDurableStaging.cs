@@ -379,4 +379,49 @@ public sealed class TestRegisteredDurableStaging
         Assert.Equal(KeyValueResponseType.Get, keepRev0Type);
         Assert.Equal("v0"u8.ToArray(), keepRev0!.Value);
     }
+
+    [Fact]
+    public async Task RegisteredExtend_StagesValue_TakesDurablePath_NotTicket()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 4
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("ext/row", ct);
+
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        // Seed a committed persistent value with no TTL.
+        (KeyValueResponseType seedType, _, _) = await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, "ext/row", "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, seedType);
+
+        // A registered transaction whose only mutation is an EXTEND: previously this fell to the manual ticket
+        // path (which leaves no canonical record); now the extend stages the current value + new expiry so the
+        // transaction finalizes through the durable-intent path.
+        (_, TransactionHandle handle) = await StartTransaction(kahuna, "registered-extend", ct);
+
+        (KeyValueResponseType extType, _, _) = await kahuna.LocateAndTryExtendKeyValue(
+            handle.TransactionId, "ext/row", 60_000, KeyValueDurability.Persistent, ct,
+            handle.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Extended, extType);
+
+        (KeyValueResponseType commitType, _) = await kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+        // A canonical transaction record exists → the durable-intent path was taken, not the ticket path.
+        Assert.True(kahuna.DurableTransactionRecordStore.Count > 0);
+
+        // The value is preserved and now carries a future expiry.
+        (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, "ext/row", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, readType);
+        Assert.Equal("v1"u8.ToArray(), entry!.Value);
+        Assert.NotEqual(HLCTimestamp.Zero, entry.Expires);
+    }
 }

@@ -1181,6 +1181,12 @@ internal sealed class TransactionCoordinator : IDisposable
 
     private DurableTransactionFinalizer? durableFinalizer;
 
+    // Deferred-settlement background resolutions in flight. Tracked so Dispose can drain them (bounded) before
+    // teardown and cancel any straggler; a lost run is finished by recovery regardless, so this is best-effort.
+    private readonly CancellationTokenSource deferredResolutionCts = new();
+
+    private readonly ConcurrentDictionary<Task, byte> deferredResolutions = new();
+
     // Resolution (materialize committed values, settle intents) runs synchronously before the finalizer returns
     // (a null scheduler = await inline). Deferred settlement would return after the decision barrier and materialize
     // in the background, but that requires the cross-node anchor decision lookup: a latest read on another node that
@@ -1189,7 +1195,12 @@ internal sealed class TransactionCoordinator : IDisposable
     // read-your-writes, so settlement is synchronous until the cross-node lookup lands. The finalizer
     // still supports deferred settlement via its scheduler seam for when it does.
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
-        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync, resolutionScheduler: null,
+        manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync,
+        // Deferred settlement runs resolution off the commit critical path when configured; otherwise resolution is
+        // awaited inline (synchronous). Reads/writes that meet a committed-but-unsettled intent resolve it through
+        // the durable-intent visibility path (local record, or routed to the anchor leader), so no stale value is
+        // served; a lost background run is completed by recovery.
+        resolutionScheduler: configuration.DurableDeferredSettlement ? ScheduleDeferredResolution : null,
         ApplyDurableCommitLocally, ApplyDurableRollbackLocally,
         // Fresh attempt HLC at the decision so a slow prepare can trip the deadline; record latency only to the
         // decision so post-decision settlement never inflates the deadline the next finalize must fit inside.
@@ -1205,7 +1216,37 @@ internal sealed class TransactionCoordinator : IDisposable
             configuration.KeyValueWriteMaxBatchBytes,
             configuration.KeyValueWriteMaxQueuedBytesPerPartition));
 
-    public void Dispose() => durableFinalizer?.Dispose();
+    /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
+    /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
+    /// is tracked so <see cref="Dispose"/> can drain it before teardown.</summary>
+    private void ScheduleDeferredResolution(Func<CancellationToken, Task> resolution)
+    {
+        Task task = Task.Run(async () =>
+        {
+            try
+            {
+                await resolution(deferredResolutionCts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Deferred durable resolution failed; recovery will complete it");
+            }
+        });
+
+        deferredResolutions.TryAdd(task, 0);
+        _ = task.ContinueWith(static (t, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(t, out _),
+            deferredResolutions, TaskScheduler.Default);
+    }
+
+    public void Dispose()
+    {
+        // Give in-flight deferred resolutions a bounded window to finish, then cancel any straggler (recovery
+        // completes a cancelled/lost run on restart), before disposing.
+        try { Task.WhenAll(deferredResolutions.Keys).Wait(TimeSpan.FromSeconds(5)); } catch { /* best-effort drain */ }
+        try { deferredResolutionCts.Cancel(); } catch (ObjectDisposedException) { /* already disposed */ }
+        deferredResolutionCts.Dispose();
+        durableFinalizer?.Dispose();
+    }
 
     // Durable-intent 2PC records replicate through the shared partition write scheduler so concurrent
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
