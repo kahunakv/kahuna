@@ -63,7 +63,9 @@ internal static class ForeignIntentWriteResolver
                     bool created = entry is null;
                     entry ??= new()
                     {
-                        Bucket = BucketOf(key),
+                        // The intent already carries this key's bucket (derived from the same key at freeze), so
+                        // reuse it instead of re-deriving the prefix string.
+                        Bucket = foreignIntent.Bucket,
                         Revision = -1,
                         State = KeyValueState.Undefined
                     };
@@ -95,11 +97,5 @@ internal static class ForeignIntentWriteResolver
             default:
                 return ForeignIntentWriteDecision.Proceed;
         }
-    }
-
-    private static string? BucketOf(string key)
-    {
-        int index = key.LastIndexOf('/');
-        return index == -1 ? null : key[..index];
     }
 }

@@ -279,7 +279,10 @@ internal sealed class PreparedIntentStore
         ManifestHash = i.ManifestHash, RecordAnchorKey = i.RecordAnchorKey,
         CommitTimestampNode = i.CommitTimestamp.N, CommitTimestampPhysical = i.CommitTimestamp.L, CommitTimestampCounter = i.CommitTimestamp.C,
         State = (int)i.State,
-        Value = i.Value is null ? ByteString.Empty : ByteString.CopyFrom(i.Value), ValueNull = i.Value is null,
+        // Wrap the intent's value array without copying: the committed value is immutable and the message is
+        // serialized synchronously by the caller before the array could change, so aliasing it here is safe and
+        // avoids a full value copy per intent on every prepare/settle serialization.
+        Value = i.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(i.Value), ValueNull = i.Value is null,
         Bucket = i.Bucket ?? string.Empty, BucketNull = i.Bucket is null,
         Revision = i.Revision,
         ExpiresNode = i.Expires.N, ExpiresPhysical = i.Expires.L, ExpiresCounter = i.Expires.C,

@@ -41,7 +41,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -56,7 +56,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -87,7 +87,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world 3"u8.ToArray(), resp.Value);
@@ -102,7 +102,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world 3"u8.ToArray(), resp.Value);
@@ -137,7 +137,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -156,7 +156,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);
@@ -187,7 +187,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -202,7 +202,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -228,7 +228,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("150"u8.ToArray(), resp.Value);
@@ -238,7 +238,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("150"u8.ToArray(), resp.Value);
@@ -261,13 +261,13 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 + 'hello'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType + StringType at line 1", resp.Reason);        
         
             script = "RETURN 100 + null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType + NullType at line 1", resp.Reason);
         
@@ -289,28 +289,28 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 + '50'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("150", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 + '50'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("150.5", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50' + 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("150", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50.5' + 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("150.5", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -336,7 +336,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("75"u8.ToArray(), resp.Value);
@@ -346,7 +346,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("75"u8.ToArray(), resp.Value);
@@ -369,13 +369,13 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 - 'hello'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType - StringType at line 1", resp.Reason);        
         
             script = "RETURN 100 - null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType - NullType at line 1", resp.Reason);
         
@@ -397,28 +397,28 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 - '50'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("50", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 - '50'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("50.5", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50' - 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("-50", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50.5' - 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("-49.5", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -444,7 +444,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("500"u8.ToArray(), resp.Value);
@@ -454,7 +454,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("500"u8.ToArray(), resp.Value);
@@ -477,13 +477,13 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 * 'hello'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType * StringType at line 1", resp.Reason);        
         
             script = "RETURN 100 * null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType * NullType at line 1", resp.Reason);
         
@@ -505,28 +505,28 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 * '50'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("5000", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 * '50'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("5025", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50' * 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("5000", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50.5' * 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("5050", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -552,7 +552,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("20"u8.ToArray(), resp.Value);
@@ -562,7 +562,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("20"u8.ToArray(), resp.Value);
@@ -585,13 +585,13 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 / 'hello'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType / StringType at line 1", resp.Reason);        
         
             script = "RETURN 100 / null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Errored, resp.Type);
             Assert.Equal("Invalid operands: LongType / NullType at line 1", resp.Reason);
         
@@ -613,28 +613,28 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 / '50'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("2", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 / '2'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("50.25", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '100' / 50";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("2", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100 / '0.5'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("200", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -660,7 +660,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("100"u8.ToArray(), resp.Value);
@@ -673,7 +673,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(1, resp.Revision);
             Assert.Equal("101"u8.ToArray(), resp.Value);
@@ -685,7 +685,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              GET pp
              """;
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(2, resp.Revision);
             Assert.Equal("102"u8.ToArray(), resp.Value);
@@ -695,7 +695,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("100"u8.ToArray(), resp.Value);
@@ -708,7 +708,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              EGET pp
              """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(1, resp.Revision);
             Assert.Equal("101"u8.ToArray(), resp.Value);
@@ -720,7 +720,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              EGET pp
              """;
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(2, resp.Revision);
             Assert.Equal("102"u8.ToArray(), resp.Value);
@@ -746,7 +746,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("100"u8.ToArray(), resp.Value);
@@ -759,7 +759,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             GET pp
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(1, resp.Revision);
             Assert.Equal("99"u8.ToArray(), resp.Value);
@@ -771,7 +771,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              GET pp
              """;
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(2, resp.Revision);
             Assert.Equal("98"u8.ToArray(), resp.Value);
@@ -781,7 +781,7 @@ public class TestKeyValueScriptOperators : BaseCluster
               EGET pp
               """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(0, resp.Revision);
             Assert.Equal("100"u8.ToArray(), resp.Value);
@@ -794,7 +794,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              EGET pp
              """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(1, resp.Revision);
             Assert.Equal("99"u8.ToArray(), resp.Value);
@@ -806,7 +806,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              EGET pp
              """;
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(2, resp.Revision);
             Assert.Equal("98"u8.ToArray(), resp.Value);
@@ -829,133 +829,133 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 = 100";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 = 50";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100.5 = 100.5";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50 = 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50.5 = 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100 == 100";
 
-            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 == 50";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100.5 == 100.5";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50 == 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50.5 == 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 'hello' = 'hello'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 'not hello' = 'hello'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN true == true";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN true == false";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN null == null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN null == false";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN null == ''";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN false == null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 'hello' == null";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -978,70 +978,70 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 = '100'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 = '50'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100.5 = '100.5'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50' = 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50.5' = 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100 == '100'";
 
-            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 == '50'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100.5 == '100.5'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50' == 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50.5' == 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1068,7 +1068,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN v = 'hello'
                 """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -1078,7 +1078,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN v = 'world'
                 """;
 
-            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -1089,7 +1089,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN 'hello' = v
                 """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -1099,7 +1099,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN 'world' = v
                 """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -1111,7 +1111,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN v = '{japanese}'
                 """;
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -1123,7 +1123,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN v = '{large}'
                 """;
 
-            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
 
@@ -1135,7 +1135,7 @@ public class TestKeyValueScriptOperators : BaseCluster
                 RETURN v = '{large2}'
                 """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         }
@@ -1156,35 +1156,35 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 < 100";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN 100.5 < 50";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100.5 < 100.5";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50 < 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50.5 < 100";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));               
@@ -1207,35 +1207,35 @@ public class TestKeyValueScriptOperators : BaseCluster
             // Persistent tests
             string script = "RETURN 100 < '100'";
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));        
         
             script = "RETURN '100.5' < 50";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 100.5 < '100.5'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN '50' < 100";
 
-            resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna3, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
         
             script = "RETURN 50.5 < '100'";
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));               
@@ -1264,7 +1264,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1277,7 +1277,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1291,7 +1291,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1305,7 +1305,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1320,7 +1320,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1335,7 +1335,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1365,7 +1365,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1379,7 +1379,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("true", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1393,7 +1393,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1407,7 +1407,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN true
             """;
 
-            resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna2, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("false", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1433,7 +1433,7 @@ public class TestKeyValueScriptOperators : BaseCluster
             RETURN x[0]
             """;
 
-            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            KeyValueTransactionResult resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("1", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1443,7 +1443,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              RETURN x[9]
              """;
 
-            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
@@ -1457,7 +1457,7 @@ public class TestKeyValueScriptOperators : BaseCluster
              RETURN total
             """;
 
-            resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+            resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));

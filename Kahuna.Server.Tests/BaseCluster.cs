@@ -1,6 +1,7 @@
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -236,6 +237,30 @@ public abstract class BaseCluster
         await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
 
         return (raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
+    }
+
+    /// <summary>
+    /// Executes a script transaction, transparently retrying the whole self-contained script while it returns the
+    /// retryable <see cref="KeyValueResponseType.MustRetry"/>. A read-modify-write issued immediately after a same-key
+    /// durable commit can transiently meet that commit's committed-but-unsettled prepared intent (one live intent per
+    /// key) before its settlement frees the key — most visibly under deferred settlement, where settlement runs in the
+    /// background after the commit returns. <c>MustRetry</c> guarantees the attempt had no durable effect, so
+    /// re-executing the script is exactly what a real client does; the caller's value/revision assertions stay strict
+    /// (this never masks a wrong value, only absorbs the documented retryable outcome). A bounded budget keeps a
+    /// genuinely stuck transaction from looping forever.
+    /// </summary>
+    protected static async Task<KeyValueTransactionResult> RetryOnMustRetry(
+        IKahuna kahuna, ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
+    {
+        const int maxAttempts = 40;
+        KeyValueTransactionResult result = await kahuna.TryExecuteTransactionScript(script, hash, parameters);
+        for (int attempt = 1; result.Type == KeyValueResponseType.MustRetry && attempt < maxAttempts; attempt++)
+        {
+            await Task.Delay(Math.Min(5 * attempt, 50));
+            result = await kahuna.TryExecuteTransactionScript(script, hash, parameters);
+        }
+
+        return result;
     }
 
     /// <summary>
