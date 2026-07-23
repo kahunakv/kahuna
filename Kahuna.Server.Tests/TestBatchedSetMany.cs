@@ -44,6 +44,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4
@@ -88,6 +91,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4
@@ -136,6 +142,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4
@@ -182,6 +191,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4
@@ -232,6 +244,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4
@@ -280,6 +295,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4
@@ -309,6 +327,9 @@ public sealed class TestBatchedSetMany
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4

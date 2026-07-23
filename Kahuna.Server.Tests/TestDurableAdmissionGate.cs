@@ -61,6 +61,9 @@ public sealed class TestDurableAdmissionGate
         DurableRecordGate? gate = null;
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
@@ -105,6 +108,9 @@ public sealed class TestDurableAdmissionGate
         DurableRecordGate? gate = null;
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
@@ -136,6 +142,9 @@ public sealed class TestDurableAdmissionGate
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
@@ -167,6 +176,9 @@ public sealed class TestDurableAdmissionGate
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,

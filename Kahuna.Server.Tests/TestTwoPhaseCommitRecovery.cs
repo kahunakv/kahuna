@@ -49,6 +49,11 @@ public sealed class TestTwoPhaseCommitRecovery
 
         RaftConfiguration raftCfg = new()
         {
+            // Keep per-node IO/executor threads at 1 so parallel test clusters don't inflate the process
+            // thread count (production embedding keeps its own defaults).
+            ReadIOThreads          = 1,
+            WriteIOThreads         = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName               = "recovery" + nodeId,
             NodeId                 = nodeId,
             Host                   = "localhost",

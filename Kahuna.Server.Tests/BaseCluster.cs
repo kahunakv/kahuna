@@ -30,6 +30,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = "kahuna1",
             NodeId = 1,
             Host = "localhost",
@@ -95,6 +100,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = "kahuna2",
             NodeId = 2,
             Host = "localhost",
@@ -156,6 +166,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = "kahuna3",
             NodeId = 3,
             Host = "localhost",
@@ -281,6 +296,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = $"kahuna{nodeId}",
             NodeId = nodeId,
             Host = "localhost",
@@ -349,6 +369,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = $"kahuna{nodeId}",
             NodeId = nodeId,
             Host = "localhost",
@@ -442,6 +467,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = $"kahuna{nodeId}",
             NodeId = nodeId,
             Host = "localhost",
@@ -532,6 +562,11 @@ public abstract class BaseCluster
 
         RaftConfiguration config = new()
         {
+            // Tests run many embedded clusters in parallel; keep per-node IO/executor threads at 1 so
+            // the process thread count stays low (production embedding keeps its own defaults).
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName = $"kahuna{nodeId}",
             NodeId = nodeId,
             Host = "localhost",

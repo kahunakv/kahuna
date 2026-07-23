@@ -955,6 +955,9 @@ public sealed class TestRangeSplit : BaseCluster
         // Short settle window so the re-eligibility leg completes in < 200 ms.
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
             NodeName        = "k6-node",
             Host            = "localhost",
             InitialPartitions = 1,
