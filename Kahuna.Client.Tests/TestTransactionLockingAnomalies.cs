@@ -11,6 +11,20 @@ public class TestTransactionLockingAnomalies
 
     private static readonly string[] Urls = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
 
+    /// <summary>
+    /// Expiry applied to every fixture key these anomaly tests seed and write.
+    /// <para>
+    /// It must comfortably outlive the slowest scenario in this suite. These tests deliberately create contention
+    /// (concurrent transactions racing on the same keys), and on the durable/persistent path a contended attempt can
+    /// wait on a write-intent lease or replication catch-up — so a scenario that normally finishes in ~1 s can take
+    /// tens of seconds on a cold or loaded cluster, which is exactly how CI runs it. With the previous 10 s expiry the
+    /// fixture keys died mid-test: the final read then legitimately returned DoesNotExist and the assertion failed as
+    /// an unrelated-looking "Expected: True / Actual: False", masking the fact that the test had simply outlived its
+    /// own data. The expiry is kept finite (not 0) so fixture keys still self-clean from the shared Docker cluster.
+    /// </para>
+    /// </summary>
+    private const int FixtureExpiryMs = 120_000;
+
     [Theory, CombinatorialData]
     public async Task TestLostUpdateOnOneKey(
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType,
@@ -29,7 +43,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue initialValue = await client.SetKeyValue(
             key,
             "0",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -97,14 +111,14 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue initialA = await client.SetKeyValue(
             keyA,
             "10",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
         KahunaKeyValue initialB = await client.SetKeyValue(
             keyB,
             "0",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -377,7 +391,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue inflightWrite = await inflightSession.SetKeyValue(
             keyInflight,
             "hidden",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -421,7 +435,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue summaryWrite = await bucketSession.SetKeyValue(
             summaryKey,
             bucketItems.Count.ToString(),
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -491,7 +505,7 @@ public class TestTransactionLockingAnomalies
         string keyA = $"{prefix}/a";
         string summaryKey = $"{prefix}/summary";
 
-        KahunaKeyValue seed = await client.SetKeyValue(keyA, "old-a", 10000, durability: durability, cancellationToken: cancellationToken);
+        KahunaKeyValue seed = await client.SetKeyValue(keyA, "old-a", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken);
         Assert.True(seed.Success);
 
         await using KahunaTransactionSession rangeSession = await client.StartTransactionSession(
@@ -508,7 +522,7 @@ public class TestTransactionLockingAnomalies
 
         // A modification is required so commit actually runs two-phase commit (and read-set validation).
         KahunaKeyValue summaryWrite = await rangeSession.SetKeyValue(
-            summaryKey, "1", 10000, durability: durability, cancellationToken: cancellationToken);
+            summaryKey, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken);
         Assert.True(summaryWrite.Success);
 
         CommitAttempt rangeCommit = await CommitTransactionAttempt(rangeSession, cancellationToken);
@@ -553,7 +567,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue initial = await client.SetKeyValue(
             existingKey,
             "existing",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -590,7 +604,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue staleInsert = await staleSession.SetKeyValue(
             staleInsertKey,
             "stale",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -641,7 +655,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue seeded = await client.SetKeyValue(
             accountKey,
             "100",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -727,14 +741,14 @@ public class TestTransactionLockingAnomalies
         Assert.True((await client.SetKeyValue(
             keyX,
             "committed",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         )).Success);
         Assert.True((await client.SetKeyValue(
             keyY,
             "stable",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         )).Success);
@@ -747,7 +761,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue uncommittedWrite = await writerSession.SetKeyValue(
             keyX,
             "uncommitted",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -815,7 +829,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue seeded = await client.SetKeyValue(
                 lockedKey,
                 "0",
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -859,9 +873,9 @@ public class TestTransactionLockingAnomalies
         string keyB = $"{prefix}/b";
         string keyC = $"{prefix}/c";
 
-        Assert.True((await client.SetKeyValue(keyA, "0", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-        Assert.True((await client.SetKeyValue(keyB, "0", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-        Assert.True((await client.SetKeyValue(keyC, "0", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "0", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyB, "0", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyC, "0", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession tx1 = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Optimistic, Timeout = 5000 },
@@ -893,9 +907,9 @@ public class TestTransactionLockingAnomalies
 
         try
         {
-            Assert.True((await tx1.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-            Assert.True((await tx1.SetKeyValue(keyB, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-            Assert.True((await tx1.SetKeyValue(keyC, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+            Assert.True((await tx1.SetKeyValue(keyA, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+            Assert.True((await tx1.SetKeyValue(keyB, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+            Assert.True((await tx1.SetKeyValue(keyC, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
             tx1Commit = await CommitTransactionAttempt(tx1, cancellationToken);
         }
@@ -937,8 +951,8 @@ public class TestTransactionLockingAnomalies
         string insertedKey = $"{prefix}/inserted";
         string deletedKey = $"{prefix}/deleted";
 
-        Assert.True((await client.SetKeyValue(updatedKey, "before", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-        Assert.True((await client.SetKeyValue(deletedKey, "to-delete", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(updatedKey, "before", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(deletedKey, "to-delete", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession session = await client.StartTransactionSession(
             new() { Locking = locking, Timeout = 5000 },
@@ -948,14 +962,14 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue updatedWrite = await session.SetKeyValue(
             updatedKey,
             "after",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
         KahunaKeyValue insertedWrite = await session.SetKeyValue(
             insertedKey,
             "created",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -1047,8 +1061,8 @@ public class TestTransactionLockingAnomalies
         string keyB = $"{prefix}/b";
         string phantomKey = $"{prefix}/c";
 
-        Assert.True((await client.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-        Assert.True((await client.SetKeyValue(keyB, "2", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyB, "2", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession bucketSession = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1080,7 +1094,7 @@ public class TestTransactionLockingAnomalies
 
         // After the prefix lock is released, a fresh unconditional write must succeed.
         KahunaKeyValue afterRelease = await client.SetKeyValue(
-            phantomKey, "phantom-after", 10000, durability: durability, cancellationToken: cancellationToken
+            phantomKey, "phantom-after", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken
         );
         Assert.True(afterRelease.Success);
     }
@@ -1104,7 +1118,7 @@ public class TestTransactionLockingAnomalies
         string prefix = $"tx-anomaly/{Guid.NewGuid():N}/idempotent";
         string keyA = $"{prefix}/a";
 
-        Assert.True((await client.SetKeyValue(keyA, "hello", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "hello", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession session = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1141,7 +1155,7 @@ public class TestTransactionLockingAnomalies
         string keyA = $"{prefix}/a";
         string keyB = $"{prefix}/b";
 
-        Assert.True((await client.SetKeyValue(keyA, "original", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "original", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession session = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1156,7 +1170,7 @@ public class TestTransactionLockingAnomalies
 
         // After rollback the prefix lock must be released so writes under the prefix succeed.
         KahunaKeyValue newEntry = await client.SetKeyValue(
-            keyB, "new-entry", 10000, durability: durability, cancellationToken: cancellationToken
+            keyB, "new-entry", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken
         );
         Assert.True(newEntry.Success);
 
@@ -1186,8 +1200,8 @@ public class TestTransactionLockingAnomalies
         string keyB = $"{prefix}/b";
         string phantomKey = $"{prefix}/c";
 
-        Assert.True((await client.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
-        Assert.True((await client.SetKeyValue(keyB, "2", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyB, "2", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession rangeSession = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1219,7 +1233,7 @@ public class TestTransactionLockingAnomalies
 
         // After the range lock is released, a fresh write must succeed.
         KahunaKeyValue afterRelease = await client.SetKeyValue(
-            phantomKey, "phantom-after", 10000, durability: durability, cancellationToken: cancellationToken
+            phantomKey, "phantom-after", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken
         );
         Assert.True(afterRelease.Success);
     }
@@ -1243,7 +1257,7 @@ public class TestTransactionLockingAnomalies
         string prefix = $"tx-anomaly/{Guid.NewGuid():N}/range-idempotent";
         string keyA = $"{prefix}/a";
 
-        Assert.True((await client.SetKeyValue(keyA, "hello", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "hello", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession session = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1284,7 +1298,7 @@ public class TestTransactionLockingAnomalies
         string keyA = $"{prefix}/a";
         string keyB = $"{prefix}/b";
 
-        Assert.True((await client.SetKeyValue(keyA, "original", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "original", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession session = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1301,7 +1315,7 @@ public class TestTransactionLockingAnomalies
 
         // After rollback the range lock must be released so writes inside the range succeed.
         KahunaKeyValue newEntry = await client.SetKeyValue(
-            keyB, "new-entry", 10000, durability: durability, cancellationToken: cancellationToken
+            keyB, "new-entry", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken
         );
         Assert.True(newEntry.Success);
 
@@ -1330,7 +1344,7 @@ public class TestTransactionLockingAnomalies
         string keyInsideRange = $"{prefix}/b";    // inside [prefix/a .. prefix/c]
         string keyOutsideRange = $"{prefix}/z";   // outside [prefix/a .. prefix/c]
 
-        Assert.True((await client.SetKeyValue(keyA, "1", 10000, durability: durability, cancellationToken: cancellationToken)).Success);
+        Assert.True((await client.SetKeyValue(keyA, "1", FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken)).Success);
 
         await using KahunaTransactionSession rangeSession = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 5000 },
@@ -1382,7 +1396,7 @@ public class TestTransactionLockingAnomalies
             );
 
             KahunaKeyValue setResult = await session.SetKeyValue(
-                key, value, 10000, durability: durability, cancellationToken: cancellationToken
+                key, value, FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken
             );
             Assert.True(setResult.Success);
 
@@ -1432,7 +1446,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue observedWrite = await session.SetKeyValue(
                 observedKey,
                 $"{firstRead.Value}:{secondRead.Value}",
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -1468,7 +1482,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue setResult = await session.SetKeyValue(
             lockedKey,
             "temp",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -1491,7 +1505,7 @@ public class TestTransactionLockingAnomalies
 
         string script = $$"""
         BEGIN (locking="pessimistic", asyncRelease="{{asyncReleaseValue}}")
-         {{setCommand}} @key 'temp' EX 10000
+         {{setCommand}} @key 'temp' EX {{FixtureExpiryMs}}
          THROW 'boom'
         END
         """;
@@ -1535,7 +1549,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue setResult = await session.SetKeyValue(
                 lockedKey,
                 "temp",
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -1632,7 +1646,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue setResult = await session.SetKeyValue(
                 key,
                 value,
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -1671,7 +1685,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue setResult = await session.SetKeyValue(
             lockedKey,
             "released",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: timeout.Token
         );
@@ -1709,7 +1723,7 @@ public class TestTransactionLockingAnomalies
             );
 
             KahunaKeyValue setResult = await session.SetKeyValue(
-                key, value, 10000, durability: durability, cancellationToken: cancellationToken
+                key, value, FixtureExpiryMs, durability: durability, cancellationToken: cancellationToken
             );
             Assert.True(setResult.Success);
 
@@ -1759,7 +1773,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue setResult = await session.SetKeyValue(
                 key,
                 (readValue.Value + 1).ToString(),
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -1810,7 +1824,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue setResult = await session.SetKeyValue(
                 keyB,
                 (readValue.Value + 1).ToString(),
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -1872,7 +1886,7 @@ public class TestTransactionLockingAnomalies
                 KahunaKeyValue setResult = await session.SetKeyValue(
                     doctorToDisableKey,
                     "false",
-                    10000,
+                    FixtureExpiryMs,
                     durability: durability,
                     cancellationToken: cancellationToken
                 );
@@ -1941,7 +1955,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue setResult = await session.SetKeyValue(
                 key,
                 value,
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -1985,7 +1999,7 @@ public class TestTransactionLockingAnomalies
          IF count(oncall) = 2 THEN
           IF to_bool(oncall[0]) THEN
            IF to_bool(oncall[1]) THEN
-            {{setCommand}} @doctor false EX 10000
+            {{setCommand}} @doctor false EX {{FixtureExpiryMs}}
            END
           END
          END
@@ -2005,14 +2019,14 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue alice = await client.SetKeyValue(
             aliceKey,
             "true",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
         KahunaKeyValue bob = await client.SetKeyValue(
             bobKey,
             "true",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -2034,14 +2048,14 @@ public class TestTransactionLockingAnomalies
         Assert.True((await client.SetKeyValue(
             keyA,
             "old-a",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         )).Success);
         Assert.True((await client.SetKeyValue(
             keyB,
             "old-b",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         )).Success);
@@ -2049,7 +2063,7 @@ public class TestTransactionLockingAnomalies
         KahunaKeyValue deleted = await client.SetKeyValue(
             keyDeleted,
             "to-delete",
-            10000,
+            FixtureExpiryMs,
             durability: durability,
             cancellationToken: cancellationToken
         );
@@ -2090,7 +2104,7 @@ public class TestTransactionLockingAnomalies
             KahunaKeyValue setResult = await session.SetKeyValue(
                 keyA,
                 "20",
-                10000,
+                FixtureExpiryMs,
                 durability: durability,
                 cancellationToken: cancellationToken
             );
@@ -2120,21 +2134,87 @@ public class TestTransactionLockingAnomalies
         }
     }
 
+    private static readonly SemaphoreSlim ClusterReadyLock = new(1, 1);
+
+    private static bool clusterReady;
+
+    /// <summary>
+    /// Waits, once per test process, until the cluster can actually serve a durable round trip.
+    /// <para>
+    /// The previous check was a single 2 s read of a nonexistent key. That succeeds as soon as any node answers,
+    /// which is true long before every partition has an elected leader — so on a freshly started cluster (exactly how
+    /// CI runs: tests begin right after <c>docker compose up</c>) a persistent test could start against partitions
+    /// still electing, stall on the durable path, and fail in a way that looks unrelated to what it asserts.
+    /// </para>
+    /// <para>
+    /// The gate is deliberately <b>process-wide and one-shot</b>: an earlier attempt that probed durably on every
+    /// test call made things markedly worse, because each of the parallel test cases added its own durable write to a
+    /// cluster that was still warming up. Paying the wait once and then short-circuiting keeps the readiness
+    /// guarantee without contributing to the contention it is meant to avoid.
+    /// </para>
+    /// </summary>
     private static async Task AssertClusterAvailable(KahunaClient client, CancellationToken cancellationToken)
     {
-        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        if (Volatile.Read(ref clusterReady))
+            return;
+
+        await ClusterReadyLock.WaitAsync(cancellationToken);
 
         try
         {
-            await client.GetKeyValue($"tx-anomaly/probe/{Guid.NewGuid():N}", cancellationToken: timeout.Token);
-        }
-        catch (Exception exception)
-        {
+            if (Volatile.Read(ref clusterReady))
+                return;
+
+            string probeKey = $"tx-anomaly/probe/{Guid.NewGuid():N}";
+            Exception? lastFailure = null;
+            long deadline = Environment.TickCount64 + 60_000;
+            int delayMs = 50;
+
+            while (Environment.TickCount64 < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    using CancellationTokenSource attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    attempt.CancelAfter(TimeSpan.FromSeconds(5));
+
+                    // A durable write plus read-back is what actually proves the persistent path these tests exercise
+                    // is serving — a read alone does not require the write path or an elected leader for the key.
+                    KahunaKeyValue written = await client.SetKeyValue(
+                        probeKey, "ready"u8.ToArray(), FixtureExpiryMs,
+                        durability: KeyValueDurability.Persistent, cancellationToken: attempt.Token);
+
+                    if (written.Success)
+                    {
+                        KahunaKeyValue read = await client.GetKeyValue(
+                            probeKey, KeyValueDurability.Persistent, cancellationToken: attempt.Token);
+
+                        if (read.Success)
+                        {
+                            Volatile.Write(ref clusterReady, true);
+                            return;
+                        }
+                    }
+                }
+                catch (Exception exception)
+                {
+                    lastFailure = exception;
+                }
+
+                await Task.Delay(delayMs, cancellationToken);
+                delayMs = Math.Min(delayMs * 2, 500);
+            }
+
             throw new XunitException(
                 "Client anomaly tests require the Docker Kahuna cluster on https://localhost:8082, https://localhost:8084, and https://localhost:8086. " +
-                $"Cluster availability probe failed: {exception.GetType().Name}: {exception.Message}"
+                "The cluster did not become durably writable within 60s. " +
+                $"Last probe failure: {(lastFailure is null ? "none (the probe kept returning unsuccessful)" : $"{lastFailure.GetType().Name}: {lastFailure.Message}")}"
             );
+        }
+        finally
+        {
+            ClusterReadyLock.Release();
         }
     }
 
