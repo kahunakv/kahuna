@@ -111,7 +111,15 @@ public sealed class EmbeddedKahunaOptions
 
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
-    public bool DurableDeferredSettlement { get; set; }
+    /// <summary>
+    /// When true (default), a durable transaction's post-decision resolution (materialize committed values, settle
+    /// intents) runs off the commit critical path — finalize returns once the decision record is durable and
+    /// settlement completes in the background (recovery finishes a lost run). Reads/writes that meet a
+    /// committed-but-unsettled intent resolve it through the durable-intent visibility path, so no stale value is
+    /// served. Removes settlement from the commit critical path for a large throughput gain. Set false for
+    /// synchronous settlement (resolution awaited inline before the commit returns).
+    /// </summary>
+    public bool DurableDeferredSettlement { get; set; } = true;
 
     public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
 

@@ -44,8 +44,20 @@ public sealed class TestDeferredSettlementReadYourWrite
         return node;
     }
 
-    private static async Task<KeyValueTransactionResult> Run(EmbeddedKahunaNode node, string script) =>
-        await node.Kahuna.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+    // A read-modify-write over a same-key committed-but-unsettled intent can transiently return the retryable
+    // MustRetry (its prepare meets the prior commit's still-live intent) until settlement frees the key; the write
+    // lands on retry. Retry the whole self-contained script, keeping the caller's strict assertions intact.
+    private static async Task<KeyValueTransactionResult> Run(EmbeddedKahunaNode node, string script)
+    {
+        KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+        for (int attempt = 1; result.Type == KeyValueResponseType.MustRetry && attempt < 40; attempt++)
+        {
+            await Task.Delay(Math.Min(5 * attempt, 50));
+            result = await node.Kahuna.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
+        }
+
+        return result;
+    }
 
     [Fact]
     public async Task ReadModifyWrite_OverUnsettledCommit_SeesOwnWrite()

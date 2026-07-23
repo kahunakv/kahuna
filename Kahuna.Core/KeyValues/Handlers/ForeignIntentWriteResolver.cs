@@ -58,7 +58,15 @@ internal static class ForeignIntentWriteResolver
                 return ForeignIntentWriteDecision.MustRetry;
 
             case ReadVisibilityAction.UseIntentValue:
-                if ((entry?.Revision ?? -1) < foreignIntent.Revision)
+                // Materialize the committed value into the entry unless the entry already reflects this intent. A
+                // committed SET bumps the revision, so an unmaterialized entry is strictly behind (Revision <). A
+                // committed DELETE keeps the revision, so an equal revision whose state still differs (entry Set,
+                // intent Deleted) is an unmaterialized delete that must still be applied — otherwise a conditional
+                // write such as SET NX would see the pre-delete value and wrongly reject as already-existing. Skip
+                // only when the entry is beyond the intent, or already at its exact revision and terminal state.
+                if (entry is null
+                    || entry.Revision < foreignIntent.Revision
+                    || (entry.Revision == foreignIntent.Revision && entry.State != foreignIntent.State))
                 {
                     bool created = entry is null;
                     entry ??= new()

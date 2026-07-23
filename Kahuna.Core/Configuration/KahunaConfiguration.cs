@@ -184,14 +184,18 @@ public sealed class KahunaConfiguration
     public int DurableRecoveryMaxPartitionsPerPass { get; set; } = 64;
 
     /// <summary>
-    /// When true, a durable transaction's post-decision resolution (materialize committed values, settle intents)
-    /// runs off the commit critical path: finalize returns as soon as the decision record is durable, and
+    /// When true (default), a durable transaction's post-decision resolution (materialize committed values, settle
+    /// intents) runs off the commit critical path: finalize returns as soon as the decision record is durable, and
     /// settlement completes in the background (a lost run is finished by recovery). Reads and writes that meet a
     /// committed-but-unsettled intent resolve the outcome through the durable-intent visibility path — the
-    /// canonical record locally, or routed to the anchor leader cross-node — so it never serves a stale value.
-    /// When false (default), resolution is awaited inline before finalize returns (synchronous settlement).
+    /// canonical record locally, or routed to the anchor leader cross-node — so it never serves a stale value. This
+    /// removes settlement from the commit critical path (measured ~+69% committed TPS, −42% commit p50 at 32
+    /// workers on one embedded node).
+    /// <para>Set false to await resolution inline before finalize returns (synchronous settlement) — the prior
+    /// behavior, useful when a consumer wants the committed value materialized into MVCC before the commit returns
+    /// on every node without relying on the durable-intent visibility path.</para>
     /// </summary>
-    public bool DurableDeferredSettlement { get; set; }
+    public bool DurableDeferredSettlement { get; set; } = true;
 
     /// <summary>
     /// Strict upper bound on the number of prepared intents resident across all partitions on this node. Checked

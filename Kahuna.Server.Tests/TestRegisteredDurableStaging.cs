@@ -78,6 +78,10 @@ public sealed class TestRegisteredDurableStaging
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
+            // This test observes the materialization records emitted *during* the commit call to prove they coalesce.
+            // Deferred settlement emits them later on a background task, so pin synchronous settlement here — the
+            // coalescing behavior under test is identical either way; only when it runs differs.
+            DurableDeferredSettlement = false,
             WriteBatchExecutorDecorator = inner => counter = new CountingExecutor(inner)
         }, loggerFactory);
         await node.StartAsync(ct);
@@ -382,6 +386,13 @@ public sealed class TestRegisteredDurableStaging
         (KeyValueResponseType secondCommit, _) = await kahuna.LocateAndCommitTransaction(second, ct);
         Assert.Equal(KeyValueResponseType.Committed, secondCommit);
         Assert.Equal(TransactionDecision.Commit, kahuna.DurableTransactionRecordStore.Get(secondTxId, 1)!.Decision);
+
+        // Under deferred settlement the NOREV write materializes on a background task; the history-suppression this
+        // test asserts is a property of that materialization, so wait for the prepared intents to drain before
+        // inspecting revisioned state.
+        long drainDeadline = Environment.TickCount64 + 5000;
+        while (kahuna.DurablePreparedIntentStore.Count != 0 && Environment.TickCount64 < drainDeadline)
+            await Task.Delay(10, ct);
 
         // The NOREV key's prior revision was not retained: reading revision 0 no longer resolves.
         (KeyValueResponseType norevRev0Type, _) = await kahuna.LocateAndTryGetValue(

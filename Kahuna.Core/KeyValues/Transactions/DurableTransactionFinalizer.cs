@@ -55,6 +55,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // concurrent transactions cannot multiply their individual fan-out into an unbounded actor-inbox flood.
     private const int MaxConcurrentLocalApplies = 32;
 
+    // A prepare rejected only because the key still holds a predecessor's committed-but-unsettled intent (deferred
+    // settlement removes it a moment later) is retryable in place — re-prepare the set a few times before conceding,
+    // so a healthy commit is not aborted merely because background settlement had not caught up. Small: the blocking
+    // intent settles within a few ms and the frozen decision deadline is the real ceiling.
+    private const int MaxPrepareRetries = 8;
+
     private readonly SemaphoreSlim localApplyGate = new(MaxConcurrentLocalApplies);
 
     /// <summary>Replicates a partition's serialized delta of the given log type and returns whether it committed
@@ -235,6 +241,27 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             }).ToArray();
             bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
             allPrepared = prepareResults.All(static prepared => prepared);
+        }
+
+        // ── Prepare retry (window narrowing): a prepare rejected because the key still holds a predecessor's
+        // committed-but-unsettled intent is retryable — the predecessor's background settlement removes that intent a
+        // moment later. Re-prepare the whole set (the record is already durable, so no re-init): a partition that
+        // already prepared answers with an idempotent same-identity match, while a blocked partition retries until the
+        // foreign intent settles. Bounded, with a short backoff to yield to settlement. No decision has been written
+        // yet, so a retry that succeeds still commits truthfully instead of aborting a healthy commit to MustRetry. A
+        // genuine conflict (another live transaction, or an undecided intent that never resolves) simply exhausts the
+        // budget and falls through to the truthful abort below; the frozen decision deadline is the final ceiling. ──
+        for (int attempt = 0; !allPrepared && attempt < MaxPrepareRetries && !cancellationToken.IsCancellationRequested; attempt++)
+        {
+            try { await Task.Delay(Math.Min(2 * (attempt + 1), 20), cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+
+            Task<bool>[] retryTasks = input.Partitions.Select(partition =>
+            {
+                byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
+                return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
+            }).ToArray();
+            allPrepared = (await Task.WhenAll(retryTasks).ConfigureAwait(false)).All(static prepared => prepared);
         }
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
