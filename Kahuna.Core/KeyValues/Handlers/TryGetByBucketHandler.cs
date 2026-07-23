@@ -87,7 +87,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket. No-op off the
         // durable path.
         (items, bool mustRetry) = BucketScanContinuation.OverlayBucketIntents(
-            context, message.Key, items, currentTime, message.ReadTimestamp);
+            context, message.Key, items, currentTime, message.ReadTimestamp, message.ForeignScanDecisions);
         if (mustRetry)
             return KeyValueStaticResponses.MustRetryResponse;
 
@@ -131,7 +131,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             items.Sort(EnsureLexicographicalOrder);
 
             (items, bool mustRetry) = BucketScanContinuation.OverlayBucketIntents(
-                context, message.Key, items, currentTime, message.ReadTimestamp);
+                context, message.Key, items, currentTime, message.ReadTimestamp, message.ForeignScanDecisions);
             if (mustRetry)
                 return KeyValueStaticResponses.MustRetryResponse;
 
@@ -169,7 +169,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
 
         BucketScanContinuation cont = new(
             message.Key, message.TransactionId, message.ReadTimestamp,
-            items, seenKeys, currentTime, promise, scanKey);
+            items, seenKeys, currentTime, promise, scanKey, message.ForeignScanDecisions);
         ArmReadDeadline(cont, currentTime);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;

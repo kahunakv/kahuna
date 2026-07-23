@@ -38,6 +38,24 @@ internal static class DurableReadVisibility
         return context.TransactionRecordStore?.Get(intent.TransactionId, intent.Epoch)?.Decision ?? TransactionDecision.Undecided;
     }
 
+    /// <summary>The canonical decision for a still-pending intent met by a scan overlay: a decision routed off the
+    /// mailbox for this exact intent identity wins (it was resolved against the intent's anchor-partition leader);
+    /// otherwise the co-located record store; else Undecided (leaves the page at retry, which triggers the scan's
+    /// off-mailbox routed resolution). The multi-intent analog of <see cref="DecisionFor"/> for the scan-merge path,
+    /// where one page can straddle many foreign intents with different remote anchors.</summary>
+    internal static TransactionDecision ScanDecision(
+        KeyValueContext context,
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions,
+        PreparedIntent intent)
+    {
+        if (routedDecisions is not null
+            && routedDecisions.TryGetValue((intent.TransactionId, intent.Epoch), out TransactionDecision routed)
+            && routed is TransactionDecision.Commit or TransactionDecision.Abort)
+            return routed;
+
+        return context.TransactionRecordStore?.Get(intent.TransactionId, intent.Epoch)?.Decision ?? TransactionDecision.Undecided;
+    }
+
     /// <summary>
     /// Whether a foreign prepared intent is a live, still-undecided concurrent writer — the durable analog of a
     /// live in-memory write intent for the commit-time conflict probe. A pending intent whose canonical decision is

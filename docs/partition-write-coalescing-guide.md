@@ -47,8 +47,11 @@ Three things the scheduler deliberately does **not** carry:
 - **In-flight transactional staging** — a write under an open transaction stages an MVCC entry (a write
   intent) on its actor; it becomes an auto-committed record only when the transaction finalizes, and only
   then (for the durable-intent path) does it reach the scheduler.
-- **The legacy manual-ticket 2PC path** — mixed/ephemeral transactions still finalize through the
-  `CommitLogs`/`RollbackLogs` ticket path, which is not merged into the scheduler's auto-commit batches.
+- **Ephemeral 2PC commit/rollback** — the ephemeral subset of a transaction settles in memory on the owning
+  actor (no Raft proposal at all), so it never reaches the scheduler. (The manual persistent
+  `CommitLogs`/`RollbackLogs` ticket path has been retired: a persistent transaction finalizes through the
+  durable-intent path, whose `TransactionRecord`/`PreparedIntent` deltas *do* ride the scheduler as
+  auto-commit records — see the previous bullet.)
 
 ---
 
@@ -198,8 +201,10 @@ A maintainer changing this subsystem must preserve all of these:
 5. **One partition per batch; auto-commit only.** A batch contains only auto-commit records for a single
    partition, but those records may be **heterogeneous** — direct `KeyValues` writes and durable-intent
    `TransactionRecord`/`PreparedIntent` deltas coalesce into one proposal. What never enters a batch is a
-   *manual* (non-auto-commit) ticket: the legacy 2PC prepare/commit path keeps its own `CommitLogs`/
-   `RollbackLogs` proposal so independent transactions retain independent commit/rollback outcomes.
+   settlement that is not an auto-commit Raft record: the ephemeral subset of a transaction commits/rolls back
+   in memory on the owning actor (no proposal), and a persistent transaction settles through the durable-intent
+   canonical record (whose deltas do coalesce). The retired manual `CommitLogs`/`RollbackLogs` ticket path no
+   longer exists.
 
 6. **Every accepted item terminates exactly once** — a `CompleteProposal` after confirmed success, or
    a `ReleaseProposal` after a pre-dispatch rejection or a confirmed failure. Completion is delivered

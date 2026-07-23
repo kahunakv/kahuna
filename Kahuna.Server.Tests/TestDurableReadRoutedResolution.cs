@@ -192,6 +192,164 @@ public sealed class TestDurableReadRoutedResolution : BaseCluster
         }
     }
 
+    [Fact]
+    public async Task CrossNodeRangeScan_CommittedUnsettledIntent_RoutesAnchorDecision_ServesCommittedValue()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 8, raftLogger, kahunaLogger);
+
+        (IRaft Raft, IKahuna Kahuna)[] nodes = [(r1, k1), (r2, k2), (r3, k3)];
+        try
+        {
+            (string key, IKahuna keyLeader, string anchor, IKahuna anchorLeader) = await FindCrossNodeKeyAndAnchor(nodes, ct);
+            string bucket = key[..key.LastIndexOf('/')];
+            byte[] value = "range-committed-via-routed-lookup"u8.ToArray();
+
+            HLCTimestamp txId = new(0, 8_000, 0);
+            InstallCommittedUnsettled(keyLeader, anchorLeader, key, bucket, anchor, value, txId, baseTicks: 8_000);
+
+            // A range scan over the bucket window meets the committed-but-unsettled remote-anchor intent; the leader
+            // routes its decision to the anchor leader and injects the committed value into the page instead of
+            // retrying until settlement. The bucket prefix routes to the same partition that holds the intent.
+            KeyValueGetByRangeResult result = await keyLeader.LocateAndGetByRange(
+                HLCTimestamp.Zero, bucket, null, true, null, false, 16, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Get, result.Type);
+            (string, ReadOnlyKeyValueEntry) row = Assert.Single(result.Items, i => i.Item1 == key);
+            Assert.Equal(value, row.Item2.Value);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    [Fact]
+    public async Task CrossNodeRangeScan_AbortedUnsettledIntent_RoutesAnchorDecision_OmitsKey()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 8, raftLogger, kahunaLogger);
+
+        (IRaft Raft, IKahuna Kahuna)[] nodes = [(r1, k1), (r2, k2), (r3, k3)];
+        try
+        {
+            (string key, IKahuna keyLeader, string anchor, IKahuna anchorLeader) = await FindCrossNodeKeyAndAnchor(nodes, ct);
+            string bucket = key[..key.LastIndexOf('/')];
+
+            HLCTimestamp txId = new(0, 8_500, 0);
+            InstallAbortedUnsettled(keyLeader, anchorLeader, key, bucket, anchor, "should-not-be-seen"u8.ToArray(), txId, baseTicks: 8_500);
+
+            // The aborted intent is invisible: the scan resolves the abort via routing and the key never enters the
+            // page. Nothing else was committed in the window, so the page is empty.
+            KeyValueGetByRangeResult result = await keyLeader.LocateAndGetByRange(
+                HLCTimestamp.Zero, bucket, null, true, null, false, 16, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Get, result.Type);
+            Assert.DoesNotContain(result.Items, i => i.Item1 == key);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    [Fact]
+    public async Task CrossNodeBucketScan_CommittedUnsettledIntent_RoutesAnchorDecision_ServesCommittedValue()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 8, raftLogger, kahunaLogger);
+
+        (IRaft Raft, IKahuna Kahuna)[] nodes = [(r1, k1), (r2, k2), (r3, k3)];
+        try
+        {
+            (string key, IKahuna keyLeader, string anchor, IKahuna anchorLeader) = await FindCrossNodeKeyAndAnchor(nodes, ct);
+            string bucket = key[..key.LastIndexOf('/')];
+            byte[] value = "bucket-committed-via-routed-lookup"u8.ToArray();
+
+            HLCTimestamp txId = new(0, 9_500, 0);
+            InstallCommittedUnsettled(keyLeader, anchorLeader, key, bucket, anchor, value, txId, baseTicks: 9_500);
+
+            // A bucket scan meets the committed-but-unsettled remote-anchor intent belonging to the bucket; the
+            // leader routes its decision to the anchor leader and serves the committed value. The bucket prefix
+            // routes to the same partition that holds the intent.
+            KeyValueGetByBucketResult result = await keyLeader.LocateAndGetByBucket(
+                HLCTimestamp.Zero, bucket, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Get, result.Type);
+            (string, ReadOnlyKeyValueEntry) row = Assert.Single(result.Items, i => i.Item1 == key);
+            Assert.Equal(value, row.Item2.Value);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    // Installs a committed-but-unsettled cross-node intent: the committed canonical record lives only on the anchor
+    // leader while a still-pending prepared intent for the key lives on the key leader (record not co-located), so a
+    // scan of the key must route the decision to resolve it.
+    private static void InstallCommittedUnsettled(
+        IKahuna keyLeader, IKahuna anchorLeader, string key, string bucket, string anchor, byte[] value,
+        HLCTimestamp txId, long baseTicks)
+    {
+        const long epoch = 1;
+        HLCTimestamp commitTs = new(0, baseTicks + 100, 0);
+        HLCTimestamp deadline = new(0, baseTicks + 4_000, 0);
+        HLCTimestamp opId = new(0, baseTicks + 50, 0);
+        HLCTimestamp origin = new(0, baseTicks, 0);
+
+        List<TransactionParticipantRef> manifest = [new(key, KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(txId, epoch, anchor, commitTs, manifest);
+
+        TransactionRecordStore recordStore = ((KahunaManager)anchorLeader).DurableTransactionRecordStore;
+        recordStore.Apply(new InitializeTransactionCommand(txId, epoch, "coord", anchor, commitTs, deadline, hash, manifest, opId, origin));
+        recordStore.Apply(new CommitTransactionCommand(txId, epoch, hash, opId, commitTs));
+
+        PreparedIntentStore intentStore = ((KahunaManager)keyLeader).DurablePreparedIntentStore;
+        PreparedIntent intent = new(
+            txId, epoch, key, hash, anchor, commitTs,
+            KeyValueState.Set, value, Bucket: bucket, Revision: 1, Expires: HLCTimestamp.Zero,
+            NoRevision: false, BaseRevision: 0, BaseState: KeyValueState.Set,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending);
+        intentStore.Apply(new PrepareIntentCommand(intent));
+
+        Assert.Null(((KahunaManager)keyLeader).DurableTransactionRecordStore.Get(txId, epoch));
+    }
+
+    // Installs an aborted-but-unsettled cross-node intent (aborted canonical record on the anchor leader; still-pending
+    // intent on the key leader), so a scan of the key must route the decision to discover the abort.
+    private static void InstallAbortedUnsettled(
+        IKahuna keyLeader, IKahuna anchorLeader, string key, string bucket, string anchor, byte[] value,
+        HLCTimestamp txId, long baseTicks)
+    {
+        const long epoch = 1;
+        HLCTimestamp commitTs = new(0, baseTicks + 100, 0);
+        HLCTimestamp deadline = new(0, baseTicks + 4_000, 0);
+        HLCTimestamp opId = new(0, baseTicks + 50, 0);
+        HLCTimestamp origin = new(0, baseTicks, 0);
+
+        List<TransactionParticipantRef> manifest = [new(key, KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(txId, epoch, anchor, commitTs, manifest);
+
+        TransactionRecordStore recordStore = ((KahunaManager)anchorLeader).DurableTransactionRecordStore;
+        recordStore.Apply(new InitializeTransactionCommand(txId, epoch, "coord", anchor, commitTs, deadline, hash, manifest, opId, origin));
+        recordStore.Apply(new AbortTransactionCommand(txId, epoch, hash, TransactionAbortClass.Conflict, opId, commitTs, anchor, commitTs, deadline, origin));
+
+        PreparedIntentStore intentStore = ((KahunaManager)keyLeader).DurablePreparedIntentStore;
+        PreparedIntent intent = new(
+            txId, epoch, key, hash, anchor, commitTs,
+            KeyValueState.Set, value, Bucket: bucket, Revision: 1, Expires: HLCTimestamp.Zero,
+            NoRevision: false, BaseRevision: 0, BaseState: KeyValueState.Set,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending);
+        intentStore.Apply(new PrepareIntentCommand(intent));
+    }
+
     // Finds a key and a distinct anchor key whose partitions are led by two different nodes, so a read of the key
     // must route the anchor-record lookup cross-node.
     private static async Task<(string Key, IKahuna KeyLeader, string Anchor, IKahuna AnchorLeader)> FindCrossNodeKeyAndAnchor(

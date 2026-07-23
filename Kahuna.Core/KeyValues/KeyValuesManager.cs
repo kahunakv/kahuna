@@ -3796,6 +3796,41 @@ internal sealed class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Off-mailbox resolution of the still-pending foreign intents a scan page meets. A scan window can straddle
+    /// many foreign intents anchored on different partitions, so — unlike a point read's single
+    /// <see cref="ForeignDecisionHint"/> — this resolves the whole set at once: for every pending intent in the
+    /// window whose canonical record is not co-located, it routes a lookup to that intent's anchor-partition leader
+    /// and collects the terminal decisions into a map the re-issued scan applies through its overlay. Returns the
+    /// map when at least one committed/aborted decision was resolved (the caller re-issues the scan once with it),
+    /// or null when nothing terminal was found — in which case the scan's <c>MustRetry</c> stands (an intent still
+    /// genuinely undecided, or the retry had another cause). Never routes an intent belonging to the scanning
+    /// transaction itself.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>?> TryRouteForeignScanDecisions(
+        IReadOnlyList<PreparedIntent> windowIntents,
+        HLCTimestamp scanTransactionId,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<(HLCTimestamp, long), TransactionDecision>? decisions = null;
+
+        foreach (PreparedIntent intent in windowIntents)
+        {
+            if (intent.Resolution != PreparedIntentResolution.Pending
+                || intent.TransactionId == scanTransactionId
+                || transactionRecordStore.Get(intent.TransactionId, intent.Epoch) is not null)
+                continue;
+
+            TransactionRecord? record = await LookupDurableRecordRouted(
+                intent.TransactionId, intent.Epoch, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+
+            if (record is { IsTerminal: true })
+                (decisions ??= [])[(intent.TransactionId, intent.Epoch)] = record.Decision;
+        }
+
+        return decisions;
+    }
+
+    /// <summary>
     /// Passes a Exists request to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -5551,6 +5586,7 @@ internal sealed class KeyValuesManager : IDisposable
         {
             int backoffMs = 1;
             long deadline = Environment.TickCount64 + 16_500;
+            bool attemptedRoutedResolve = false;
 
             while (true)
             {
@@ -5566,6 +5602,28 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type != KeyValueResponseType.WaitingForReplication)
                 {
+                    // A bucket scan that retries only because it meets a committed-but-unsettled foreign intent
+                    // whose canonical record lives on another partition would otherwise re-scan until settlement.
+                    // Route those intents' decisions to their anchor leaders once, off the mailbox, and re-issue
+                    // with the resolved set so the overlay serves them immediately. Persistent scans only; a
+                    // genuinely undecided intent still stands at MustRetry.
+                    if (durability != KeyValueDurability.Ephemeral
+                        && !attemptedRoutedResolve
+                        && response.Type == KeyValueResponseType.MustRetry)
+                    {
+                        attemptedRoutedResolve = true;
+
+                        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routed =
+                            await TryRouteForeignScanDecisions(
+                                preparedIntentStore.SnapshotBucket(prefixKeyName), transactionId, CancellationToken.None);
+
+                        if (routed is not null)
+                        {
+                            request.ForeignScanDecisions = routed;
+                            continue;
+                        }
+                    }
+
                     if (response is { Type: KeyValueResponseType.Get, Items: not null })
                         return new(response.Type, response.Items);
                     return new(response.Type, []);
@@ -5611,6 +5669,8 @@ internal sealed class KeyValuesManager : IDisposable
             null
         );
 
+        bool attemptedRoutedResolve = false;
+
         try
         {
             foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
@@ -5629,6 +5689,32 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     await Task.Delay(delay);
                     continue;
+                }
+
+                // A page that retries only because it meets a committed-but-unsettled foreign intent whose canonical
+                // record lives on another partition would otherwise re-scan until settlement propagates. Route those
+                // intents' decisions to their anchor leaders once, off the mailbox, and re-issue with the resolved
+                // set so the overlay serves them immediately. Persistent scans only (ephemeral carry no durable
+                // intents); a genuinely undecided intent still stands at MustRetry.
+                if (durability != KeyValueDurability.Ephemeral
+                    && !attemptedRoutedResolve
+                    && (response.RangeResult?.Type ?? response.Type) == KeyValueResponseType.MustRetry)
+                {
+                    attemptedRoutedResolve = true;
+
+                    (string rStart, bool rStartIncl, string? rEnd, bool rEndIncl) =
+                        Handlers.TryGetByRangeHandler.ComputeBounds(request);
+
+                    IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routed =
+                        await TryRouteForeignScanDecisions(
+                            preparedIntentStore.SnapshotScanWindow(rStart, rStartIncl, rEnd, rEndIncl),
+                            transactionId, CancellationToken.None);
+
+                    if (routed is not null)
+                    {
+                        request.ForeignScanDecisions = routed;
+                        continue;
+                    }
                 }
 
                 if (response.RangeResult is not null)

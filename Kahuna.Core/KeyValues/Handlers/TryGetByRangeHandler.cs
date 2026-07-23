@@ -116,7 +116,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             {
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
-                    i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+                    i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));
@@ -176,7 +176,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             message.EndKey, message.EndInclusive,
             message.TransactionId, snapshotTs, currentTime,
             isSnapshotRead: !message.ReadTimestamp.IsNull(),
-            memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor, promise);
+            memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor,
+            promise, message.ForeignScanDecisions);
 
         bool capturedSnapshotRead = !message.ReadTimestamp.IsNull();
         HLCTimestamp capturedSnapshotTs = snapshotTs;
@@ -275,7 +276,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     }
 
     /// <summary>Computes the effective BTree bounds, substituting the prefix upper bound when EndKey is null.</summary>
-    private static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message)
+    internal static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message)
     {
         string start = message.StartKey ?? message.Key;
         bool startIncl = message.StartKey is null || message.StartInclusive;

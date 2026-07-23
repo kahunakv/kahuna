@@ -49,6 +49,11 @@ internal sealed class RangeScanContinuation : ReadContinuation
     private readonly HLCTimestamp currentTime;
     private readonly bool isSnapshotRead;
 
+    /// <summary>Canonical decisions routed off-mailbox for the still-pending foreign intents this scan's window
+    /// meets (keyed by intent identity). Null on the first attempt; populated when the manager re-issues the scan
+    /// after resolving a committed-but-unsettled remote-anchor intent so the overlay serves it instead of retrying.</summary>
+    private readonly IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions;
+
     // ── K-way merge state (mutable, actor-thread-only) ───────────────────────
 
     /// <summary>
@@ -105,7 +110,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
         int memBatch,
         bool memMaybeMore,
         string diskCursor,
-        TaskCompletionSource<KeyValueResponse?> promise) : base(promise)
+        TaskCompletionSource<KeyValueResponse?> promise,
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null) : base(promise)
     {
         this.prefix = prefix;
         this.limit = limit;
@@ -125,6 +131,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         this.memBatch = memBatch;
         this.memMaybeMore = memMaybeMore;
         this.diskCursor = diskCursor;
+        this.routedDecisions = routedDecisions;
         this.accumulated = [];
     }
 
@@ -311,7 +318,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
             {
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
-                    i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+                    i => DurableReadVisibility.ScanDecision(context, routedDecisions, i));
                 if (merge.MustRetry)
                 {
                     Resolve(new(KeyValueResponseType.MustRetry,

@@ -78,6 +78,14 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// the outcome instead of retrying until settlement. Default (Zero identity) means no hint.</summary>
     internal Transactions.Data.ForeignDecisionHint ForeignDecisionHint { get; set; }
 
+    /// <summary>Optional: canonical decisions for the still-pending foreign intents a scan page meets, keyed by
+    /// intent identity <c>(TransactionId, Epoch)</c>. A scan page can straddle many foreign intents with different
+    /// remote anchors, so — unlike a point read's single <see cref="ForeignDecisionHint"/> — the routed decisions
+    /// are resolved off-mailbox as a set and the scan is re-issued with the whole map, letting the overlay resolve
+    /// each committed-but-unsettled intent instead of retrying the page until settlement. Null means no routed
+    /// decisions.</summary>
+    internal IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), Transactions.Data.TransactionDecision>? ForeignScanDecisions { get; set; }
+
     /// <summary>
     /// Key-range routing generation the request was resolved on (descriptor fence). 0 = hash space / not
     /// range-routed. Set by the locator for KeyRange write ops; threaded into the proposal so the
@@ -280,6 +288,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
         ForeignDecisionHint = default;
+        ForeignScanDecisions = null;
         Continuation = null;
         InvalidateOrApplyData = null;
         RoutedGeneration = 0;

@@ -337,8 +337,9 @@ conflict.
 
 ## 8. Durable commit decisions
 
-`DecisionDurability.Durable` finalizes an all-persistent transaction through **durable-intent 2PC**
-instead of the in-memory ticket path. It does not persist the active coordinator *session* (its live
+`DecisionDurability.Durable` finalizes an all-persistent transaction through **durable-intent 2PC** — now
+the only path for a persistent commit (the manual ticket path has been retired). It does not persist the
+active coordinator *session* (its live
 in-memory context still lives only on the coordinator-partition leader), but every step that decides
 the outcome is a replicated Raft record, so the prepared writes and the commit decision survive process
 loss and are finished by recovery on the participant leaders.
@@ -466,9 +467,9 @@ Durable mode has clear boundaries:
   a duplicate finalize returns `MustRetry`/`Errored` (never a false outcome) until the local record or
   recovery resolves it.
 
-Unlike the in-memory ticket path, a prepared intent is *durable* here: a participant leader change after
-prepare does not lose the staged value, so recovery on the new leader can still commit or abort it from
-the canonical record.
+Unlike the retired manual ticket path (whose prepare state lived only in the participant leader's memory), a
+prepared intent is *durable* here: a participant leader change after prepare does not lose the staged value,
+so recovery on the new leader can still commit or abort it from the canonical record.
 
 ---
 
@@ -700,7 +701,7 @@ the server project does not.
 | `Kahuna.Core/KeyValues/Transactions/FinalizeLatencyEstimator.cs`, `DurableTransactionMetrics.cs` | Rolling finalize-p99 estimate that sizes decision deadlines, and the durable-path counters/histogram. |
 | `Kahuna.Core/KeyValues/Transactions/PreparedIntentVisibility.cs`, `PreparedIntentScanMerge.cs`, `Handlers/DurableReadVisibility.cs`, `Handlers/ForeignIntentWriteResolver.cs` | Reading and scanning committed-but-unmaterialized intents, and resolving a foreign intent on a conflicting write. |
 | `Kahuna.Core/KeyValues/PreparedIntentRecoveryActor.cs`, `TransactionReaperActor.cs` | Periodic prepared-intent recovery and abandoned-session cleanup triggers. |
-| `Kahuna.Core/KeyValues/Handlers/TryPrepareMutationsHandler.cs`, `TryCommitMutationsHandler.cs` | Ticket-path prepare/commit and completion-receipt lookup/recording (the durable-intent path materializes through the normal key/value commit). |
+| `Kahuna.Core/KeyValues/Handlers/TryPrepareMutationsHandler.cs`, `TryCommitMutationsHandler.cs` | Ephemeral 2PC prepare/commit (a persistent key is rejected here — it finalizes through the durable-intent path, which materializes the committed value and records the completion receipt via the normal key/value commit apply). |
 | `Kahuna.Core/KeyValues/KeyValueReplicator.cs`, `KeyValueRestorer.cs` | Receipt reconstruction on replication and WAL restore. |
 | `Kahuna.Core/Persistence/BackgroundWriterActor.cs` | Receipt snapshot ordering before partition checkpoints advance WAL retention. |
 | `Kahuna.Core/KeyValues/Ranges/RangeSplitter.cs`, `RangeMerger.cs` | Replicated, cutover-gating completion-receipt handoff across routing changes. |

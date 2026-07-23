@@ -29,6 +29,11 @@ internal sealed class BucketScanContinuation : ReadContinuation
     private readonly HLCTimestamp currentTime;
     private readonly (string, long, bool)? scanKey;
 
+    /// <summary>Canonical decisions routed off-mailbox for the still-pending foreign intents this bucket meets
+    /// (keyed by intent identity). Null on the first attempt; populated when the manager re-issues the scan after
+    /// resolving a committed-but-unsettled remote-anchor intent so the overlay serves it instead of retrying.</summary>
+    private readonly IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions;
+
     /// <summary>
     /// Snapshot-projected disk rows resolved in stage 2. Populated only for snapshot scans
     /// (readTimestamp non-null); null for latest and transactional scans.
@@ -53,7 +58,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HashSet<string> seenKeys,
         HLCTimestamp currentTime,
         TaskCompletionSource<KeyValueResponse?> promise,
-        (string, long, bool)? scanKey) : base(promise)
+        (string, long, bool)? scanKey,
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null) : base(promise)
     {
         this.prefix = prefix;
         this.transactionId = transactionId;
@@ -62,6 +68,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         this.seenKeys = seenKeys;
         this.currentTime = currentTime;
         this.scanKey = scanKey;
+        this.routedDecisions = routedDecisions;
     }
 
     internal override void RemovePendingKey(KeyValueContext context)
@@ -132,7 +139,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket, so a committed
         // insert/override/delete not yet materialized is reflected exactly as it would be in the equivalent range
         // scan. No-op off the durable path.
-        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp);
+        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp, routedDecisions);
         if (mustRetry)
         {
             Resolve(KeyValueStaticResponses.MustRetryResponse);
@@ -154,7 +161,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         string? bucket,
         List<(string, ReadOnlyKeyValueEntry)> items,
         HLCTimestamp currentTime,
-        HLCTimestamp readTimestamp)
+        HLCTimestamp readTimestamp,
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null)
     {
         if (context.PreparedIntentStore is not { } intentStore)
             return (items, false);
@@ -168,7 +176,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
             items, bucketIntents, snapshotTs, currentTime,
             limit: KeyValueScanLimits.MaxPrefixScanResults, kvHasMore: false, kvCeilingKey: null,
-            i => context.TransactionRecordStore?.Get(i.TransactionId, i.Epoch)?.Decision ?? TransactionDecision.Undecided);
+            i => DurableReadVisibility.ScanDecision(context, routedDecisions, i));
 
         return (merge.Items, merge.MustRetry);
     }
