@@ -1312,10 +1312,6 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// </summary>
     public long ManualTicketPersistentSettlementCount => keyValues.ManualTicketPersistentSettlementCount;
 
-    /// <summary>The first phase-two worker instance, for test injection of
-    /// <see cref="Server.KeyValues.KeyValuePhaseTwoActor.BeforeRaftCallHook"/>.</summary>
-    internal Server.KeyValues.KeyValuePhaseTwoActor? FirstPhaseTwoWorker => keyValues.FirstPhaseTwoWorker;
-
     /// <summary>
     /// Commits the transaction identified by <paramref name="handle"/>.
     /// </summary>

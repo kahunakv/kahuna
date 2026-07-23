@@ -20,8 +20,8 @@ internal sealed record InvalidateOrApplyData(
     // cache coherence. The leader applies direct writes via CompleteProposal, and a durable transaction leaves the
     // key resident with a live write intent + MVCC snapshot that the ordinary path deliberately does not touch — so
     // without this the committed value never lands on the leader. A commit-apply clears the committing
-    // transaction's write intent and MVCC snapshot, applies the value to the base entry, and persists it (the
-    // durable analog of CompletePhaseTwo), inserting the entry when the key is not resident.
+    // transaction's write intent and MVCC snapshot, applies the value to the base entry, and persists it,
+    // inserting the entry when the key is not resident.
     bool ForceResident = false,
     // The committing transaction, to identify and clear its write intent/MVCC on a commit-apply.
     HLCTimestamp TransactionId = default,

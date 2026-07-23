@@ -55,13 +55,6 @@ internal sealed class KeyValueContext
     /// </summary>
     public Writes.PartitionWriteAggregator WriteAggregator { get; }
 
-    /// <summary>
-    /// Off-mailbox worker router for two-phase-commit Raft round trips (prepare/commit/rollback), so a
-    /// participant handler can dispatch its Raft call rather than await it inline on the actor mailbox.
-    /// Null only in bare test contexts that never exercise the phase-two dispatch path.
-    /// </summary>
-    public IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? PhaseTwoRouter { get; }
-
     public IRaft Raft  { get; }
 
     public KeySpaceRegistry KeySpaceRegistry { get; }
@@ -96,19 +89,6 @@ internal sealed class KeyValueContext
     public Dictionary<string, List<KeyValueRangeLock>> LocksByRange { get; }
 
     public Dictionary<int, KeyValueProposal> Proposals { get; }
-
-    /// <summary>
-    /// In-flight two-phase-commit dispatches whose Raft round trip is running off the mailbox, keyed by
-    /// a monotonic <c>phaseTwoId</c>. The completion handler removes an entry on the first completion
-    /// for its id; a duplicate completion then finds nothing and no-ops. Mutated only on the actor
-    /// thread — no synchronisation required.
-    /// </summary>
-    internal Dictionary<int, PendingPhaseTwo> PendingPhaseTwos { get; } = new();
-
-    private int phaseTwoIdCounter;
-
-    /// <summary>Allocates the next monotonic <c>phaseTwoId</c> for a phase-two dispatch. Actor-thread only.</summary>
-    internal int NextPhaseTwoId() => ++phaseTwoIdCounter;
 
     /// <summary>
     /// Per-actor map of in-flight backend reads. The key is <c>(key, revision, isExists)</c>,
@@ -164,7 +144,6 @@ internal sealed class KeyValueContext
         ILogger<IKahuna> logger,
         SnapshotFloorStore? snapshotFloorStore = null,
         CompletionReceiptStore? completionReceiptStore = null,
-        IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter = null,
         Transactions.PreparedIntentStore? preparedIntentStore = null,
         Transactions.TransactionRecordStore? transactionRecordStore = null
     )
@@ -176,7 +155,6 @@ internal sealed class KeyValueContext
         Proposals = proposals;
         BackgroundWriter = backgroundWriter;
         WriteAggregator = writeAggregator;
-        PhaseTwoRouter = phaseTwoRouter;
         PersistenceBackend = persistenceBackend;
         Raft = raft;
         KeySpaceRegistry = keySpaceRegistry;

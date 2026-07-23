@@ -112,13 +112,6 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal InvalidateOrApplyData? InvalidateOrApplyData { get; private set; }
 
     /// <summary>
-    /// Outcome of an off-mailbox two-phase-commit Raft call, carried on a <c>CompletePhaseTwo</c>
-    /// message from <see cref="KeyValuePhaseTwoActor"/> back to the participant actor. Non-null only
-    /// when <see cref="Type"/> is <see cref="KeyValueRequestType.CompletePhaseTwo"/>.
-    /// </summary>
-    internal PhaseTwoCompletionData? PhaseTwoCompletionData { get; private set; }
-
-    /// <summary>
     /// Constructs an <c>InvalidateOrApply</c> message with named fields carried in
     /// <see cref="InvalidateOrApplyData"/> rather than punned into general-purpose fields.
     /// </summary>
@@ -169,35 +162,6 @@ public sealed class KeyValueRequest : IConsistentHashable
             0,
             0,
             null);
-
-    /// <summary>
-    /// Constructs a <c>CompletePhaseTwo</c> message: the off-mailbox phase-two worker notifying the
-    /// originating participant actor of a two-phase-commit Raft outcome. The structured
-    /// <paramref name="completion"/> carries the correlation id and result; <paramref name="promise"/>
-    /// is the caller's promise the actor-owned completion handler resolves.
-    /// </summary>
-    internal static KeyValueRequest ForCompletePhaseTwo(
-        PhaseTwoCompletionData completion,
-        TaskCompletionSource<KeyValueResponse?>? promise)
-    {
-        KeyValueRequest req = new(
-            KeyValueRequestType.CompletePhaseTwo,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
-            string.Empty,
-            null,
-            null,
-            -1,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            0,
-            0,
-            promise);
-        req.PhaseTwoCompletionData = completion;
-        return req;
-    }
 
     /// <summary>
     /// Creates a type-only request (e.g. periodic cache collection).
@@ -318,7 +282,6 @@ public sealed class KeyValueRequest : IConsistentHashable
         ForeignDecisionHint = default;
         Continuation = null;
         InvalidateOrApplyData = null;
-        PhaseTwoCompletionData = null;
         RoutedGeneration = 0;
         RecordAnchorKey = null;
     }

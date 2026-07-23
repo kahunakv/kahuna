@@ -110,80 +110,11 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return new(KeyValueResponseType.RolledBack);
         }
 
-        // Not joined to a Raft cluster (embedded single-node, no replication): there is nothing to roll
-        // back in Raft, so the rollback is an immediate success — apply inline.
-        if (!context.Raft.Joined)
-        {
-            ApplyConfirmedRollback(entry, message.TransactionId, currentTime);
-            return new(KeyValueResponseType.RolledBack, 0);
-        }
+        // A crash-atomic (persistent) mutation rolls back through the durable-intent canonical-record path, and
+        // the manual persistent 2PC rollback is rejected at the manager boundary, so a persistent key must not
+        // reach here. Fail loudly rather than silently no-op if the invariant is ever violated.
+        context.Logger.LogError("Persistent rollback reached the manual mutation handler for {TransactionId} {Key}", message.TransactionId, message.Key);
 
-        int partitionId = ResolvePartition(message.Key);
-
-        // Joined but no off-mailbox worker wired (bare test contexts): roll the ticket back inline so it
-        // is durably settled in Raft before the local state is cleared — never skip RollbackLogs.
-        if (context.PhaseTwoRouter is null)
-            return await RollbackInline(message, entry, currentTime, partitionId);
-
-        // Otherwise dispatch the RollbackLogs Raft round trip to the off-mailbox worker so this actor is
-        // free while it runs; the completion applies the confirmed rollback back on the mailbox.
-        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
-        if (!actorContext.Reply.HasValue)
-            return KeyValueStaticResponses.ErroredResponse;
-
-        // Park the after-Raft context on the actor, keyed by a monotonic id the completion carries back.
-        // The entry stays pinned by its live write intent across the window, so it cannot be evicted.
-        int phaseTwoId = context.NextPhaseTwoId();
-        long deadlineTicks = KeyValuePhaseTwoRequest.DeadlineFrom(context.Configuration.Phase2CommitTimeout);
-
-        PendingPhaseTwo pending = PendingPhaseTwo.ForRollback(
-            message.TransactionId, message.Key, message.Durability, currentTime,
-            message.ProposalTicketId, partitionId);
-        pending.Promise = actorContext.Reply.Value.Promise!;
-        pending.DeadlineTicks = deadlineTicks;
-        context.PendingPhaseTwos[phaseTwoId] = pending;
-
-        context.PhaseTwoRouter.Send(KeyValuePhaseTwoRequest.ForRollback(
-            phaseTwoId, partitionId, message.ProposalTicketId,
-            deadlineTicks, actorContext.Self, actorContext.Reply.Value.Promise!));
-
-        actorContext.ByPassReply = true;
-
-        return KeyValueStaticResponses.WaitingForReplicationResponse;
+        return KeyValueStaticResponses.ErroredResponse;
     }
-
-    /// <summary>
-    /// Rolls the prepared ticket back inline (durable), bounded by the phase-two deadline, then clears
-    /// the local state — the fallback when no off-mailbox worker is wired. Transient failures return
-    /// MustRetry with state retained.
-    /// </summary>
-    private async Task<KeyValueResponse> RollbackInline(
-        KeyValueRequest message, KeyValueEntry entry, HLCTimestamp currentTime, int partitionId)
-    {
-        int timeoutMs = context.Configuration.Phase2CommitTimeout;
-        using CancellationTokenSource? cts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : null;
-
-        (bool success, RaftOperationStatus status, long logIndex) = await context.Raft.RollbackLogs(
-            partitionId, message.ProposalTicketId, cts?.Token ?? CancellationToken.None);
-
-        if (!success)
-            return IsTransientRaftStatus(status)
-                ? KeyValueStaticResponses.MustRetryResponse
-                : KeyValueStaticResponses.ErroredResponse;
-
-        if (entry.WriteIntent is null || entry.WriteIntent.TransactionId != message.TransactionId)
-            return new(KeyValueResponseType.RolledBack, logIndex);
-
-        ApplyConfirmedRollback(entry, message.TransactionId, currentTime);
-
-        return new(KeyValueResponseType.RolledBack, logIndex);
-    }
-
-    private static bool IsTransientRaftStatus(RaftOperationStatus status) => status is
-        RaftOperationStatus.NodeIsNotLeader or
-        RaftOperationStatus.ProposalQueueFull or
-        RaftOperationStatus.RestoreInProgress or
-        RaftOperationStatus.ProposalTimeout or
-        RaftOperationStatus.ReplicationFailed or
-        RaftOperationStatus.OperationCancelled;
 }

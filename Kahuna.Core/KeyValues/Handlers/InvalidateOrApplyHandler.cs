@@ -27,9 +27,9 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         InvalidateOrApplyData data = message.InvalidateOrApplyData!;
 
         // Durable-intent resolution apply on the leader. A commit clears the committing transaction's write intent
-        // and MVCC snapshot, applies the committed value, and persists it (the durable analog of CompletePhaseTwo,
-        // inserting the entry when not resident). An abort just clears the transaction's staged write intent and
-        // MVCC snapshot so the key is not blocked until the intent expires (the analog of ApplyConfirmedRollback).
+        // and MVCC snapshot, applies the committed value, and persists it (inserting the entry when not resident).
+        // An abort just clears the transaction's staged write intent and MVCC snapshot so the key is not blocked
+        // until the intent expires (the analog of ApplyConfirmedRollback).
         if (data.ForceResident)
             return data.IsRollback ? ApplyDurableRollback(message.Key, data) : ApplyDurableCommit(message.Key, data);
 
@@ -38,7 +38,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
 
         // Don't touch an entry whose apply is still owned by an in-flight operation: the owning
         // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or
-        // CompletePhaseTwo (2PC, WriteIntent), which archives the correct superseded revision and
+        // the durable-intent resolution (WriteIntent), which archives the correct superseded revision and
         // adjusts accounting exactly once. Advancing the entry here first would corrupt that archive.
         // A notification for the transaction that owns the write intent always defers, even if a finite
         // lease elapsed: the acknowledged force-resident apply owns intent cleanup and archival. An

@@ -36,8 +36,4 @@ public enum KeyValueRequestType
     ResumeRead,
     InvalidateOrApply,
     FlushAck,
-    CompletePhaseTwo,
-    StagePrepareMutations,
-    ApplyRolledBackMutations,
-    ApplyCommittedMutations,
 }

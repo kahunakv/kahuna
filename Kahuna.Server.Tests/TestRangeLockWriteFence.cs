@@ -129,44 +129,6 @@ public sealed class TestRangeLockWriteFence : BaseCluster
     }
 
     /// <summary>
-    /// Tx A holds X [10,50); tx B prepares a mutation on a key inside → MustRetry.
-    /// </summary>
-    [Fact]
-    public async Task Prepare_IntoExclusiveRange_Conflicts()
-    {
-        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
-            await AssembleThreNodeCluster("memory", 1, raftLogger, kahunaLogger);
-        try
-        {
-            (IRaft leaderRaft, KahunaManager leader) = await GetLeader(r1, r2, r3, k1, k2, k3);
-
-            // tx B stages a mutation on the inside key.
-            HLCTimestamp txB = NextTx(leaderRaft);
-            (KeyValueResponseType setResult, _, _) = await leader.TrySetKeyValue(
-                txB, InsideKey, SomeValue, null, -1, KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent);
-            Assert.Equal(KeyValueResponseType.Set, setResult);
-
-            // tx A acquires exclusive range lock covering that key.
-            HLCTimestamp txA = NextTx(leaderRaft);
-            (KeyValueResponseType _lockType, _) = await leader.TryAcquireRangeLock(
-                txA, Prefix, StartKey, true, EndKey, false, ExpiresMs,
-                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
-            Assert.Equal(KeyValueResponseType.Locked, _lockType);
-
-            // tx B tries to prepare — tx A's range lock blocks it.
-            HLCTimestamp commitId = NextTx(leaderRaft);
-            (KeyValueResponseType prepResult, _, _, _) = await leader.TryPrepareMutations(
-                txB, commitId, InsideKey, KeyValueDurability.Persistent);
-            Assert.Equal(KeyValueResponseType.MustRetry, prepResult);
-        }
-        finally
-        {
-            await LeaveCluster(r1, r2, r3);
-        }
-    }
-
-    /// <summary>
     /// A write (set and delete) to a key inside a SHARED range lock from another tx → MustRetry.
     /// A write needs exclusive on [K,K], which conflicts with S.
     /// </summary>

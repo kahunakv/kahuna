@@ -1313,7 +1313,7 @@ internal sealed class TransactionCoordinator : IDisposable
         manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken);
 
     // Applies a committed intent's value on the leader (clears the staged write intent/MVCC and applies the value —
-    // the durable analog of CompletePhaseTwo), invoked by the finalizer's resolution after the intent commits.
+    // the durable-path commit apply), invoked by the finalizer's resolution after the intent commits.
     // Routes to the participant partition's leader node on a cluster.
     private Task<bool> ApplyDurableCommitLocally(int partitionId, PreparedIntent intent) =>
         manager.ApplyDurableCommit(partitionId, intent, CancellationToken.None);

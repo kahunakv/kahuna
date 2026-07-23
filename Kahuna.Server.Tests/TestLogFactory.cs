@@ -6,7 +6,12 @@ internal static class TestLogFactory
 {
     private const string MinimumLevelEnvironmentVariable = "KAHUNA_TEST_LOG_LEVEL";
 
-    public static ILoggerFactory Create(ITestOutputHelper outputHelper, LogLevel defaultMinimumLevel = LogLevel.Debug, bool quietKommander = false)
+    // Default to Warning: piping Debug/Info-level logs (every actor message, Raft heartbeat, etc.) into
+    // xUnit's ITestOutputHelper buffers all of it in memory for the whole run, which accumulates to multiple
+    // GB across a large suite and OOM-kills the test host ("error while writing to logger(s)"). Warning keeps
+    // the output (and memory) small. Set KAHUNA_TEST_LOG_LEVEL=Debug (or Information/Trace) to opt back in when
+    // diagnosing a specific test.
+    public static ILoggerFactory Create(ITestOutputHelper outputHelper, LogLevel defaultMinimumLevel = LogLevel.Warning, bool quietKommander = false)
     {
         LogLevel minimumLevel = GetMinimumLevel(defaultMinimumLevel);
 

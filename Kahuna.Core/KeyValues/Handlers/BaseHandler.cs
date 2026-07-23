@@ -511,45 +511,4 @@ internal abstract class BaseHandler
 
         context.RecordRolledBack(txId);
     }
-
-    /// <summary>
-    /// Resolves and drops orphaned phase-two entries whose off-mailbox worker never returned a completion
-    /// (worker death, or a dropped request/completion). An entry still within its dispatch deadline plus a
-    /// grace (the phase-two window) is left alone — its completion may yet arrive. Runs on the periodic
-    /// collect so it fires even on an otherwise-idle actor, guaranteeing the caller's ask is eventually
-    /// resolved (retryable) rather than hanging forever. This is the safety net behind the worker's own
-    /// deadline-bounded completion; the common path resolves the promise long before this runs.
-    /// </summary>
-    protected void SweepExpiredPhaseTwos()
-    {
-        if (context.PendingPhaseTwos.Count == 0)
-            return;
-
-        long now = Environment.TickCount64;
-        int graceMs = context.Configuration.Phase2CommitTimeout > 0 ? context.Configuration.Phase2CommitTimeout : 5000;
-
-        List<int>? orphaned = null;
-        foreach ((int id, PendingPhaseTwo pending) in context.PendingPhaseTwos)
-        {
-            if (pending.DeadlineTicks == KeyValuePhaseTwoRequest.NoDeadline)
-                continue;
-            if (now - (pending.DeadlineTicks + graceMs) > 0)
-                (orphaned ??= []).Add(id);
-        }
-
-        if (orphaned is null)
-            return;
-
-        foreach (int id in orphaned)
-        {
-            if (!context.PendingPhaseTwos.Remove(id, out PendingPhaseTwo? pending))
-                continue;
-
-            context.Logger.LogWarning(
-                "KeyValueActor: sweeping orphaned phase-two {OpKind} for {TxId} — no completion arrived by its deadline",
-                pending.OpKind, pending.TxId);
-
-            pending.Promise?.TrySetResult(KeyValueStaticResponses.MustRetryResponse);
-        }
-    }
 }

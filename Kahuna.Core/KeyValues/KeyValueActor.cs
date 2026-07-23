@@ -211,12 +211,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly TryRollbackMutationsHandler tryRollbackMutationsHandler;
 
     /// <summary>
-    /// Unwinds a write intent staged for the partition-batched prepare whose batch never proposed (no-Raft
-    /// local rollback), so a partition batch that fails staging cannot leak pinned intents.
-    /// </summary>
-    private readonly ApplyRolledBackMutationsHandler applyRolledBackMutationsHandler;
-
-    /// <summary>
     /// Handles the process of collecting and managing key/value resources within the actor.
     /// This handler is responsible for triggering cleanup or optimization tasks, such as
     /// consolidating cached data or freeing unneeded resources to maintain efficient operation.
@@ -237,12 +231,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     ///
     /// </summary>
     private readonly ResumeReadHandler resumeReadHandler;
-
-    /// <summary>
-    /// Resolves the caller's promise from an off-mailbox two-phase-commit Raft outcome delivered by
-    /// <see cref="KeyValuePhaseTwoActor"/>.
-    /// </summary>
-    private readonly CompletePhaseTwoHandler completePhaseTwoHandler;
 
     /// <summary>
     /// Applies a committed Raft log entry to a resident cache entry so a follower (or a newly
@@ -283,7 +271,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : this(actorContext, backgroundWriter, writeAggregator, null, persistenceBackend, raft,
+    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft,
              keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null, null)
     {
     }
@@ -292,7 +280,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         Writes.PartitionWriteAggregator writeAggregator,
-        IActorRef<BalancingActor<KeyValuePhaseTwoActor, KeyValuePhaseTwoRequest>, KeyValuePhaseTwoRequest>? phaseTwoRouter,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         KeySpaceRegistry keySpaceRegistry,
@@ -324,7 +311,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             logger,
             snapshotFloorStore,
             completionReceiptStore,
-            phaseTwoRouter,
             preparedIntentStore,
             transactionRecordStore
         );
@@ -353,13 +339,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryPrepareMutationsHandler = new(context);
         tryCommitMutationsHandler = new(context);
         tryRollbackMutationsHandler = new(context);
-        applyRolledBackMutationsHandler = new(context);
         tryCollectHandler = new(context);
         completeProposalHandler = new(context);
         releaseProposalHandler = new(context);
         resumeReadHandler = new(context);
         invalidateOrApplyHandler = new(context);
-        completePhaseTwoHandler = new(context);
     }
 
     /// <summary>
@@ -432,10 +416,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ImportRangeLocks => ImportRangeLocks(message),
                 KeyValueRequestType.GetSafeTimestamp => await getSafeTimestampHandler.Execute(message),
                 KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
-                KeyValueRequestType.StagePrepareMutations => await StagePrepareMutations(message),
-                KeyValueRequestType.ApplyRolledBackMutations => await ApplyRolledBackMutations(message),
                 KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
-                KeyValueRequestType.ApplyCommittedMutations => await ApplyCommittedMutations(message),
                 KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
                 KeyValueRequestType.GetByBucket => await GetByBucket(message),
                 KeyValueRequestType.GetByRange => await GetByRange(message),
@@ -443,7 +424,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
-                KeyValueRequestType.CompletePhaseTwo => CompletePhaseTwo(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
                 KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 KeyValueRequestType.FlushAck => FlushAck(message),
@@ -639,25 +619,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     }
 
     /// <summary>
-    /// Prepare for the partition-batched path: validate and pin the write intent exactly as a per-key
-    /// prepare, but return the serialized proposal for the manager to batch into one partition-wide
-    /// <c>ReplicateLogs</c> instead of proposing here.
-    /// </summary>
-    private Task<KeyValueResponse> StagePrepareMutations(KeyValueRequest message)
-    {
-        return tryPrepareMutationsHandler.StageExecute(message);
-    }
-
-    /// <summary>
-    /// Unwinds a write intent staged for a partition batch that never proposed — a no-Raft local rollback of
-    /// prepare state, so a batch that fails staging leaves no pinned intent behind.
-    /// </summary>
-    private Task<KeyValueResponse> ApplyRolledBackMutations(KeyValueRequest message)
-    {
-        return applyRolledBackMutationsHandler.Execute(message);
-    }
-
-    /// <summary>
     /// Commit the mutations made to the key currently held in the MVCC entry
     /// </summary>
     /// <param name="message"></param>
@@ -667,15 +628,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         return tryCommitMutationsHandler.Execute(message);
     }
 
-    /// <summary>
-    /// Applies a mutation whose partition ticket the manager already committed in one batched CommitLogs —
-    /// the per-key apply half of partition-batched commit, with no Raft round trip of its own.
-    /// </summary>
-    private Task<KeyValueResponse> ApplyCommittedMutations(KeyValueRequest message)
-    {
-        return tryCommitMutationsHandler.ApplyExecute(message);
-    }
-    
     /// <summary>
     /// Rollback made to the key currently held in the MVCC entry
     /// </summary>
@@ -711,17 +663,6 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private KeyValueResponse? ResumeRead(KeyValueRequest message)
     {
         return resumeReadHandler.Execute(message);
-    }
-
-    /// <summary>
-    /// Resolves the caller's promise from a two-phase-commit Raft outcome produced off the mailbox
-    /// by <see cref="KeyValuePhaseTwoActor"/>.
-    /// </summary>
-    /// <param name="message"></param>
-    /// <returns></returns>
-    private KeyValueResponse CompletePhaseTwo(KeyValueRequest message)
-    {
-        return completePhaseTwoHandler.Execute(message);
     }
 
     private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)

@@ -107,7 +107,7 @@ internal sealed class KeyValueReplicator
     /// Applies a durable-intent resolution's committed value on the leader by routing a commit-apply to the owning
     /// persistent actor: unlike the ordinary follower cache-coherence path, it carries the committing transaction id
     /// so the actor can clear that transaction's staged write intent and MVCC snapshot and apply the value to the
-    /// base entry (the durable analog of CompletePhaseTwo). The returned acknowledgement means the actor has
+    /// base entry. The returned acknowledgement means the actor has
     /// completed that work; routing/enqueueing alone is not sufficient to settle the durable intent.
     /// </summary>
     public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)

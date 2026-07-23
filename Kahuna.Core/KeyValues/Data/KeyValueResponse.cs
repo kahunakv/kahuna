@@ -134,27 +134,4 @@ public sealed class KeyValueResponse
 
     public static KeyValueResponse ForRangeLocks(List<KeyValueRangeLock> locks) =>
         new(KeyValueResponseType.RangeLocks) { RangeLockList = locks };
-
-    /// <summary>
-    /// The serialized committed proposal produced by a batched prepare stage
-    /// (<see cref="Kahuna.Shared.KeyValue.KeyValueRequestType.StagePrepareMutations"/>). Non-null only on a
-    /// Prepared stage response that has a persistent mutation to replicate; null when the key prepared with
-    /// nothing to propose (ephemeral, an Undefined read, or a not-joined single node). The manager batches
-    /// every non-null proposal for a partition into one <c>ReplicateLogs</c>.
-    /// </summary>
-    public byte[]? StagedProposal { get; private set; }
-
-    /// <summary>
-    /// Partition the staged proposal resolves to as the participant actor itself sees it. The manager
-    /// groups by partition before staging; this lets it batch — and assert grouping did not drift — by the
-    /// authoritative value rather than its own pre-stage guess.
-    /// </summary>
-    public int StagedPartitionId { get; private set; }
-
-    /// <summary>
-    /// A staged prepare outcome for the batched 2PC path: Prepared, carrying an optional serialized proposal
-    /// and the partition it routes to. A null proposal means the key prepared with nothing to replicate.
-    /// </summary>
-    public static KeyValueResponse Staged(byte[]? stagedProposal, int stagedPartitionId) =>
-        new(KeyValueResponseType.Prepared) { StagedProposal = stagedProposal, StagedPartitionId = stagedPartitionId };
 }
