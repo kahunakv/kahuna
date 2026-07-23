@@ -356,7 +356,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         return RocksDbSharedResources.CreateWithUnifiedBudget(totalBytes, memtableBytes);
     }
 
-    private static RaftConfiguration CreateRaftConfiguration(EmbeddedKahunaOptions options)
+    internal static RaftConfiguration CreateRaftConfiguration(EmbeddedKahunaOptions options)
     {
         return new()
         {
@@ -381,6 +381,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             EndElectionTimeoutIncrement = options.EndElectionTimeoutIncrement,
             SlowRaftStateMachineLog = options.SlowRaftStateMachineLog,
             SlowRaftWALMachineLog = options.SlowRaftWALMachineLog,
+            MaxWalGroupBatchPartitions = options.RaftMaxWalGroupBatchPartitions,
+            WalGroupCommitLingerMs = options.RaftWalGroupCommitLingerMs,
+            WalSingleFsyncCommit = options.RaftWalSingleFsyncCommit,
             ReadIOThreads = options.ReadIOThreads,
             WriteIOThreads = options.WriteIOThreads,
             // Share a bounded thread pool across all partitions instead of one OS thread each, so

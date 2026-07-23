@@ -72,6 +72,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// replicate (protocol tests, and the post-decision settle/materialize which recovery backstops).</summary>
     public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken);
 
+    /// <summary>Replicates the anchor partition's record initialization and its own prepared-intent group as one
+    /// atomic ordered proposal (removing a pre-decision barrier), fenced against the anchor descriptor. Returns two
+    /// independent signals: <c>BatchCommitted</c> — the proposal reached Raft so the record is durably initialized;
+    /// and <c>PrepareAcknowledged</c> — the anchor prepare took ownership of its key. The two cannot be folded: a
+    /// committed batch whose prepare was rejected must drive a truthful abort (the record exists), while a batch that
+    /// never committed is a clean retry with nothing durable. Null keeps the unbundled init-then-prepare sequence
+    /// (protocol tests, and the fallback when the anchor key routes outside the participant partitions).</summary>
+    public delegate Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateAnchorBundleDelegate(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
     /// <summary>Runs the post-decision resolution (materialize committed values, settle intents) on a background
     /// task, off the commit critical path (deferred settlement). When <see langword="null"/>, resolution is instead
     /// awaited inline so it completes before <see cref="FinalizeAsync"/> returns (synchronous settlement). Either
@@ -95,6 +104,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Fenced replicate for the pre-decision path; null falls back to the unfenced replicate.
     private readonly ReplicateFencedDelegate? replicateFenced;
+
+    // Bundles the anchor partition's [record init, prepare] into one proposal; null keeps the unbundled sequence.
+    private readonly ReplicateAnchorBundleDelegate? replicateAnchorBundle;
 
     // Null = synchronous settlement: resolution is awaited inline in FinalizeAsync. Non-null = deferred settlement.
     private readonly ResolutionScheduler? scheduleResolution;
@@ -129,12 +141,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         Func<HLCTimestamp>? attemptClock = null,
         Action<double>? recordDecisionLatencyMs = null,
         ReplicateFencedDelegate? replicateFenced = null,
+        ReplicateAnchorBundleDelegate? replicateAnchorBundle = null,
         int maxMaterializationBatchItems = 512,
         long maxMaterializationBatchBytes = 4 * 1024 * 1024)
     {
         this.recordStore = recordStore;
         this.replicate = replicate;
         this.replicateFenced = replicateFenced;
+        this.replicateAnchorBundle = replicateAnchorBundle;
         this.applyCommitLocally = applyCommitLocally;
         this.applyRollbackLocally = applyRollbackLocally;
         // A null scheduler means synchronous settlement (FinalizeAsync awaits resolution inline).
@@ -159,24 +173,69 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         long startTicks = Stopwatch.GetTimestamp();
 
         // ── Initialize the canonical record (Undecided) on the anchor partition ──
-        // Nothing is durable yet if this fails, so it is a clean retry.
         byte[] initDelta = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
             input.TransactionId, input.Epoch, input.CoordinatorKey, input.RecordAnchorKey,
             input.CommitTimestamp, input.DecisionDeadline, input.ManifestHash, input.Manifest, opId, input.CreatedAt)]);
 
-        if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Ordinary, cancellationToken).ConfigureAwait(false))
-            return Retry();
+        // When the anchor key routes to a participant partition (the common case), the record init and that
+        // partition's prepare are one atomic proposal — one fewer pre-decision barrier. Every other partition's
+        // prepare fans out concurrently, so the bundle and the remaining prepares share a single barrier.
+        DurablePartitionPrepare? anchorPartition = replicateAnchorBundle is null
+            ? null
+            : input.Partitions.FirstOrDefault(partition => partition.PartitionId == input.AnchorPartitionId);
 
-        // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
-        // failure — its outcome is needed to drive a truthful abort). A prepared-then-aborted intent is cleaned
-        // up by resolution/recovery; a failed prepare forces the transaction to abort. ──
-        Task<bool>[] prepareTasks = input.Partitions.Select(partition =>
+        bool allPrepared;
+        if (anchorPartition is not null)
         {
-            byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-            return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
-        }).ToArray();
-        bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
-        bool allPrepared = prepareResults.All(static prepared => prepared);
+            byte[] anchorPrepareDelta = PreparedIntentStore.SerializeDelta(
+                anchorPartition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
+
+            Task<(bool BatchCommitted, bool PrepareAcknowledged)> anchorBundleTask = replicateAnchorBundle!(
+                input.AnchorPartitionId, initDelta, anchorPrepareDelta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken);
+
+            // Every non-anchor partition prepares concurrently. Never abandon a submission on the first failure —
+            // its outcome is needed to drive a truthful abort; a prepared-then-aborted intent is cleaned up by
+            // resolution/recovery.
+            Task<bool>[] otherPrepareTasks = input.Partitions
+                .Where(partition => partition.PartitionId != input.AnchorPartitionId)
+                .Select(partition =>
+                {
+                    byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
+                    return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
+                }).ToArray();
+
+            (bool BatchCommitted, bool PrepareAcknowledged) anchorResult = await anchorBundleTask.ConfigureAwait(false);
+            bool[] otherResults = await Task.WhenAll(otherPrepareTasks).ConfigureAwait(false);
+
+            // The record init and anchor prepare committed atomically. If the batch never committed, nothing is
+            // durable — a clean retry, exactly as a standalone init failure was. A decision must NOT be written here:
+            // an abort against an absent record creates a tombstone that would poison a same-identity retry.
+            if (!anchorResult.BatchCommitted)
+                return Retry();
+
+            // The record is durably initialized. Fold the anchor prepare's own acknowledgement in with the others;
+            // a rejected anchor prepare (another transaction owns the anchor key) drops allPrepared and drives the
+            // truthful abort below, exactly as a rejected non-anchor prepare does.
+            allPrepared = anchorResult.PrepareAcknowledged && otherResults.All(static prepared => prepared);
+        }
+        else
+        {
+            // Nothing to bundle (anchor key routes outside the participant partitions, or no bundle seam): keep the
+            // original init-then-prepare sequence. Nothing is durable if the init fails, so it is a clean retry.
+            if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Ordinary, cancellationToken).ConfigureAwait(false))
+                return Retry();
+
+            // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
+            // failure — its outcome is needed to drive a truthful abort). A prepared-then-aborted intent is cleaned
+            // up by resolution/recovery; a failed prepare forces the transaction to abort. ──
+            Task<bool>[] prepareTasks = input.Partitions.Select(partition =>
+            {
+                byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
+                return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
+            }).ToArray();
+            bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
+            allPrepared = prepareResults.All(static prepared => prepared);
+        }
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
         bool validated = allPrepared && await validateReadSet(cancellationToken).ConfigureAwait(false);

@@ -33,6 +33,13 @@ public sealed class TestDurableTransactionFinalizer
         public TransactionRecordStore? Records;
         public PreparedIntentStore? Intents;
 
+        // When set and returning true for the anchor partition, the bundle proposal never commits (a Raft-level
+        // failure): nothing durable, so both signals are false — the clean-retry case.
+        public Func<int, bool>? FailBundleBatch { get; set; }
+
+        // Marker log type recorded in Calls for a bundled anchor [init, prepare] submission.
+        public const string BundleType = "bundle";
+
         public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
@@ -46,6 +53,24 @@ public sealed class TestDurableTransactionFinalizer
                 return Task.FromResult(Intents is null || Intents.ApplyDeltaAckPrepares(log));
 
             return Task.FromResult(true);
+        }
+
+        // Mirrors the production anchor bundle: the record init and the anchor prepare apply atomically in one
+        // proposal. BatchCommitted reflects whether the proposal reached Raft; PrepareAcknowledged reflects whether
+        // the anchor prepare took ownership of its key (the store folds a rejection to false).
+        public Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateBundle(
+            int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken ct)
+        {
+            Calls.Enqueue((partitionId, BundleType));
+
+            if (FailBundleBatch is not null && FailBundleBatch(partitionId))
+                return Task.FromResult((false, false));
+
+            Records?.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = recordInitDelta });
+
+            bool prepareAck = Intents is null
+                || Intents.ApplyDeltaAckPrepares(new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = anchorPrepareDelta });
+            return Task.FromResult((true, prepareAck));
         }
     }
 
@@ -86,6 +111,17 @@ public sealed class TestDurableTransactionFinalizer
         seam.Records = records;
         seam.Intents = intents;
         return (new DurableTransactionFinalizer(records, intents, seam.Replicate, scheduler), records, intents);
+    }
+
+    // Wires the anchor [init, prepare] bundle seam, mirroring the production coordinator, so the bundled
+    // pre-decision path is exercised (not the unbundled fallback the other Build overloads use).
+    private static (DurableTransactionFinalizer, TransactionRecordStore, PreparedIntentStore) BuildBundled(Seam seam)
+    {
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        return (new DurableTransactionFinalizer(records, intents, seam.Replicate, replicateAnchorBundle: seam.ReplicateBundle), records, intents);
     }
 
     [Fact]
@@ -720,6 +756,110 @@ public sealed class TestDurableTransactionFinalizer
         // so post-decision settlement time never inflates the deadline estimator.
         Assert.True(latencyRecorded);
         Assert.NotNull(deferredResolution);
+    }
+
+    [Fact]
+    public async Task AnchorBundle_HealthyCommit_BundlesInitAndAnchorPrepare_OtherPreparesFanOut()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = BuildBundled(seam);
+
+        // Anchor is partition 5 (participants[0]); partition 8 is a second participant that prepares concurrently.
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Null(intents.Get("idx/name/bob"));
+
+        // The anchor partition's record init + prepare crossed as ONE bundle proposal (not a standalone init
+        // followed by a standalone prepare): exactly one bundle call on partition 5, and the only standalone
+        // pre/post-decision TransactionRecord call is the decision itself — the init never cost its own barrier.
+        Assert.Equal(1, seam.Calls.Count(c => c.Type == Seam.BundleType && c.Partition == 5));
+        Assert.Equal(1, seam.Calls.Count(c => c.Type == ReplicationTypes.TransactionRecord)); // decision only
+    }
+
+    [Fact]
+    public async Task AnchorBundle_RejectedAnchorPrepare_AbortsTruthfully_NotFalseCommit()
+    {
+        HLCTimestamp txId = Ts(3000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = BuildBundled(seam);
+
+        // Another transaction already holds a live intent on the anchor key, so this transaction's co-bundled anchor
+        // prepare is rejected by the store even though the record init in the same proposal succeeds. The bundled
+        // init succeeding must NOT mask the prepare rejection into a false commit — the transaction must abort.
+        intents.Apply(new PrepareIntentCommand(Intent(Ts(1000), 1, "acct/1")));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
+
+        Assert.NotEqual(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+    }
+
+    [Fact]
+    public async Task AnchorBundle_BatchNotCommitted_MustRetry_NoDecisionRecordWritten()
+    {
+        HLCTimestamp txId = Ts(1000);
+        // The bundle proposal never reaches Raft: nothing durable, so it must be a clean retry with no decision
+        // record — writing an abort tombstone against an absent record would poison a same-identity retry.
+        Seam seam = new() { FailBundleBatch = _ => true };
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = BuildBundled(seam);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Null(records.Get(txId, 1));           // no tombstone, no record at all
+        Assert.Equal(0, intents.Count);
+        Assert.DoesNotContain(seam.Calls, c => c.Type == ReplicationTypes.TransactionRecord); // no decision attempted
+    }
+
+    [Fact]
+    public async Task AnchorBundle_RejectedNonAnchorPrepare_AbortsTruthfully()
+    {
+        HLCTimestamp txId = Ts(1000);
+        // The anchor bundle commits cleanly, but a non-anchor partition's prepare is rejected: prepare-rejection
+        // propagation from a fanned-out partition must still drive a truthful abort under bundling.
+        Seam seam = new() { Fail = (partition, type) => partition == 8 && type == ReplicationTypes.PreparedIntent };
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = BuildBundled(seam);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1"));      // anchor intent prepared then settled as aborted
+        Assert.Null(intents.Get("idx/name/bob")); // never landed
+    }
+
+    [Fact]
+    public async Task AnchorBundle_AnchorNotAParticipantPartition_FallsBackToUnbundledInit()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = BuildBundled(seam);
+
+        // Anchor key/partition is 5 (participants[0]) — but craft an input whose anchor partition holds no prepare
+        // group by pointing the anchor at a partition none of the modified keys route to. Build one by hand.
+        List<TransactionParticipantRef> manifest = [new TransactionParticipantRef("idx/name/bob", KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(txId, 1, "coord/anchor", Ts(1100), manifest);
+        List<DurablePartitionPrepare> partitions =
+            [new DurablePartitionPrepare(8, 0L, [Intent(txId, 1, "idx/name/bob") with { ManifestHash = hash }])];
+        DurableFinalizeInput input = new(txId, 1, "coord", "coord/anchor", AnchorPartitionId: 3,
+            AnchorGeneration: 0L, Ts(1100), DecisionDeadline: Ts(9000), hash, manifest, partitions, CreatedAt: Ts(1000));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // With no anchor prepare group to bundle, the init is a standalone proposal on partition 3 (no bundle call),
+        // and the transaction still commits.
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.DoesNotContain(seam.Calls, c => c.Type == Seam.BundleType);
+        Assert.Contains((3, ReplicationTypes.TransactionRecord), seam.Calls); // standalone init on the anchor partition
     }
 
     [Fact]

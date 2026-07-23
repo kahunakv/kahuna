@@ -1261,6 +1261,9 @@ internal sealed class TransactionCoordinator : IDisposable
         // Re-fence the pre-decision record/prepare submissions at dispatch, so a split/merge between freeze and
         // dispatch releases them retryably instead of appending to a retired partition.
         replicateFenced: ReplicateDurableFencedAsync,
+        // Bundle the anchor partition's record init with its own prepare into one proposal, removing a pre-decision
+        // Raft barrier from the one-partition critical path.
+        replicateAnchorBundle: ReplicateDurableAnchorBundleAsync,
         maxMaterializationBatchItems: Math.Min(
             configuration.KeyValueWriteMaxBatchItems,
             configuration.KeyValueWriteMaxQueuedItemsPerPartition),
@@ -1311,6 +1314,12 @@ internal sealed class TransactionCoordinator : IDisposable
     // generation at dispatch (local aggregator path) so a topology change since freeze releases it retryably.
     private Task<bool> ReplicateDurableFencedAsync(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
         manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken);
+
+    // Bundles the anchor partition's [record init, prepare] into one fenced proposal, removing a pre-decision
+    // barrier. Returns the record-durable and prepare-acknowledged signals separately so the finalizer can tell a
+    // clean retry (nothing durable) from a committed-but-rejected prepare (record durable, drive a truthful abort).
+    private Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableAnchorBundleAsync(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableBundleThroughSchedulerFenced(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken);
 
     // Applies a committed intent's value on the leader (clears the staged write intent/MVCC and applies the value —
     // the durable-path commit apply), invoked by the finalizer's resolution after the intent commits.

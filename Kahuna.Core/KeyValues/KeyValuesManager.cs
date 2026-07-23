@@ -238,6 +238,75 @@ internal sealed class KeyValuesManager : IDisposable
         return await submission.Committed.ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Replicates the anchor partition's <c>[TransactionRecord init, PreparedIntent prepare]</c> as one atomic
+    /// ordered proposal, removing a pre-decision Raft barrier: the record initialization no longer costs a separate
+    /// round trip before the anchor partition's prepare. Fenced against the anchor descriptor <paramref name="fenceKey"/>
+    /// at <paramref name="fenceGeneration"/> like the standalone pre-decision path.
+    /// <para>Returns two independent signals the caller cannot fold into one: <c>BatchCommitted</c> — the proposal
+    /// reached Raft, so the record is durably initialized (Undecided); and <c>PrepareAcknowledged</c> — the anchor
+    /// prepare took ownership of its key. A committed batch with a rejected prepare must drive a truthful abort
+    /// (the record exists), whereas a batch that never committed is a clean retry with nothing durable.</para>
+    /// </summary>
+    internal async Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleThroughSchedulerFenced(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is not null)
+        {
+            // The durable-operation wire carries a single (logType, data) per call, so the two-entry atomic bundle
+            // cannot cross to a remote leader as one proposal. Forward the record init and the anchor prepare as the
+            // two sequential ops they were before this optimization — the bundle win is the local-leader path (the
+            // embedded single-node target); a remote atomic bundle needs a wire change and is a follow-up.
+            bool initOk = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, ReplicationTypes.TransactionRecord, recordInitDelta, cancellationToken).ConfigureAwait(false);
+            if (!initOk)
+                return (false, false);
+
+            transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = recordInitDelta });
+
+            bool prepareOk = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, ReplicationTypes.PreparedIntent, anchorPrepareDelta, cancellationToken).ConfigureAwait(false);
+            return (true, prepareOk);
+        }
+
+        return await ReplicateDurableBundleLocal(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleLocal(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Set only from the scheduler's ordered completion, which runs iff the batch committed; its write
+        // happens-before the awaiter through the completion's TrySetResult, so a true read means the record init
+        // (the first bundled entry) is durably applied. The batch's autocommit round is a single proposal, so both
+        // entries share one fate on the commit dimension — this flag is the "did the record land" signal the folded
+        // Committed bool cannot express on its own.
+        bool batchCommitted = false;
+
+        Writes.DurableProposalSubmission submission = new(
+            partitionId,
+            [
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0),
+                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0)
+            ],
+            completion,
+            Writes.WriteAdmissionClass.Ordinary,
+            entries =>
+            {
+                batchCommitted = true;
+                return ApplyDurableEntriesOnCommit(entries);
+            },
+            fenceKey,
+            fenceGeneration);
+
+        if (!writeAggregator.TryEnqueue(submission))
+            return (false, false);
+
+        using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
+        bool prepareAcknowledged = await submission.Committed.ConfigureAwait(false);
+        return (batchCommitted, prepareAcknowledged);
+    }
+
     // The scheduler's ordered per-partition completion applies each durable record/intent delta to its store, in
     // Raft-commit order — the single authoritative apply owner on the leader. Key/value materialization records are
     // applied by their own leader path (ApplyDurableCommit / the replicator), not here. Returns whether every

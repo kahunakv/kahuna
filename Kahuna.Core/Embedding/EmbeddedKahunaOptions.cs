@@ -181,6 +181,36 @@ public sealed class EmbeddedKahunaOptions
 
     public int SlowRaftWALMachineLog { get; set; } = 25;
 
+    /// <summary>
+    /// Maximum partitions coalesced into a single WAL cross-partition group-commit batch. On a
+    /// single-partition embedded queue there is nothing to combine, so this only matters once the
+    /// consumer runs multiple partitions. Mirrors <c>RaftConfiguration.MaxWalGroupBatchPartitions</c>;
+    /// defaults to Kommander's own default (64).
+    /// </summary>
+    public int RaftMaxWalGroupBatchPartitions { get; set; } = 64;
+
+    /// <summary>
+    /// Group-commit linger window in milliseconds (0 = disabled). When positive, a WAL worker briefly
+    /// waits to gather more ready partitions before issuing the single group fsync, trading a bounded
+    /// latency floor for denser batches. Mirrors <c>RaftConfiguration.WalGroupCommitLingerMs</c>;
+    /// defaults to Kommander's own default (0, byte-for-byte the prior opportunistic batching).
+    /// </summary>
+    public int RaftWalGroupCommitLingerMs { get; set; }
+
+    /// <summary>
+    /// Single-fsync commit fast path. When enabled, an auto-commit single-round proposal releases its
+    /// client ticket as soon as the propose quorum is durable and demotes the commit marker to a lazy
+    /// write, removing one serial fsync from the caller's critical path without weakening durability.
+    /// Mirrors <c>RaftConfiguration.WalSingleFsyncCommit</c>.
+    /// <para>
+    /// Defaults to <c>false</c> — Kommander's own default (byte-for-byte the prior two-fsync commit) —
+    /// <b>not</b> the <c>Kahuna.Server</c> default, which is single-fsync <b>on</b>. Flipping this
+    /// changes durability/recovery timing for every embedded consumer, so enabling it is an explicit
+    /// consumer decision. Enable and measure before relying on it.
+    /// </para>
+    /// </summary>
+    public bool RaftWalSingleFsyncCommit { get; set; }
+
     public int CompactEveryOperations { get; set; } = 1000;
 
     public int CompactNumberEntries { get; set; } = 50;
