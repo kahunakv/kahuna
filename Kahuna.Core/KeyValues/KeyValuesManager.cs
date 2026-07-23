@@ -1131,6 +1131,14 @@ internal sealed class KeyValuesManager : IDisposable
 
         ActorRunnerOptions<KeyValueRequest> options = BuildActorInboxOptions(configuration);
 
+        // Ephemeral actors never participate in durable-intent 2PC (a durable transaction cannot modify an ephemeral
+        // key), so they get no prepared-intent / transaction-record store. Sharing the persistent store let an
+        // ephemeral write to a key whose *persistent* namesake held a committed-but-unsettled intent materialize that
+        // foreign intent into the ephemeral entry and over-derive its revision — a cross-keyspace contamination
+        // visible only while deferred settlement left the intent lingering.
+        Transactions.PreparedIntentStore? noPreparedIntentStore = null;
+        Transactions.TransactionRecordStore? noTransactionRecordStore = null;
+
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.SpawnWithOptions<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                 "ephemeral-keyvalue-" + i,
@@ -1145,8 +1153,8 @@ internal sealed class KeyValuesManager : IDisposable
                 logger,
                 snapshotFloorStore,
                 completionReceiptStore,
-                preparedIntentStore,
-                transactionRecordStore
+                noPreparedIntentStore!,
+                noTransactionRecordStore!
             ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
