@@ -1132,12 +1132,18 @@ internal sealed class KeyValuesManager : IDisposable
         ActorRunnerOptions<KeyValueRequest> options = BuildActorInboxOptions(configuration);
 
         // Ephemeral actors never participate in durable-intent 2PC (a durable transaction cannot modify an ephemeral
-        // key), so they get no prepared-intent / transaction-record store. Sharing the persistent store let an
-        // ephemeral write to a key whose *persistent* namesake held a committed-but-unsettled intent materialize that
-        // foreign intent into the ephemeral entry and over-derive its revision — a cross-keyspace contamination
-        // visible only while deferred settlement left the intent lingering.
-        Transactions.PreparedIntentStore? noPreparedIntentStore = null;
-        Transactions.TransactionRecordStore? noTransactionRecordStore = null;
+        // key), so they must not consult the persistent prepared-intent / transaction-record stores. Sharing the
+        // persistent stores let an ephemeral write to a key whose *persistent* namesake held a committed-but-unsettled
+        // intent materialize that foreign intent into the ephemeral entry and over-derive its revision — a
+        // cross-keyspace contamination visible only while deferred settlement left the intent lingering.
+        //
+        // Give them dedicated, empty, disk-free stores instead of null: durable operations only ever route to the
+        // persistent actors, so these stay empty for the node's lifetime, but they must be non-null because the
+        // server resolves the actor constructor through DI (ActivatorUtilities), which cannot infer a parameter's
+        // type from a null argument — passing null there fails constructor selection (it works only under the
+        // provider-less Activator path the in-process tests use).
+        Transactions.PreparedIntentStore ephemeralPreparedIntentStore = new();
+        Transactions.TransactionRecordStore ephemeralTransactionRecordStore = new();
 
         for (int i = 0; i < configuration.KeyValueWorkers; i++)
             ephemeralInstances.Add(actorSystem.SpawnWithOptions<KeyValueActor, KeyValueRequest, KeyValueResponse>(
@@ -1153,8 +1159,8 @@ internal sealed class KeyValuesManager : IDisposable
                 logger,
                 snapshotFloorStore,
                 completionReceiptStore,
-                noPreparedIntentStore!,
-                noTransactionRecordStore!
+                ephemeralPreparedIntentStore,
+                ephemeralTransactionRecordStore
             ));
 
         return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
