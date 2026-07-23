@@ -8,7 +8,7 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <IsPackable>true</IsPackable>
     <PackageId>Kahuna.Core</PackageId>
-    <Version>0.8.6</Version>
+    <Version>0.8.7</Version>
     <Description>.NET embeddable core for Kahuna: Distributed locks and reliable key-value store</Description>
     <Authors>Andres Gutierrez</Authors>
     <Company>Andres Gutierrez</Company>
@@ -40,7 +40,7 @@
     </PackageReference>
     <PackageReference Include="Nixie" Version="1.2.3" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
-    <PackageReference Include="Kommander" Version="0.20.3" />
+    <PackageReference Include="Kommander" Version="0.20.4" />
     <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
   </ItemGroup>
