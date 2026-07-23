@@ -33,7 +33,15 @@ internal sealed class TryExistsHandler : BaseHandler
 
         // Durable-intent read visibility: a foreign prepared intent may carry a committed outcome not yet
         // materialized locally. Empty store (durable-intent path disabled) ⇒ null ⇒ no effect.
-        if (context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
+        //
+        // A transaction that has already snapshotted or written this key in its own MVCC must see that view
+        // (read-your-own-write / snapshot isolation), never a concurrent foreign intent — otherwise a
+        // committed-but-unsettled intent from another transaction would preempt this transaction's own staged write.
+        bool readerHasOwnMvcc = message.TransactionId != HLCTimestamp.Zero
+            && entry?.MvccEntries is { } readerMvcc && readerMvcc.ContainsKey(message.TransactionId);
+
+        if (!readerHasOwnMvcc
+            && context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
             && foreignIntent.TransactionId != message.TransactionId)
         {
             HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
