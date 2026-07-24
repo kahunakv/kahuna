@@ -382,7 +382,22 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     public override async Task<GrpcTryGetManyValuesResponse> TryGetManyValues(GrpcTryGetManyValuesRequest request, ServerCallContext context)
     {
-        return await TryGetManyValuesInternal(request, context);
+        // A client sends the whole batch to one node as a unary RPC without routing per key, so this endpoint must
+        // route each key to its partition leader itself — exactly as the single-key TryGetKeyValue does. Reading
+        // the local actors directly (TryGetManyValuesInternal) returns this node's own state, which for a key whose
+        // partition this node does not lead is stale or absent, so a batched read would miss a committed value a
+        // routed single-key read (or a same-transaction scan) sees. The non-locating internal is only correct on
+        // the inter-node path, where the caller already routed the keys to this leader.
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            GetRequestManyValuesItems(request.Items),
+            context.CancellationToken
+        );
+
+        GrpcTryGetManyValuesResponse response = new();
+        response.Items.Add(GetResponseGetManyValuesItems(responses));
+        return response;
     }
 
     /// <summary>
@@ -438,6 +453,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
+    /// <summary>
+    /// Non-locating batch read: serves the requested keys from this node's local actors without routing. Correct
+    /// only on the inter-node path (<c>KeyValueServerBatcher</c>), where the sending node already grouped the keys
+    /// by their partition leader and forwarded each group to the node that leads it. The client-facing
+    /// <see cref="TryGetManyValues"/> override must not use this — it routes per key instead.
+    /// </summary>
     internal async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesInternal(GrpcTryGetManyValuesRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryGetManyValues(
@@ -464,7 +485,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     public override async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValues(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
     {
-        return await TryExistsManyValuesInternal(request, context);
+        // Route per key for the same reason as TryGetManyValues: the non-locating internal reads only this node's
+        // actors and is correct only on the already-routed inter-node path.
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            GetRequestManyValuesItems(request.Items),
+            context.CancellationToken
+        );
+
+        GrpcTryExistsManyValuesResponse response = new();
+        response.Items.Add(GetResponseExistsManyValuesItems(responses));
+        return response;
     }
 
     /// <summary>
@@ -517,6 +549,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
+    /// <summary>
+    /// Non-locating batch exists: the inter-node counterpart of <see cref="TryGetManyValuesInternal"/>. Serves the
+    /// keys from this node's local actors, correct only when the caller already routed them here. The client-facing
+    /// <see cref="TryExistsManyValues"/> override routes per key instead.
+    /// </summary>
     internal async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValuesInternal(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryExistsManyValues(

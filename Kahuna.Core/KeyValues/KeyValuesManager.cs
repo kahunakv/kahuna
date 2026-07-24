@@ -5103,7 +5103,8 @@ internal sealed class KeyValuesManager : IDisposable
             return;
 
         DurableTransactionMetrics.ReceiptsExpired(expired);
-        logger.LogDebug("Dropped {Count} completion receipts past the retention backstop", expired);
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogDebug("Dropped {Count} completion receipts past the retention backstop", expired);
     }
 
     /// <summary>
