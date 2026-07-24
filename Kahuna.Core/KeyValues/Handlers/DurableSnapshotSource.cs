@@ -73,4 +73,20 @@ internal static class DurableSnapshotSource
                 return SnapshotDecision.UseBase;
         }
     }
+
+    /// <summary>
+    /// True when <paramref name="readerTransactionId"/> already holds its own MVCC version of <paramref name="key"/> —
+    /// i.e. the scanning transaction has read or written (set/tombstoned) the key within this transaction. The
+    /// scan-merge uses this to keep that own version authoritative over a lingering committed foreign intent for the
+    /// same key (read-your-own-write / snapshot consistency), instead of letting the foreign intent override, exclude,
+    /// or resurrect it. The MVCC entry — not the write intent — is the durable signal: a pending write intent is
+    /// short-lived (its lease can lapse and it is cleared on prepare/abort) while the transaction's MVCC version
+    /// persists for the transaction's lifetime, so gating on the write intent misses a still-open transaction whose
+    /// intent has already been cleared.
+    /// </summary>
+    public static bool ReaderHasOwnVersion(KeyValueContext context, string key, HLCTimestamp readerTransactionId)
+        => readerTransactionId != HLCTimestamp.Zero
+           && context.Store.TryGetValue(key, out KeyValueEntry? entry)
+           && entry.MvccEntries is { } mvcc
+           && mvcc.ContainsKey(readerTransactionId);
 }

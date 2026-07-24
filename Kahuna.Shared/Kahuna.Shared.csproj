@@ -9,7 +9,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>Kahuna.Shared</PackageId>
-        <Version>0.8.10</Version>
+        <Version>0.8.11</Version>
         <Description>.NET shared libries for Kahuna: Distributed locks and reliable key-value store </Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Andres Gutierrez</Company>

@@ -318,7 +318,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
             {
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
-                    i => DurableReadVisibility.ScanDecision(context, routedDecisions, i));
+                    i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
+                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId));
                 if (merge.MustRetry)
                 {
                     Resolve(new(KeyValueResponseType.MustRetry,

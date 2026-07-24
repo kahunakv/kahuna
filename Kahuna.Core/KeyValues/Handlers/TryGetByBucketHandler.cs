@@ -87,7 +87,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket. No-op off the
         // durable path.
         (items, bool mustRetry) = BucketScanContinuation.OverlayBucketIntents(
-            context, message.Key, items, currentTime, message.ReadTimestamp, message.ForeignScanDecisions);
+            context, message.Key, items, currentTime, message.ReadTimestamp, message.TransactionId, message.ForeignScanDecisions);
         if (mustRetry)
             return KeyValueStaticResponses.MustRetryResponse;
 
@@ -131,7 +131,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             items.Sort(EnsureLexicographicalOrder);
 
             (items, bool mustRetry) = BucketScanContinuation.OverlayBucketIntents(
-                context, message.Key, items, currentTime, message.ReadTimestamp, message.ForeignScanDecisions);
+                context, message.Key, items, currentTime, message.ReadTimestamp, message.TransactionId, message.ForeignScanDecisions);
             if (mustRetry)
                 return KeyValueStaticResponses.MustRetryResponse;
 

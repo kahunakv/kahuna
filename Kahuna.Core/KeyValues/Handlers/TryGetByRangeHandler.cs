@@ -116,7 +116,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             {
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
-                    i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i));
+                    i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i),
+                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));

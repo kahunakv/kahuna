@@ -53,13 +53,22 @@ internal static class PreparedIntentScanMerge
         int limit,
         bool kvHasMore,
         string? kvCeilingKey,
-        Func<PreparedIntent, TransactionDecision>? decisionLookup = null)
+        Func<PreparedIntent, TransactionDecision>? decisionLookup = null,
+        Func<string, bool>? readerHasOwnVersion = null)
     {
         Dictionary<string, PreparedIntent> overrides = [];
         HashSet<string> excludes = [];
 
         foreach (PreparedIntent intent in intents)
         {
+            // A key the scanning transaction already holds its own version of is served from that version
+            // (read-your-own-write / snapshot consistency): the KV page already reflects it via the per-key MVCC
+            // path, so a foreign committed intent must not override it, exclude it, or (for a delete) resurrect it.
+            // Without this, an UPDATE/DELETE over a committed-but-unsettled row is masked by that row's lingering
+            // foreign intent, so the transaction fails to see its own mutation.
+            if (readerHasOwnVersion is not null && readerHasOwnVersion(intent.Key))
+                continue;
+
             TransactionDecision decision = intent.Resolution == PreparedIntentResolution.Pending && decisionLookup is not null
                 ? decisionLookup(intent)
                 : TransactionDecision.Undecided;

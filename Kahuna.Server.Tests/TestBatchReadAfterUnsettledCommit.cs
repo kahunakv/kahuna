@@ -116,4 +116,58 @@ public sealed class TestBatchReadAfterUnsettledCommit
         Assert.True(scanShort == 0 && aborts == 0 && misses == 0,
             $"scanShort={scanShort} aborts={aborts} misses={misses} — a committed row was lost across scan/batch-read");
     }
+
+    [Fact]
+    public async Task ScanSeesOwnWrite_OverUnsettledForeignCommit_NotTheForeignValue()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        int stale = 0, resurrected = 0;
+
+        for (int round = 0; round < 40; round++)
+        {
+            const int rows = 6;
+            string prefix = $"ryow/g{round}";
+            // Prior transaction commits the rows; under deferred settlement they linger as committed intents.
+            List<string> keys = await DurableInsert(node, prefix, rows, ct);
+
+            // A second transaction overwrites every row, then scans the range. The scan must see the transaction's
+            // own writes (v-new / a delete), never the still-unsettled foreign committed value it wrote over.
+            (KeyValueResponseType startType, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = $"{prefix}-upd",
+                    Locking = KeyValueTransactionLocking.Pessimistic,
+                    Timeout = 10_000
+                }, ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            // Overwrite the even rows, delete (via tombstone SET) the odd rows — CamusDB's UPDATE/DELETE shape.
+            for (int r = 0; r < rows; r++)
+            {
+                byte[] value = r % 2 == 0 ? Encoding.UTF8.GetBytes($"new{r}") : Encoding.UTF8.GetBytes("__tombstone__");
+                (KeyValueResponseType w, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                    handle.TransactionId, keys[r], value, null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
+                    coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+                Assert.Equal(KeyValueResponseType.Set, w);
+            }
+
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in node.Kahuna.LocateAndScanRange(
+                               handle.TransactionId, prefix, prefix + "/", true, prefix + "/￿", true, 100,
+                               HLCTimestamp.Zero, KeyValueDurability.Persistent, ct))
+            {
+                int idx = int.Parse(key[(key.LastIndexOf('-') + 1)..]);
+                string got = Encoding.UTF8.GetString(entry.Value ?? []);
+                if (idx % 2 == 0 && got != $"new{idx}") stale++;               // own update masked by foreign commit
+                if (idx % 2 == 1 && got != "__tombstone__") resurrected++;     // own delete masked by foreign commit
+            }
+
+            KeyValueResponseType rollback = await node.Kahuna.LocateAndRollbackTransaction(handle, ct);
+            Assert.Equal(KeyValueResponseType.RolledBack, rollback);
+        }
+
+        Assert.True(stale == 0 && resurrected == 0,
+            $"stale={stale} resurrected={resurrected} — the scan returned a foreign committed value instead of the transaction's own write");
+    }
 }

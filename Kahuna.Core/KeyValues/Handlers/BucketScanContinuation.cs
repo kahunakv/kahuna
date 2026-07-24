@@ -139,7 +139,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket, so a committed
         // insert/override/delete not yet materialized is reflected exactly as it would be in the equivalent range
         // scan. No-op off the durable path.
-        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp, routedDecisions);
+        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp, transactionId, routedDecisions);
         if (mustRetry)
         {
             Resolve(KeyValueStaticResponses.MustRetryResponse);
@@ -162,6 +162,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         List<(string, ReadOnlyKeyValueEntry)> items,
         HLCTimestamp currentTime,
         HLCTimestamp readTimestamp,
+        HLCTimestamp transactionId,
         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null)
     {
         if (context.PreparedIntentStore is not { } intentStore)
@@ -176,7 +177,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
             items, bucketIntents, snapshotTs, currentTime,
             limit: KeyValueScanLimits.MaxPrefixScanResults, kvHasMore: false, kvCeilingKey: null,
-            i => DurableReadVisibility.ScanDecision(context, routedDecisions, i));
+            i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
+            k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId));
 
         return (merge.Items, merge.MustRetry);
     }
