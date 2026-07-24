@@ -451,16 +451,29 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 if (entry is null)
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
+                // A committed-but-unsettled foreign intent supersedes the resident base: snapshot its committed
+                // value so this transaction's later reads of the key stay consistent instead of binding a stale base.
                 // entry.MvccEntries is already initialised (??= new() in the block above).
-                KeyValueMvccEntry newMvcc = new()
+                KeyValueMvccEntry newMvcc;
+                switch (DurableSnapshotSource.Resolve(context, key, transactionId, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
-                    Value = entry.Value,
-                    Revision = entry.Revision,
-                    Expires = entry.Expires,
-                    LastUsed = entry.LastUsed,
-                    LastModified = entry.LastModified,
-                    State = entry.State
-                };
+                    case SnapshotDecision.Retry:
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    case SnapshotDecision.UseIntent:
+                        newMvcc = intentSnapshot;
+                        break;
+                    default:
+                        newMvcc = new()
+                        {
+                            Value = entry.Value,
+                            Revision = entry.Revision,
+                            Expires = entry.Expires,
+                            LastUsed = entry.LastUsed,
+                            LastModified = entry.LastModified,
+                            State = entry.State
+                        };
+                        break;
+                }
 
                 entry.MvccEntries!.Add(transactionId, newMvcc);
 
@@ -477,7 +490,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                     newMvcc.Expires,
                     newMvcc.LastUsed,
                     newMvcc.LastModified,
-                    entry.State);
+                    newMvcc.State);
 
                 return new(KeyValueResponseType.Get, readOnlyKeyValueEntry);
             }

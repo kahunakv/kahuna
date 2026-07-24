@@ -440,16 +440,29 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 && context.Store.TryGetValue(key, out KeyValueEntry? liveEntry)
                 && ReferenceEquals(liveEntry, entry))
             {
-                // Snapshot the current committed state for OCC conflict detection.
-                KeyValueMvccEntry newMvcc = new()
+                // Snapshot the current committed state for OCC conflict detection. A committed-but-unsettled foreign
+                // intent supersedes the resident base, so snapshot its committed value instead — otherwise this
+                // transaction binds a stale base and its later reads of the key return DoesNotExist or OCC-Aborted.
+                KeyValueMvccEntry newMvcc;
+                switch (DurableSnapshotSource.Resolve(context, key, transactionId, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
-                    Value = entry.Value,
-                    Revision = entry.Revision,
-                    Expires = entry.Expires,
-                    LastUsed = entry.LastUsed,
-                    LastModified = entry.LastModified,
-                    State = entry.State
-                };
+                    case SnapshotDecision.Retry:
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    case SnapshotDecision.UseIntent:
+                        newMvcc = intentSnapshot;
+                        break;
+                    default:
+                        newMvcc = new()
+                        {
+                            Value = entry.Value,
+                            Revision = entry.Revision,
+                            Expires = entry.Expires,
+                            LastUsed = entry.LastUsed,
+                            LastModified = entry.LastModified,
+                            State = entry.State
+                        };
+                        break;
+                }
 
                 entry.MvccEntries!.Add(transactionId, newMvcc);
                 context.AdjustEstimatedEntryBytes(
@@ -464,7 +477,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
 
                 return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
                     newMvcc.Value, newMvcc.Revision, newMvcc.Expires,
-                    newMvcc.LastUsed, newMvcc.LastModified, entry.State));
+                    newMvcc.LastUsed, newMvcc.LastModified, newMvcc.State));
             }
         }
 

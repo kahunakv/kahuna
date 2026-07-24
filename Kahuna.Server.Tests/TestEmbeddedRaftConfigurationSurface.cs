@@ -7,15 +7,15 @@ public sealed class TestEmbeddedRaftConfigurationSurface
     [Fact]
     public void TestWalThroughputKnobsDefaultToKommanderDefaults()
     {
-        // The embedded surface preserves Kommander's own defaults, NOT the Kahuna.Server defaults.
-        // In particular single-fsync is OFF here (the server defaults it on), because flipping it
-        // changes durability/recovery timing for every embedded consumer.
+        // The embedded surface preserves Kommander's own defaults for the WAL throughput knobs, NOT the
+        // Kahuna.Server defaults — with one deliberate exception: single-fsync is kept OFF here regardless of
+        // Kommander's default (Kommander now defaults it ON), because flipping it changes durability/recovery
+        // timing for every embedded consumer, so that choice must be explicit rather than inherited.
         RaftConfiguration kommanderDefaults = new();
         EmbeddedKahunaOptions options = new();
 
         Assert.Equal(kommanderDefaults.MaxWalGroupBatchPartitions, options.RaftMaxWalGroupBatchPartitions);
         Assert.Equal(kommanderDefaults.WalGroupCommitLingerMs, options.RaftWalGroupCommitLingerMs);
-        Assert.Equal(kommanderDefaults.WalSingleFsyncCommit, options.RaftWalSingleFsyncCommit);
         Assert.False(options.RaftWalSingleFsyncCommit);
     }
 

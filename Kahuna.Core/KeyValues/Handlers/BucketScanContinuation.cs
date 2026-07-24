@@ -247,16 +247,29 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
             if (!entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
             {
-                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
-                mvccEntry = new()
+                // A committed-but-unsettled foreign intent supersedes the resident base: snapshot its committed
+                // value so this transaction's later reads of the key stay consistent instead of binding a stale base.
+                switch (DurableSnapshotSource.Resolve(context, key, transactionId, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
-                    Value = entry.Value,
-                    Revision = entry.Revision,
-                    Expires = entry.Expires,
-                    LastUsed = entry.LastUsed,
-                    LastModified = entry.LastModified,
-                    State = entry.State
-                };
+                    case SnapshotDecision.Retry:
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    case SnapshotDecision.UseIntent:
+                        mvccEntry = intentSnapshot;
+                        break;
+                    default:
+                        mvccEntry = new()
+                        {
+                            Value = entry.Value,
+                            Revision = entry.Revision,
+                            Expires = entry.Expires,
+                            LastUsed = entry.LastUsed,
+                            LastModified = entry.LastModified,
+                            State = entry.State
+                        };
+                        break;
+                }
+
+                bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
                 entry.MvccEntries.Add(transactionId, mvccEntry);
                 context.AdjustEstimatedEntryBytes(
                     entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
@@ -271,7 +284,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
             return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
                 mvccEntry.Value, mvccEntry.Revision, mvccEntry.Expires,
-                mvccEntry.LastUsed, mvccEntry.LastModified, entry.State));
+                mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
         }
 
         if (!readTimestamp.IsNull() && entry.LastModified > readTimestamp)
