@@ -715,6 +715,53 @@ public abstract class BaseCluster
                 await Task.Delay(50, cancellationToken: assemblyCts.Token);
             }
         }
+
+        await WaitForStableLeadership(partitions, raft1, assemblyCts.Token);
+    }
+
+    /// <summary>
+    /// Gives the freshly assembled cluster a moment to stop re-electing before the test starts using it. The first
+    /// sighting of a leader is not the end of the election: each node's timer fires independently, so a just-elected
+    /// term is regularly superseded a few hundred milliseconds later, and a test that starts on that first sighting
+    /// can have its work land on a node that then stops being the leader — silently discarding non-replicated actor
+    /// state (staged MVCC entries, write intents, ephemeral values) and surfacing as an unrelated-looking Errored or
+    /// DoesNotExist.
+    ///
+    /// Best-effort by design: the leader balancer keeps moving leadership on purpose, so a cluster is not guaranteed
+    /// to ever present an unchanging leader map. Waiting for one would hang assembly rather than stabilise it, so
+    /// this gives up on its own short budget and lets the test proceed exactly as it did before.
+    /// </summary>
+    private static async Task WaitForStableLeadership(int partitions, IRaft raft, CancellationToken cancellationToken)
+    {
+        const int requiredStableSamples = 2;
+        int sampleIntervalMs = (int)(100 * TimingScale);
+        long giveUpAt = Environment.TickCount64 + (long)(3_000 * TimingScale);
+
+        string?[] observed = new string?[partitions + 1];
+        int stableSamples = 0;
+
+        while (stableSamples < requiredStableSamples && Environment.TickCount64 < giveUpAt)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            bool unchanged = true;
+
+            for (int i = 0; i <= partitions; i++)
+            {
+                string leader = await raft.WaitForLeader(i, cancellationToken);
+
+                if (observed[i] != leader)
+                {
+                    observed[i] = leader;
+                    unchanged = false;
+                }
+            }
+
+            stableSamples = unchanged ? stableSamples + 1 : 0;
+
+            if (stableSamples < requiredStableSamples)
+                await Task.Delay(sampleIntervalMs, cancellationToken);
+        }
     }
 
     /// <summary>

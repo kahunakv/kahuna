@@ -36,6 +36,14 @@ internal sealed class KeyValuesManager : IDisposable
 {
     private const int MaxRetries = 3;
 
+    /// <summary>
+    /// How long a point-lock acquire waits out a transient holder (an in-flight replication intent, or a write
+    /// intent left by a durably decided transaction whose resolution has not run yet) before reporting MustRetry.
+    /// Generous enough to absorb a loaded resolution round-trip, far below the write-intent lease so a genuinely
+    /// stalled resolution still surfaces to the caller instead of pinning the acquire until the lease lapses.
+    /// </summary>
+    private const int AcquireLockWaitMs = 3_000;
+
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
@@ -4129,32 +4137,65 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
-            {
-                KeyValueResponse? response;
+            (KeyValueResponseType type, HLCTimestamp holder) = await AcquireExclusiveLockWithWait(
+                request, key, transactionId, durability, Environment.TickCount64 + AcquireLockWaitMs);
 
-                if (durability == KeyValueDurability.Ephemeral)
-                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
-                else
-                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
-
-                if (response is null)
-                    return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero);
-
-                if (response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    await Task.Delay(delay);
-                    continue;
-                }
-
-                return (response.Type, key, durability, response.HolderTransactionId);
-            }
-
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            return (type, key, durability, holder);
         }
         finally
         {
             KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Issues a point-lock acquire and waits out the transient conditions that hold the key without conflicting
+    /// with the caller: an in-flight replication intent, and a write intent whose transaction is durably decided
+    /// but not yet resolved (the deferred-settlement window). Both surface as
+    /// <see cref="KeyValueResponseType.WaitingForReplication"/> and clear on their own, so the acquire is
+    /// re-issued under exponential back-off instead of being reported as a conflict. A genuine live holder
+    /// answers <c>AlreadyLocked</c> on the first attempt and never enters the wait. Exhausting
+    /// <paramref name="deadline"/> yields <see cref="KeyValueResponseType.MustRetry"/> — retryable, never a decided
+    /// outcome. The deadline is supplied by the caller so a multi-key acquire spends one budget across all its keys
+    /// rather than one per key.
+    /// </summary>
+    private async Task<(KeyValueResponseType, HLCTimestamp)> AcquireExclusiveLockWithWait(
+        KeyValueRequest request, string key, HLCTimestamp transactionId, KeyValueDurability durability, long deadline)
+    {
+        int backoffMs = 1;
+        bool attemptedRoutedResolve = false;
+
+        while (true)
+        {
+            KeyValueResponse? response;
+
+            if (durability == KeyValueDurability.Ephemeral)
+                response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
+            else
+                response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+
+            if (response is null)
+                return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
+
+            // A holder whose canonical record lives on another partition cannot be classified by the actor, so it
+            // reads as still-undecided and the acquire is denied. Route the lookup to the anchor leader once, off
+            // the mailbox, and re-issue with the terminal decision so a settled holder is recognised as transient.
+            if (response.Type is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.WaitingForReplication
+                && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+            {
+                attemptedRoutedResolve = true;
+                if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                    continue;
+            }
+
+            if (response.Type != KeyValueResponseType.WaitingForReplication)
+                return (response.Type, response.HolderTransactionId);
+
+            if (Environment.TickCount64 >= deadline)
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
+            await Task.Delay(backoffMs);
+            backoffMs = Math.Min(backoffMs * 2, 100);
         }
     }
 
@@ -4234,6 +4275,10 @@ internal sealed class KeyValuesManager : IDisposable
     {
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(keys.Count);
 
+        // One wait budget for the whole batch: a key that has to wait out a resolution must not let a long key list
+        // multiply the caller's worst case.
+        long deadline = Environment.TickCount64 + AcquireLockWaitMs;
+
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
         {
             KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -4255,22 +4300,14 @@ internal sealed class KeyValuesManager : IDisposable
 
             try
             {
-                KeyValueResponse? response;
+                // Shares the single-key wait: a transient holder must not be reported as a failed acquire here
+                // either, or a multi-key transaction aborts for merely overlapping a resolution window.
+                (KeyValueResponseType type, HLCTimestamp holder) =
+                    await AcquireExclusiveLockWithWait(request, key.key, transactionId, key.durability, deadline);
 
-                if (key.durability == KeyValueDurability.Ephemeral)
-                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
-                else
-                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+                responses.Add((type, key.key, key.durability, holder));
 
-                if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability, HLCTimestamp.Zero));
-                    continue;
-                }
-
-                responses.Add((response.Type, key.key, key.durability, response.HolderTransactionId));
-
-                if (response.Type != KeyValueResponseType.Locked)
+                if (type != KeyValueResponseType.Locked)
                     break;
             }
             finally

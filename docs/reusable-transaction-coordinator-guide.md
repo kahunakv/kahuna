@@ -12,6 +12,13 @@ concurrent finalization, failures, and recovery. It is written for two audiences
 No knowledge of the coordinator internals is required. If you are new to Kahuna transactions, start
 with the example below and then read the lifecycle sections in order.
 
+> **Looking for the internals?** This guide covers the *interactive session API and its semantics*. For
+> the end-to-end execution path — how a request travels from gRPC/REST/embedded through routing and
+> staging into durable-intent 2PC, out through the partition write aggregator to the Raft WAL and the
+> persistence backend, and what happens in the deferred-settlement window afterwards — read
+> **`transaction-lifecycle-guide.md`**. For the aggregator's batching and backpressure knobs in depth,
+> read **`partition-write-coalescing-guide.md`**.
+
 ---
 
 ## 1. The big picture
@@ -360,11 +367,19 @@ this path.
 
 `DurableTransactionFinalizer` drives one transaction to a durable outcome:
 
-1. **Initialize** the canonical record as `Undecided` on the anchor partition, freezing the commit
-   timestamp, the decision deadline, and the participant manifest. Nothing is durable if this fails, so
-   it is a clean retry.
-2. **Prepare barrier** — replicate every partition's prepared intents. Every partition is attempted
-   even if one fails, because a truthful abort needs to know each partition's result.
+1. **Initialize + prepare (one barrier).** The anchor key belongs to one of the participant partitions, so
+   the canonical record's initialization (`Undecided`, freezing the commit timestamp, decision deadline and
+   participant manifest) is submitted together with *that partition's* prepared intents as **one atomic
+   ordered proposal**; every other partition's prepare fans out concurrently. The bundle reports two
+   separate signals — whether the batch committed (is the record durable?) and whether the anchor prepare
+   was acknowledged — because a committed batch whose prepare was rejected must drive a truthful abort,
+   while a batch that never committed is a clean retry with nothing durable. If the anchor key routes
+   outside the participant partitions, this falls back to initialize-then-prepare.
+   Every partition is attempted even if one fails, because a truthful abort needs each partition's result.
+2. **Prepare retry.** A prepare rejected *only* because the key still holds a predecessor's
+   committed-but-unsettled intent is retried in place a bounded number of times — idempotent for the
+   partitions that already prepared — **before any decision is written**, so a healthy commit is not
+   aborted merely because the predecessor's background settlement had not caught up yet.
 3. **Validate** the read set (revision comparison plus a concurrent-writer probe, read through the
    intent-aware path) — only meaningful once every prepare is durable.
 4. **Decision barrier** — compare-and-set the canonical record: `Commit` only when every prepare is
@@ -400,13 +415,22 @@ caller never sees a false conflict for a transient failure.
 
 ### Settlement timing
 
-Resolution currently runs **synchronously**: the finalizer awaits it before returning, so a committed
-value is materialized into visible MVCC before the caller gets `Committed`. This is required for correct
-read-your-writes across nodes until a cross-node canonical-record lookup exists — a latest read on
-another node that meets a committed-but-unmaterialized intent has nothing to resolve it against yet, and
-would read the stale prior value. The finalizer keeps a scheduler seam for deferred (background)
-settlement for when that cross-node lookup lands; the canonical decision is already durable either way,
-so recovery finishes any settlement that a background run would have lost.
+Resolution runs **deferred (in the background) by default**: `DurableDeferredSettlement` defaults to
+`true` on both `KahunaConfiguration` and `EmbeddedKahunaOptions`. The finalizer returns as soon as the
+**decision record is durable**, and materialize + settle run on a background task — so the client-visible
+commit point is the durable decision and settlement is off the commit critical path.
+
+This is safe because the cross-node canonical-record lookup now exists: a read (or a scan, or a write)
+that meets a committed-but-unmaterialized foreign intent resolves it against the canonical record —
+locally, or routed to the anchor-partition leader — instead of serving the stale prior value. Setting the
+flag to `false` restores fully synchronous settlement, where a committed value is materialized into
+visible MVCC before the caller gets `Committed`.
+
+Either way the canonical decision is already durable before the caller is told anything, so recovery on
+the participant leaders finishes any settlement a lost background run would have dropped.
+
+> For the mechanics of that window — what lingers, how each operation resolves it, and the routed
+> decision lookup — see **`transaction-lifecycle-guide.md` §8**.
 
 ### Recovery
 

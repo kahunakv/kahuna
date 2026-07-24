@@ -79,6 +79,10 @@ public sealed class BenchmarkRegisteredTransactionThroughput
                     await CommitSetMany(
                         kahuna, keyCount, $"warmup-{concurrency}", cancellationToken);
 
+                    // The warm-up's own settlement runs after its commit returned; let it finish so its Raft work
+                    // is not charged to the measured round.
+                    await WaitForSettledIntents(kahuna, cancellationToken);
+
                     long callsBefore = counter!.Calls;
                     long entriesBefore = counter.Entries;
                     ConcurrentBag<double> commitLatenciesMs = new();
@@ -102,9 +106,15 @@ public sealed class BenchmarkRegisteredTransactionThroughput
                     }
 
                     workload.Stop();
+
+                    // A commit reports success as soon as its decision is durable; the intents it prepared are
+                    // materialized, applied and removed afterwards, off the caller's critical path. Drain that tail
+                    // before reading the counters — the latency window is already closed, and counting first would
+                    // both credit the round with less Raft work than it caused and read the intent store mid-flight.
+                    // The leak check is that the store drains, not that it is empty the instant a commit returns.
+                    int unresolvedIntents = await WaitForSettledIntents(kahuna, cancellationToken);
                     long proposals = counter.Calls - callsBefore;
                     long entries = counter.Entries - entriesBefore;
-                    int unresolvedIntents = kahuna.DurablePreparedIntentStore.Count;
                     double[] sortedLatencies = commitLatenciesMs.Order().ToArray();
                     double rowsPerSecond = transactionCount / workload.Elapsed.TotalSeconds;
 
@@ -179,6 +189,25 @@ public sealed class BenchmarkRegisteredTransactionThroughput
         commit.Stop();
         Assert.Equal(KeyValueResponseType.Committed, commitType);
         return commit.Elapsed.TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// Polls the durable prepared-intent store until it drains, returning the final count so the caller asserts on
+    /// it. A count that never reaches zero is returned as-is and fails the caller's assertion — the deadline bounds
+    /// the wait without hiding a genuine leak.
+    /// </summary>
+    private static async Task<int> WaitForSettledIntents(KahunaManager kahuna, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + 30_000;
+
+        int remaining = kahuna.DurablePreparedIntentStore.Count;
+        while (remaining > 0 && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(25, cancellationToken);
+            remaining = kahuna.DurablePreparedIntentStore.Count;
+        }
+
+        return remaining;
     }
 
     private static double Percentile(IReadOnlyList<double> sortedValues, double percentile)

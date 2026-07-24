@@ -66,7 +66,17 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 
             // Check if the lease is still active
             if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
+            {
+                // A holder whose transaction is already durably decided is not a live conflict: its intent is
+                // only waiting for the resolution that clears it, which under deferred settlement runs in the
+                // background after the commit was reported. Reporting AlreadyLocked there would abort a caller
+                // that merely arrived inside that window, so the transient wait is surfaced instead and the
+                // acquire loop re-issues until the resolution lands.
+                if (IsAwaitingSettlement(message, entry.WriteIntent.TransactionId))
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
                 return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, entry.WriteIntent.TransactionId);
+            }
         }
 
         entry.WriteIntent = new()
@@ -76,7 +86,21 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         };
         
         context.Logger.LogAssignedWriteIntent(message.Key, message.TransactionId);
-        
+
         return KeyValueStaticResponses.LockedResponse;
+    }
+
+    /// <summary>
+    /// Whether the live write intent held by <paramref name="holder"/> only survives because its transaction's
+    /// resolution has not run yet. True when the holder owns a durable prepared intent on this key whose canonical
+    /// outcome is already terminal — locally recorded, routed from the anchor leader, or flipped on the intent
+    /// itself. An intent whose transaction is still undecided is a genuine concurrent writer and is not covered.
+    /// </summary>
+    private bool IsAwaitingSettlement(KeyValueRequest message, HLCTimestamp holder)
+    {
+        if (context.PreparedIntentStore?.Get(message.Key) is not { } intent || intent.TransactionId != holder)
+            return false;
+
+        return !DurableReadVisibility.IsUndecidedWriter(context, intent, message.ForeignDecisionHint);
     }
 }
