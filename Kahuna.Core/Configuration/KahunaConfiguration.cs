@@ -175,6 +175,23 @@ public sealed class KahunaConfiguration
     public int DurableRecordGcMaxPerPass { get; set; } = 4_096;
 
     /// <summary>
+    /// Age after which a participant completion receipt is dropped even though no coordinator acknowledgement
+    /// released it. This is the backstop that bounds the receipt store on its own terms rather than only as a side
+    /// effect of reclaiming the transaction record that owns it: a WAL replay on cold restart or partition leader
+    /// change re-records receipts for transactions whose record was already reclaimed, and nothing would ever
+    /// release those.
+    ///
+    /// <para>The default is twice <see cref="TransactionOutcomeRetentionTtl"/>: enough margin that the ordinary
+    /// acknowledgement-driven release always gets to a live receipt first, so this only ever collects genuinely
+    /// orphaned ones, and no more — this value is also the worst-case retention floor of the receipt store (a node
+    /// committing at a steady rate retains roughly that rate times this window), so raising it costs memory
+    /// proportionally. The margin absorbs the fact that age is measured from the receipt's transaction id, which
+    /// overstates the true age by up to one transaction's lifetime. A value &lt;= 0 disables the backstop, leaving
+    /// orphans retained for the node's lifetime.</para>
+    /// </summary>
+    public TimeSpan CompletionReceiptRetentionTtl { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// Maximum partitions the prepared-intent recovery sweep drives in one collection pass, per node. Bounds the
     /// cross-partition fan-out (and the concurrent recovery lookups it issues) so a restart backlog spread across
     /// many partitions is drained across successive passes instead of one tick fanning out to every partition at

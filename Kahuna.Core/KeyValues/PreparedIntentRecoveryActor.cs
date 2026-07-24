@@ -55,5 +55,17 @@ internal sealed class PreparedIntentRecoveryActor : IActor<PreparedIntentRecover
         {
             logger.LogError(ex, "Failed to collect durable transaction records");
         }
+
+        // Then the receipt age backstop, which runs second so the acknowledgement-driven release above always gets
+        // first refusal on a receipt whose record still exists. What it collects is the remainder: receipts a log
+        // replay re-created for transactions whose record was already reclaimed, which nothing else would remove.
+        try
+        {
+            manager.CollectExpiredCompletionReceipts();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to collect expired completion receipts");
+        }
     }
 }

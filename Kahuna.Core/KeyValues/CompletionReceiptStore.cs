@@ -25,8 +25,9 @@ namespace Kahuna.Server.KeyValues;
 /// </para>
 /// <para>
 /// Receipts are not evicted by a size bound: dropping a receipt still needed for recovery would
-/// reintroduce the ambiguity. They are removed only by <see cref="Forget"/>, which a durable
-/// coordinator acknowledgement drives once the decision is safely recorded elsewhere.
+/// reintroduce the ambiguity. They are removed either by <see cref="Forget"/>, which a durable
+/// coordinator acknowledgement drives once the decision is safely recorded elsewhere, or by the age
+/// backstop <see cref="CollectExpired"/> once no re-delivery can still arrive.
 /// </para>
 /// </summary>
 internal sealed class CompletionReceiptStore
@@ -125,6 +126,46 @@ internal sealed class CompletionReceiptStore
     /// </summary>
     public bool Forget(HLCTimestamp transactionId, string key)
         => receipts.TryRemove(new ReceiptKey(transactionId, key), out _);
+
+    /// <summary>
+    /// Drops every receipt older than <paramref name="ttl"/> and returns how many were removed. This is the age
+    /// backstop that bounds the store independently of the coordinator-driven <see cref="Forget"/> path.
+    /// <para>
+    /// A receipt can outlive the transaction whose completion it proves: every replay of a committed persistent
+    /// mutation re-records one — on a follower applying the log, and on a cold restart or partition leader change
+    /// replaying the retained log — including for transactions whose canonical record was already reclaimed. Those
+    /// receipts have no owner left to release them, so without an age bound they accumulate for the node's
+    /// lifetime. Sweeping by age reclaims them, and needs no replication: a receipt is node-local state that every
+    /// replica derives from the same log, so each node ages out its own copy and they converge without a log entry.
+    /// </para>
+    /// <para>
+    /// Age is measured from the receipt's transaction id — the HLC minted when the transaction began, which is
+    /// necessarily earlier than the commit the receipt attests to. The measured age therefore <i>overstates</i> the
+    /// true age by at most one transaction's lifetime (itself bounded by the decision deadline), so
+    /// <paramref name="ttl"/> must exceed the transaction-record retention window by a comfortable margin for this
+    /// to stay a backstop rather than preempt the ordinary release.
+    /// </para>
+    /// </summary>
+    public int CollectExpired(HLCTimestamp now, TimeSpan ttl)
+    {
+        if (ttl <= TimeSpan.Zero || now == HLCTimestamp.Zero)
+            return 0;
+
+        int removed = 0;
+
+        foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
+        {
+            if (now - receipt.Key.TransactionId < ttl)
+                continue;
+
+            // Remove only if the value is still the one just observed, so a receipt re-recorded concurrently
+            // under the same key is left for the next pass rather than dropped on stale information.
+            if (receipts.TryRemove(receipt))
+                removed++;
+        }
+
+        return removed;
+    }
 
     /// <summary>Current number of retained receipts. Diagnostic only.</summary>
     public int Count => receipts.Count;

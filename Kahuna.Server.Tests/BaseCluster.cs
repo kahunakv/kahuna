@@ -715,53 +715,55 @@ public abstract class BaseCluster
                 await Task.Delay(50, cancellationToken: assemblyCts.Token);
             }
         }
-
-        await WaitForStableLeadership(partitions, raft1, assemblyCts.Token);
     }
 
     /// <summary>
-    /// Gives the freshly assembled cluster a moment to stop re-electing before the test starts using it. The first
-    /// sighting of a leader is not the end of the election: each node's timer fires independently, so a just-elected
-    /// term is regularly superseded a few hundred milliseconds later, and a test that starts on that first sighting
-    /// can have its work land on a node that then stops being the leader — silently discarding non-replicated actor
-    /// state (staged MVCC entries, write intents, ephemeral values) and surfacing as an unrelated-looking Errored or
-    /// DoesNotExist.
+    /// Runs a scenario whose assertions depend on state that exists only in the partition's current leader —
+    /// ephemeral values, staged MVCC entries and write intents are held in the leader's actor and are not
+    /// replicated — and retries it when the leader map changed while it ran. A leader change legitimately discards
+    /// that state, so the scenario would be asserting on something the engine never promised to keep; on a loaded
+    /// runner a single delayed heartbeat is enough to re-open an election, which is why these scenarios fail there
+    /// and not on an idle machine.
     ///
-    /// Best-effort by design: the leader balancer keeps moving leadership on purpose, so a cluster is not guaranteed
-    /// to ever present an unchanging leader map. Waiting for one would hang assembly rather than stabilise it, so
-    /// this gives up on its own short budget and lets the test proceed exactly as it did before.
+    /// Strictness is preserved: an assertion that fails while leadership held is rethrown immediately, so this can
+    /// only absorb the leadership-change case and never a wrong value. Each attempt re-runs
+    /// <paramref name="scenario"/> from the top, so the scenario must allocate its own keys.
     /// </summary>
-    private static async Task WaitForStableLeadership(int partitions, IRaft raft, CancellationToken cancellationToken)
+    protected static async Task RunUnderStableLeadership(IRaft raft, int partitions, Func<Task> scenario, int maxAttempts = 3)
     {
-        const int requiredStableSamples = 2;
-        int sampleIntervalMs = (int)(100 * TimingScale);
-        long giveUpAt = Environment.TickCount64 + (long)(3_000 * TimingScale);
+        CancellationToken ct = TestContext.Current.CancellationToken;
 
-        string?[] observed = new string?[partitions + 1];
-        int stableSamples = 0;
-
-        while (stableSamples < requiredStableSamples && Environment.TickCount64 < giveUpAt)
+        for (int attempt = 1; ; attempt++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            string[] before = await LeaderMap(raft, partitions, ct);
 
-            bool unchanged = true;
-
-            for (int i = 0; i <= partitions; i++)
+            try
             {
-                string leader = await raft.WaitForLeader(i, cancellationToken);
-
-                if (observed[i] != leader)
-                {
-                    observed[i] = leader;
-                    unchanged = false;
-                }
+                await scenario();
+                return;
             }
+            catch (Xunit.Sdk.XunitException)
+            {
+                if (attempt >= maxAttempts)
+                    throw;
 
-            stableSamples = unchanged ? stableSamples + 1 : 0;
+                string[] after = await LeaderMap(raft, partitions, ct);
 
-            if (stableSamples < requiredStableSamples)
-                await Task.Delay(sampleIntervalMs, cancellationToken);
+                // Leadership held throughout: the assertion failed on its own merits.
+                if (before.SequenceEqual(after))
+                    throw;
+            }
         }
+    }
+
+    private static async Task<string[]> LeaderMap(IRaft raft, int partitions, CancellationToken cancellationToken)
+    {
+        string[] leaders = new string[partitions + 1];
+
+        for (int i = 0; i <= partitions; i++)
+            leaders[i] = await raft.WaitForLeader(i, cancellationToken);
+
+        return leaders;
     }
 
     /// <summary>

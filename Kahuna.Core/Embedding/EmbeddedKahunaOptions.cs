@@ -109,6 +109,13 @@ public sealed class EmbeddedKahunaOptions
 
     public TimeSpan TransactionOutcomeRetentionTtl { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Age after which an orphaned completion receipt — one whose transaction record was already reclaimed, so no
+    /// acknowledgement will ever release it — is dropped. Bounds the receipt store independently of the record
+    /// sweep; twice <see cref="TransactionOutcomeRetentionTtl"/> so it stays a backstop.
+    /// </summary>
+    public TimeSpan CompletionReceiptRetentionTtl { get; set; } = TimeSpan.FromMinutes(10);
+
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
     /// <summary>

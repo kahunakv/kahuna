@@ -81,9 +81,22 @@ internal static class DurableTransactionMetrics
             "kahuna.durable_tx.admission_rejections",
             description: "Durable transactions refused admission at the outstanding-decision cap.");
 
+    /// <summary>
+    /// Completion receipts dropped by the age backstop rather than by a coordinator acknowledgement. These are
+    /// receipts no surviving transaction record owns — re-recorded by a log replay after their record was already
+    /// reclaimed — so a sustained non-zero rate is expected after restarts and leader changes, and is the signal
+    /// that the backstop, not the ordinary release path, is what keeps the store bounded.
+    /// </summary>
+    internal static readonly Counter<long> GcReceiptsExpired =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.gc_receipts_expired",
+            description: "Completion receipts dropped by the age backstop with no owning transaction record.");
+
     internal static void RecordsReclaimed(int count) => GcRecordsReclaimed.Add(count);
 
     internal static void ReceiptsReleased(int count) => GcReceiptsReleased.Add(count);
+
+    internal static void ReceiptsExpired(int count) => GcReceiptsExpired.Add(count);
 
     /// <summary>
     /// Registers resident-state observable gauges — canonical record count, completion-receipt count, resident

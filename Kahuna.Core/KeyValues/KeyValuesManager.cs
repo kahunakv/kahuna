@@ -143,6 +143,9 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly int durableRecordGcMaxPerPass;
 
+    // Age backstop for the receipt store, applied independently of the record-driven release above.
+    private readonly TimeSpan completionReceiptRetentionTtl;
+
     private readonly int durableRecoveryMaxPartitionsPerPass;
 
     // Instance-owned meter for the durable-2PC resident-state gauges; disposed on teardown so a disposed node's
@@ -537,6 +540,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         durableRecordRetentionTtl = configuration.TransactionOutcomeRetentionTtl;
         durableRecordGcMaxPerPass = configuration.DurableRecordGcMaxPerPass;
+        completionReceiptRetentionTtl = configuration.CompletionReceiptRetentionTtl;
         durableRecoveryMaxPartitionsPerPass = configuration.DurableRecoveryMaxPartitionsPerPass;
 
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
@@ -4991,6 +4995,38 @@ internal sealed class KeyValuesManager : IDisposable
                 logger.LogError(ex, "Durable transaction-record GC purge failed for partition {Partition}", partitionId);
             }
         }
+    }
+
+    /// <summary>
+    /// Age backstop for the node-local completion-receipt store, run after the record sweep above and independent
+    /// of it. <see cref="CollectDurableTransactionRecords"/> can only release a receipt whose transaction record
+    /// still exists, but a receipt outlives its record whenever a committed persistent mutation is replayed after
+    /// that record was reclaimed — which every cold restart and partition leader change does, replaying the whole
+    /// retained log. Those receipts are orphans no acknowledgement will ever release, so this drops them once they
+    /// are older than <see cref="KahunaConfiguration.CompletionReceiptRetentionTtl"/> and no re-delivered commit
+    /// can still need them to answer <c>Committed</c>.
+    ///
+    /// <para>Purely node-local: receipts are derived state every replica rebuilds from its own log, so unlike the
+    /// acknowledgement-driven release there is nothing to replicate — each node ages out its own copy. The sweep
+    /// is in-memory only and needs no per-pass cap.</para>
+    /// </summary>
+    internal void CollectExpiredCompletionReceipts()
+    {
+        TimeSpan retentionTtl = completionReceiptRetentionTtl;
+        if (retentionTtl <= TimeSpan.Zero)
+            return; // backstop disabled
+
+        if (completionReceiptStore.Count == 0)
+            return;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        int expired = completionReceiptStore.CollectExpired(now, retentionTtl);
+        if (expired == 0)
+            return;
+
+        DurableTransactionMetrics.ReceiptsExpired(expired);
+        logger.LogDebug("Dropped {Count} completion receipts past the retention backstop", expired);
     }
 
     /// <summary>
