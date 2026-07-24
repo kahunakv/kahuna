@@ -166,6 +166,9 @@ public sealed class TestTransactionRecordGc
         Assert.Equal(KeyValueResponseType.Set, result.Type);
 
         await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count > 0);
+        // Wait for the receipt too, not just the record: it is written on the committed value's apply, which lands
+        // after the record. Capturing the count before then would compare against a not-yet-written receipt.
+        await WaitUntil(() => kahuna.CompletionReceiptStore.Count > 0);
         int recordsBefore = kahuna.DurableTransactionRecordStore.Count;
         int receiptsBefore = kahuna.CompletionReceiptStore.Count;
 
