@@ -124,6 +124,50 @@ internal static class KeyValueRequestPool
         return request;
     }
 
+    /// <summary>
+    /// Rents a <see cref="KeyValueRequest"/> pre-populated for an <c>InvalidateOrApply</c> message.
+    /// Mirrors <see cref="KeyValueRequest.ForInvalidateOrApply"/> but draws the shell from the pool; the
+    /// payload record is still allocated fresh. Only safe to <see cref="Return"/> once the actor has finished
+    /// consuming the request (i.e. after an awaited <c>Ask</c>), never on a fire-and-forget <c>Send</c>.
+    /// </summary>
+    public static KeyValueRequest RentInvalidateOrApply(
+        string key,
+        long revision,
+        byte[]? value,
+        HLCTimestamp expires,
+        HLCTimestamp lastUsed,
+        HLCTimestamp lastModified,
+        KeyValueState state,
+        bool forceResident,
+        HLCTimestamp transactionId,
+        int partitionId,
+        bool noRevision,
+        bool isRollback)
+    {
+        KeyValueRequest request = Rent(
+            KeyValueRequestType.InvalidateOrApply,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            key,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            null
+        );
+
+        request.InvalidateOrApplyData = new(
+            revision, value, expires, lastUsed, lastModified, state,
+            forceResident, transactionId, partitionId, noRevision, isRollback);
+
+        return request;
+    }
+
     public static void Return(KeyValueRequest obj)
     {
         obj.Clear();

@@ -112,17 +112,23 @@ internal sealed class KeyValueReplicator
     /// </summary>
     public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)
     {
+        KeyValueRequest request = KeyValueRequestPool.RentInvalidateOrApply(
+            intent.Key, intent.Revision, intent.Value,
+            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
+            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: false);
+
         try
         {
-            KeyValueResponse? response = await persistentRouter.Ask(KeyValueRequest.ForInvalidateOrApply(
-                intent.Key, intent.Revision, intent.Value,
-                intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
-                forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision)).ConfigureAwait(false);
+            KeyValueResponse? response = await persistentRouter.Ask(request).ConfigureAwait(false);
             return response?.Type == KeyValueResponseType.Committed;
         }
         catch
         {
             return false;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
         }
     }
 
@@ -134,17 +140,23 @@ internal sealed class KeyValueReplicator
     /// </summary>
     public async Task<bool> ApplyDurableRollback(int partitionId, PreparedIntent intent)
     {
+        KeyValueRequest request = KeyValueRequestPool.RentInvalidateOrApply(
+            intent.Key, intent.Revision, intent.Value,
+            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
+            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: true);
+
         try
         {
-            KeyValueResponse? response = await persistentRouter.Ask(KeyValueRequest.ForInvalidateOrApply(
-                intent.Key, intent.Revision, intent.Value,
-                intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
-                forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: true)).ConfigureAwait(false);
+            KeyValueResponse? response = await persistentRouter.Ask(request).ConfigureAwait(false);
             return response?.Type == KeyValueResponseType.RolledBack;
         }
         catch
         {
             return false;
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
         }
     }
 

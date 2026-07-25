@@ -220,15 +220,47 @@ internal sealed class CompletionReceiptStore
 
         try
         {
-            GrpcImportCompletionReceiptsRequest message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(log.LogData);
-            foreach (GrpcCompletionReceiptEntry entry in message.Receipts)
+            // Stream-decode the batch instead of materializing the generated message tree: on a busy durable
+            // workload this apply runs on every replica for every receipt record/forget, and ParseFrom would
+            // allocate the container, the repeated-field array, and one GrpcCompletionReceiptEntry per receipt
+            // only to read six scalars and throw them away. Reading fields straight off a CodedInputStream keeps
+            // the strings that become dictionary keys and drops the rest of the garbage.
+            //
+            // Field numbers are pinned to GrpcImportCompletionReceiptsRequest / GrpcCompletionReceiptEntry in
+            // keyvalues.proto; if that message changes, this decoder must change with it.
+            CodedInputStream input = new(log.LogData);
+
+            bool forget = false;
+            List<PendingReceipt> pending = new();
+
+            uint tag;
+            while ((tag = input.ReadTag()) != 0)
             {
-                HLCTimestamp transactionId = new(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter);
-                if (message.Forget)
-                    Forget(transactionId, entry.Key);
-                else
-                    Record(transactionId, entry.Key, entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null, (KeyValueDurability)entry.Durability);
+                switch (WireFormat.GetTagFieldNumber(tag))
+                {
+                    case 1: // repeated GrpcCompletionReceiptEntry Receipts
+                        pending.Add(ParseReceiptEntry(input));
+                        break;
+                    case 2: // int32 DestinationPartitionId — routing already resolved; irrelevant on apply
+                        input.ReadInt32();
+                        break;
+                    case 3: // bool Forget — record vs. remove; wire order is not guaranteed, hence the buffer
+                        forget = input.ReadBool();
+                        break;
+                    default:
+                        input.SkipLastField();
+                        break;
+                }
             }
+
+            foreach (PendingReceipt receipt in pending)
+            {
+                if (forget)
+                    Forget(receipt.TransactionId, receipt.Key);
+                else
+                    Record(receipt.TransactionId, receipt.Key, receipt.RecordAnchorKey, receipt.Durability);
+            }
+
             return true;
         }
         catch (Exception ex)
@@ -236,6 +268,39 @@ internal sealed class CompletionReceiptStore
             logger?.LogError(ex, "Failed to apply completion-receipt batch on partition {Partition}", partitionId);
             return false;
         }
+    }
+
+    // Reads one GrpcCompletionReceiptEntry off the stream into a value tuple, without allocating the generated
+    // message object. An absent RecordAnchorKey (field 5) stays null, matching HasRecordAnchorKey == false.
+    private static PendingReceipt ParseReceiptEntry(CodedInputStream input)
+    {
+        // The entry is a length-delimited sub-message; bound the read by its byte length rather than the
+        // internal PushLimit helper (not part of the public surface in this protobuf version).
+        long end = input.Position + input.ReadLength();
+
+        int node = 0;
+        long physical = 0;
+        uint counter = 0;
+        string key = string.Empty;
+        string? recordAnchorKey = null;
+        int durability = 0;
+
+        while (input.Position < end)
+        {
+            uint tag = input.ReadTag();
+            switch (WireFormat.GetTagFieldNumber(tag))
+            {
+                case 1: node = input.ReadInt32(); break;            // TransactionIdNode
+                case 2: physical = input.ReadInt64(); break;        // TransactionIdPhysical
+                case 3: counter = input.ReadUInt32(); break;        // TransactionIdCounter
+                case 4: key = input.ReadString(); break;            // Key
+                case 5: recordAnchorKey = input.ReadString(); break; // RecordAnchorKey (optional)
+                case 6: durability = input.ReadInt32(); break;      // Durability
+                default: input.SkipLastField(); break;
+            }
+        }
+
+        return new PendingReceipt(new HLCTimestamp(node, physical, counter), key, recordAnchorKey, (KeyValueDurability)durability);
     }
 
     /// <summary>
@@ -382,6 +447,14 @@ internal sealed class CompletionReceiptStore
     private readonly record struct ReceiptKey(HLCTimestamp TransactionId, string Key);
 
     private readonly record struct CompletionReceipt(string? RecordAnchorKey, KeyValueDurability Durability);
+
+    // A receipt decoded from a replicated batch, buffered until the batch's Forget flag is known so the
+    // record-vs-remove action can be applied regardless of the flag's wire position.
+    private readonly record struct PendingReceipt(
+        HLCTimestamp TransactionId,
+        string Key,
+        string? RecordAnchorKey,
+        KeyValueDurability Durability);
 }
 
 /// <summary>A transferable completion receipt: the full tuple used when routing receipts across split/merge.</summary>

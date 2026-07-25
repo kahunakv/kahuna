@@ -1,6 +1,7 @@
 using System.Text;
 using Kahuna;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -177,6 +178,89 @@ public sealed class TestTransactionRecordGc
         // Within the retention window nothing is reclaimed — a live receipt must still answer a re-delivered commit.
         Assert.Equal(recordsBefore, kahuna.DurableTransactionRecordStore.Count);
         Assert.Equal(receiptsBefore, kahuna.CompletionReceiptStore.Count);
+    }
+
+    [Fact]
+    public async Task Sweep_WithOnePartitionForgetFailing_RetainsOnlyDependentRecords()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 4,
+            TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1)
+        }, loggerFactory);
+        await node.StartAsync(ct);
+
+        ILogger<IKahuna> logger = loggerFactory.CreateLogger<IKahuna>();
+        (string keyHealthy, string keyFaulted) = FindKeysOnDifferentPartitions(node, logger);
+        int faultedPartition = PartitionOf(node, logger, keyFaulted);
+
+        await node.WaitForLeaderForKeyAsync(keyHealthy, ct);
+        await node.WaitForLeaderForKeyAsync(keyFaulted, ct);
+
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        // Two independent durable transactions, one persistent key each, on two different partitions.
+        foreach (string key in new[] { keyHealthy, keyFaulted })
+        {
+            KeyValueTransactionResult r = await node.Kahuna.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes($"BEGIN SET `{key}` 'v' COMMIT END"), null, null);
+            Assert.Equal(KeyValueResponseType.Set, r.Type);
+        }
+
+        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == 2);
+        await WaitUntil(() => kahuna.CompletionReceiptStore.Count == 2);
+
+        // The forget on the faulted key's partition is not durable this pass, so that record must be held back
+        // while the other partition's record purges normally.
+        kahuna.KeyValues.ReplicateReceiptForgetFault = pid => pid == faultedPartition;
+
+        await Task.Delay(50, ct);
+        await kahuna.KeyValues.CollectDurableTransactionRecords(ct);
+
+        // Exactly the faulted transaction survives: its record retained and its receipt still held.
+        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == 1);
+        await WaitUntil(() => kahuna.CompletionReceiptStore.Count == 1);
+
+        IReadOnlyCollection<CompletionReceiptRecord> remaining = kahuna.CompletionReceiptStore.SnapshotRange(null, null);
+        CompletionReceiptRecord survivor = Assert.Single(remaining);
+        Assert.Equal(keyFaulted, survivor.Key);
+
+        // Clearing the fault lets a subsequent pass reclaim the held-back record and release its receipt.
+        kahuna.KeyValues.ReplicateReceiptForgetFault = null;
+        await kahuna.KeyValues.CollectDurableTransactionRecords(ct);
+
+        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == 0);
+        await WaitUntil(() => kahuna.CompletionReceiptStore.Count == 0);
+    }
+
+    private static (string keyA, string keyB) FindKeysOnDifferentPartitions(EmbeddedKahunaNode node, ILogger<IKahuna> logger)
+    {
+        const string first = "gcfault-0/k";
+        int firstPartition = PartitionOf(node, logger, first);
+
+        for (int i = 1; i < 256; i++)
+        {
+            string candidate = $"gcfault-{i}/k";
+            if (PartitionOf(node, logger, candidate) != firstPartition)
+                return (first, candidate);
+        }
+
+        throw new InvalidOperationException("Could not find two keys routing to different partitions");
+    }
+
+    private static int PartitionOf(EmbeddedKahunaNode node, ILogger<IKahuna> logger, string key)
+    {
+        KeySpaceRegistry registry = new();
+        DataPartitionRouter router = new(node.Raft);
+        RangeMap rangeMap = new RangeMapStore(node.Raft, null, null, logger).Current;
+        return RangeRouting.Locate(registry, rangeMap, router, key).PartitionId;
     }
 
     private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 5000)

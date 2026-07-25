@@ -77,6 +77,7 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
 
     internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> EphemeralInstances => ephemeralInstances;
+
     internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> PersistentInstances => persistentInstances;
 
     private readonly KeyValueRestorer restorer;
@@ -231,6 +232,7 @@ internal sealed class KeyValuesManager : IDisposable
             bool ok = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
             if (ok && logType == ReplicationTypes.TransactionRecord)
                 transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = logType, LogData = data });
+
             return ok;
         }
 
@@ -240,6 +242,7 @@ internal sealed class KeyValuesManager : IDisposable
     private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         Writes.DurableProposalSubmission submission = new(
             partitionId,
             [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0)],
@@ -247,7 +250,8 @@ internal sealed class KeyValuesManager : IDisposable
             admissionClass,
             ApplyDurableEntriesOnCommit,
             fenceKey,
-            fenceGeneration);
+            fenceGeneration
+        );
 
         if (!writeAggregator.TryEnqueue(submission))
             return false;
@@ -551,6 +555,7 @@ internal sealed class KeyValuesManager : IDisposable
         durableRecoveryMaxPartitionsPerPass = configuration.DurableRecoveryMaxPartitionsPerPass;
 
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
+
         writeAggregator = new Writes.PartitionWriteAggregator(
             actorSystem,
             writeBatchExecutorDecorator?.Invoke(realBatchExecutor) ?? realBatchExecutor,
@@ -574,7 +579,9 @@ internal sealed class KeyValuesManager : IDisposable
                 LaneCount = Math.Max(1, configuration.KeyValueWorkers)
             },
             new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore),
-            logger);
+            logger
+        );
+
         ephemeralKeyValuesRouter = GetEphemeralRouter(configuration);
         persistentKeyValuesRouter = GetConsistentRouter(configuration);
 
@@ -3668,6 +3675,7 @@ internal sealed class KeyValuesManager : IDisposable
         try
         {
             bool attemptedRoutedResolve = false;
+
             foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
@@ -3741,6 +3749,7 @@ internal sealed class KeyValuesManager : IDisposable
         try
         {
             bool attemptedRoutedResolve = false;
+            
             foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
             {
                 KeyValueResponse? response;
@@ -4961,10 +4970,11 @@ internal sealed class KeyValuesManager : IDisposable
 
         int cap = durableRecordGcMaxPerPass;
 
-        // Stage 1 — select. The records eligible this pass, each paired with its anchor partition and the distinct
-        // participant partitions whose receipt-forget must succeed before it may be purged, plus the pass-wide
-        // receipt batch those partitions forget in stage 2.
-        List<(TransactionRecord Record, int AnchorPartition, List<int> ReceiptPartitions)> eligible = [];
+        // Stage 1 — select. The records eligible this pass, each paired with its anchor partition, plus the pass-wide
+        // receipt batch (keyed by the participant partition that must forget each) those partitions forget in stage 2.
+        // A record's own participant partitions are not stored per-record: they are needed only to hold a record back
+        // when a forget fails (rare), and that dependency is reconstructed once in stage 3 from the receipt batch.
+        List<(TransactionRecord Record, int AnchorPartition)> eligible = [];
         Dictionary<int, List<CompletionReceiptRecord>> receiptsByPartition = [];
 
         // Anchor leadership is asked once per partition rather than once per record: a backlog is typically many
@@ -4996,7 +5006,8 @@ internal sealed class KeyValuesManager : IDisposable
             if (!leadsAnchor)
                 continue; // only the anchor leader drives this record's GC
 
-            eligible.Add((record, anchorPartition, CollectCompletionReceiptsForRecord(record, receiptsByPartition)));
+            AppendCompletionReceiptsForRecord(record, receiptsByPartition);
+            eligible.Add((record, anchorPartition));
         }
 
         if (eligible.Count == 0)
@@ -5044,11 +5055,24 @@ internal sealed class KeyValuesManager : IDisposable
         // Stage 3 — purge, grouped by anchor partition. A record is purged only once every partition holding one of
         // its receipts forgot it durably, so a partial failure narrows what this pass reclaims instead of purging a
         // record while a proof of it still exists somewhere.
+        //
+        // The set of transactions blocked by a failed forget is reconstructed here, once, from the receipt batch —
+        // rather than storing each record's participant partitions in stage 1 (an allocation per record, on the hot
+        // common path where nothing fails). A receipt carries only its transaction id, but within a single pass a
+        // terminal record's transaction id identifies it uniquely, so keying the block set on transaction id is
+        // exact. When no forget failed (the common case) the block set is empty and every eligible record purges.
+        HashSet<HLCTimestamp> blockedTransactions = [];
+        foreach (int partitionId in unreleasedPartitions)
+        {
+            foreach (CompletionReceiptRecord receipt in receiptsByPartition[partitionId])
+                blockedTransactions.Add(receipt.TransactionId);
+        }
+
         Dictionary<int, List<PurgeTransactionCommand>> purgesByAnchor = [];
 
-        foreach ((TransactionRecord record, int anchorPartition, List<int> receiptPartitions) in eligible)
+        foreach ((TransactionRecord record, int anchorPartition) in eligible)
         {
-            if (HasUnreleasedReceipts(receiptPartitions, unreleasedPartitions))
+            if (blockedTransactions.Contains(record.TransactionId))
                 continue;
 
             if (!purgesByAnchor.TryGetValue(anchorPartition, out List<PurgeTransactionCommand>? purges))
@@ -5109,17 +5133,16 @@ internal sealed class KeyValuesManager : IDisposable
 
     /// <summary>
     /// Appends a record's persistent participants' completion receipts into <paramref name="receiptsByPartition"/>,
-    /// the pass-wide batch keyed by the partition that must forget each, and returns the distinct partitions this
-    /// record's purge therefore depends on. Only persistent participants ever recorded a receipt; a manifestless
-    /// tombstone or an ephemeral-only transaction wrote none and so returns an empty list — nothing to release,
-    /// immediately purgeable.
+    /// the pass-wide batch keyed by the partition that must forget each. Only persistent participants ever recorded
+    /// a receipt; a manifestless tombstone or an ephemeral-only transaction wrote none and contributes nothing — it
+    /// has no proof to release and is immediately purgeable. The record's own participant partitions are not
+    /// returned: they are needed only to hold a record back on a failed forget (rare), which stage 3 reconstructs
+    /// from this batch rather than paying a per-record allocation on every pass.
     /// </summary>
-    private List<int> CollectCompletionReceiptsForRecord(
+    private void AppendCompletionReceiptsForRecord(
         TransactionRecord record,
         Dictionary<int, List<CompletionReceiptRecord>> receiptsByPartition)
     {
-        List<int> partitions = [];
-
         foreach (TransactionParticipantRef participant in record.Participants)
         {
             if (participant.Durability != KeyValueDurability.Persistent)
@@ -5130,31 +5153,7 @@ internal sealed class KeyValuesManager : IDisposable
             if (!receiptsByPartition.TryGetValue(partitionId, out List<CompletionReceiptRecord>? receipts))
                 receiptsByPartition[partitionId] = receipts = [];
             receipts.Add(new CompletionReceiptRecord(record.TransactionId, participant.Key, record.RecordAnchorKey, KeyValueDurability.Persistent));
-
-            // A linear scan, not a set: a transaction's participants span a handful of partitions at most.
-            if (!partitions.Contains(partitionId))
-                partitions.Add(partitionId);
         }
-
-        return partitions;
-    }
-
-    /// <summary>
-    /// True when any partition holding one of this record's receipts failed to forget them durably, so the record
-    /// must be retained for a later pass rather than purged while a proof of it still exists.
-    /// </summary>
-    private static bool HasUnreleasedReceipts(List<int> receiptPartitions, HashSet<int> unreleasedPartitions)
-    {
-        if (unreleasedPartitions.Count == 0)
-            return false;
-
-        foreach (int partitionId in receiptPartitions)
-        {
-            if (unreleasedPartitions.Contains(partitionId))
-                return true;
-        }
-
-        return false;
     }
 
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(

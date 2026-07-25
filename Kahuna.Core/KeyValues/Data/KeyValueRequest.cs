@@ -117,7 +117,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// Structured payload for <c>InvalidateOrApply</c> messages. Non-null only when
     /// <see cref="Type"/> is <see cref="KeyValueRequestType.InvalidateOrApply"/>.
     /// </summary>
-    internal InvalidateOrApplyData? InvalidateOrApplyData { get; private set; }
+    internal InvalidateOrApplyData? InvalidateOrApplyData { get; set; }
 
     /// <summary>
     /// Constructs an <c>InvalidateOrApply</c> message with named fields carried in
@@ -143,8 +143,11 @@ public sealed class KeyValueRequest : IConsistentHashable
             KeyValueDurability.Persistent,
             0,
             0,
-            null);
+            null
+        );
+
         req.InvalidateOrApplyData = new(revision, value, expires, lastUsed, lastModified, state, forceResident, transactionId, partitionId, noRevision, isRollback);
+        
         return req;
     }
 
