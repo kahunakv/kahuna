@@ -39,6 +39,8 @@ internal readonly struct GrpcServerBatcherResponse
 
     public GrpcServerBatcherResponse(GrpcTryCheckWriteIntentResponse tryCheckWriteIntent) => payload = tryCheckWriteIntent;
 
+    public GrpcServerBatcherResponse(GrpcTryCheckManyWriteIntentsResponse tryCheckManyWriteIntents) => payload = tryCheckManyWriteIntents;
+
     public GrpcServerBatcherResponse(GrpcGetByBucketResponse getByBucket) => payload = getByBucket;
 
     public GrpcServerBatcherResponse(GrpcGetByRangeResponse getByRange) => payload = getByRange;
@@ -139,6 +141,8 @@ internal readonly struct GrpcServerBatcherResponse
     public GrpcTryExistsManyValuesResponse? TryExistsManyValues => payload as GrpcTryExistsManyValuesResponse;
 
     public GrpcTryCheckWriteIntentResponse? TryCheckWriteIntent => payload as GrpcTryCheckWriteIntentResponse;
+
+    public GrpcTryCheckManyWriteIntentsResponse? TryCheckManyWriteIntents => payload as GrpcTryCheckManyWriteIntentsResponse;
 
     public GrpcGetByBucketResponse? GetByBucket => payload as GrpcGetByBucketResponse;
 

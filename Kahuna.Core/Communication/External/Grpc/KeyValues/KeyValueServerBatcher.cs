@@ -146,6 +146,14 @@ internal sealed class KeyValueServerBatcher
                     }
                     break;
 
+                    case GrpcServerBatchType.ServerTryCheckManyWriteIntents:
+                    {
+                        GrpcTryCheckManyWriteIntentsRequest? checkManyWriteIntentsRequest = request.TryCheckManyWriteIntents;
+
+                        Track(TryCheckManyWriteIntentsServerDelayed(semaphore, request.RequestId, checkManyWriteIntentsRequest, responseStream, context));
+                    }
+                    break;
+
                     case GrpcServerBatchType.ServerTryExecuteTransactionScript:
                     {
                         GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
@@ -634,6 +642,27 @@ internal sealed class KeyValueServerBatcher
             Type = GrpcServerBatchType.ServerTryCheckWriteIntent,
             RequestId = requestId,
             TryCheckWriteIntent = tryCheckWriteIntentResponse
+        };
+
+        await WriteResponseToStream(semaphore, responseStream, response, context);
+    }
+
+    private async Task TryCheckManyWriteIntentsServerDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcTryCheckManyWriteIntentsRequest checkManyWriteIntentsRequest,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context
+    )
+    {
+        GrpcTryCheckManyWriteIntentsResponse tryCheckManyWriteIntentsResponse =
+            await service.TryCheckManyWriteIntentsInternal(checkManyWriteIntentsRequest, context);
+
+        GrpcBatchServerKeyValueResponse response = new()
+        {
+            Type = GrpcServerBatchType.ServerTryCheckManyWriteIntents,
+            RequestId = requestId,
+            TryCheckManyWriteIntents = tryCheckManyWriteIntentsResponse
         };
 
         await WriteResponseToStream(semaphore, responseStream, response, context);

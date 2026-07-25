@@ -706,6 +706,44 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     }
 
     /// <summary>
+    /// Probes every key of one owning node for concurrent write intents in a single call, so validating a read
+    /// set costs one round trip per node rather than one per key.
+    /// </summary>
+    public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntents(
+        string node,
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcTryCheckManyWriteIntentsRequest request = new()
+        {
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C
+        };
+
+        foreach ((string key, KeyValueDurability durability) in keys)
+            request.Items.Add(new GrpcTryCheckManyWriteIntentsRequestItem
+            {
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            });
+
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcTryCheckManyWriteIntentsResponse remoteResponse = response.TryCheckManyWriteIntents!;
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(remoteResponse.Items.Count);
+
+        foreach (GrpcTryCheckManyWriteIntentsResponseItem item in remoteResponse.Items)
+            responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability));
+
+        return responses;
+    }
+
+    /// <summary>
     /// Redirects an "acquire-exclusive-lock" key/value operation to the specified node.
     /// </summary>
     /// <param name="node">The target node to initiate the lock coordination.</param>

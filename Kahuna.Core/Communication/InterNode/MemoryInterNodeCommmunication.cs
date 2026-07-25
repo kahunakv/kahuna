@@ -18,9 +18,24 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     private int getByRangeCallCount;
     private int beginOperationCallCount;
     private int completeOperationCallCount;
+    private int checkWriteIntentCallCount;
+    private int checkManyWriteIntentsCallCount;
+    private int existsManyCallCount;
 
     /// <summary>Number of <c>GetByRange</c> RPCs dispatched to a remote node. Used by multi-range fan-out tests.</summary>
     public int GetByRangeCallCount => Volatile.Read(ref getByRangeCallCount);
+
+    /// <summary>Number of single-key <c>TryCheckWriteIntent</c> RPCs dispatched to a remote node — one per read
+    /// key probed at commit time, so it measures the fan-out of the commit-time concurrent-writer probe.</summary>
+    public int CheckWriteIntentCallCount => Volatile.Read(ref checkWriteIntentCallCount);
+
+    /// <summary>Number of grouped <c>TryCheckManyWriteIntents</c> RPCs dispatched to a remote node — one per
+    /// remote node holding any of the probed keys, however many of its keys the probe covers.</summary>
+    public int CheckManyWriteIntentsCallCount => Volatile.Read(ref checkManyWriteIntentsCallCount);
+
+    /// <summary>Number of <c>TryExistsMany</c> RPCs dispatched to a remote node — one per remote node holding
+    /// any of the requested keys, so it measures what the same key set costs when grouped by owner.</summary>
+    public int ExistsManyCallCount => Volatile.Read(ref existsManyCallCount);
 
     /// <summary>Number of register-remote <c>BeginOperation</c> RPCs dispatched to a remote coordinator node.</summary>
     public int BeginOperationCallCount => Volatile.Read(ref beginOperationCallCount);
@@ -463,6 +478,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            Interlocked.Increment(ref existsManyCallCount);
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
                 await kahunaNode.TryExistsManyValues(transactionId, readTimestamp, keys);
 
@@ -495,7 +512,28 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref checkWriteIntentCallCount);
+
             return await kahunaNode.TryCheckWriteIntentValue(transactionId, key, durability);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntents(
+        string node,
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref checkManyWriteIntentsCallCount);
+
+            return await kahunaNode.TryCheckManyWriteIntentValues(transactionId, keys);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

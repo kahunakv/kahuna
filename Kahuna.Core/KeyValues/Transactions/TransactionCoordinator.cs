@@ -1718,27 +1718,48 @@ internal sealed class TransactionCoordinator : IDisposable
         if (toCheck.Count == 0)
             return true;
 
-        Task<KeyValueResponseType>[] tasks = new Task<KeyValueResponseType>[toCheck.Count];
+        List<(string key, KeyValueDurability durability)> probeKeys = new(toCheck.Count);
 
-        for (int i = 0; i < toCheck.Count; i++)
+        foreach (KeyValueTransactionReadKey readKey in toCheck)
+            probeKeys.Add((readKey.Key!, readKey.Durability));
+
+        // One probe per node owning part of the read set, rather than one per key: a read set spread over remote
+        // partitions otherwise costs a network round trip per key.
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
+            await manager.LocateAndTryCheckManyWriteIntents(context.TransactionId, probeKeys, cancellationToken);
+
+        Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(results.Count);
+
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
         {
-            KeyValueTransactionReadKey readKey = toCheck[i];
-            tasks[i] = manager.LocateAndTryCheckWriteIntent(
-                context.TransactionId,
-                readKey.Key!,
-                readKey.Durability,
-                cancellationToken
-            );
-        }
-
-        KeyValueResponseType[] results = await Task.WhenAll(tasks);
-
-        for (int i = 0; i < results.Length; i++)
-        {
-            if (results[i] != KeyValueResponseType.Aborted)
+            // Two results for one key can only differ if one of them found a conflict, and a conflict is the
+            // answer that matters: never let a second, cleaner answer overwrite it.
+            if (byKey.TryGetValue((key, durability), out KeyValueResponseType existing) && existing == KeyValueResponseType.Aborted)
                 continue;
 
-            string key = toCheck[i].Key!;
+            byKey[(key, durability)] = type;
+        }
+
+        foreach ((string key, KeyValueDurability durability) in probeKeys)
+        {
+            // A key that was probed but has no answer means the probe did not actually cover the read set. That
+            // is a broken contract rather than a transient outcome, and treating an unanswered key as "no
+            // conflict" would silently disable the write-skew guard, so it aborts like a detected conflict.
+            if (!byKey.TryGetValue((key, durability), out KeyValueResponseType type))
+            {
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.Aborted,
+                    Reason = $"Write intent probe returned no result for read key {key}"
+                };
+
+                logger.LogWriteSkewGuardAborted(context.TransactionId, key);
+
+                return false;
+            }
+
+            if (type != KeyValueResponseType.Aborted)
+                continue;
 
             context.Result = new()
             {

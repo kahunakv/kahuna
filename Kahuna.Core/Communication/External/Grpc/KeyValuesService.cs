@@ -662,6 +662,36 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
+    /// Probes a group of keys this node leads for concurrent write intents. The sender already grouped the keys
+    /// by owning node, so — as with the batched many-key reads — this serves them locally rather than routing
+    /// each one again.
+    /// </summary>
+    internal async Task<GrpcTryCheckManyWriteIntentsResponse> TryCheckManyWriteIntentsInternal(GrpcTryCheckManyWriteIntentsRequest request, ServerCallContext context)
+    {
+        List<(string key, KeyValueDurability durability)> keys = new(request.Items.Count);
+
+        foreach (GrpcTryCheckManyWriteIntentsRequestItem item in request.Items)
+            keys.Add((item.Key, (KeyValueDurability)item.Durability));
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
+            await keyValues.TryCheckManyWriteIntentValues(
+                new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+                keys);
+
+        GrpcTryCheckManyWriteIntentsResponse response = new() { ServedFrom = "" };
+
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
+            response.Items.Add(new GrpcTryCheckManyWriteIntentsResponseItem
+            {
+                Type = (GrpcKeyValueResponseType)type,
+                Key = key,
+                Durability = (GrpcKeyValueDurability)durability
+            });
+
+        return response;
+    }
+
+    /// <summary>
     /// Attempts to acquire an exclusive lock on a key-value resource.
     /// </summary>
     /// <param name="request">The request containing details about the lock acquisition operation.</param>

@@ -638,6 +638,108 @@ internal sealed class KeyValueLocator
     }
 
     /// <summary>
+    /// Probes several keys for concurrent write intents, grouping them by the node that leads each key's
+    /// partition so the whole set costs one call per owning node instead of one per key. Used at commit time by
+    /// optimistic transactions as a write-skew guard over the read set.
+    ///
+    /// Returns exactly one result per requested key, in no particular order — callers correlate by key and
+    /// durability. The per-key coverage is part of the contract: a caller must never have to treat a key it asked
+    /// about but did not hear back on as "no conflict", so every rejection path fills in the affected keys rather
+    /// than dropping them. A remote group that faults propagates its exception, exactly as a single-key probe
+    /// does, so a failed probe is never silently read as a pass.
+    ///
+    /// Only the routing is grouped. Keys the local node owns are still probed one actor request at a time
+    /// (see <see cref="KeyValuesManager.TryCheckManyWriteIntentValues"/>), which measurement showed is not the
+    /// cost worth removing — the round trip per remote key is.
+    /// </summary>
+    public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (keys.Count == 0)
+            return [];
+
+        if (!raft.Joined)
+            return BuildManyWriteIntentRejection(keys, KeyValueResponseType.MustRetry);
+
+        string localNode = raft.GetLocalEndpoint();
+        Dictionary<string, List<(string key, KeyValueDurability durability)>> probePlan = [];
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(keys.Count);
+
+        foreach ((string key, KeyValueDurability durability) item in keys)
+        {
+            // A malformed key is reported against that key alone; the rest of the set is still probed, so one
+            // bad entry cannot quietly cancel the write-skew guard for every other read dependency.
+            if (string.IsNullOrEmpty(item.key))
+            {
+                responses.Add((KeyValueResponseType.InvalidInput, item.key, item.durability));
+                continue;
+            }
+
+            int partitionId = RouteKey(item.key);
+            string leader = await raft.WaitForLeader(partitionId, cancellationToken);
+
+            if (probePlan.TryGetValue(leader, out List<(string key, KeyValueDurability durability)>? list))
+                list.Add(item);
+            else
+                probePlan[leader] = [item];
+        }
+
+        Lock lockSync = new();
+        List<Task> tasks = new(probePlan.Count);
+
+        foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in probePlan)
+            tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+
+        await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    private async Task TryCheckManyWriteIntentsOnNode(
+        HLCTimestamp transactionId,
+        string leader,
+        string localNode,
+        List<(string key, KeyValueDurability durability)> xkeys,
+        Lock lockSync,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        logger.LogCheckManyWriteIntentsRedirect(xkeys.Count, leader);
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> nodeResponses =
+            leader == localNode
+                ? await manager.TryCheckManyWriteIntentValues(transactionId, xkeys)
+                : await interNodeCommunication.TryCheckManyWriteIntents(leader, transactionId, xkeys, cancellationToken);
+
+        lock (lockSync)
+        {
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in nodeResponses)
+                responses.Add(item);
+        }
+    }
+
+    /// <summary>
+    /// Builds one result per requested key carrying the same rejection type, for the paths that never reach a
+    /// leader. Callers correlate results by key, so a rejection has to name every key it covers.
+    /// </summary>
+    private static List<(KeyValueResponseType type, string key, KeyValueDurability durability)> BuildManyWriteIntentRejection(
+        List<(string key, KeyValueDurability durability)> keys,
+        KeyValueResponseType type
+    )
+    {
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> rejected = new(keys.Count);
+
+        foreach ((string key, KeyValueDurability durability) in keys)
+            rejected.Add((type, key, durability));
+
+        return rejected;
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryAcquireExclusiveLock request.
     /// </summary>
     /// <param name="transactionId"></param>

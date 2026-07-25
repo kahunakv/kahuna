@@ -1972,6 +1972,20 @@ internal sealed class KeyValuesManager : IDisposable
     }
     
     /// <summary>
+    /// Probes a whole read set for concurrent write intents in one pass, grouped by the node owning each key.
+    /// Returns one result per requested key; see <see cref="KeyValueLocator.LocateAndTryCheckManyWriteIntents"/>
+    /// for the coverage contract callers rely on.
+    /// </summary>
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken);
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and checks whether a live write intent from another
     /// transaction exists. Used at commit time by optimistic transactions as a write-skew guard.
     /// </summary>
@@ -4079,6 +4093,31 @@ internal sealed class KeyValuesManager : IDisposable
             );
 
             return (type, item.key, item.durability, entry);
+        }
+    }
+
+    /// <summary>
+    /// Probes several locally owned keys for concurrent write intents, returning one result per requested key.
+    /// The keys are dispatched to their owning actors independently, as the many-key reads do: the grouping that
+    /// pays is by node, upstream in the locator, not by actor here.
+    /// </summary>
+    public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys
+    )
+    {
+        Task<(KeyValueResponseType, string, KeyValueDurability)>[] tasks = new Task<(KeyValueResponseType, string, KeyValueDurability)>[keys.Count];
+
+        for (int i = 0; i < keys.Count; i++)
+            tasks[i] = CheckWriteIntent(keys[i]);
+
+        return [.. await Task.WhenAll(tasks)];
+
+        async Task<(KeyValueResponseType, string, KeyValueDurability)> CheckWriteIntent((string key, KeyValueDurability durability) item)
+        {
+            KeyValueResponseType type = await TryCheckWriteIntentValue(transactionId, item.key, item.durability);
+
+            return (type, item.key, item.durability);
         }
     }
 

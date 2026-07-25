@@ -58,6 +58,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "CHECK-WRITE-INTENT Redirect {KeyValueName} to leader partition {Partition} at {Leader}")]
     public static partial void LogCheckWriteIntentRedirect(this ILogger<IKahuna> logger, string keyValueName, int partition, string leader);
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "CHECK-WRITE-INTENT Redirect {Number} batched intent probes to node {Leader}")]
+    public static partial void LogCheckManyWriteIntentsRedirect(this ILogger<IKahuna> logger, int number, string leader);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "ACQUIRE-LOCK-KEYVALUE Redirect {KeyValueName} to leader partition {Partition} at {Leader}")]
     public static partial void LogAcquireLockKeyValueRedirected(this ILogger<IKahuna> logger, string keyValueName, int partition, string leader);
 

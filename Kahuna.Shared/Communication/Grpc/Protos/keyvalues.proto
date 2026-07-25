@@ -377,6 +377,31 @@ message GrpcTryCheckWriteIntentResponse {
   GrpcKeyValueResponseType Type = 2;
 }
 
+// Probes several keys owned by the same node for concurrent write intents in one call, so a commit
+// validating a large read set costs one round trip per node holding part of it rather than one per key.
+message GrpcTryCheckManyWriteIntentsRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  repeated GrpcTryCheckManyWriteIntentsRequestItem Items = 4;
+}
+
+message GrpcTryCheckManyWriteIntentsRequestItem {
+  string Key = 1;
+  GrpcKeyValueDurability Durability = 2;
+}
+
+message GrpcTryCheckManyWriteIntentsResponse {
+  optional string ServedFrom = 1;
+  repeated GrpcTryCheckManyWriteIntentsResponseItem Items = 2;
+}
+
+message GrpcTryCheckManyWriteIntentsResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  string Key = 2;
+  GrpcKeyValueDurability Durability = 3;
+}
+
 message GrpcTryAcquireExclusivePrefixLockRequest {
   int32 TransactionIdNode = 1;
   int64 TransactionIdPhysical = 2;
@@ -1071,6 +1096,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcImportCoordinatorDecisionsRequest ImportCoordinatorDecisions = 48;
     GrpcDurableOperationRequest DurableOperation = 49;
     GrpcLookupTransactionRecordRequest LookupTransactionRecord = 50;
+    GrpcTryCheckManyWriteIntentsRequest TryCheckManyWriteIntents = 51;
   }
 }
 
@@ -1126,6 +1152,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcImportCoordinatorDecisionsResponse ImportCoordinatorDecisions = 47;
     GrpcDurableOperationResponse DurableOperation = 48;
     GrpcLookupTransactionRecordResponse LookupTransactionRecord = 49;
+    GrpcTryCheckManyWriteIntentsResponse TryCheckManyWriteIntents = 50;
   }
 }
 
@@ -1316,6 +1343,7 @@ enum GrpcServerBatchType {
   SERVER_IMPORT_COORDINATOR_DECISIONS = 46;
   SERVER_DURABLE_OPERATION = 47;
   SERVER_LOOKUP_TRANSACTION_RECORD = 48;
+  SERVER_TRY_CHECK_MANY_WRITE_INTENTS = 49;
 }
 
 enum GrpcRangeLockMode {

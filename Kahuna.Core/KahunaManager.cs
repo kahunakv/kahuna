@@ -500,6 +500,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return keyValues.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
     }
 
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryDeleteValue request.
     /// </summary>
@@ -1079,6 +1088,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
     )
     {
         return keyValues.TryCheckWriteIntentValue(transactionId, key, durability);
+    }
+
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys
+    )
+    {
+        return keyValues.TryCheckManyWriteIntentValues(transactionId, keys);
     }
 
     /// <summary>
