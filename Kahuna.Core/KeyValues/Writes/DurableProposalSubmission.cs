@@ -22,7 +22,9 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     // returns whether every PREPARE in the bundle was acknowledged (took ownership of its key); a rejected prepare
     // resolves the producer's Committed task false so the finalizer aborts instead of committing an unrecoverable
     // mutation. Null in tests that only assert scheduling, not store state.
-    private readonly Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit;
+    // It also receives each entry's committed Raft log index, so the apply can be attributed to the exact log
+    // entries it covered and the redundant consumer apply of those same entries can be skipped.
+    private readonly Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, bool>? applyOnCommit;
 
     // The logical key + range-descriptor generation this submission's partition was resolved against at freeze. A
     // null key opts out of the fence (post-decision settle/materialize, recovery, and state-transfer imports,
@@ -47,7 +49,7 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         IReadOnlyList<RaftProposalEntry> entries,
         TaskCompletionSource<bool> completion,
         WriteAdmissionClass admissionClass,
-        Func<IReadOnlyList<RaftProposalEntry>, bool>? applyOnCommit = null,
+        Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, bool>? applyOnCommit = null,
         string? fenceKey = null,
         long fenceGeneration = 0)
     {
@@ -73,7 +75,8 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 
     /// <summary>The batch committed: apply this submission's records to their stores in Raft-commit order, then
     /// resolve the producer with whether every prepare was acknowledged.</summary>
-    public void Complete() => completion.TrySetResult(applyOnCommit is null || applyOnCommit(Entries));
+    public void Complete(IReadOnlyList<long>? entryLogIndices) =>
+        completion.TrySetResult(applyOnCommit is null || applyOnCommit(PartitionId, Entries, entryLogIndices));
 
     public void Release(bool transient) => completion.TrySetResult(false);
 }

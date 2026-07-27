@@ -21,7 +21,13 @@ internal enum PartitionWriteMessageKind
 /// contiguous entry slice in the index-aligned per-entry Raft result. A submission whose every entry committed is
 /// <see cref="Committed"/>; a submission with any failed entry is released, retryably per <see cref="Transient"/>,
 /// carrying the failing entry's <see cref="Status"/> for diagnostics.</summary>
-internal readonly record struct BatchSubmissionOutcome(IProposalSubmission Item, bool Committed, bool Transient, RaftOperationStatus Status);
+internal readonly record struct BatchSubmissionOutcome(
+    IProposalSubmission Item,
+    bool Committed,
+    bool Transient,
+    RaftOperationStatus Status,
+    // Committed Raft log index of each of the submission's own entries, in order; null unless it committed.
+    IReadOnlyList<long>? EntryLogIndices = null);
 
 /// <summary>
 /// The single lane-actor message. Submit is an ordinary admission; TimerWake and BatchComplete are priority

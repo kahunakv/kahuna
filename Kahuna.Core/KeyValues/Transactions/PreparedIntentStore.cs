@@ -188,7 +188,7 @@ internal sealed class PreparedIntentStore
         bool allPreparesAccepted = true;
         foreach (PreparedIntentCommandMessage message in delta.Commands)
         {
-            PreparedIntentCommand command = ToCommand(message);
+            PreparedIntentCommand command = ToCommand(message, delta.Header);
             PreparedIntentApplyResult result = Apply(command);
             if (command is PrepareIntentCommand && result.Outcome == TransactionApplyOutcome.Rejected)
                 allPreparesAccepted = false;
@@ -205,7 +205,7 @@ internal sealed class PreparedIntentStore
         PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(log.LogData);
 
         foreach (PreparedIntentCommandMessage message in delta.Commands)
-            Apply(ToCommand(message));
+            Apply(ToCommand(message, delta.Header));
 
         return true;
     }
@@ -218,7 +218,92 @@ internal sealed class PreparedIntentStore
         foreach (PreparedIntentCommand command in commands)
             delta.Commands.Add(ToProto(command));
 
+        HoistSharedHeader(delta);
+
         return ReplicationSerializer.Serialize(delta);
+    }
+
+    /// <summary>
+    /// Moves the fields every transition in the delta agrees on into one delta-level header and clears them from the
+    /// commands, so the transaction identity, manifest hash, commit timestamp, recovery deadline and record-anchor
+    /// key are encoded once for the batch instead of once per key. A cleared field is at its proto3 default and so is
+    /// not written at all. Does nothing when the commands disagree, which keeps the per-command form correct for any
+    /// delta this can't compact.
+    /// </summary>
+    private static void HoistSharedHeader(PreparedIntentDeltaMessage delta)
+    {
+        if (delta.Commands.Count < 2)
+            return;
+
+        PreparedIntentCommandMessage first = delta.Commands[0];
+
+        // Every command's identity must agree. The mutation fields only exist on PREPARE commands, so they need only
+        // agree among those — a resolve/remove never reads them back.
+        PreparedIntentCommandMessage? firstPrepare = null;
+
+        foreach (PreparedIntentCommandMessage command in delta.Commands)
+        {
+            if (command.TransactionIdNode != first.TransactionIdNode
+                || command.TransactionIdPhysical != first.TransactionIdPhysical
+                || command.TransactionIdCounter != first.TransactionIdCounter
+                || command.Epoch != first.Epoch)
+                return;
+
+            if (command.Kind != PreparedIntentCommandKindMessage.PreparedIntentPrepare)
+                continue;
+
+            if (firstPrepare is null)
+            {
+                firstPrepare = command;
+                continue;
+            }
+
+            if (command.ManifestHash != firstPrepare.ManifestHash
+                || !string.Equals(command.RecordAnchorKey, firstPrepare.RecordAnchorKey, StringComparison.Ordinal)
+                || command.CommitTimestampNode != firstPrepare.CommitTimestampNode
+                || command.CommitTimestampPhysical != firstPrepare.CommitTimestampPhysical
+                || command.CommitTimestampCounter != firstPrepare.CommitTimestampCounter
+                || command.RecoveryDeadlineNode != firstPrepare.RecoveryDeadlineNode
+                || command.RecoveryDeadlinePhysical != firstPrepare.RecoveryDeadlinePhysical
+                || command.RecoveryDeadlineCounter != firstPrepare.RecoveryDeadlineCounter)
+                return;
+        }
+
+        delta.Header = new()
+        {
+            TransactionIdNode = first.TransactionIdNode,
+            TransactionIdPhysical = first.TransactionIdPhysical,
+            TransactionIdCounter = first.TransactionIdCounter,
+            Epoch = first.Epoch,
+            ManifestHash = firstPrepare?.ManifestHash ?? 0,
+            RecordAnchorKey = firstPrepare?.RecordAnchorKey ?? string.Empty,
+            CommitTimestampNode = firstPrepare?.CommitTimestampNode ?? 0,
+            CommitTimestampPhysical = firstPrepare?.CommitTimestampPhysical ?? 0,
+            CommitTimestampCounter = firstPrepare?.CommitTimestampCounter ?? 0,
+            RecoveryDeadlineNode = firstPrepare?.RecoveryDeadlineNode ?? 0,
+            RecoveryDeadlinePhysical = firstPrepare?.RecoveryDeadlinePhysical ?? 0,
+            RecoveryDeadlineCounter = firstPrepare?.RecoveryDeadlineCounter ?? 0
+        };
+
+        foreach (PreparedIntentCommandMessage command in delta.Commands)
+        {
+            command.TransactionIdNode = 0;
+            command.TransactionIdPhysical = 0;
+            command.TransactionIdCounter = 0;
+            command.Epoch = 0;
+
+            if (command.Kind != PreparedIntentCommandKindMessage.PreparedIntentPrepare)
+                continue;
+
+            command.ManifestHash = 0;
+            command.RecordAnchorKey = string.Empty;
+            command.CommitTimestampNode = 0;
+            command.CommitTimestampPhysical = 0;
+            command.CommitTimestampCounter = 0;
+            command.RecoveryDeadlineNode = 0;
+            command.RecoveryDeadlinePhysical = 0;
+            command.RecoveryDeadlineCounter = 0;
+        }
     }
 
     private static PreparedIntentCommandMessage ToProto(PreparedIntentCommand command)
@@ -249,20 +334,26 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    private static PreparedIntentCommand ToCommand(PreparedIntentCommandMessage m)
+    /// <summary>Rebuilds one transition, taking the fields the batch shares from <paramref name="header"/> when the
+    /// writer hoisted them there and from the command itself when it did not.</summary>
+    private static PreparedIntentCommand ToCommand(PreparedIntentCommandMessage m, PreparedIntentDeltaHeaderMessage? header)
     {
-        HLCTimestamp txId = new(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter);
+        HLCTimestamp txId = header is null
+            ? new(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter)
+            : new(header.TransactionIdNode, header.TransactionIdPhysical, header.TransactionIdCounter);
+
+        long epoch = header?.Epoch ?? m.Epoch;
 
         switch (m.Kind)
         {
             case PreparedIntentCommandKindMessage.PreparedIntentPrepare:
-                return new PrepareIntentCommand(IntentOf(m));
+                return new PrepareIntentCommand(IntentOf(m, header));
 
             case PreparedIntentCommandKindMessage.PreparedIntentResolve:
-                return new ResolveIntentCommand(txId, m.Epoch, m.Key, m.Commit);
+                return new ResolveIntentCommand(txId, epoch, m.Key, m.Commit);
 
             case PreparedIntentCommandKindMessage.PreparedIntentRemove:
-                return new RemoveIntentCommand(txId, m.Epoch, m.Key);
+                return new RemoveIntentCommand(txId, epoch, m.Key);
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(m), m.Kind, "unknown prepared-intent command kind");
@@ -292,10 +383,14 @@ internal sealed class PreparedIntentStore
         Resolution = (int)i.Resolution
     };
 
-    private static PreparedIntent IntentOf(PreparedIntentCommandMessage m) => new(
-        new HLCTimestamp(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter),
-        m.Epoch, m.Key, m.ManifestHash, m.RecordAnchorKey,
-        new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter),
+    private static PreparedIntent IntentOf(PreparedIntentCommandMessage m, PreparedIntentDeltaHeaderMessage? header = null) => new(
+        header is null
+            ? new HLCTimestamp(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter)
+            : new HLCTimestamp(header.TransactionIdNode, header.TransactionIdPhysical, header.TransactionIdCounter),
+        header?.Epoch ?? m.Epoch, m.Key, header?.ManifestHash ?? m.ManifestHash, header?.RecordAnchorKey ?? m.RecordAnchorKey,
+        header is null
+            ? new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter)
+            : new HLCTimestamp(header.CommitTimestampNode, header.CommitTimestampPhysical, header.CommitTimestampCounter),
         (KeyValueState)m.State,
         m.ValueNull ? null : m.Value.ToByteArray(),
         m.BucketNull ? null : m.Bucket,
@@ -303,7 +398,9 @@ internal sealed class PreparedIntentStore
         new HLCTimestamp(m.ExpiresNode, m.ExpiresPhysical, m.ExpiresCounter),
         m.NoRevision,
         m.BaseRevision, (KeyValueState)m.BaseState,
-        new HLCTimestamp(m.RecoveryDeadlineNode, m.RecoveryDeadlinePhysical, m.RecoveryDeadlineCounter),
+        header is null
+            ? new HLCTimestamp(m.RecoveryDeadlineNode, m.RecoveryDeadlinePhysical, m.RecoveryDeadlineCounter)
+            : new HLCTimestamp(header.RecoveryDeadlineNode, header.RecoveryDeadlinePhysical, header.RecoveryDeadlineCounter),
         (PreparedIntentResolution)m.Resolution);
 
     // ── durable snapshot ──────────────────────────────────────────────────────────

@@ -177,7 +177,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         foreach (BatchSubmissionOutcome outcome in outcomes)
         {
             if (outcome.Committed)
-                outcome.Item.Complete();
+                outcome.Item.Complete(outcome.EntryLogIndices);
             else
                 outcome.Item.Release(outcome.Transient);
 
@@ -389,7 +389,18 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             }
 
             (bool committed, bool transient) = ClassifyOutcome(ok, failStatus, threw: false);
-            outcomes.Add(new BatchSubmissionOutcome(item, committed, transient, ok ? RaftOperationStatus.Success : failStatus));
+
+            // Carry the committed index of each of this submission's own entries, so a producer applying on
+            // completion can name the exact log entries its apply covered.
+            long[]? entryLogIndices = null;
+            if (committed)
+            {
+                entryLogIndices = new long[count];
+                for (int i = 0; i < count; i++)
+                    entryLogIndices[i] = result.Entries[offset + i].LogIndex;
+            }
+
+            outcomes.Add(new BatchSubmissionOutcome(item, committed, transient, ok ? RaftOperationStatus.Success : failStatus, entryLogIndices));
 
             offset += count;
         }

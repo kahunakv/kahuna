@@ -58,7 +58,7 @@ public sealed class TestPartitionWriteAggregator
         }
 
         public bool IsStale(IWriteRangeFence fence) => fence.IsStale(key, 0, PartitionId);
-        public void Complete() => sink?.Completed.TryAdd(ProposalId, 1);
+        public void Complete(IReadOnlyList<long>? entryLogIndices) => sink?.Completed.TryAdd(ProposalId, 1);
         public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
     }
 
@@ -85,7 +85,7 @@ public sealed class TestPartitionWriteAggregator
         }
 
         public bool IsStale(IWriteRangeFence fence) => false;
-        public void Complete() => sink?.Completed.TryAdd(ProposalId, 1);
+        public void Complete(IReadOnlyList<long>? entryLogIndices) => sink?.Completed.TryAdd(ProposalId, 1);
         public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
     }
 

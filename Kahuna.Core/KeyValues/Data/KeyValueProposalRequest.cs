@@ -92,7 +92,7 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
 
     /// <summary>Batch committed: send <c>CompleteProposal</c> (apply) to the originating key actor — the only
     /// component that mutates the entry and resolves the caller's promise.</summary>
-    public void Complete() =>
+    public void Complete(IReadOnlyList<long>? entryLogIndices) =>
         KeyValueActor.Send(new(
             KeyValueRequestType.CompleteProposal,
             HLCTimestamp.Zero,

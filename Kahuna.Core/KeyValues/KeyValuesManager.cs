@@ -139,6 +139,10 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly PreparedIntentStore preparedIntentStore;
 
+    // Carries each durable entry's apply result from the consumer apply to the write scheduler's completion for the
+    // same log entry, so the completion reuses it instead of deserializing and re-applying an identical delta.
+    private readonly Transactions.DurableApplyResultLedger durableApplyResults = new();
+
     // Retention GC of durable-2PC metadata (records + participant receipts): the window a terminal record is kept
     // before it and its receipts are reclaimed, and the per-pass cap that bounds one sweep's work.
     private readonly TimeSpan durableRecordRetentionTtl;
@@ -313,10 +317,10 @@ internal sealed class KeyValuesManager : IDisposable
             ],
             completion,
             Writes.WriteAdmissionClass.Ordinary,
-            entries =>
+            (batchPartitionId, entries, entryLogIndices) =>
             {
                 batchCommitted = true;
-                return ApplyDurableEntriesOnCommit(entries);
+                return ApplyDurableEntriesOnCommit(batchPartitionId, entries, entryLogIndices);
             },
             fenceKey,
             fenceGeneration);
@@ -333,18 +337,37 @@ internal sealed class KeyValuesManager : IDisposable
     // Raft-commit order — the single authoritative apply owner on the leader. Key/value materialization records are
     // applied by their own leader path (ApplyDurableCommit / the replicator), not here. Returns whether every
     // PREPARE in the bundle took ownership of its key so a rejected prepare fails the producer's replicate.
-    private bool ApplyDurableEntriesOnCommit(IReadOnlyList<RaftProposalEntry> entries)
+    private bool ApplyDurableEntriesOnCommit(int partitionId, IReadOnlyList<RaftProposalEntry> entries, IReadOnlyList<long>? entryLogIndices)
     {
         bool preparesAcknowledged = true;
 
-        foreach (RaftProposalEntry entry in entries)
+        for (int i = 0; i < entries.Count; i++)
         {
+            RaftProposalEntry entry = entries[i];
+
+            if (entry.Type != ReplicationTypes.TransactionRecord && entry.Type != ReplicationTypes.PreparedIntent)
+                continue;
+
+            // Raft's commit path applies committed entries to the consumer before this completion can run, so the
+            // apply of this very log entry has normally already happened and left its result. Reusing it keeps this
+            // path's contract (the record is applied before the producer is resolved) without a second parse of the
+            // same delta.
+            long logIndex = entryLogIndices is not null && i < entryLogIndices.Count ? entryLogIndices[i] : 0;
+            if (durableApplyResults.TryConsume(partitionId, logIndex, out bool recorded))
+            {
+                if (entry.Type == ReplicationTypes.PreparedIntent)
+                    preparesAcknowledged &= recorded;
+
+                continue;
+            }
+
+            // No recorded result — this completion overtook the consumer apply, so apply it here as before.
+            // The store applies by record/intent identity; the partition argument is unused on the apply path.
             RaftLog log = new() { LogType = entry.Type, LogData = entry.Data };
 
-            // The store applies by record/intent identity; the partition argument is unused on the apply path.
             if (entry.Type == ReplicationTypes.TransactionRecord)
                 transactionRecordStore.Replicate(0, log);
-            else if (entry.Type == ReplicationTypes.PreparedIntent)
+            else
                 preparesAcknowledged &= preparedIntentStore.ApplyDeltaAckPrepares(log);
         }
 
@@ -1284,11 +1307,23 @@ internal sealed class KeyValuesManager : IDisposable
         if (log.LogType == ReplicationTypes.SnapshotFloor)
             return Task.FromResult(snapshotFloorStore.Replicate(partitionId, log));
 
+        // Durable records apply here, in Raft commit order, on every node. On the leader the write scheduler's
+        // completion for these same entries would otherwise apply the identical delta a second time just to learn
+        // its outcome, so the outcome is recorded against the log entry for the completion to reuse.
         if (log.LogType == ReplicationTypes.TransactionRecord)
-            return Task.FromResult(transactionRecordStore.Replicate(partitionId, log));
+        {
+            bool applied = transactionRecordStore.Replicate(partitionId, log);
+            durableApplyResults.RecordApplied(partitionId, log.Id, applied);
+            return Task.FromResult(applied);
+        }
 
         if (log.LogType == ReplicationTypes.PreparedIntent)
-            return Task.FromResult(preparedIntentStore.Replicate(partitionId, log));
+        {
+            // The prepare acknowledgement is what a local producer needs from this apply; a prepare rejected on its
+            // merits is still a successfully applied log entry, so it never fails replication.
+            durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(log));
+            return Task.FromResult(true);
+        }
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
             return Task.FromResult(completionReceiptStore.Replicate(partitionId, log));

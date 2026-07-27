@@ -42,8 +42,10 @@ internal interface IProposalSubmission
     bool IsStale(IWriteRangeFence fence);
 
     /// <summary>Exactly-once terminal completion — the batch committed; apply the record's effect and resolve the
-    /// producer's caller.</summary>
-    void Complete();
+    /// producer's caller. <paramref name="entryLogIndices"/> is the committed Raft log index of each of this
+    /// submission's own <see cref="Entries"/>, in order, so a producer whose apply runs here can identify the very
+    /// entries it applied; null when the executor reported no per-entry indices.</summary>
+    void Complete(IReadOnlyList<long>? entryLogIndices);
 
     /// <summary>Exactly-once terminal unwind — the batch did not commit (or the submission was released before
     /// dispatch). <paramref name="transient"/> true asks the producer's caller to retry (MustRetry).</summary>

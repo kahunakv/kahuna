@@ -47,9 +47,34 @@ message PreparedIntentCommandMessage {
   int32  resolution = 28; // PreparedIntentResolution (carried so a replayed prepare reflects its resolved state)
 }
 
+// The fields every transition in a delta has in common. A delta almost always carries one transaction attempt's
+// transitions for one partition, so without this each key repeats the same transaction identity, manifest hash,
+// commit timestamp, recovery deadline and record-anchor key — tens of bytes plus a full string copy per key.
+//
+// When this is present the reader takes these fields from here for every command in the delta and each command's
+// own copies are left at their proto3 defaults, so they are never written. Absent means every command carries its
+// own, which is how a delta whose commands do not all agree is written, and how a delta written before this
+// existed is read. Readers must therefore handle both forms; a writer that emits the compact form produces bytes
+// an older reader would misread, so every node must be able to read it before any node writes it.
+message PreparedIntentDeltaHeaderMessage {
+  int32  transactionIdNode     = 1;
+  int64  transactionIdPhysical = 2;
+  uint32 transactionIdCounter  = 3;
+  int64  epoch = 4;
+  int64  manifestHash = 5;
+  string recordAnchorKey = 6;
+  int32  commitTimestampNode     = 7;
+  int64  commitTimestampPhysical = 8;
+  uint32 commitTimestampCounter  = 9;
+  int32  recoveryDeadlineNode     = 10;
+  int64  recoveryDeadlinePhysical = 11;
+  uint32 recoveryDeadlineCounter  = 12;
+}
+
 // A batch of transitions committing as a single atomic data-partition log entry.
 message PreparedIntentDeltaMessage {
   repeated PreparedIntentCommandMessage commands = 1;
+  PreparedIntentDeltaHeaderMessage header = 2;
 }
 
 // The full materialized intent set of a data partition, for the durable on-disk snapshot and whole-partition

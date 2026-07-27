@@ -99,6 +99,29 @@ internal static class DurableTransactionMetrics
     internal static void ReceiptsExpired(int count) => GcReceiptsExpired.Add(count);
 
     /// <summary>
+    /// Durable record/intent applies skipped by the write scheduler's completion because the consumer apply of that
+    /// exact log entry already ran and left its result. Each skip avoids a full re-deserialization of a delta whose
+    /// effect is already in the store. A value that stays near zero on a busy leader means the two apply paths are no
+    /// longer agreeing on log identity — the redundant parse is back.
+    /// </summary>
+    internal static readonly Counter<long> RedundantAppliesSkipped =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.redundant_applies_skipped",
+            description: "Durable applies skipped because that log entry's apply already ran.");
+
+    private static long redundantAppliesSkipped;
+
+    /// <summary>Process-wide count behind <see cref="RedundantAppliesSkipped"/>, readable so the skip can be asserted
+    /// as actually happening rather than assumed.</summary>
+    internal static long RedundantAppliesSkippedCount => Interlocked.Read(ref redundantAppliesSkipped);
+
+    internal static void RedundantApplySkipped()
+    {
+        Interlocked.Increment(ref redundantAppliesSkipped);
+        RedundantAppliesSkipped.Add(1);
+    }
+
+    /// <summary>
     /// Registers resident-state observable gauges — canonical record count, completion-receipt count, resident
     /// prepared-intent count and bytes, and outstanding durable transactions — on a fresh, <b>instance-owned</b>
     /// <see cref="Meter"/> returned to the caller. The callbacks capture the stores/coordinator, so the caller
