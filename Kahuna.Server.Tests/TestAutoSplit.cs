@@ -242,16 +242,24 @@ public sealed class TestAutoSplit : BaseCluster
         {
             CancellationToken ct = TestContext.Current.CancellationToken;
 
-            KahunaManager? dualLeader = await FindDualLeaderAsync(nodes, ct);
-            if (dualLeader is null)
-                return;
-
-            int splits = await dualLeader.TriggerAutoSplitAsync(threshold, minRangeSize: 2, ct);
+            // Retry: a Raft re-election between FindDualLeaderAsync and TriggerAutoSplitAsync
+            // makes AmILeader return false inside TriggerAsync, returning 0. Re-find and retry.
+            KahunaManager? dualLeader = null;
+            int splits = 0;
+            long splitDeadline = Environment.TickCount64 + 20_000;
+            while (splits == 0 && Environment.TickCount64 < splitDeadline)
+            {
+                dualLeader = await FindDualLeaderAsync(nodes, ct);
+                if (dualLeader is null)
+                    return; // skip if no dual leader available
+                splits = await dualLeader.TriggerAutoSplitAsync(threshold, minRangeSize: 2, ct);
+                if (splits == 0) await Task.Delay(100, ct);
+            }
             Assert.Equal(1, splits);
 
-            await WaitUntilAsync(() => dualLeader.RangeMapStore.Current.FindAll(space).Count == 2);
+            await WaitUntilAsync(() => dualLeader!.RangeMapStore.Current.FindAll(space).Count == 2);
 
-            IReadOnlyList<RangeDescriptor> descriptors = dualLeader.RangeMapStore.Current.FindAll(space);
+            IReadOnlyList<RangeDescriptor> descriptors = dualLeader!.RangeMapStore.Current.FindAll(space);
             Assert.Equal(2, descriptors.Count);
 
             string splitKey = descriptors[0].EndKey!;

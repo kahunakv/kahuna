@@ -199,11 +199,15 @@ public class TestKeyValueScripts : BaseCluster
             Assert.Equal(3, resp.Revision);
             Assert.Equal("hello world"u8.ToArray(), resp.Value);
         
-            script = "EXTEND pp 2000";
+            // The new TTL must outlast the retry window below, not just the delay: the key was created with
+            // EX 1000, so a 2s extend leaves under a second of life once the 1100ms delay is done and a single
+            // slow round trip or re-election expires it while the retry loop is still polling for it.
+            script = "EXTEND pp 60000";
 
             resp = await kahuna2.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
-            Assert.Equal(KeyValueResponseType.Extended, resp.Type);        
-        
+            Assert.Equal(KeyValueResponseType.Extended, resp.Type);
+
+            // 1100ms > the original 1000ms TTL: without the extend the key would be gone by now.
             await Task.Delay(1100, TestContext.Current.CancellationToken);
 
             // A Raft re-election during the delay may leave the new leader momentarily without the
@@ -228,7 +232,8 @@ public class TestKeyValueScripts : BaseCluster
             Assert.Equal(KeyValueResponseType.Set, resp.Type);
             Assert.Equal(0, resp.Revision);
 
-            script = "EEXTEND pp 2000";
+            // Same reasoning as the persistent extend above: the new TTL has to outlast the retry window.
+            script = "EEXTEND pp 60000";
 
             resp = await kahuna3.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Extended, resp.Type);
