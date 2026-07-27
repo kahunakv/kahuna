@@ -66,11 +66,11 @@ internal static class PreparedIntentDigest
         h = FoldBytes(h, intent.Value, prime);
         h = FoldString(h, intent.Bucket ?? "\0<null>", prime);
         h = Fold(h, intent.Revision, prime);
-        h = FoldString(h, intent.Expires.ToString(), prime);
+        h = FoldTimestamp(h, intent.Expires, prime);
         h = Fold(h, intent.NoRevision ? 1 : 0, prime);
         h = Fold(h, intent.BaseRevision, prime);
         h = Fold(h, (long)intent.BaseState, prime);
-        h = FoldString(h, intent.CommitTimestamp.ToString(), prime);
+        h = FoldTimestamp(h, intent.CommitTimestamp, prime);
 
         return unchecked((long)h);
     }
@@ -94,6 +94,16 @@ internal static class PreparedIntentDigest
 
         h ^= (ulong)value.Length;
         h *= prime;
+        return h;
+    }
+
+    /// <summary>Folds a timestamp from its node/physical/counter components directly, so hashing a timestamp
+    /// never formats it into a string.</summary>
+    private static ulong FoldTimestamp(ulong h, HLCTimestamp timestamp, ulong prime)
+    {
+        h = Fold(h, timestamp.N, prime);
+        h = Fold(h, timestamp.L, prime);
+        h = Fold(h, timestamp.C, prime);
         return h;
     }
 

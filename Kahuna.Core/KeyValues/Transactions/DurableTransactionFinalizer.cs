@@ -186,29 +186,46 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // When the anchor key routes to a participant partition (the common case), the record init and that
         // partition's prepare are one atomic proposal — one fewer pre-decision barrier. Every other partition's
         // prepare fans out concurrently, so the bundle and the remaining prepares share a single barrier.
-        DurablePartitionPrepare? anchorPartition = replicateAnchorBundle is null
-            ? null
-            : input.Partitions.FirstOrDefault(partition => partition.PartitionId == input.AnchorPartitionId);
+        // Each partition's prepare payload is serialized exactly once here and reused for the initial submission and
+        // every retry attempt below: the frozen intent set never changes, so re-encoding it per attempt would copy the
+        // whole payload again for no gain.
+        byte[][] prepareDeltas = new byte[input.Partitions.Count][];
+        for (int i = 0; i < input.Partitions.Count; i++)
+            prepareDeltas[i] = SerializePrepare(input.Partitions[i]);
+
+        int anchorIndex = -1;
+        if (replicateAnchorBundle is not null)
+        {
+            for (int i = 0; i < input.Partitions.Count; i++)
+            {
+                if (input.Partitions[i].PartitionId == input.AnchorPartitionId)
+                {
+                    anchorIndex = i;
+                    break;
+                }
+            }
+        }
 
         bool allPrepared;
-        if (anchorPartition is not null)
+        if (anchorIndex >= 0)
         {
-            byte[] anchorPrepareDelta = PreparedIntentStore.SerializeDelta(
-                anchorPartition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-
             Task<(bool BatchCommitted, bool PrepareAcknowledged)> anchorBundleTask = replicateAnchorBundle!(
-                input.AnchorPartitionId, initDelta, anchorPrepareDelta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken);
+                input.AnchorPartitionId, initDelta, prepareDeltas[anchorIndex], input.RecordAnchorKey, input.AnchorGeneration, cancellationToken);
 
             // Every non-anchor partition prepares concurrently. Never abandon a submission on the first failure —
             // its outcome is needed to drive a truthful abort; a prepared-then-aborted intent is cleaned up by
             // resolution/recovery.
-            Task<bool>[] otherPrepareTasks = input.Partitions
-                .Where(partition => partition.PartitionId != input.AnchorPartitionId)
-                .Select(partition =>
-                {
-                    byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-                    return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
-                }).ToArray();
+            List<Task<bool>> otherPrepareTaskList = new(input.Partitions.Count);
+            for (int i = 0; i < input.Partitions.Count; i++)
+            {
+                if (i == anchorIndex)
+                    continue;
+
+                DurablePartitionPrepare partition = input.Partitions[i];
+                otherPrepareTaskList.Add(ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken));
+            }
+
+            Task<bool>[] otherPrepareTasks = otherPrepareTaskList.ToArray();
 
             (bool BatchCommitted, bool PrepareAcknowledged) anchorResult = await anchorBundleTask.ConfigureAwait(false);
             bool[] otherResults = await Task.WhenAll(otherPrepareTasks).ConfigureAwait(false);
@@ -234,11 +251,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
             // failure — its outcome is needed to drive a truthful abort). A prepared-then-aborted intent is cleaned
             // up by resolution/recovery; a failed prepare forces the transaction to abort. ──
-            Task<bool>[] prepareTasks = input.Partitions.Select(partition =>
+            Task<bool>[] prepareTasks = new Task<bool>[input.Partitions.Count];
+            for (int i = 0; i < input.Partitions.Count; i++)
             {
-                byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-                return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
-            }).ToArray();
+                DurablePartitionPrepare partition = input.Partitions[i];
+                prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
+            }
             bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
             allPrepared = prepareResults.All(static prepared => prepared);
         }
@@ -256,11 +274,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             try { await Task.Delay(Math.Min(2 * (attempt + 1), 20), cancellationToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
 
-            Task<bool>[] retryTasks = input.Partitions.Select(partition =>
+            Task<bool>[] retryTasks = new Task<bool>[input.Partitions.Count];
+            for (int i = 0; i < input.Partitions.Count; i++)
             {
-                byte[] prepareDelta = PreparedIntentStore.SerializeDelta(partition.Intents.Select(i => (PreparedIntentCommand)new PrepareIntentCommand(i)));
-                return ReplicatePrepareAsync(partition.PartitionId, prepareDelta, partition.Intents[0].Key, partition.Generation, cancellationToken);
-            }).ToArray();
+                DurablePartitionPrepare partition = input.Partitions[i];
+                retryTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
+            }
             allPrepared = (await Task.WhenAll(retryTasks).ConfigureAwait(false)).All(static prepared => prepared);
         }
 
@@ -549,6 +568,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // resolved by the recovery sweep, and re-fencing would only strand the settle.
     private Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
         replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken);
+
+    /// <summary>Encodes one partition's frozen intent set as a single prepare delta.</summary>
+    private static byte[] SerializePrepare(DurablePartitionPrepare partition)
+    {
+        PreparedIntentCommand[] commands = new PreparedIntentCommand[partition.Intents.Count];
+        for (int i = 0; i < partition.Intents.Count; i++)
+            commands[i] = new PrepareIntentCommand(partition.Intents[i]);
+
+        return PreparedIntentStore.SerializeDelta(commands);
+    }
 
     private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
 }

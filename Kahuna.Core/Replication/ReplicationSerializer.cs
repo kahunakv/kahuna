@@ -10,13 +10,18 @@ namespace Kahuna.Server.Replication;
 /// </summary>
 public static class ReplicationSerializer
 {
+    // Writes straight into the exactly-sized destination array, so encoding a message costs one allocation — the
+    // payload the log entry keeps — and no intermediate stream.
+    private static byte[] Encode(IMessage message)
+    {
+        byte[] buffer = new byte[message.CalculateSize()];
+        message.WriteTo(buffer.AsSpan());
+        return buffer;
+    }
+
     public static byte[] Serialize(LockMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static LockMessage UnserializeLockMessage(ReadOnlySpan<byte> serializedData) =>
@@ -24,11 +29,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(KeyValueMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static KeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData) =>
@@ -36,11 +37,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(RangeMapMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static RangeMapMessage UnserializeRangeMapMessage(ReadOnlySpan<byte> serializedData) =>
@@ -48,11 +45,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(SnapshotFloorMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static SnapshotFloorMessage UnserializeSnapshotFloorMessage(ReadOnlySpan<byte> serializedData) =>
@@ -60,11 +53,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(SnapshotFloorDeltaMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static SnapshotFloorDeltaMessage UnserializeSnapshotFloorDeltaMessage(ReadOnlySpan<byte> serializedData) =>
@@ -72,11 +61,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(MetaSystemStateMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static MetaSystemStateMessage UnserializeMetaSystemStateMessage(ReadOnlySpan<byte> serializedData) =>
@@ -84,11 +69,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(CoordinatorDecisionDeltaMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static CoordinatorDecisionDeltaMessage UnserializeCoordinatorDecisionDeltaMessage(ReadOnlySpan<byte> serializedData) =>
@@ -96,11 +77,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(CoordinatorDecisionSnapshotMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static CoordinatorDecisionSnapshotMessage UnserializeCoordinatorDecisionSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
@@ -108,11 +85,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(TransactionRecordDeltaMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static TransactionRecordDeltaMessage UnserializeTransactionRecordDeltaMessage(ReadOnlySpan<byte> serializedData) =>
@@ -120,11 +93,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(PreparedIntentDeltaMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static PreparedIntentDeltaMessage UnserializePreparedIntentDeltaMessage(ReadOnlySpan<byte> serializedData) =>
@@ -132,11 +101,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(TransactionRecordSnapshotMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static TransactionRecordSnapshotMessage UnserializeTransactionRecordSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
@@ -144,11 +109,7 @@ public static class ReplicationSerializer
 
     public static byte[] Serialize(PreparedIntentSnapshotMessage message)
     {
-        int size = message.CalculateSize();
-        byte[] buf = new byte[size];
-        using CodedOutputStream cos = new(buf);
-        message.WriteTo(cos);
-        return buf;
+        return Encode(message);
     }
 
     public static PreparedIntentSnapshotMessage UnserializePreparedIntentSnapshotMessage(ReadOnlySpan<byte> serializedData) =>
