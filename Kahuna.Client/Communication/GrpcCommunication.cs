@@ -8,6 +8,7 @@
 
 using System.Collections.Concurrent;
 using System.Net.Security;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
@@ -30,6 +31,45 @@ namespace Kahuna.Client.Communication;
 /// </summary>
 public class GrpcCommunication : IKahunaCommunication
 {
+    // gRPC client stubs are thread-safe and bound to a channel, so one cached stub per channel
+    // replaces a per-call allocation on every unary path. ConditionalWeakTable lets the entry die
+    // with its channel when the shared pool invalidates and disposes it.
+    private static readonly ConditionalWeakTable<GrpcChannel, KeyValuer.KeyValuerClient> keyValueClients = new();
+
+    private static readonly ConditionalWeakTable<GrpcChannel, Sequencer.SequencerClient> sequencerClients = new();
+
+    private static readonly ConditionalWeakTable<GrpcChannel, Cluster.ClusterClient> clusterClients = new();
+
+    private static readonly ConditionalWeakTable<GrpcChannel, Backups.BackupsClient> backupsClients = new();
+
+    private static KeyValuer.KeyValuerClient GetKeyValueClient(GrpcChannel channel) =>
+        keyValueClients.GetValue(channel, static c => new(c));
+
+    private static Sequencer.SequencerClient GetSequencerClient(GrpcChannel channel) =>
+        sequencerClients.GetValue(channel, static c => new(c));
+
+    private static Cluster.ClusterClient GetClusterClient(GrpcChannel channel) =>
+        clusterClients.GetValue(channel, static c => new(c));
+
+    private static Backups.BackupsClient GetBackupsClient(GrpcChannel channel) =>
+        backupsClients.GetValue(channel, static c => new(c));
+
+    /// <summary>
+    /// Returns the response payload as a byte array without copying when the ByteString's backing
+    /// array is fully owned by it (the normal case for a freshly parsed message); falls back to a
+    /// copy for sliced/rope-backed values so callers never observe bytes outside the payload.
+    /// </summary>
+    private static byte[] GetResponseBytes(ByteString value)
+    {
+        if (MemoryMarshal.TryGetArray(value.Memory, out ArraySegment<byte> segment)
+            && segment.Array is not null
+            && segment.Offset == 0
+            && segment.Count == segment.Array.Length)
+            return segment.Array;
+
+        return value.ToByteArray();
+    }
+
     private readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
 
     private readonly KahunaOptions? options;
@@ -77,35 +117,45 @@ public class GrpcCommunication : IKahunaCommunication
         // applied per Enqueue inside the batcher, so it only aborts a single unresponsive call,
         // not the overall retry loop when the server keeps returning MustRetry quickly.  The
         // backoff grows from ~1ms toward ~10ms over the first 10 retries, then stays capped at the
-        // last value, so a stuck server is not busy-polled.
-        using IEnumerator<TimeSpan> mustRetryBackoff = Backoff
-            .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
-            .GetEnumerator();
+        // last value, so a stuck server is not busy-polled. The backoff sequence is only allocated
+        // on the first MustRetry, keeping the common first-attempt success allocation-free.
+        IEnumerator<TimeSpan>? mustRetryBackoff = null;
         TimeSpan mustRetryDelay = TimeSpan.FromMilliseconds(1);
 
-        while (true)
+        try
         {
-            GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
+            while (true)
+            {
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-            response = batchResponse.TryLock;
+                response = batchResponse.TryLock;
 
-            if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
+                if (response is null)
+                    throw new KahunaException("Response is null", LockResponseType.Errored);
 
-            if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
-                return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
+                if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
+                    return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
 
-            if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
-                return (KahunaLockAcquireResult.Conflicted, -1, null);
+                if (response.Type == GrpcLockResponseType.LockResponseTypeBusy)
+                    return (KahunaLockAcquireResult.Conflicted, -1, null);
 
-            if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
-                throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
+                if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
+                    throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
 
-            if (mustRetryBackoff.MoveNext())
-                mustRetryDelay = mustRetryBackoff.Current;
-            // else: keep the last (capped) delay for all subsequent retries
+                mustRetryBackoff ??= Backoff
+                    .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
+                    .GetEnumerator();
 
-            await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
+                if (mustRetryBackoff.MoveNext())
+                    mustRetryDelay = mustRetryBackoff.Current;
+                // else: keep the last (capped) delay for all subsequent retries
+
+                await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            mustRetryBackoff?.Dispose();
         }
     }
 
@@ -354,7 +404,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTrySetManyKeyValueRequest request = new();
         
-        request.Items.AddRange(GetSetManyKeyValueRequestItems(requestItems));
+        AddSetManyKeyValueRequestItems(request.Items, requestItems);
         
         GrpcBatcher batcher = GetSharedBatcher(url);
         
@@ -383,7 +433,7 @@ public class GrpcCommunication : IKahunaCommunication
     {
         GrpcTryDeleteManyKeyValueRequest request = new();
 
-        request.Items.AddRange(GetDeleteManyKeyValueRequestItems(requestItems));
+        AddDeleteManyKeyValueRequestItems(request.Items, requestItems);
 
         // The whole batch registers as one coordinator operation so its confirmed persistent keys anchor
         // the transaction record deterministically. Absent for the non-transactional batch path.
@@ -429,10 +479,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
-        request.Items.AddRange(GetManyKeyValuesRequestItems(requestItems));
+        AddManyKeyValuesRequestItems(request.Items, requestItems);
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcTryGetManyValuesResponse response = await client.TryGetManyValuesAsync(
             request, cancellationToken: cancellationToken
@@ -455,10 +505,10 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C
         };
-        request.Items.AddRange(GetManyKeyValuesRequestItems(requestItems));
+        AddManyKeyValuesRequestItems(request.Items, requestItems);
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcTryExistsManyValuesResponse response = await client.TryExistsManyValuesAsync(
             request, cancellationToken: cancellationToken
@@ -467,17 +517,18 @@ public class GrpcCommunication : IKahunaCommunication
         return (GetExistsManyKeyValuesResponseItems(response.Items), 0);
     }
 
-    private static IEnumerable<GrpcTryManyValuesRequestItem> GetManyKeyValuesRequestItems(
+    private static void AddManyKeyValuesRequestItems(
+        RepeatedField<GrpcTryManyValuesRequestItem> target,
         IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems)
     {
         foreach (KahunaGetManyKeyValuesRequestItem item in requestItems)
         {
-            yield return new()
+            target.Add(new GrpcTryManyValuesRequestItem
             {
                 Key = item.Key ?? "",
                 Revision = item.Revision,
                 Durability = (GrpcKeyValueDurability)item.Durability
-            };
+            });
         }
     }
 
@@ -491,7 +542,7 @@ public class GrpcCommunication : IKahunaCommunication
             {
                 Key = item.Key,
                 Type = (KeyValueResponseType)item.Type,
-                Value = item.HasValue ? item.Value.ToByteArray() : null,
+                Value = item.HasValue ? GetResponseBytes(item.Value) : null,
                 Revision = item.Revision,
                 LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                 Durability = (KeyValueDurability)item.Durability
@@ -518,19 +569,21 @@ public class GrpcCommunication : IKahunaCommunication
         return result;
     }
 
-    private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyKeyValueRequestItems(IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
-    {                
+    private static void AddSetManyKeyValueRequestItems(
+        RepeatedField<GrpcTrySetManyKeyValueRequestItem> target,
+        IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
+    {
         foreach (KahunaSetKeyValueRequestItem item in requestItems)
         {
-            yield return new()
+            target.Add(new GrpcTrySetManyKeyValueRequestItem
             {
                 Key = item.Key,
                 Value = item.Value is not null ? UnsafeByteOperations.UnsafeWrap(item.Value) : null,
                 ExpiresMs = item.ExpiresMs,
                 Flags = (GrpcKeyValueFlags)item.Flags,
                 Durability = (GrpcKeyValueDurability)item.Durability
-            };                       
-        }        
+            });
+        }
     }
     
     private static List<KahunaSetKeyValueResponseItem> GetSetManyKeyValueResponseItems(RepeatedField<GrpcTrySetManyKeyValueResponseItem> grpcReponseItems)
@@ -551,18 +604,20 @@ public class GrpcCommunication : IKahunaCommunication
         return responseItems;
     }
 
-    private static IEnumerable<GrpcTryDeleteManyKeyValueRequestItem> GetDeleteManyKeyValueRequestItems(IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems)
+    private static void AddDeleteManyKeyValueRequestItems(
+        RepeatedField<GrpcTryDeleteManyKeyValueRequestItem> target,
+        IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems)
     {
         foreach (KahunaDeleteKeyValueRequestItem item in requestItems)
         {
-            yield return new()
+            target.Add(new GrpcTryDeleteManyKeyValueRequestItem
             {
                 TransactionIdNode = item.TransactionId.N,
                 TransactionIdPhysical = item.TransactionId.L,
                 TransactionIdCounter = item.TransactionId.C,
                 Key = item.Key,
                 Durability = (GrpcKeyValueDurability)item.Durability
-            };
+            });
         }
     }
 
@@ -818,12 +873,7 @@ public class GrpcCommunication : IKahunaCommunication
                     {
                         case GrpcKeyValueResponseType.TypeGot:
                         {
-                            byte[]? value;
-
-                            if (MemoryMarshal.TryGetArray(response.Value.Memory, out ArraySegment<byte> segment))
-                                value = segment.Array;
-                            else
-                                value = response.Value.ToByteArray();
+                            byte[] value = GetResponseBytes(response.Value);
 
                             HLCTimestamp lastModified = new(response.LastModifiedNode, response.LastModifiedPhysical, response.LastModifiedCounter);
                             return (true, value, response.Revision, lastModified, response.TimeElapsedMs);
@@ -1087,7 +1137,7 @@ public class GrpcCommunication : IKahunaCommunication
             request.Hash = hash;
         
         if (parameters is not null)
-            request.Parameters.AddRange(GetTransactionParameters(parameters));
+            AddTransactionParameters(request.Parameters, parameters);
 
         int retries = 0;
         GrpcTryExecuteTransactionScriptResponse? response;
@@ -1211,7 +1261,7 @@ public class GrpcCommunication : IKahunaCommunication
         };
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         for (int retries = 0; retries < 5; retries++)
         {
@@ -1250,7 +1300,7 @@ public class GrpcCommunication : IKahunaCommunication
         };
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         await client.TryReleaseExclusivePrefixLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
@@ -1291,7 +1341,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (endKey is not null)   request.EndKey   = endKey;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         for (int retries = 0; retries < 5; retries++)
         {
@@ -1343,7 +1393,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (endKey is not null)   request.EndKey   = endKey;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         await client.TryReleaseExclusiveRangeLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
@@ -1386,7 +1436,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (endKey is not null)   request.EndKey   = endKey;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         for (int retries = 0; retries < 5; retries++)
         {
@@ -1401,13 +1451,7 @@ public class GrpcCommunication : IKahunaCommunication
             {
                 return new()
                 {
-                    Items = response.Items.Select(x => new KeyValueGetByBucketItem
-                    {
-                        Key = x.Key,
-                        Value = x.Value.ToByteArray(),
-                        Revision = x.Revision,
-                        LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
-                    }).ToList(),
+                    Items = GetByPrefixResponseItems(response.Items),
                     NextCursor = response.HasNextCursor ? response.NextCursor : null,
                     HasMore = response.HasMore
                 };
@@ -1455,7 +1499,7 @@ public class GrpcCommunication : IKahunaCommunication
         if (endKey is not null)   request.EndKey   = endKey;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         using Grpc.Core.AsyncServerStreamingCall<GrpcGetByRangePageResponse> stream =
             client.GetByRangeStream(request, cancellationToken: cancellationToken);
@@ -1467,12 +1511,30 @@ public class GrpcCommunication : IKahunaCommunication
                 yield return new KeyValueGetByBucketItem
                 {
                     Key = item.Key,
-                    Value = item.Value.IsEmpty ? null : item.Value.ToByteArray(),
+                    Value = item.Value.IsEmpty ? null : GetResponseBytes(item.Value),
                     Revision = item.Revision,
                     LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter)
                 };
             }
         }
+    }
+
+    private static List<KeyValueGetByBucketItem> GetByPrefixResponseItems(RepeatedField<GrpcKeyValueByPrefixItemResponse> grpcResponseItems)
+    {
+        List<KeyValueGetByBucketItem> items = new(grpcResponseItems.Count);
+
+        foreach (GrpcKeyValueByPrefixItemResponse x in grpcResponseItems)
+        {
+            items.Add(new()
+            {
+                Key = x.Key,
+                Value = GetResponseBytes(x.Value),
+                Revision = x.Revision,
+                LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
+            });
+        }
+
+        return items;
     }
 
     private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
@@ -1481,17 +1543,10 @@ public class GrpcCommunication : IKahunaCommunication
         
         foreach (GrpcTryExecuteTransactionResponseValue response in responseValues)
         {
-            byte[]? value;
-
-            if (MemoryMarshal.TryGetArray(response.Value.Memory, out ArraySegment<byte> segment))
-                value = segment.Array;
-            else
-                value = response.Value.ToByteArray();
-            
             KahunaKeyValueTransactionResultValue responseValue = new()
             {
                 Key = response.Key,
-                Value = value,
+                Value = GetResponseBytes(response.Value),
                 Revision = response.Revision,
                 Expires = new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter),
                 LastModified = new(response.LastModifiedNode, response.LastModifiedPhysical, response.LastModifiedCounter)
@@ -1554,17 +1609,11 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
-                return response.Items.Select(x => new KeyValueGetByBucketItem()
-                {
-                    Key = x.Key,
-                    Value = x.Value.ToByteArray(),
-                    Revision = x.Revision,
-                    LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
-                }).ToList();
-            
+                return GetByPrefixResponseItems(response.Items);
+
             if (response.Type == GrpcKeyValueResponseType.TypeDoesNotExist)
                 return [];
-            
+
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry get key/value by prefix");
             
@@ -1618,17 +1667,11 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
             
             if (response.Type == GrpcKeyValueResponseType.TypeGot)
-                return response.Items.Select(x => new KeyValueGetByBucketItem()
-                {
-                    Key = x.Key,
-                    Value = x.Value.ToByteArray(),
-                    Revision = x.Revision,
-                    LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
-                }).ToList();
-            
+                return GetByPrefixResponseItems(response.Items);
+
             if (response.Type == GrpcKeyValueResponseType.TypeDoesNotExist)
                 return [];
-            
+
             if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
                 logger?.LogDebug("Server asked to retry scan key/value by prefix");
             
@@ -1838,7 +1881,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Sequencer.SequencerClient client = new(channel);
+        Sequencer.SequencerClient client = GetSequencerClient(channel);
 
         GrpcSequenceResponse response = await client.GetSequenceAsync(new()
         {
@@ -1863,7 +1906,7 @@ public class GrpcCommunication : IKahunaCommunication
             request.MaxValue = maxValue.Value;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Sequencer.SequencerClient client = new(channel);
+        Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceResponse response = await client.CreateSequenceAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return ((SequenceResponseType)response.Type, response.Revision, response.TimeElapsedMs);
@@ -1881,7 +1924,7 @@ public class GrpcCommunication : IKahunaCommunication
             request.IdempotencyKey = idempotencyKey;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Sequencer.SequencerClient client = new(channel);
+        Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceAllocationResponse response = await client.NextSequenceValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return ((SequenceResponseType)response.Type, ToSequenceAllocation(response.Allocation), response.TimeElapsedMs);
@@ -1900,7 +1943,7 @@ public class GrpcCommunication : IKahunaCommunication
             request.IdempotencyKey = idempotencyKey;
 
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Sequencer.SequencerClient client = new(channel);
+        Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceAllocationResponse response = await client.ReserveSequenceRangeAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return ((SequenceResponseType)response.Type, ToSequenceAllocation(response.Allocation), response.TimeElapsedMs);
@@ -1909,7 +1952,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Sequencer.SequencerClient client = new(channel);
+        Sequencer.SequencerClient client = GetSequencerClient(channel);
 
         GrpcSequenceResponse response = await client.DeleteSequenceAsync(new()
         {
@@ -1952,7 +1995,7 @@ public class GrpcCommunication : IKahunaCommunication
         );
     }
     
-    private static IEnumerable<GrpcKeyValueParameter> GetTransactionParameters(List<KeyValueParameter> parameters)
+    private static void AddTransactionParameters(RepeatedField<GrpcKeyValueParameter> target, List<KeyValueParameter> parameters)
     {
         foreach (KeyValueParameter parameter in parameters)
         {
@@ -1963,8 +2006,8 @@ public class GrpcCommunication : IKahunaCommunication
 
             if (parameter.Value is not null)
                 grpcParameter.Value = parameter.Value;
-            
-            yield return grpcParameter;
+
+            target.Add(grpcParameter);
         }
     }
 
@@ -1985,7 +2028,7 @@ public class GrpcCommunication : IKahunaCommunication
         string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcAcquireSnapshotHoldResponse response = await client.AcquireSnapshotHoldAsync(
             new GrpcAcquireSnapshotHoldRequest
@@ -2006,7 +2049,7 @@ public class GrpcCommunication : IKahunaCommunication
         string url, string holdId, int leaseMs, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcRenewSnapshotHoldResponse response = await client.RenewSnapshotHoldAsync(
             new GrpcRenewSnapshotHoldRequest { HoldId = holdId, LeaseMs = leaseMs },
@@ -2020,7 +2063,7 @@ public class GrpcCommunication : IKahunaCommunication
         string url, string holdId, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcReleaseSnapshotHoldResponse response = await client.ReleaseSnapshotHoldAsync(
             new GrpcReleaseSnapshotHoldRequest { HoldId = holdId },
@@ -2033,7 +2076,7 @@ public class GrpcCommunication : IKahunaCommunication
         string url, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcGetSnapshotFloorResponse response = await client.GetSnapshotFloorAsync(
             new GrpcGetSnapshotFloorRequest(),
@@ -2048,7 +2091,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        KeyValuer.KeyValuerClient client = new(channel);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
 
         GrpcRegisterKeyRangeResponse response = await client.RegisterKeyRangeAsync(new()
         {
@@ -2061,7 +2104,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Cluster.ClusterClient client = new(channel);
+        Cluster.ClusterClient client = GetClusterClient(channel);
 
         GrpcGetMembershipResponse response = await client.GetMembershipAsync(
             new GrpcGetMembershipRequest(),
@@ -2099,7 +2142,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = new(channel);
+        Backups.BackupsClient client = GetBackupsClient(channel);
         GrpcBackupInfoResponse r = await client.TakeFullBackupAsync(
             new GrpcTakeFullBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
         return FromGrpc(r);
@@ -2108,7 +2151,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = new(channel);
+        Backups.BackupsClient client = GetBackupsClient(channel);
         GrpcBackupInfoResponse r = await client.TakeIncrementalBackupAsync(
             new GrpcTakeIncrementalBackupRequest { ParentBackupId = parentBackupId.ToString() },
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -2118,7 +2161,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = new(channel);
+        Backups.BackupsClient client = GetBackupsClient(channel);
         GrpcBackupInfoResponse r = await client.TakeCoordinatedBackupAsync(
             new GrpcTakeCoordinatedBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
         return FromGrpc(r);
@@ -2127,7 +2170,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = new(channel);
+        Backups.BackupsClient client = GetBackupsClient(channel);
         GrpcListBackupsResponse r = await client.ListBackupsAsync(
             new GrpcListBackupsRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
         return r.Backups.Select(FromGrpc).ToList();
@@ -2136,7 +2179,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = new(channel);
+        Backups.BackupsClient client = GetBackupsClient(channel);
         GrpcListBackupsResponse r = await client.GetBackupChainAsync(
             new GrpcGetBackupChainRequest { LeafBackupId = leafBackupId.ToString() },
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -2146,7 +2189,7 @@ public class GrpcCommunication : IKahunaCommunication
     public async Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = new(channel);
+        Backups.BackupsClient client = GetBackupsClient(channel);
         GrpcRestoreResponse r = await client.RestoreAsync(
             new GrpcRestoreRequest { LeafBackupId = leafBackupId.ToString(), TargetDir = targetDir, TargetTimeMs = targetTimeMs },
             cancellationToken: cancellationToken).ConfigureAwait(false);

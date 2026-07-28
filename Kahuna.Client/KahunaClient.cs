@@ -488,7 +488,7 @@ public class KahunaClient
         CancellationToken cancellationToken = default
     )
     {
-        List<KahunaDeleteKeyValueRequestItem> requestItems = [];
+        List<KahunaDeleteKeyValueRequestItem> requestItems = new(keys.TryGetNonEnumeratedCount(out int count) ? count : 4);
 
         foreach (string key in keys)
         {
@@ -1158,10 +1158,11 @@ public class KahunaClient
         IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
             medianFirstRetryDelay: TimeSpan.FromMilliseconds(50),
             retryCount: 10
-        ).Select(t => TimeSpan.FromMilliseconds(Math.Min(t.TotalMilliseconds, 500)));
-        
-        foreach (TimeSpan timeSpan in backoffDelays)
+        );
+
+        foreach (TimeSpan backoffDelay in backoffDelays)
         {
+            TimeSpan timeSpan = backoffDelay.TotalMilliseconds > 500 ? TimeSpan.FromMilliseconds(500) : backoffDelay;
             await using KahunaTransactionSession session = await StartTransactionSession(options, cancellationToken).ConfigureAwait(false);
             
             try
@@ -1368,6 +1369,11 @@ public class KahunaClient
     /// <returns></returns>
     private string GetRoundRobinUrl()
     {
+        // Single-endpoint clients skip the interlocked counter: it would only add cross-core
+        // cache-line contention on the hot path without affecting the chosen URL.
+        if (urls.Length == 1)
+            return urls[0];
+
         int serverPointer = Interlocked.Increment(ref currentServer);
         return urls[Math.Abs(serverPointer) % urls.Length];
     }

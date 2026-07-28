@@ -674,7 +674,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
 
-        List<KahunaDeleteKeyValueRequestItem> items = [];
+        List<KahunaDeleteKeyValueRequestItem> items = new(requestItems.TryGetNonEnumeratedCount(out int count) ? count : 4);
 
         foreach (KahunaDeleteKeyValueRequestItem item in requestItems)
         {
@@ -734,7 +734,7 @@ public class KahunaTransactionSession : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
-        List<KahunaDeleteKeyValueRequestItem> requestItems = [];
+        List<KahunaDeleteKeyValueRequestItem> requestItems = new(keys.TryGetNonEnumeratedCount(out int count) ? count : 4);
 
         foreach (string key in keys)
         {

@@ -308,6 +308,26 @@ internal sealed class GrpcBatcher
         return TryProcessQueue(grpcBatcherItem, promise, cancellationToken);
     }
 
+    /// <summary>
+    /// Shared state for a cancellable request's cleanup: consumed by both the cancellation
+    /// registration callback and the promise-completion continuation, so a single allocation
+    /// serves both instead of one boxed tuple each.
+    /// </summary>
+    private sealed class CancellationCleanupState
+    {
+        public readonly GrpcBatcherItem Item;
+        public readonly CancellationToken Token;
+        public readonly CancellationTokenSource? DeadlineCts;
+        public CancellationTokenRegistration Registration;
+
+        public CancellationCleanupState(GrpcBatcherItem item, CancellationTokenSource? deadlineCts, CancellationToken token)
+        {
+            Item = item;
+            DeadlineCts = deadlineCts;
+            Token = token;
+        }
+    }
+
     private Task<GrpcBatcherResponse> TryProcessQueue(GrpcBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcBatcherResponse> promise, CancellationToken cancellationToken)
     {
         // CT3: when the caller passes no token, apply the configured default deadline so that a
@@ -332,23 +352,26 @@ internal sealed class GrpcBatcher
             // Register a local-cleanup callback so that cancelling the caller's token (or the
             // deadline firing) removes the item from the tracking dicts and cancels the promise.
             // The registration AND the deadline CTS (if any) are disposed when the promise
-            // completes to release all resources promptly.
-            CancellationTokenRegistration reg = cancellationToken.Register(static state =>
+            // completes to release all resources promptly. A single state object is shared by the
+            // registration and the completion continuation to avoid boxing a tuple for each.
+            CancellationCleanupState cleanupState = new(grpcBatcherItem, deadlineCts, cancellationToken);
+
+            cleanupState.Registration = cancellationToken.Register(static state =>
             {
-                (GrpcBatcherItem item, CancellationToken ct) = ((GrpcBatcherItem, CancellationToken))state!;
-                requestRefs.TryRemove(item.RequestId, out _);
-                requestStreamRefs.TryRemove(item.RequestId, out _);
-                item.Promise.TrySetCanceled(ct);
-            }, (grpcBatcherItem, cancellationToken));
+                CancellationCleanupState s = (CancellationCleanupState)state!;
+                requestRefs.TryRemove(s.Item.RequestId, out _);
+                requestStreamRefs.TryRemove(s.Item.RequestId, out _);
+                s.Item.Promise.TrySetCanceled(s.Token);
+            }, cleanupState);
 
             promise.Task.ContinueWith(
                 static (_, state) =>
                 {
-                    (CancellationTokenRegistration reg, CancellationTokenSource? cts) = ((CancellationTokenRegistration, CancellationTokenSource?))state!;
-                    reg.Dispose();
-                    cts?.Dispose();
+                    CancellationCleanupState s = (CancellationCleanupState)state!;
+                    s.Registration.Dispose();
+                    s.DeadlineCts?.Dispose();
                 },
-                (reg, deadlineCts),
+                cleanupState,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -531,28 +554,31 @@ internal sealed class GrpcBatcher
         
         GrpcBatcherRequest itemRequest = request.Request;
 
-        if (itemRequest.TryLock is not null)
+        GrpcLockClientBatchType batchType = itemRequest.LockBatchType;
+        batchRequest.Type = batchType;
+
+        switch (batchType)
         {
-            batchRequest.Type = GrpcLockClientBatchType.TypeTryLock;
-            batchRequest.TryLock = itemRequest.TryLock;
-        } 
-        else if (itemRequest.Unlock is not null)
-        {
-            batchRequest.Type = GrpcLockClientBatchType.TypeUnlock;
-            batchRequest.Unlock = itemRequest.Unlock;
+            case GrpcLockClientBatchType.TypeTryLock:
+                batchRequest.TryLock = (GrpcTryLockRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcLockClientBatchType.TypeUnlock:
+                batchRequest.Unlock = (GrpcUnlockRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcLockClientBatchType.TypeExtendLock:
+                batchRequest.ExtendLock = (GrpcExtendLockRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcLockClientBatchType.TypeGetLock:
+                batchRequest.GetLock = (GrpcGetLockRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcLockClientBatchType.TypeNone:
+            default:
+                throw new KahunaException("Unknown request type", LockResponseType.Errored);
         }
-        else if (itemRequest.ExtendLock is not null)
-        {
-            batchRequest.Type = GrpcLockClientBatchType.TypeExtendLock;
-            batchRequest.ExtendLock = itemRequest.ExtendLock;
-        }
-        else if (itemRequest.GetLock is not null)
-        {
-            batchRequest.Type = GrpcLockClientBatchType.TypeGetLock;
-            batchRequest.GetLock = itemRequest.GetLock;
-        }
-        else        
-            throw new KahunaException("Unknown request type", LockResponseType.Errored);        
 
         bool lockTaken = false;
 
@@ -594,78 +620,71 @@ internal sealed class GrpcBatcher
 
         GrpcBatcherRequest itemRequest = request.Request;
 
-        if (itemRequest.TrySetKeyValue is not null)
+        GrpcClientBatchType batchType = itemRequest.KeyValueBatchType;
+        batchRequest.Type = batchType;
+
+        switch (batchType)
         {
-            batchRequest.Type = GrpcClientBatchType.TrySetKeyValue;
-            batchRequest.TrySetKeyValue = itemRequest.TrySetKeyValue;
+            case GrpcClientBatchType.TrySetKeyValue:
+                batchRequest.TrySetKeyValue = (GrpcTrySetKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TrySetManyKeyValue:
+                batchRequest.TrySetManyKeyValue = (GrpcTrySetManyKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryDeleteManyKeyValue:
+                batchRequest.TryDeleteManyKeyValue = (GrpcTryDeleteManyKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryGetKeyValue:
+                batchRequest.TryGetKeyValue = (GrpcTryGetKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryDeleteKeyValue:
+                batchRequest.TryDeleteKeyValue = (GrpcTryDeleteKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryExtendKeyValue:
+                batchRequest.TryExtendKeyValue = (GrpcTryExtendKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryExistsKeyValue:
+                batchRequest.TryExistsKeyValue = (GrpcTryExistsKeyValueRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryAcquireExclusiveLock:
+                batchRequest.TryAcquireExclusiveLock = (GrpcTryAcquireExclusiveLockRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryExecuteTransactionScript:
+                batchRequest.TryExecuteTransactionScript = (GrpcTryExecuteTransactionScriptRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryGetByBucket:
+                batchRequest.GetByBucket = (GrpcGetByBucketRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryScanByPrefix:
+                batchRequest.ScanByPrefix = (GrpcScanAllByPrefixRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryStartTransaction:
+                batchRequest.StartTransaction = (GrpcStartTransactionRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryCommitTransaction:
+                batchRequest.CommitTransaction = (GrpcCommitTransactionRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TryRollbackTransaction:
+                batchRequest.RollbackTransaction = (GrpcRollbackTransactionRequest)itemRequest.Payload!;
+                break;
+
+            case GrpcClientBatchType.TypeNone:
+            default:
+                throw new KahunaException("Unknown request type", KeyValueResponseType.Errored);
         }
-        else if (itemRequest.TrySetManyKeyValues is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TrySetManyKeyValue;
-            batchRequest.TrySetManyKeyValue = itemRequest.TrySetManyKeyValues;
-        }
-        else if (itemRequest.TryDeleteManyKeyValues is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryDeleteManyKeyValue;
-            batchRequest.TryDeleteManyKeyValue = itemRequest.TryDeleteManyKeyValues;
-        }
-        else if (itemRequest.TryGetKeyValue is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryGetKeyValue;
-            batchRequest.TryGetKeyValue = itemRequest.TryGetKeyValue;
-        }
-        else if (itemRequest.TryDeleteKeyValue is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryDeleteKeyValue;
-            batchRequest.TryDeleteKeyValue = itemRequest.TryDeleteKeyValue;
-        } 
-        else if (itemRequest.TryExtendKeyValue is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryExtendKeyValue;
-            batchRequest.TryExtendKeyValue = itemRequest.TryExtendKeyValue;
-        } 
-        else if (itemRequest.TryExistsKeyValue is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryExistsKeyValue;
-            batchRequest.TryExistsKeyValue = itemRequest.TryExistsKeyValue;
-        }
-        else if (itemRequest.TryAcquireExclusiveLock is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryAcquireExclusiveLock;
-            batchRequest.TryAcquireExclusiveLock = itemRequest.TryAcquireExclusiveLock;
-        }
-        else if (itemRequest.TryExecuteTransactionScript is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryExecuteTransactionScript;
-            batchRequest.TryExecuteTransactionScript = itemRequest.TryExecuteTransactionScript;
-        }
-        else if (itemRequest.GetByBucket is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryGetByBucket;
-            batchRequest.GetByBucket = itemRequest.GetByBucket;
-        }
-        else if (itemRequest.ScanByPrefix is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryScanByPrefix;
-            batchRequest.ScanByPrefix = itemRequest.ScanByPrefix;
-        }
-        else if (itemRequest.StartTransaction is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryStartTransaction;
-            batchRequest.StartTransaction = itemRequest.StartTransaction;
-        }
-        else if (itemRequest.CommitTransaction is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryCommitTransaction;
-            batchRequest.CommitTransaction = itemRequest.CommitTransaction;
-        }
-        else if (itemRequest.RollbackTransaction is not null)
-        {
-            batchRequest.Type = GrpcClientBatchType.TryRollbackTransaction;
-            batchRequest.RollbackTransaction = itemRequest.RollbackTransaction;
-        }
-        else        
-            throw new KahunaException("Unknown request type", KeyValueResponseType.Errored);        
 
         bool lockTaken = false;
 

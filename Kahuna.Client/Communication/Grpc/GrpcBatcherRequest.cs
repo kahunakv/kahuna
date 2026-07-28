@@ -11,49 +11,135 @@ namespace Kahuna.Client.Communication;
 /// <summary>
 /// A single queued batch operation's request. Exactly one operation payload is ever populated, so
 /// rather than a wide class with one nullable field per operation type (an allocation per queued
-/// request) the single payload is held as one reference in a value type. The per-operation accessors
-/// preserve the original API by narrowing that reference, so the batch dispatch reads
-/// <c>request.TryLock</c> exactly as before.
+/// request) the single payload is held as one reference in a value type. Each constructor also
+/// records the wire batch type, so dispatch reads one discriminator and performs a single cast
+/// instead of probing every payload accessor in turn. The per-operation accessors preserve the
+/// original API by narrowing that reference, so callers can still read <c>request.TryLock</c>.
 /// </summary>
 internal readonly struct GrpcBatcherRequest
 {
     private readonly object? payload;
 
-    public GrpcBatcherRequest(GrpcTryLockRequest tryLock) => payload = tryLock;
+    // Holds either a GrpcLockClientBatchType or a GrpcClientBatchType value; the owning
+    // GrpcBatcherItem.Type decides which enum space applies.
+    private readonly int batchType;
 
-    public GrpcBatcherRequest(GrpcUnlockRequest unlock) => payload = unlock;
+    /// <summary>The raw request message; cast according to the batch type discriminator.</summary>
+    public object? Payload => payload;
 
-    public GrpcBatcherRequest(GrpcExtendLockRequest extendLock) => payload = extendLock;
+    /// <summary>Wire batch type when this request carries a lock operation.</summary>
+    public GrpcLockClientBatchType LockBatchType => (GrpcLockClientBatchType)batchType;
 
-    public GrpcBatcherRequest(GrpcGetLockRequest getLock) => payload = getLock;
+    /// <summary>Wire batch type when this request carries a key-value operation.</summary>
+    public GrpcClientBatchType KeyValueBatchType => (GrpcClientBatchType)batchType;
 
-    public GrpcBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue) => payload = trySetKeyValue;
+    public GrpcBatcherRequest(GrpcTryLockRequest tryLock)
+    {
+        payload = tryLock;
+        batchType = (int)GrpcLockClientBatchType.TypeTryLock;
+    }
 
-    public GrpcBatcherRequest(GrpcTrySetManyKeyValueRequest trySetManyKeyValues) => payload = trySetManyKeyValues;
+    public GrpcBatcherRequest(GrpcUnlockRequest unlock)
+    {
+        payload = unlock;
+        batchType = (int)GrpcLockClientBatchType.TypeUnlock;
+    }
 
-    public GrpcBatcherRequest(GrpcTryDeleteManyKeyValueRequest tryDeleteManyKeyValues) => payload = tryDeleteManyKeyValues;
+    public GrpcBatcherRequest(GrpcExtendLockRequest extendLock)
+    {
+        payload = extendLock;
+        batchType = (int)GrpcLockClientBatchType.TypeExtendLock;
+    }
 
-    public GrpcBatcherRequest(GrpcTryGetKeyValueRequest tryGetKeyValue) => payload = tryGetKeyValue;
+    public GrpcBatcherRequest(GrpcGetLockRequest getLock)
+    {
+        payload = getLock;
+        batchType = (int)GrpcLockClientBatchType.TypeGetLock;
+    }
 
-    public GrpcBatcherRequest(GrpcTryDeleteKeyValueRequest tryDeleteKeyValue) => payload = tryDeleteKeyValue;
+    public GrpcBatcherRequest(GrpcTrySetKeyValueRequest trySetKeyValue)
+    {
+        payload = trySetKeyValue;
+        batchType = (int)GrpcClientBatchType.TrySetKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcTryExtendKeyValueRequest tryExtendKeyValue) => payload = tryExtendKeyValue;
+    public GrpcBatcherRequest(GrpcTrySetManyKeyValueRequest trySetManyKeyValues)
+    {
+        payload = trySetManyKeyValues;
+        batchType = (int)GrpcClientBatchType.TrySetManyKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcTryExistsKeyValueRequest tryExistsKeyValue) => payload = tryExistsKeyValue;
+    public GrpcBatcherRequest(GrpcTryDeleteManyKeyValueRequest tryDeleteManyKeyValues)
+    {
+        payload = tryDeleteManyKeyValues;
+        batchType = (int)GrpcClientBatchType.TryDeleteManyKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionScript) => payload = tryExecuteTransactionScript;
+    public GrpcBatcherRequest(GrpcTryGetKeyValueRequest tryGetKeyValue)
+    {
+        payload = tryGetKeyValue;
+        batchType = (int)GrpcClientBatchType.TryGetKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcTryAcquireExclusiveLockRequest tryAcquireExclusiveLock) => payload = tryAcquireExclusiveLock;
+    public GrpcBatcherRequest(GrpcTryDeleteKeyValueRequest tryDeleteKeyValue)
+    {
+        payload = tryDeleteKeyValue;
+        batchType = (int)GrpcClientBatchType.TryDeleteKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcGetByBucketRequest getByBucket) => payload = getByBucket;
+    public GrpcBatcherRequest(GrpcTryExtendKeyValueRequest tryExtendKeyValue)
+    {
+        payload = tryExtendKeyValue;
+        batchType = (int)GrpcClientBatchType.TryExtendKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcScanAllByPrefixRequest scanByPrefix) => payload = scanByPrefix;
+    public GrpcBatcherRequest(GrpcTryExistsKeyValueRequest tryExistsKeyValue)
+    {
+        payload = tryExistsKeyValue;
+        batchType = (int)GrpcClientBatchType.TryExistsKeyValue;
+    }
 
-    public GrpcBatcherRequest(GrpcStartTransactionRequest startTransaction) => payload = startTransaction;
+    public GrpcBatcherRequest(GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionScript)
+    {
+        payload = tryExecuteTransactionScript;
+        batchType = (int)GrpcClientBatchType.TryExecuteTransactionScript;
+    }
 
-    public GrpcBatcherRequest(GrpcCommitTransactionRequest commitTransaction) => payload = commitTransaction;
+    public GrpcBatcherRequest(GrpcTryAcquireExclusiveLockRequest tryAcquireExclusiveLock)
+    {
+        payload = tryAcquireExclusiveLock;
+        batchType = (int)GrpcClientBatchType.TryAcquireExclusiveLock;
+    }
 
-    public GrpcBatcherRequest(GrpcRollbackTransactionRequest rollbackTransaction) => payload = rollbackTransaction;
+    public GrpcBatcherRequest(GrpcGetByBucketRequest getByBucket)
+    {
+        payload = getByBucket;
+        batchType = (int)GrpcClientBatchType.TryGetByBucket;
+    }
+
+    public GrpcBatcherRequest(GrpcScanAllByPrefixRequest scanByPrefix)
+    {
+        payload = scanByPrefix;
+        batchType = (int)GrpcClientBatchType.TryScanByPrefix;
+    }
+
+    public GrpcBatcherRequest(GrpcStartTransactionRequest startTransaction)
+    {
+        payload = startTransaction;
+        batchType = (int)GrpcClientBatchType.TryStartTransaction;
+    }
+
+    public GrpcBatcherRequest(GrpcCommitTransactionRequest commitTransaction)
+    {
+        payload = commitTransaction;
+        batchType = (int)GrpcClientBatchType.TryCommitTransaction;
+    }
+
+    public GrpcBatcherRequest(GrpcRollbackTransactionRequest rollbackTransaction)
+    {
+        payload = rollbackTransaction;
+        batchType = (int)GrpcClientBatchType.TryRollbackTransaction;
+    }
 
     public GrpcTryLockRequest? TryLock => payload as GrpcTryLockRequest;
 
