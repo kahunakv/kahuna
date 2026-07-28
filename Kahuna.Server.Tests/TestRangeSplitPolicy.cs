@@ -141,6 +141,42 @@ public sealed class TestRangeSplitPolicy
     }
 
     [Fact]
+    public void WriteCentroid_DecayResidueHistogram_FallsBackToMedian()
+    {
+        // A histogram left over after Decay() can cover only a sliver of the range: keys the
+        // replicator happened to record more than once survive halving while every once-written
+        // key is forgotten. Here 7 residue entries sit at the bottom of a 20-key uniformly
+        // written range. Bisecting them would pull the split key to index 3 (left=3/right=17);
+        // the weak-signal guard (totalWrites < sample.Count) must reject the histogram and
+        // fall back to the count-based median instead.
+        var sample = MakeSample(20);
+        var freq = new Dictionary<string, long>();
+        for (int i = 0; i < 7; i++)
+            freq[$"k{i:D4}"] = 1;
+
+        string? key = RangeSplitPolicy.ComputeSplitKey(
+            sample, threshold: 10, minRangeSize: 2, writeFrequency: freq, out double imbalance);
+
+        Assert.Equal("k0010", key); // median of 20, not the residue centroid k0003
+        Assert.Equal(0, imbalance); // count path — indivisibility guard must not fire
+    }
+
+    [Fact]
+    public void WriteCentroid_OneWritePerSampledKey_UsesCentroid()
+    {
+        // Exactly one write per sampled key is the guard boundary: the histogram covers the
+        // whole sample, so the centroid path applies and bisects the uniform weights.
+        var sample = MakeSample(20);
+        var freq = sample.ToDictionary(e => e.Key, _ => 1L);
+
+        string? key = RangeSplitPolicy.ComputeSplitKey(
+            sample, threshold: 10, minRangeSize: 2, writeFrequency: freq, out double imbalance);
+
+        Assert.Equal("k0010", key);
+        Assert.InRange(imbalance, 0.49, 0.51);
+    }
+
+    [Fact]
     public void WriteCentroid_BelowThreshold_ReturnsNull()
     {
         var sample = MakeSample(20);

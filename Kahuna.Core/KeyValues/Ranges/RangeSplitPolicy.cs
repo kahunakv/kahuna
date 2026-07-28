@@ -122,7 +122,8 @@ internal static class RangeSplitPolicy
             if (centroidKey is not null)
                 return centroidKey;
 
-            // Histogram present but no sample keys matched (e.g. histogram is warming up on a
+            // Histogram present but the write signal is too weak to trust (no sample keys
+            // matched, or fewer total writes than sampled keys — decay residue / warm-up on a
             // different key set). Fall through to the count-based path.
             achievableImbalance = 0;
         }
@@ -146,8 +147,13 @@ internal static class RangeSplitPolicy
 
     /// <summary>
     /// Finds the split index that best bisects cumulative writes across the ordered sample.
-    /// Returns null when fewer than <c>minRangeSize * 2</c> sample keys have a non-zero
-    /// write count (histogram too sparse to be meaningful).
+    /// Returns null when the histogram carries less than one recorded write per sampled key
+    /// (<c>totalWrites &lt; sample.Count</c>): such a histogram is decay residue or a partial
+    /// warm-up — a handful of keys that survived <see cref="KeyWriteFrequencyTracker.Decay"/>
+    /// while the rest were forgotten — not a load signal. Bisecting that residue produces
+    /// wildly unbalanced splits (e.g. 7 leftover entries at the bottom of a uniformly-written
+    /// range pull the split key into the first few keys). A genuinely hot range accumulates
+    /// far more writes than sampled keys, so real load always clears this bar.
     /// </summary>
     private static string? TryComputeWriteCentroid(
         IReadOnlyList<(string Key, HLCTimestamp LastModified)> sample,
@@ -168,8 +174,12 @@ internal static class RangeSplitPolicy
             totalWrites += w;
         }
 
-        // No write signal at all — histogram is cold; caller falls back to count-based path.
-        if (totalWrites == 0)
+        // Weak write signal — histogram is cold, or holds only decay residue / a partial
+        // warm-up covering a sliver of the range. Averaging less than one write per sampled
+        // key means the counts are noise, and bisecting noise concentrates the split at
+        // whichever end of the key space the residue happens to sit. Fall back to the
+        // count-based path.
+        if (totalWrites < sample.Count)
             return null;
 
         // Prefix-sum sweep: find the split index i (left = [0..i), right = [i..n)) that
