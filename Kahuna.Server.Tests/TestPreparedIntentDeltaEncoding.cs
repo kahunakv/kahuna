@@ -29,8 +29,10 @@ public sealed class TestPreparedIntentDeltaEncoding
             NoRevision: false, BaseRevision: 4, BaseState: KeyValueState.Set, RecoveryDeadline: Ts(6000),
             Resolution: PreparedIntentResolution.Pending);
 
+    // Copy the serialized bytes so the apply cannot recognize them as this process's own proposal and must decode
+    // them — the follower's view, which is exactly what these encoding tests exist to exercise.
     private static RaftLog IntentLog(params PreparedIntentCommand[] commands) =>
-        new() { LogType = ReplicationTypes.PreparedIntent, LogData = PreparedIntentStore.SerializeDelta(commands) };
+        new() { LogType = ReplicationTypes.PreparedIntent, LogData = [.. PreparedIntentStore.SerializeDelta(commands)] };
 
     [Fact]
     public void SingleTransactionBatch_RoundTripsEveryField()
@@ -131,6 +133,52 @@ public sealed class TestPreparedIntentDeltaEncoding
         // as belonging to a different transaction.
         Assert.Equal(PreparedIntentResolution.Committed, store.Get("row/1")!.Resolution);
         Assert.Equal(PreparedIntentResolution.Pending, store.Get("row/2")!.Resolution);
+    }
+
+    [Fact]
+    public void LocallyProposedDelta_AppliesIdenticallyToItsDecodedForm()
+    {
+        HLCTimestamp txId = Ts(1000);
+        const long epoch = 3;
+
+        PreparedIntentCommand[] commands =
+        [
+            new PrepareIntentCommand(Intent(txId, epoch, "row/1")),
+            new PrepareIntentCommand(Intent(txId, epoch, "row/2")),
+            new ResolveIntentCommand(txId, epoch, "row/1", Commit: true)
+        ];
+
+        byte[] data = PreparedIntentStore.SerializeDelta(commands);
+
+        // The proposing node applies the very byte array it produced (Raft hands it back on commit) and may reuse
+        // the pre-serialization commands; a follower decodes a fresh copy of the same bytes. Both must land on the
+        // same state, or leader and follower silently diverge.
+        PreparedIntentStore proposer = new();
+        Assert.True(proposer.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = data }));
+
+        PreparedIntentStore follower = new();
+        Assert.True(follower.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = [.. data] }));
+
+        foreach (string key in new[] { "row/1", "row/2" })
+        {
+            PreparedIntent? local = proposer.Get(key);
+            PreparedIntent? decoded = follower.Get(key);
+            Assert.NotNull(local);
+            Assert.NotNull(decoded);
+
+            // Record equality compares the value array by reference; compare its content separately and the rest
+            // of the record with the array reference neutralized.
+            Assert.Equal(decoded!.Value, local!.Value);
+            Assert.Equal(decoded, local with { Value = decoded.Value });
+        }
+
+        Assert.Equal(PreparedIntentResolution.Committed, proposer.Get("row/1")!.Resolution);
+        Assert.Equal(PreparedIntentResolution.Pending, proposer.Get("row/2")!.Resolution);
+
+        // Re-applying the same entry (redelivery/replay) after the proposal bytes were already claimed must fall
+        // back to decoding and stay an idempotent no-op.
+        Assert.True(proposer.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = data }));
+        Assert.Equal(PreparedIntentResolution.Committed, proposer.Get("row/1")!.Resolution);
     }
 
     [Fact]

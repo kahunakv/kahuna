@@ -89,8 +89,10 @@ public sealed class TestDurableIntentReplication
 
     // ── prepared intent store ────────────────────────────────────────────────────
 
+    // Copy the serialized bytes so the apply cannot recognize them as this process's own proposal and must decode
+    // them — these tests assert wire fidelity, which only the decoded path exercises.
     private static RaftLog IntentLog(params PreparedIntentCommand[] commands) =>
-        new() { LogType = ReplicationTypes.PreparedIntent, LogData = PreparedIntentStore.SerializeDelta(commands) };
+        new() { LogType = ReplicationTypes.PreparedIntent, LogData = [.. PreparedIntentStore.SerializeDelta(commands)] };
 
     private static PreparedIntent Intent(HLCTimestamp txId, long epoch, string key) =>
         new(txId, epoch, key, ManifestHash: 4242, RecordAnchorKey: "anchor", CommitTimestamp: Ts(1100),

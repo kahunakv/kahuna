@@ -361,14 +361,21 @@ internal sealed class KeyValuesManager : IDisposable
                 continue;
             }
 
-            // No recorded result — this completion overtook the consumer apply, so apply it here as before.
-            // The store applies by record/intent identity; the partition argument is unused on the apply path.
+            // No recorded result — this completion overtook the consumer apply, so apply it here and leave the
+            // outcome for the consumer to reuse when Raft delivers the same entry, mirroring the consumer-first
+            // direction. The store applies by record/intent identity; the partition argument is unused here.
             RaftLog log = new() { LogType = entry.Type, LogData = entry.Data };
 
+            bool applied;
             if (entry.Type == ReplicationTypes.TransactionRecord)
-                transactionRecordStore.Replicate(0, log);
+                applied = transactionRecordStore.Replicate(0, log);
             else
-                preparesAcknowledged &= preparedIntentStore.ApplyDeltaAckPrepares(log);
+            {
+                applied = preparedIntentStore.ApplyDeltaAckPrepares(log);
+                preparesAcknowledged &= applied;
+            }
+
+            durableApplyResults.RecordApplied(partitionId, logIndex, applied);
         }
 
         return preparesAcknowledged;
@@ -1308,10 +1315,14 @@ internal sealed class KeyValuesManager : IDisposable
             return Task.FromResult(snapshotFloorStore.Replicate(partitionId, log));
 
         // Durable records apply here, in Raft commit order, on every node. On the leader the write scheduler's
-        // completion for these same entries would otherwise apply the identical delta a second time just to learn
-        // its outcome, so the outcome is recorded against the log entry for the completion to reuse.
+        // completion applies the identical delta too, and the fast-path ticket release means either side can run
+        // first — so whichever applies records the outcome against the log entry, and the other consumes it
+        // instead of deserializing and applying the same delta a second time.
         if (log.LogType == ReplicationTypes.TransactionRecord)
         {
+            if (durableApplyResults.TryConsume(partitionId, log.Id, out bool recorded))
+                return Task.FromResult(recorded);
+
             bool applied = transactionRecordStore.Replicate(partitionId, log);
             durableApplyResults.RecordApplied(partitionId, log.Id, applied);
             return Task.FromResult(applied);
@@ -1321,7 +1332,9 @@ internal sealed class KeyValuesManager : IDisposable
         {
             // The prepare acknowledgement is what a local producer needs from this apply; a prepare rejected on its
             // merits is still a successfully applied log entry, so it never fails replication.
-            durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(log));
+            if (!durableApplyResults.TryConsume(partitionId, log.Id, out _))
+                durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(log));
+
             return Task.FromResult(true);
         }
 

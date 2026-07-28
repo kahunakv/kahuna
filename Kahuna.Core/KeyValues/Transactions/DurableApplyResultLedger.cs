@@ -3,20 +3,20 @@ using System.Collections.Concurrent;
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>
-/// Carries the outcome of a durable record/intent apply from the consumer apply that Raft drives to the write
+/// Carries the outcome of a durable record/intent apply between the consumer apply that Raft drives and the write
 /// scheduler's completion for the same log entry, so the entry's delta is deserialized and applied once instead of
 /// twice.
 ///
 /// <para>On the leader every locally produced durable entry is applied twice: Raft delivers the committed entry to
 /// the consumer, and the scheduler's completion applies the very same delta again because the producer's prepare
 /// acknowledgement is that apply's result. The transitions are idempotent so the second apply changes nothing — it
-/// only costs a full deserialization. The consumer apply runs first (the commit path applies to the consumer after
-/// releasing the proposal ticket but before the scheduler's completion can run), so it records what it applied and
-/// the completion consumes that result instead of re-applying.</para>
+/// only costs a full deserialization. Either side can run first (the fast-path proposal-ticket release lets the
+/// completion overtake the consumer apply), so whichever applies records its result and the other consumes it
+/// instead of re-applying.</para>
 ///
-/// <para>A miss always means "apply it yourself". Nothing here can cause a missed apply — pruning, a completion that
-/// somehow overtakes the consumer, and a restart all degrade to the original double apply, never to a lost one. That
-/// is what makes the ledger safe to keep bounded and lock-free.</para>
+/// <para>A miss always means "apply it yourself". Nothing here can cause a missed apply — pruning, a lost race where
+/// both sides apply, and a restart all degrade to the original double apply, never to a lost one. That is what makes
+/// the ledger safe to keep bounded and lock-free.</para>
 /// </summary>
 internal sealed class DurableApplyResultLedger
 {

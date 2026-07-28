@@ -1,5 +1,7 @@
 
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
@@ -173,6 +175,27 @@ internal sealed class PreparedIntentStore
 
     public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
 
+    // The node that proposes a delta serialized it from live command objects moments before Raft hands the very
+    // same byte array back to the local apply path, so the decoded form is registered against the produced bytes
+    // and the local apply reuses it instead of parsing and rebuilding every command. The table is weak on the
+    // byte array, so an entry vanishes with the proposal bytes; any reader that misses — a follower, WAL replay
+    // on restart, state transfer, all of which see freshly materialized arrays — parses as before, so
+    // correctness never depends on a hit. Commands and their intents are immutable, which is what makes reusing
+    // the producer's instances safe even when an in-process transport shares the array across nodes.
+    private static readonly ConditionalWeakTable<byte[], PreparedIntentCommand[]> locallyProposedDeltas = new();
+
+    // A hit is taken single-shot: with the redundant-apply ledger only one local apply runs per committed entry,
+    // and clearing on take keeps the WAL's in-memory retention of the bytes from pinning the decoded commands.
+    // A concurrent second taker simply misses and parses, which is the same double work it did before.
+    private static bool TryTakeLocallyProposed(byte[] data, [NotNullWhen(true)] out PreparedIntentCommand[]? commands)
+    {
+        if (!locallyProposedDeltas.TryGetValue(data, out commands))
+            return false;
+
+        locallyProposedDeltas.Remove(data);
+        return true;
+    }
+
     /// <summary>Applies a delta and reports whether every PREPARE command in it took ownership of its key. Returns
     /// <see langword="false"/> when any prepare is rejected by the state machine — another transaction already
     /// holds the key, or the same identity re-prepared a divergent mutation — which is NOT an acknowledged
@@ -183,9 +206,22 @@ internal sealed class PreparedIntentStore
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
 
+        bool allPreparesAccepted = true;
+
+        if (TryTakeLocallyProposed(log.LogData, out PreparedIntentCommand[]? proposed))
+        {
+            foreach (PreparedIntentCommand command in proposed)
+            {
+                PreparedIntentApplyResult result = Apply(command);
+                if (command is PrepareIntentCommand && result.Outcome == TransactionApplyOutcome.Rejected)
+                    allPreparesAccepted = false;
+            }
+
+            return allPreparesAccepted;
+        }
+
         PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(log.LogData);
 
-        bool allPreparesAccepted = true;
         foreach (PreparedIntentCommandMessage message in delta.Commands)
         {
             PreparedIntentCommand command = ToCommand(message, delta.Header);
@@ -202,6 +238,14 @@ internal sealed class PreparedIntentStore
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
 
+        if (TryTakeLocallyProposed(log.LogData, out PreparedIntentCommand[]? proposed))
+        {
+            foreach (PreparedIntentCommand command in proposed)
+                Apply(command);
+
+            return true;
+        }
+
         PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(log.LogData);
 
         foreach (PreparedIntentCommandMessage message in delta.Commands)
@@ -210,17 +254,23 @@ internal sealed class PreparedIntentStore
         return true;
     }
 
-    /// <summary>Serializes a batch of transitions for one atomic data-partition log entry.</summary>
+    /// <summary>Serializes a batch of transitions for one atomic data-partition log entry. The produced bytes
+    /// remember their decoded commands so the local apply of this same entry can skip re-parsing them.</summary>
     public static byte[] SerializeDelta(IEnumerable<PreparedIntentCommand> commands)
     {
+        PreparedIntentCommand[] batch = commands as PreparedIntentCommand[] ?? [.. commands];
+
         PreparedIntentDeltaMessage delta = new();
 
-        foreach (PreparedIntentCommand command in commands)
+        foreach (PreparedIntentCommand command in batch)
             delta.Commands.Add(ToProto(command));
 
         HoistSharedHeader(delta);
 
-        return ReplicationSerializer.Serialize(delta);
+        byte[] data = ReplicationSerializer.Serialize(delta);
+        locallyProposedDeltas.AddOrUpdate(data, batch);
+
+        return data;
     }
 
     /// <summary>
