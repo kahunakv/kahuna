@@ -32,16 +32,20 @@ internal sealed class DurableTransactionRecovery
 
     private readonly DriveAbortDelegate driveAbort;
 
+    private readonly DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally;
+
     public DurableTransactionRecovery(
         PreparedIntentStore intentStore,
         DurableTransactionFinalizer.ReplicateDelegate replicate,
         LookupRecordDelegate lookupRecord,
-        DriveAbortDelegate driveAbort)
+        DriveAbortDelegate driveAbort,
+        DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally = null)
     {
         this.intentStore = intentStore;
         this.replicate = replicate;
         this.lookupRecord = lookupRecord;
         this.driveAbort = driveAbort;
+        this.applyCommitLocally = applyCommitLocally;
     }
 
     /// <summary>Resolves every eligible unresolved intent on <paramref name="partitionId"/> and returns how many
@@ -133,6 +137,15 @@ internal sealed class DurableTransactionRecovery
                 {
                     byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
                     materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+
+                    // Replication makes the value durable and converges followers, but the leader applies a key/value
+                    // materialization to its own in-memory KV state through its dedicated apply path, not the generic
+                    // commit apply — so without this the recovered value is durable in the log yet invisible on the
+                    // recovering leader until a restart replays it. Mirror the finalizer's resolution: apply the
+                    // committed value locally before settling. If the local apply does not confirm (e.g. leadership
+                    // lost mid-sweep), leave the intent for a later sweep rather than settling an unapplied commit.
+                    if (materialized && applyCommitLocally is not null)
+                        materialized = await applyCommitLocally(partitionId, intent).ConfigureAwait(false);
                 }
                 catch
                 {

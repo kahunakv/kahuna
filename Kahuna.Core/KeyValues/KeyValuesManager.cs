@@ -5240,7 +5240,11 @@ internal sealed class KeyValuesManager : IDisposable
         // and leaving it for the anchor's own sweep. A remote-anchor commit/abort is resolved directly; only a
         // genuinely absent/undecided record falls through to the leadership-gated drive-abort path.
         (transactionId, epoch, anchorKey, cancellationToken) => LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken),
-        DriveDurableAbortAsync);
+        DriveDurableAbortAsync,
+        // Apply the recovered committed value to the leader's own KV state. Materialization replication converges
+        // followers and makes the value durable, but the leader materializes into its in-memory MVCC through this
+        // dedicated apply path — without it a recovered commit is invisible on the recovering leader until restart.
+        (partitionId, intent) => ApplyDurableCommit(partitionId, intent, CancellationToken.None));
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {
