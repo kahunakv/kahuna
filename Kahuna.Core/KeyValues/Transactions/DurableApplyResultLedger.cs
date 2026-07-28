@@ -23,9 +23,12 @@ internal sealed class DurableApplyResultLedger
     // Results are consumed almost immediately, so a window this size is far larger than the real in-flight depth. It
     // exists only to bound the residue left when a completion never claims its result (it applied first, or its
     // batch was released), which would otherwise accumulate for the process's lifetime.
-    private const int MaxRecords = 1024;
+    private const int WindowSize = 1024;
 
-    private readonly ConcurrentDictionary<(int PartitionId, long LogIndex), bool> results = new();
+    // One ring per partition, addressed by log index modulo the window, so recording is a single slot write and the
+    // window is bounded by construction: entry N silently displaces entry N-1024, which is the same residue bound the
+    // window has always had. Nothing is allocated per entry, and there is no scan to drop stale results.
+    private readonly ConcurrentDictionary<int, long[]> partitions = new();
 
     /// <summary>Records what the consumer apply of this entry produced: the prepare acknowledgement for an intent
     /// delta, or the apply result for a record delta. A non-positive index carries no entry identity.</summary>
@@ -34,34 +37,46 @@ internal sealed class DurableApplyResultLedger
         if (logIndex <= 0)
             return;
 
-        results[(partitionId, logIndex)] = result;
+        long[] ring = partitions.TryGetValue(partitionId, out long[]? existing)
+            ? existing
+            : partitions.GetOrAdd(partitionId, static _ => new long[WindowSize]);
 
-        if (results.Count > MaxRecords)
-            PruneBelow(partitionId, logIndex - MaxRecords);
+        Volatile.Write(ref ring[Slot(logIndex)], Encode(logIndex, result));
     }
 
     /// <summary>Takes the recorded result for an entry, meaning its apply already happened and must not be repeated.
     /// False means no result is available and the caller must apply the entry itself.</summary>
     public bool TryConsume(int partitionId, long logIndex, out bool result)
     {
-        if (logIndex > 0 && results.TryRemove((partitionId, logIndex), out result))
-        {
-            DurableTransactionMetrics.RedundantApplySkipped();
-            return true;
-        }
-
         result = false;
-        return false;
+
+        if (logIndex <= 0 || !partitions.TryGetValue(partitionId, out long[]? ring))
+            return false;
+
+        ref long slot = ref ring[Slot(logIndex)];
+
+        // Claim the slot only if it still holds this exact entry: a displaced or already consumed slot reads as some
+        // other index and the caller applies for itself. Clearing it makes the take single-shot under concurrency.
+        long expected = Encode(logIndex, true);
+        long observed = Interlocked.CompareExchange(ref slot, 0, expected);
+
+        if (observed != expected)
+        {
+            expected = Encode(logIndex, false);
+
+            if (Interlocked.CompareExchange(ref slot, 0, expected) != expected)
+                return false;
+        }
+        else
+            result = true;
+
+        DurableTransactionMetrics.RedundantApplySkipped();
+        return true;
     }
 
-    // Entries are committed and applied in ascending index order, so a result this far behind the newest one was
-    // never going to be claimed. Dropping it only means its (already completed) submission applies for itself.
-    private void PruneBelow(int partitionId, long logIndex)
-    {
-        foreach ((int PartitionId, long LogIndex) key in results.Keys)
-        {
-            if (key.PartitionId == partitionId && key.LogIndex <= logIndex)
-                results.TryRemove(key, out _);
-        }
-    }
+    private static int Slot(long logIndex) => (int)((ulong)logIndex % WindowSize);
+
+    // The index identifies the entry occupying the slot and the low bit carries its result, so a slot is claimed and
+    // read in one atomic word. Zero is never a valid encoding, which makes it the empty/consumed marker.
+    private static long Encode(long logIndex, bool result) => (logIndex << 1) | (result ? 1L : 0L);
 }
