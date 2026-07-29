@@ -437,7 +437,7 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     [Fact]
-    public async Task PartialPrepareFailure_AbortsRetryable_ResolvesPreparedAsAborted()
+    public async Task PartialPrepareFailure_AbortsAsRetryableFailure_ResolvesPreparedAsAborted()
     {
         HLCTimestamp txId = Ts(1000);
         Seam seam = new() { Fail = (partition, type) => partition == 8 && type == ReplicationTypes.PreparedIntent };
@@ -446,7 +446,11 @@ public sealed class TestDurableTransactionFinalizer
         DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
             Input(txId, 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
 
-        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        // The decision is a durable abort, so the outcome is Aborted even though nothing conflicted: the record can
+        // never transition to commit, and reporting MustRetry would promise a re-drive that re-reads this same abort
+        // forever. The class still records that the cause was infrastructural, not a conflict.
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
         Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
         // Partition 5's intent prepared, then aborted and removed by settlement; partition 8's never landed.
         Assert.Null(intents.Get("acct/1"));
@@ -830,7 +834,8 @@ public sealed class TestDurableTransactionFinalizer
         DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
             Input(txId, 1, (5, "acct/1"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
 
-        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
         Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
         Assert.Null(intents.Get("acct/1"));      // anchor intent prepared then settled as aborted
         Assert.Null(intents.Get("idx/name/bob")); // never landed

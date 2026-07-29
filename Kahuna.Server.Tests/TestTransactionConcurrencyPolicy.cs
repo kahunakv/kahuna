@@ -180,6 +180,84 @@ public sealed class TestTransactionConcurrencyPolicy
     }
 
     /// <summary>
+    /// Two optimistic transactions that each read both keys and write only their own resolve promptly, and each
+    /// reports a definite outcome (committed, or the conflict abort that prevents the skew).
+    ///
+    /// <para>Their write sets are disjoint, so both durably prepare an intent; each then validates a read set that
+    /// covers the other's prepared key. A read that waits for a foreign undecided intent to resolve would make each
+    /// transaction wait for the other's decision — a deadlock neither can break, resolved only when the read hits
+    /// its own multi-second deadline and then reported as an unclassifiable failure. The time bound is the point of
+    /// this test: an outcome that is correct but takes a read deadline to arrive is the bug.</para>
+    /// </summary>
+    [Fact]
+    public async Task CrossedReadSets_ResolveWithoutWaitingOnEachOther()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+        KahunaClient client = Connect(node);
+
+        string a = "cp/crossed/a/" + Guid.NewGuid().ToString("N")[..8];
+        string b = "cp/crossed/b/" + Guid.NewGuid().ToString("N")[..8];
+
+        await client.SetKeyValue(a, "1", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+        await client.SetKeyValue(b, "1", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+
+        // Both attempts stage their write before either commits, so the two finalizes overlap and each meets the
+        // other's prepared intent — the interleaving that produced the standoff.
+        using SemaphoreSlim staged = new(0, 2);
+        using SemaphoreSlim commit = new(0, 2);
+
+        async Task<KeyValueResponseType> Attempt(string self, string other)
+        {
+            try
+            {
+                await using KahunaTransactionSession tx = await client.StartTransactionSession(
+                    new() { Locking = KeyValueTransactionLocking.Optimistic }, ct);
+
+                await tx.GetKeyValue(self, KeyValueDurability.Persistent, ct);
+                await tx.GetKeyValue(other, KeyValueDurability.Persistent, ct);
+                await tx.SetKeyValue(self, "0", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+
+                staged.Release();
+                await commit.WaitAsync(ct);
+
+                return await tx.Commit(ct) ? KeyValueResponseType.Committed : KeyValueResponseType.MustRetry;
+            }
+            catch (KahunaException exception)
+            {
+                return exception.KeyValueErrorCode;
+            }
+        }
+
+        Task<KeyValueResponseType> first = Attempt(a, b);
+        Task<KeyValueResponseType> second = Attempt(b, a);
+
+        await staged.WaitAsync(ct);
+        await staged.WaitAsync(ct);
+        commit.Release(2);
+
+        long startedAt = Environment.TickCount64;
+        KeyValueResponseType[] outcomes = await Task.WhenAll(first, second);
+        long elapsedMs = Environment.TickCount64 - startedAt;
+
+        // Far below the read path's own retry deadline: a standoff broken by that deadline lands in the seconds.
+        Assert.True(elapsedMs < 5_000, $"the two finalizes took {elapsedMs}ms, so they waited on each other");
+
+        // Every outcome is classified. Errored would mean the caller cannot tell whether to retry the transaction.
+        foreach (KeyValueResponseType outcome in outcomes)
+            Assert.True(
+                outcome is KeyValueResponseType.Committed or KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry,
+                $"unclassifiable finalize outcome {outcome}");
+
+        // Whatever the interleaving decided, the skew must not have happened: at least one key stays on.
+        KahunaKeyValue finalA = await client.GetKeyValue(a, KeyValueDurability.Persistent, cancellationToken: ct);
+        KahunaKeyValue finalB = await client.GetKeyValue(b, KeyValueDurability.Persistent, cancellationToken: ct);
+
+        Assert.True(finalA.ValueAsString() == "1" || finalB.ValueAsString() == "1");
+    }
+
+    /// <summary>
     /// A transaction opened with a caller-supplied snapshot timestamp reads the state as of that
     /// timestamp and records no read dependency, so a concurrent write after the snapshot does not
     /// invalidate the transaction and it still commits.

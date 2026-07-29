@@ -35,17 +35,27 @@ public sealed class TestTransactionPriorityOrderer
         ManualTimeProvider? time = null)
         => new(maxConcurrent, reserved, agingThresholdMs, maxQueued, time ?? new ManualTimeProvider());
 
+    /// <summary>
+    /// Admits below the ceiling and asserts the lease was granted. Cancellation follows the running test, so a
+    /// gate that never admits ends with the test instead of hanging the run.
+    /// </summary>
     private static async Task<AdmissionLease> Admit(TransactionPriorityOrderer orderer, TransactionPriority priority)
     {
-        AdmissionLease? lease = await orderer.AdmitAsync(priority, CancellationToken.None);
+        AdmissionLease? lease = await orderer.AdmitAsync(priority, TestContext.Current.CancellationToken);
 
         Assert.NotNull(lease);
 
         return lease;
     }
 
-    private static Task<AdmissionLease?> Park(TransactionPriorityOrderer orderer, TransactionPriority priority, CancellationToken cancellationToken = default)
-        => orderer.AdmitAsync(priority, cancellationToken).AsTask();
+    /// <summary>
+    /// Starts an admission that is expected to queue, and returns it un-awaited so the test can assert on the
+    /// queue. Omitting <paramref name="cancellationToken"/> parks under the running test's token — the default
+    /// every test wants, so a parked admission cannot outlive its test; the few tests that abandon a waiter on
+    /// purpose pass their own token.
+    /// </summary>
+    private static Task<AdmissionLease?> Park(TransactionPriorityOrderer orderer, TransactionPriority priority, CancellationToken? cancellationToken = null)
+        => orderer.AdmitAsync(priority, cancellationToken ?? TestContext.Current.CancellationToken).AsTask();
 
     [Fact]
     public async Task BelowCeiling_EveryPriorityIsAdmittedWithoutWaiting()

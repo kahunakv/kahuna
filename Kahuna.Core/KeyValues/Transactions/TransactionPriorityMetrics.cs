@@ -60,6 +60,11 @@ internal static class TransactionPriorityMetrics
             () => Observe(scriptOrderer, sessionOrderer, static (orderer, priority) => orderer.AbandonedWhileWaitingAt(priority)),
             description: "Waiters whose own timeout fired before they were ever started, by gate and priority.");
 
+        meter.CreateObservableGauge(
+            "kahuna.tx_admission.rejected_queue_full",
+            () => Observe(scriptOrderer, sessionOrderer, static (orderer, priority) => orderer.RejectedQueueFullAt(priority)),
+            description: "Requests refused outright because the wait queue was full, by gate and priority. The node is shedding load.");
+
         return meter;
     }
 

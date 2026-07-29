@@ -17,8 +17,13 @@ internal enum TransactionDecision
 
 /// <summary>
 /// Why a transaction aborted. Storage resolution is identical for every class (every abort discards prepared
-/// values); the class preserves result truth at the API boundary: <see cref="Conflict"/> maps to
-/// <c>Aborted</c>, the rest map to <c>MustRetry</c> at the API boundary.
+/// values); the class records why the decision went the way it did, for diagnostics and metrics.
+///
+/// <para>It does not change the outcome reported to the caller: a durable abort is terminal whatever its class —
+/// the record's decision transitions exactly once and the state machine rejects a later commit — so every class
+/// maps to <c>Aborted</c> at the API boundary. Reporting a non-conflict abort as <c>MustRetry</c> would promise a
+/// retry that can never succeed, because each retry re-reads the same aborted record. The caller's recourse for
+/// any class is the same: start a new transaction.</para>
 /// </summary>
 internal enum TransactionAbortClass
 {

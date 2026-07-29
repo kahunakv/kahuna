@@ -71,6 +71,40 @@ public class GrpcCommunication : IKahunaCommunication
         return value.ToByteArray();
     }
 
+    /// <summary>
+    /// How many times a transaction-session call (start / commit / rollback) re-issues a request the server
+    /// answered with MustRetry before handing the retryable outcome back to the application.
+    /// </summary>
+    private const int TransactionRetries = 5;
+
+    /// <summary>
+    /// Growing delay between MustRetry attempts on a transaction-session call. The server returns MustRetry for a
+    /// transient condition — a leader flip, an in-doubt finalize a recovery sweep is still resolving — and none of
+    /// those clear within the microseconds an immediate re-issue takes, so retrying without a delay burns the whole
+    /// retry budget inside the same instant that produced the first MustRetry. The delay grows from ~1ms toward
+    /// ~10ms and then holds, matching the lock path's backoff. Instantiated only once a MustRetry is actually
+    /// observed, so the common first-attempt success allocates nothing.
+    /// </summary>
+    private sealed class MustRetryBackoff : IDisposable
+    {
+        private readonly IEnumerator<TimeSpan> sequence = Backoff
+            .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
+            .GetEnumerator();
+
+        private TimeSpan delay = TimeSpan.FromMilliseconds(1);
+
+        public Task WaitAsync(CancellationToken cancellationToken)
+        {
+            // Past the end of the sequence the last (capped) delay is reused for every further attempt.
+            if (sequence.MoveNext())
+                delay = sequence.Current;
+
+            return Task.Delay(delay, cancellationToken);
+        }
+
+        public void Dispose() => sequence.Dispose();
+    }
+
     private readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
 
     private readonly KahunaOptions? options;
@@ -1716,36 +1750,47 @@ public class GrpcCommunication : IKahunaCommunication
         };
 
         int retries = 0;
-        
+
         GrpcBatcher batcher = GetSharedBatcher(url);
         GrpcStartTransactionResponse? response;
-        
-        do
+        MustRetryBackoff? backoff = null;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
-            
-            GrpcBatcherResponse batchResponse;
-                
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.StartTransaction;
+            while (true)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-            if (response is null)
-                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-            if (response.Type == GrpcKeyValueResponseType.TypeSet)
-                return new(url, new(response.TransactionIdNode, response.TransactionIdPhysical, response.TransactionIdCounter)); 
-                        
-            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                response = batchResponse.StartTransaction;
+
+                if (response is null)
+                    throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+                if (response.Type == GrpcKeyValueResponseType.TypeSet)
+                    return new(url, new(response.TransactionIdNode, response.TransactionIdPhysical, response.TransactionIdCounter));
+
+                if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                    throw new KahunaException("Failed to start key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+
                 logger?.LogDebug("Server asked to retry start key/value transaction");
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
-            
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
-            
-        throw new KahunaException("Failed to start key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+
+                // Out of attempts: the condition is still transient, so report it as such. Reporting Errored here
+                // would tell the caller the request was malformed and must not be retried, when the truth is the
+                // opposite — the same transaction can still be started.
+                if (++retries >= TransactionRetries)
+                    throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+                backoff ??= new();
+                await backoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            backoff?.Dispose();
+        }
     }
 
     /// <summary>
@@ -1783,36 +1828,51 @@ public class GrpcCommunication : IKahunaCommunication
             request.RecordAnchorKey = recordAnchorKey;
 
         int retries = 0;
-        
+
         GrpcBatcher batcher = GetSharedBatcher(url);
         GrpcCommitTransactionResponse? response;
-        
-        do
+        MustRetryBackoff? backoff = null;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
-            
-            GrpcBatcherResponse batchResponse;
-                
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.CommitTransaction;
+            while (true)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-            if (response is null)
-                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-            if (response.Type == GrpcKeyValueResponseType.TypeCommitted)
-                return (true, response.HasRecordAnchorKey ? response.RecordAnchorKey : null);
+                response = batchResponse.CommitTransaction;
 
-            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                if (response is null)
+                    throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+                if (response.Type == GrpcKeyValueResponseType.TypeCommitted)
+                    return (true, response.HasRecordAnchorKey ? response.RecordAnchorKey : null);
+
+                if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                    throw new KahunaException("Failed to commit key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+
                 logger?.LogDebug("Server asked to retry commit key/value transaction");
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
-            
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
-            
-        throw new KahunaException("Failed to commit key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+
+                // Carry the coordinator's canonical anchor into the next attempt: a commit that lost its
+                // coordinating session still reaches the durable decision as long as the anchor travels with it.
+                if (response.HasRecordAnchorKey)
+                    request.RecordAnchorKey = response.RecordAnchorKey;
+
+                // Out of attempts: the finalize is still in doubt, not failed. Report it as retryable so the
+                // caller re-drives the same commit rather than treating an undecided transaction as an error.
+                if (++retries >= TransactionRetries)
+                    throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+                backoff ??= new();
+                await backoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            backoff?.Dispose();
+        }
     }
 
     /// <summary>
@@ -1849,36 +1909,46 @@ public class GrpcCommunication : IKahunaCommunication
             request.RecordAnchorKey = recordAnchorKey;
 
         int retries = 0;
-        
+
         GrpcBatcher batcher = GetSharedBatcher(url);
         GrpcRollbackTransactionResponse? response;
-        
-        do
+        MustRetryBackoff? backoff = null;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);                   
-            
-            GrpcBatcherResponse batchResponse;
-                
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.RollbackTransaction;
+            while (true)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-            if (response is null)
-                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-            if (response.Type == GrpcKeyValueResponseType.TypeRolledback)
-                return true; 
-                        
-            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                response = batchResponse.RollbackTransaction;
+
+                if (response is null)
+                    throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+                if (response.Type == GrpcKeyValueResponseType.TypeRolledback)
+                    return true;
+
+                if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                    throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+
                 logger?.LogDebug("Server asked to retry rollback key/value transaction");
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
-            
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
-            
-        throw new KahunaException("Failed to rollback key/value transaction: " + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
+
+                // Out of attempts: the cleanup is incomplete, not refused. Report it as retryable so the caller
+                // can re-drive it instead of reading an unfinished rollback as a permanent error.
+                if (++retries >= TransactionRetries)
+                    throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+                backoff ??= new();
+                await backoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            backoff?.Dispose();
+        }
     }
 
     public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)

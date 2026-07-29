@@ -363,13 +363,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (commit && record.Decision == TransactionDecision.Undecided)
             DurableTransactionMetrics.LateCommitRejections.Add(1);
 
+        // A durable abort is terminal whatever drove it: the record decides once and a later commit against it is
+        // rejected, so every abort class reports Aborted. Only a record that is still undecided is retryable.
         return record.Decision switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
-            TransactionDecision.Abort when record.AbortClass == TransactionAbortClass.Conflict
-                => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, TransactionAbortClass.Conflict),
-            TransactionDecision.Abort
-                => new DurableFinalizeOutcome(DurableFinalizeResult.MustRetry, record.AbortClass),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
             _ => Retry()
         };
     }

@@ -229,6 +229,18 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-grpc-enable-snapshot-compression", Required = false, HelpText = "Compress Raft snapshot transfers sent over gRPC", Default = false)]
     public bool RaftGrpcEnableSnapshotCompression { get; set; }
 
+    [Option("raft-snapshot-receive-session-ttl", Required = false, HelpText = "How long an idle snapshot-receive session is kept before the receiver discards it and releases its buffered bytes, in milliseconds. Bounds the memory a leader that vanishes mid-transfer can strand.", Default = 30000)]
+    public int RaftSnapshotReceiveSessionTtl { get; set; } = 30000;
+
+    [Option("raft-snapshot-max-pending-sessions", Required = false, HelpText = "Cap on concurrent snapshot-receive sessions across all partitions. Beyond the cap the receiver evicts its least-recently-active sessions.", Default = 8)]
+    public int RaftSnapshotMaxPendingSessions { get; set; } = 8;
+
+    [Option("raft-snapshot-max-pending-bytes", Required = false, HelpText = "Cap on total buffered bytes across all in-progress snapshot-receive sessions. The primary memory bound on the receive path.", Default = 512L * 1024 * 1024)]
+    public long RaftSnapshotMaxPendingBytes { get; set; } = 512L * 1024 * 1024;
+
+    [Option("raft-allow-legacy-snapshot-senders", Required = false, HelpText = "Accept snapshot chunks that leave the sender's session-metadata fields empty, treating them as a sender that pre-dates those fields. Temporary compatibility switch for a mixed-version cluster.", Default = false)]
+    public bool RaftAllowLegacySnapshotSenders { get; set; }
+
     [Option("raft-backfill-threshold", Required = false, HelpText = "Committed entries a follower may trail the leader before active backfill kicks in", Default = 10)]
     public int RaftBackfillThreshold { get; set; } = 10;
 

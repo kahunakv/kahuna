@@ -241,7 +241,7 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>
     /// Consults the durable-intent canonical transaction record for a handle whose in-memory session is gone,
     /// so a lost interactive durable transaction reports its true outcome instead of <c>Errored</c>: a committed
-    /// record answers <c>Committed</c>; a conflict abort answers <c>Aborted</c>; any other abort or an undecided
+    /// record answers <c>Committed</c>; an abort answers <c>Aborted</c> (terminal whatever its class); an undecided
     /// record answers <c>MustRetry</c> (recovery finishes it). The lookup is routed by the handle's anchor key to
     /// the anchor partition leader, so the record is found even when it lives on another node — closing the
     /// cross-node lost-session gap. Returns Found=false only when no record exists at all, so the caller falls
@@ -262,8 +262,8 @@ internal sealed class TransactionCoordinator : IDisposable
         KeyValueResponseType response = record.Decision switch
         {
             TransactionDecision.Commit => KeyValueResponseType.Committed,
-            TransactionDecision.Abort when record.AbortClass == TransactionAbortClass.Conflict => KeyValueResponseType.Aborted,
-            _ => KeyValueResponseType.MustRetry // any other abort, or still undecided → recovery completes it
+            TransactionDecision.Abort => KeyValueResponseType.Aborted, // terminal whatever the class: it can never commit
+            _ => KeyValueResponseType.MustRetry // still undecided → recovery completes it
         };
 
         return (true, response);
@@ -1494,26 +1494,32 @@ internal sealed class TransactionCoordinator : IDisposable
             return DurableFinalizeResult.MustRetry;
         }
 
-        // Post-prepare read-set validation: the revision-comparison check (intent-aware — it reads current
-        // committed state through the durable-intent-aware read path) catches a read that a concurrent commit made
-        // stale, and the write-intent probe catches a concurrent in-flight writer. Both must pass to commit.
+        // Post-prepare read-set validation: the write-intent probe catches a concurrent in-flight writer, and the
+        // revision-comparison check (intent-aware — it reads current committed state through the durable-intent-aware
+        // read path) catches a read that a concurrent commit made stale. Both must pass to commit.
+        //
+        // The concurrent-writer probe runs FIRST, and the order is load-bearing: it answers immediately for an
+        // undecided foreign intent, while the revision check's read waits for one to resolve. Two transactions that
+        // prepared intents on each other's read-set keys would otherwise each wait for the other to decide — a
+        // deadlock broken only by the read's own deadline. Probing for the concurrent writer first turns that
+        // standoff into the immediate mutual abort the probe exists to produce.
         // The finalizer records its own decision-scoped latency into finalizeLatency.
         DurableFinalizeOutcome outcome;
         try
         {
             outcome = await DurableFinalizer.FinalizeAsync(
                 input,
-                validateReadSet: async ct => await ValidateReadSet(context, ct).ConfigureAwait(false)
-                    && await CheckReadSetForConflicts(context, ct).ConfigureAwait(false),
+                validateReadSet: async ct => await CheckReadSetForConflicts(context, ct).ConfigureAwait(false)
+                    && await ValidateReadSet(context, ct).ConfigureAwait(false),
                 opId,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
-            // An exception during finalize is never a definite conflict abort. Classify from the canonical record:
-            // if the decision is already durable it is the truth (Committed, or a conflict Abort); otherwise the
-            // outcome is unknown and retryable. This is what stops a post-decision infrastructure failure from
-            // telling the caller it is safe to replay a transaction that actually committed.
+            // An exception during finalize does not itself decide anything. Classify from the canonical record:
+            // if the decision is already durable it is the truth (Committed or Abort); otherwise the outcome is
+            // unknown and retryable. This is what stops a post-decision infrastructure failure from telling the
+            // caller it is safe to replay a transaction that actually committed.
             outcome = ClassifyFromCanonicalRecord(input);
         }
         finally
@@ -1528,7 +1534,13 @@ internal sealed class TransactionCoordinator : IDisposable
             // sets no result on success), so an auto-commit script ending in a read returns that read — not a
             // synthetic Set. A bare commit with no prior result still reports Set.
             DurableFinalizeResult.Committed => context.Result ?? new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
-            DurableFinalizeResult.Aborted => new KeyValueTransactionResult { Type = KeyValueResponseType.Aborted, Reason = "Transaction conflict" },
+            DurableFinalizeResult.Aborted => new KeyValueTransactionResult
+            {
+                Type = KeyValueResponseType.Aborted,
+                Reason = outcome.AbortClass == TransactionAbortClass.Conflict
+                    ? "Transaction conflict"
+                    : $"Transaction aborted: {outcome.AbortClass}"
+            },
             _ => new KeyValueTransactionResult { Type = KeyValueResponseType.MustRetry, Reason = "Durable finalize could not complete; retry" }
         };
 
@@ -1537,10 +1549,10 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>
     /// Maps the canonical transaction record to a finalize outcome after a finalize threw. A durable Commit is
-    /// Committed, a durable conflict Abort is Aborted, and anything else (undecided, a non-conflict abort, or no
-    /// resident record) is the retryable MustRetry — never a fabricated conflict abort. A remote anchor's record is
-    /// read from this node's local projection; a nonresident record stays MustRetry until recovery or the
-    /// anchor-routed lookup resolves it.
+    /// Committed and a durable Abort is Aborted (terminal whatever its class); an undecided record or no resident
+    /// record is the retryable MustRetry — never a fabricated abort. A remote anchor's record is read from this
+    /// node's local projection; a nonresident record stays MustRetry until recovery or the anchor-routed lookup
+    /// resolves it.
     /// </summary>
     /// <summary>Reserves one outstanding-durable admission slot, or returns false if the node is at
     /// <c>DurableDecisionOutstandingMax</c>. A non-positive cap disables the gate (always admits). The CAS loop
@@ -1610,8 +1622,7 @@ internal sealed class TransactionCoordinator : IDisposable
         return record?.Decision switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
-            TransactionDecision.Abort when record.AbortClass == TransactionAbortClass.Conflict
-                => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, TransactionAbortClass.Conflict),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
             _ => new DurableFinalizeOutcome(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure)
         };
     }

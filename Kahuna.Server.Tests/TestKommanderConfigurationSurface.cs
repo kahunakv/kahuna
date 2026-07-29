@@ -1,3 +1,4 @@
+using CommandLine;
 using Kommander;
 
 namespace Kahuna.Server.Tests;
@@ -59,6 +60,10 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.GrpcChannelsPerNode)] = nameof(KahunaCommandLineOptions.RaftGrpcChannelsPerNode),
         [nameof(RaftConfiguration.GrpcEnableMultipleHttp2Connections)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableMultipleHttp2Connections),
         [nameof(RaftConfiguration.GrpcEnableSnapshotCompression)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableSnapshotCompression),
+        [nameof(RaftConfiguration.SnapshotReceiveSessionTtl)] = nameof(KahunaCommandLineOptions.RaftSnapshotReceiveSessionTtl),
+        [nameof(RaftConfiguration.SnapshotMaxPendingSessions)] = nameof(KahunaCommandLineOptions.RaftSnapshotMaxPendingSessions),
+        [nameof(RaftConfiguration.SnapshotMaxPendingBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotMaxPendingBytes),
+        [nameof(RaftConfiguration.AllowLegacySnapshotSenders)] = nameof(KahunaCommandLineOptions.RaftAllowLegacySnapshotSenders),
         [nameof(RaftConfiguration.EnableQuiescence)] = nameof(KahunaCommandLineOptions.RaftEnableQuiescence),
         [nameof(RaftConfiguration.QuiesceAfter)] = nameof(KahunaCommandLineOptions.RaftQuiesceAfter),
         [nameof(RaftConfiguration.EnableLeaderBalancer)] = nameof(KahunaCommandLineOptions.RaftEnableLeaderBalancer),
@@ -102,5 +107,35 @@ public sealed class TestKommanderConfigurationSurface
 
         Assert.All(RaftToCliOptionProperties.Values, cliProperty =>
             Assert.Contains(cliProperty, cliProperties));
+    }
+
+    /// <summary>
+    /// The snapshot-receive bounds are reachable from the command line: a declared property satisfies the surface
+    /// check above without proving the flag parses, so each one is driven through the parser with a non-default
+    /// value, and the defaults are pinned to the ones Kommander documents.
+    /// </summary>
+    [Fact]
+    public void TestSnapshotReceiveBoundOptionsParseFromTheCommandLine()
+    {
+        ParserResult<KahunaCommandLineOptions> defaults = Parser.Default.ParseArguments<KahunaCommandLineOptions>([]);
+
+        Assert.Equal(ParserResultType.Parsed, defaults.Tag);
+        Assert.Equal(30000, defaults.Value.RaftSnapshotReceiveSessionTtl);
+        Assert.Equal(8, defaults.Value.RaftSnapshotMaxPendingSessions);
+        Assert.Equal(512L * 1024 * 1024, defaults.Value.RaftSnapshotMaxPendingBytes);
+        Assert.False(defaults.Value.RaftAllowLegacySnapshotSenders);
+
+        ParserResult<KahunaCommandLineOptions> overridden = Parser.Default.ParseArguments<KahunaCommandLineOptions>([
+            "--raft-snapshot-receive-session-ttl", "45000",
+            "--raft-snapshot-max-pending-sessions", "3",
+            "--raft-snapshot-max-pending-bytes", "67108864",
+            "--raft-allow-legacy-snapshot-senders"
+        ]);
+
+        Assert.Equal(ParserResultType.Parsed, overridden.Tag);
+        Assert.Equal(45000, overridden.Value.RaftSnapshotReceiveSessionTtl);
+        Assert.Equal(3, overridden.Value.RaftSnapshotMaxPendingSessions);
+        Assert.Equal(64L * 1024 * 1024, overridden.Value.RaftSnapshotMaxPendingBytes);
+        Assert.True(overridden.Value.RaftAllowLegacySnapshotSenders);
     }
 }
