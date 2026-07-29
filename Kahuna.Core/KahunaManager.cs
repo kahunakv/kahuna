@@ -1233,9 +1233,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="hash">An optional hash representing the script for validation or identification purposes.</param>
     /// <param name="parameters">An optional list of parameters to be passed into the script during execution.</param>
     /// <returns>A task that represents the asynchronous operation and resolves to the result of the transaction execution.</returns>
-    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
+    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal)
     {
-        return keyValues.TryExecuteTx(script, hash, parameters);
+        return keyValues.TryExecuteTx(script, hash, parameters, priority);
     }
 
     /// <summary>

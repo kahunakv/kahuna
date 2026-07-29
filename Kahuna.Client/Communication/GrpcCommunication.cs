@@ -17,6 +17,7 @@ using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
 using Kommander.Time;
@@ -1126,11 +1127,12 @@ public class GrpcCommunication : IKahunaCommunication
     /// An instance of <see cref="KahunaKeyValueTransactionResult"/> representing the outcome of the transaction execution.
     /// </returns>
     /// <exception cref="KahunaException">Thrown if the operation fails, the transaction is aborted, or an unrecoverable error is encountered.</exception>
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken, TransactionPriority priority = TransactionPriority.Normal)
     {
         GrpcTryExecuteTransactionScriptRequest request = new()
         {
-            Script = UnsafeByteOperations.UnsafeWrap(script)
+            Script = UnsafeByteOperations.UnsafeWrap(script),
+            Priority = TransactionPriorityWire.ToGrpc(priority)
         };
         
         if (hash is not null)
@@ -1707,6 +1709,7 @@ public class GrpcCommunication : IKahunaCommunication
             AutoCommit = txOptions.AutoCommit,
             ReadValidation = (GrpcReadValidation)txOptions.ReadValidation,
             DecisionDurability = (GrpcDecisionDurability)txOptions.DecisionDurability,
+            Priority = TransactionPriorityWire.ToGrpc(txOptions.Priority),
             ReadTimestampNode = txOptions.ReadTimestamp.N,
             ReadTimestampPhysical = txOptions.ReadTimestamp.L,
             ReadTimestampCounter = txOptions.ReadTimestamp.C

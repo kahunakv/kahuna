@@ -1035,13 +1035,14 @@ public class RestCommunication : IKahunaCommunication
     /// <exception cref="KahunaException">
     /// Thrown if the transaction fails, is aborted, or cannot be completed due to an unrecoverable error.
     /// </exception>
-    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken)
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken, TransactionPriority priority = TransactionPriority.Normal)
     {
         KeyValueTransactionRequest request = new()
         {
             Hash = hash,
             Script = script,
-            Parameters = parameters
+            Parameters = parameters,
+            Priority = priority
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KeyValueTransactionRequest);

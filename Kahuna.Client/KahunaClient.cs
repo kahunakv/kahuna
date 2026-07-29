@@ -1094,11 +1094,38 @@ public class KahunaClient
     )
     {
         return await communication.TryExecuteKeyValueTransactionScript(
-            GetRoundRobinUrl(), 
-            Encoding.UTF8.GetBytes(script), 
-            hash, 
-            parameters, 
+            GetRoundRobinUrl(),
+            Encoding.UTF8.GetBytes(script),
+            hash,
+            parameters,
             cancellationToken
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Executes a script on the key-value store at the given admission priority.
+    /// </summary>
+    /// <remarks>
+    /// A separate overload rather than an extra optional parameter on the one above: inserting a parameter
+    /// ahead of the existing trailing <see cref="CancellationToken"/> would silently break every caller that
+    /// passes the token positionally. <paramref name="priority"/> intentionally has no default, which is what
+    /// keeps the two overloads unambiguous for existing calls.
+    /// </remarks>
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+        string script,
+        string? hash,
+        List<KeyValueParameter>? parameters,
+        TransactionPriority priority,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return await communication.TryExecuteKeyValueTransactionScript(
+            GetRoundRobinUrl(),
+            Encoding.UTF8.GetBytes(script),
+            hash,
+            parameters,
+            cancellationToken,
+            priority
         ).ConfigureAwait(false);
     }
     
@@ -1113,13 +1140,28 @@ public class KahunaClient
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
-        byte[] script, 
-        string? hash = null, 
-        List<KeyValueParameter>? parameters = null, 
+        byte[] script,
+        string? hash = null,
+        List<KeyValueParameter>? parameters = null,
         CancellationToken cancellationToken = default
     )
     {
         return await communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Executes a pre-encoded script on the key-value store at the given admission priority. Kept as a
+    /// separate overload for the same source-compatibility reason as the string form above.
+    /// </summary>
+    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+        byte[] script,
+        string? hash,
+        List<KeyValueParameter>? parameters,
+        TransactionPriority priority,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return await communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken, priority).ConfigureAwait(false);
     }
 
     /// <summary>

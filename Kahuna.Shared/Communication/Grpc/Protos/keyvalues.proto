@@ -317,6 +317,7 @@ message GrpcTryExecuteTransactionScriptRequest {
   optional string Hash = 1;
   bytes Script = 2;
   repeated GrpcKeyValueParameter Parameters = 3;
+  GrpcTransactionPriority Priority = 4;
 }
 
 message GrpcKeyValueParameter {
@@ -775,6 +776,7 @@ message GrpcStartTransactionRequest
   int32 ReadTimestampNode = 8;
   int64 ReadTimestampPhysical = 9;
   uint32 ReadTimestampCounter = 10;
+  GrpcTransactionPriority Priority = 11;
 }
 
 message GrpcStartTransactionResponse
@@ -1404,6 +1406,18 @@ enum GrpcReadValidation {
 enum GrpcDecisionDurability {
   DECISION_DURABILITY_BEST_EFFORT = 0;
   DECISION_DURABILITY_DURABLE = 1;
+}
+// Offset by one from Kahuna.Shared.KeyValue.TransactionPriority so that zero — the value a peer that
+// predates this field necessarily sends — means "not specified" and resolves to Normal, rather than
+// silently demoting every old client's transactions to Background. Convert with TransactionPriorityWire,
+// never with a raw cast.
+enum GrpcTransactionPriority {
+  TRANSACTION_PRIORITY_UNSPECIFIED = 0;
+  TRANSACTION_PRIORITY_BACKGROUND = 1;
+  TRANSACTION_PRIORITY_LOW = 2;
+  TRANSACTION_PRIORITY_NORMAL = 3;
+  TRANSACTION_PRIORITY_HIGH = 4;
+  TRANSACTION_PRIORITY_CRITICAL = 5;
 }
 message GrpcAcquireSnapshotHoldRequest {
   string HolderId          = 1;

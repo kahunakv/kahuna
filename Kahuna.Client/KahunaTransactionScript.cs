@@ -56,4 +56,21 @@ public class KahunaTransactionScript
     {
         return await kahunaClient.ExecuteKeyValueTransactionScript(script, hash, parameters, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Executes the Kahuna transaction script at the given admission priority, which decides how the server
+    /// orders this transaction against others when it is at its concurrency ceiling.
+    /// </summary>
+    /// <param name="priority">Relative importance of this execution. Has no effect below the server's ceiling.</param>
+    /// <param name="parameters">A list of key-value parameters for the transaction script. This parameter is optional.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task representing the asynchronous operation. The task result contains the result of the Kahuna key-value transaction.</returns>
+    public async Task<KahunaKeyValueTransactionResult> Run(
+        TransactionPriority priority,
+        List<KeyValueParameter>? parameters = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return await kahunaClient.ExecuteKeyValueTransactionScript(script, hash, parameters, priority, cancellationToken).ConfigureAwait(false);
+    }
 }

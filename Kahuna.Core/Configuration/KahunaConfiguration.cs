@@ -41,6 +41,50 @@ public sealed class KahunaConfiguration
     public int MaxTransactionTimeout { get; set; } = 300_000;
 
     /// <summary>
+    /// Script transactions that may execute concurrently on this node before further ones are queued and
+    /// started in priority order. A value &lt;= 0 disables the gate entirely: every transaction starts
+    /// immediately and its priority is recorded for observability only, which is byte-for-byte the behavior
+    /// of a build without an admission gate. Default is disabled, so enabling admission control is an
+    /// explicit operator decision.
+    /// </summary>
+    public int MaxConcurrentTransactions { get; set; }
+
+    /// <summary>
+    /// Interactive transaction sessions that may be open concurrently on this node. Deliberately governed
+    /// separately from <see cref="MaxConcurrentTransactions"/> and expected to be far more generous: a session
+    /// holds its slot for as long as the client keeps it open, so a shared pool would let idle client-paced
+    /// sessions starve script transactions. A value &lt;= 0 disables the session gate.
+    /// </summary>
+    public int MaxConcurrentSessions { get; set; }
+
+    /// <summary>
+    /// Slots, out of each ceiling above, that only <c>High</c> and <c>Critical</c> transactions may occupy.
+    /// This is what stops a flood of bulk work from filling every slot and starving latency-critical work.
+    /// Clamped below its ceiling so ordinary traffic always retains at least one slot. Zero — the default —
+    /// means no class distinction: whoever is first in line wins.
+    /// </summary>
+    public int TransactionPriorityReservedSlots { get; set; }
+
+    /// <summary>
+    /// Milliseconds a queued transaction must wait to gain one effective priority level, compounding until it
+    /// reaches just below <c>Critical</c>. This is the anti-starvation bound: background work queued behind an
+    /// unending stream of important work still reaches the front rather than waiting forever. Lower values
+    /// favour fairness, higher values favour honouring the stated priorities; a value &lt;= 0 disables aging
+    /// and lets high-priority work defer low-priority work indefinitely.
+    /// </summary>
+    public int TransactionPriorityAgingThreshold { get; set; } = 1_000;
+
+    /// <summary>
+    /// Callers that may wait for an admission slot at once, per gate, before further ones are refused with a
+    /// retryable result instead of being queued. Without this the ceiling bounds only how much work *runs*
+    /// while the queue behind it grows with offered load — retaining a waiter, its continuation, and its
+    /// cancellation registration each — which consumes the very memory the ceiling exists to protect, and
+    /// does so precisely during the overload it is meant to survive. A value &lt;= 0 leaves the queue
+    /// unbounded. Only has an effect when the corresponding ceiling is enabled.
+    /// </summary>
+    public int TransactionPriorityMaxQueued { get; set; } = 4_096;
+
+    /// <summary>
     /// Upper bound, in milliseconds, on how long a single two-phase-commit <c>CommitLogs</c>/<c>RollbackLogs</c>
     /// Raft wait may block before it is cancelled and returns a retryable <c>OperationCancelled</c>
     /// (mapped to <c>MustRetry</c>) so the coordinator re-drives the same ticket against the settled

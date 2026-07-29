@@ -31,12 +31,17 @@ internal sealed class ScriptTransactionExecutor
 
     private readonly ScriptParserProcessor scriptParserProcessor;
 
+    /// <summary>Admission gate for script transactions. Separate from the interactive-session gate because a
+    /// script transaction holds its slot only for its own bounded execution.</summary>
+    private readonly TransactionPriorityOrderer orderer;
+
     public ScriptTransactionExecutor(
         KeyValuesManager manager,
         KahunaConfiguration configuration,
         IRaft raft,
         ILogger<IKahuna> logger,
-        TransactionCoordinator coordinator
+        TransactionCoordinator coordinator,
+        TransactionPriorityOrderer orderer
     )
     {
         this.manager = manager;
@@ -44,14 +49,31 @@ internal sealed class ScriptTransactionExecutor
         this.raft = raft;
         this.logger = logger;
         this.coordinator = coordinator;
+        this.orderer = orderer;
         this.scriptParserProcessor = new(this.configuration, logger);
     }
 
     /// <summary>
     /// Executes a single or multi-command transaction in an atomic manner.
     /// </summary>
-    public async Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
+    /// <param name="priority">
+    /// Admission priority, honoured only for scripts that actually open a transaction — an explicit
+    /// <c>BEGIN</c> block or a multi-statement script, which is what the admission gate governs. A script
+    /// consisting of one standalone command (<c>SET</c>, <c>GET</c>, <c>DELETE</c>, <c>EXTEND</c>, a bucket or
+    /// prefix read, or their ephemeral forms) runs directly against the store and is deliberately not gated:
+    /// it holds no transaction, and putting single-key operations behind a concurrency ceiling would throttle
+    /// ordinary reads and writes, which is well outside what this gate is for. Priority is accepted and
+    /// ignored for those shapes rather than rejected, so a caller can set it once for a mixed workload.
+    /// Note that parsing necessarily happens before admission, since the script is what says whether a
+    /// transaction is being opened at all.
+    /// </param>
+    public async Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal)
     {
+        // A priority can arrive here as a raw number from a REST payload or as a cast enum from the embedded
+        // API, neither of which is validated by the gRPC wire conversion. Normalize before it can influence
+        // admission, so an out-of-range ordinal cannot be treated as Critical and jump the queue.
+        priority = TransactionPriorityOrderer.Normalize(priority);
+
         try
         {
             // Parse synchronously before the first await; the AST owns everything needed
@@ -103,7 +125,7 @@ internal sealed class ScriptTransactionExecutor
                     return await ScanByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
-                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false);
+                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false, priority);
 
                 case NodeType.StmtList:
                 case NodeType.Let:
@@ -140,7 +162,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.Placeholder:
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
-                    return await ExecuteTransaction(ast, null, parameters, true);
+                    return await ExecuteTransaction(ast, null, parameters, true, priority);
 
                 case NodeType.SetCmp:
                 case NodeType.SetCmpRev:
@@ -209,7 +231,7 @@ internal sealed class ScriptTransactionExecutor
     /// Executes a script transaction using the two-phase commit protocol.
     /// The autoCommit flag selects automatic commit on success vs. explicit commit/rollback.
     /// </summary>
-    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit)
+    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit, TransactionPriority priority)
     {
         bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
@@ -268,17 +290,54 @@ internal sealed class ScriptTransactionExecutor
                     throw new KahunaScriptException("snapshot must be a non-zero Unix epoch millisecond value", optionsAst.yyline);
                 readTimestamp = new HLCTimestamp(0, snapshotMs, uint.MaxValue);
             }
+
+            // An inline priority overrides whatever the transport carried, so a script can express its own
+            // importance without the caller having to set it out of band.
+            if (options.TryGetValue("priority", out optionValue))
+            {
+                priority = optionValue switch
+                {
+                    "background" => TransactionPriority.Background,
+                    "low" => TransactionPriority.Low,
+                    "normal" => TransactionPriority.Normal,
+                    "high" => TransactionPriority.High,
+                    "critical" => TransactionPriority.Critical,
+                    _ => throw new KahunaScriptException("Unsupported priority option: " + optionValue, optionsAst.yyline)
+                };
+            }
         }
 
         using CancellationTokenSource cts = new();
 
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
 
+        // Wait for a slot before minting the transaction's identity. A transaction that queued behind a
+        // saturated node must carry the HLC of when it actually started, not of when it was submitted, or its
+        // reads would be anchored to a snapshot taken before it ran. Below the ceiling this completes
+        // synchronously and costs nothing.
+        AdmissionLease? lease;
+
+        try
+        {
+            lease = await orderer.AdmitAsync(priority, cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Timed out while still waiting to start, so nothing was minted, locked, or written.
+            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+        }
+
+        // Refused outright because the admission queue is already full. Nothing was started, so this is
+        // retryable backpressure rather than a failure of the transaction itself.
+        if (lease is null)
+            return new() { Type = KeyValueResponseType.MustRetry, Reason = "Node is at its transaction admission limit" };
+
         HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
 
         ScriptTransactionContext context = new()
         {
             TransactionId = transactionId,
+            Priority = priority,
             Locking = locking,
             ReadTimestamp = readTimestamp,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
@@ -292,18 +351,20 @@ internal sealed class ScriptTransactionExecutor
         HashSet<string> ephemeralPrefixLocksToAcquire = [];
         HashSet<string> persistentPrefixLocksToAcquire = [];
 
-        if (locking == KeyValueTransactionLocking.Pessimistic)
-            KeyValueLockHelper.GetLocksToAcquire(
-                context,
-                ast,
-                ephemeralLocksToAcquire,
-                persistentLocksToAcquire,
-                ephemeralPrefixLocksToAcquire,
-                persistentPrefixLocksToAcquire
-            );
-
         try
         {
+            // Inside the try so that a malformed script surfacing here still runs the finally that returns
+            // the admission slot — a slot lost to an early throw would shrink node capacity permanently.
+            if (locking == KeyValueTransactionLocking.Pessimistic)
+                KeyValueLockHelper.GetLocksToAcquire(
+                    context,
+                    ast,
+                    ephemeralLocksToAcquire,
+                    persistentLocksToAcquire,
+                    ephemeralPrefixLocksToAcquire,
+                    persistentPrefixLocksToAcquire
+                );
+
             if (locking == KeyValueTransactionLocking.Pessimistic)
                 await AcquireLocksPessimistically(
                     context,
@@ -361,6 +422,10 @@ internal sealed class ScriptTransactionExecutor
         }
         finally
         {
+            // First, and unconditionally: returning the slot must not sit behind anything that can throw,
+            // or a failure here would cost the node a slot for the rest of its life.
+            lease.Dispose();
+
             // Release every confirmed lock shape not finalized by two-phase commit and clean the
             // transaction's read MVCC. Safe to run on a committed transaction: its modified keys were already
             // finalized and are skipped internally. Best-effort — no terminal promise rides on completion.

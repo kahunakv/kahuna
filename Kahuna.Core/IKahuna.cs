@@ -240,7 +240,11 @@ public interface IKahuna
     
     public Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability);
     
-    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters);
+    /// <param name="priority">
+    /// Admission priority. Applies only to scripts that open a transaction (an explicit <c>BEGIN</c> block or
+    /// a multi-statement script); a standalone single-command script is not admission-gated and ignores it.
+    /// </param>
+    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal);
     
     public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability);
 

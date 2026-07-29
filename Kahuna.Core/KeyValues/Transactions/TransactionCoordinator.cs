@@ -85,12 +85,20 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>A finalized outcome held in the idempotency window, stamped with the HLC at retention time.</summary>
     private readonly record struct RetainedOutcome(FinalizeOutcome Outcome, HLCTimestamp RetainedAt);
 
-    public TransactionCoordinator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
+    /// <summary>
+    /// Admission gate for interactive sessions. Deliberately a different instance from the script executor's:
+    /// a session holds its slot for as long as the client keeps it open, so sharing one pool would let idle
+    /// client-paced sessions occupy every slot and stall script transactions node-wide.
+    /// </summary>
+    private readonly TransactionPriorityOrderer orderer;
+
+    public TransactionCoordinator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger, TransactionPriorityOrderer orderer)
     {
         this.manager = manager;
         this.configuration = configuration;
         this.raft = raft;
         this.logger = logger;
+        this.orderer = orderer;
     }
 
     /// <summary>
@@ -111,45 +119,103 @@ internal sealed class TransactionCoordinator : IDisposable
             !Enum.IsDefined(options.DecisionDurability))
             return (KeyValueResponseType.InvalidInput, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
 
+        // Priority is normalized rather than rejected, unlike the policies above. Those change what the
+        // transaction *means* — isolation, durability — so an unrecognized value must never be silently
+        // defaulted. Priority only influences the order in which work starts, so an unknown ordinal (a raw
+        // REST number, a cast enum, a newer peer's value) is treated as ordinary work rather than failing an
+        // otherwise valid transaction. This matches the gRPC wire contract and keeps an out-of-range value
+        // from being read as Critical.
+        TransactionPriority priority = TransactionPriorityOrderer.Normalize(options.Priority);
+
         // A fixed read snapshot and write-skew validation are mutually exclusive: pinning reads to a past
         // timestamp cannot detect concurrent writes that land after that snapshot, so the two together would
         // silently promise a guarantee the engine cannot honor. Reject the combination up front.
         if (options.ReadTimestamp != HLCTimestamp.Zero && options.ReadValidation == ReadValidation.TrackAndValidate)
             return (KeyValueResponseType.InvalidInput, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
 
-        bool added;
-        HLCTimestamp transactionId;
+        // Clamp to the server's hard maximum so no admitted session can outlive it — the bound that
+        // makes age-based reclamation of a transaction's orphaned MVCC read snapshots correct.
+        int timeout = Math.Min(
+            options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout,
+            configuration.MaxTransactionTimeout);
 
-        do
+        // Take a session slot before the session exists. Bounded by the session's own timeout so a Begin issued
+        // against a node already holding its full complement of sessions fails as a retryable timeout instead of
+        // parking indefinitely. Below the ceiling this completes synchronously.
+        AdmissionLease? lease;
+
+        using (CancellationTokenSource admissionCts = new(TimeSpan.FromMilliseconds(timeout)))
         {
-            transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
-
-            TransactionContext context = new()
+            try
             {
-                CoordinatorKey     = coordinatorKey,
-                TransactionId      = transactionId,
-                Locking            = options.Locking,
-                ReadValidation     = options.ReadValidation,
-                DecisionDurability = options.DecisionDurability,
-                ReadTimestamp      = options.ReadTimestamp,
-                Action             = KeyValueTransactionAction.Commit,
-                AsyncRelease       = options.AsyncRelease,
-                // Clamp to the server's hard maximum so no admitted session can outlive it — the bound that
-                // makes age-based reclamation of a transaction's orphaned MVCC read snapshots correct.
-                Timeout            = Math.Min(
-                                         options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout,
-                                         configuration.MaxTransactionTimeout)
-            };
+                lease = await orderer.AdmitAsync(priority, admissionCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // No session was created, so there is nothing to clean up and the caller may simply try again.
+                return (KeyValueResponseType.MustRetry, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
+            }
+        }
 
-            added = sessions.TryAdd(transactionId, context);
+        // Refused outright because the wait queue is full — the gate shedding load. Retryable for the same
+        // reason a timeout is: nothing was started.
+        if (lease is null)
+            return (KeyValueResponseType.MustRetry, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
 
-        } while (!added);
+        bool added = false;
+        HLCTimestamp transactionId = HLCTimestamp.Zero;
+
+        try
+        {
+            do
+            {
+                transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
+
+                TransactionContext context = new()
+                {
+                    CoordinatorKey     = coordinatorKey,
+                    TransactionId      = transactionId,
+                    Locking            = options.Locking,
+                    ReadValidation     = options.ReadValidation,
+                    DecisionDurability = options.DecisionDurability,
+                    ReadTimestamp      = options.ReadTimestamp,
+                    Priority           = priority,
+                    Action             = KeyValueTransactionAction.Commit,
+                    AsyncRelease       = options.AsyncRelease,
+                    Timeout            = timeout,
+                    // The slot travels with the session and is returned by whichever path finalizes it.
+                    AdmissionLease     = lease
+                };
+
+                added = sessions.TryAdd(transactionId, context);
+
+            } while (!added);
+        }
+        finally
+        {
+            // Ownership of the slot transfers to the published session and is released by whichever path
+            // finalizes it. Until that publication succeeds the slot belongs to nobody, so anything that goes
+            // wrong in between — a clock fault while minting the id, teardown, an unexpected throw — must give
+            // it back here or the node silently loses capacity for the rest of its life.
+            if (!added)
+                lease.Dispose();
+        }
 
         logger.LogStartedInteractiveTransaction(transactionId);
 
-        await Task.CompletedTask;
-
         return (KeyValueResponseType.Set, new TransactionHandle(transactionId, coordinatorKey));
+    }
+
+    /// <summary>
+    /// Retires a finalized session and returns the admission slot it held. Every path that ends a session —
+    /// commit, rollback, and the reaper reclaiming an abandoned one — goes through here, so node capacity
+    /// recovers even when the client never cooperates. The lease's own release is idempotent, so a racing
+    /// second finalize that finds the session already gone changes nothing.
+    /// </summary>
+    private void FinalizeSession(HLCTimestamp transactionId)
+    {
+        if (sessions.TryRemove(transactionId, out TransactionContext? context))
+            context.AdmissionLease?.Dispose();
     }
 
     /// <summary>
@@ -261,7 +327,7 @@ internal sealed class TransactionCoordinator : IDisposable
             if (outcome.IsTerminal)
             {
                 RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
-                sessions.TryRemove(transactionId, out _);
+                FinalizeSession(transactionId);
             }
 
             return (outcome.Type, outcome.RecordAnchorKey);
@@ -406,7 +472,7 @@ internal sealed class TransactionCoordinator : IDisposable
             if (outcome.IsTerminal)
             {
                 RetainTerminalOutcome(transactionId, outcome, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
-                sessions.TryRemove(transactionId, out _);
+                FinalizeSession(transactionId);
             }
 
             return outcome.Type;
@@ -907,7 +973,7 @@ internal sealed class TransactionCoordinator : IDisposable
             if (outcome.IsTerminal)
             {
                 RetainTerminalOutcome(transactionId, outcome, now);
-                sessions.TryRemove(transactionId, out _);
+                FinalizeSession(transactionId);
             }
         }
         catch (Exception ex)

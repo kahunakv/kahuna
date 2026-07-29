@@ -1,6 +1,7 @@
 
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Server.KeyValues.Transactions;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
@@ -53,6 +54,19 @@ internal class TransactionContext
     /// Controls how durable the coordinator decision record must be before the client receives the outcome.
     /// </summary>
     public DecisionDurability DecisionDurability { get; init; }
+
+    /// <summary>
+    /// Admission priority this transaction was started with. Recorded for observability and for the admission
+    /// gate's accounting; it has no effect on execution once the transaction is running.
+    /// </summary>
+    public TransactionPriority Priority { get; init; } = TransactionPriority.Normal;
+
+    /// <summary>
+    /// Admission slot held by an interactive session for its whole lifetime, released exactly once when the
+    /// session leaves the active map — by commit, by rollback, or by the reaper reclaiming it. Null for script
+    /// transactions, which scope their lease to their own execution instead of to a context.
+    /// </summary>
+    internal AdmissionLease? AdmissionLease { get; set; }
 
     /// <summary>
     /// Last result of the current key-value execution.

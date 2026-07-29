@@ -42,4 +42,11 @@ public sealed class KahunaTransactionOptions
     /// Transaction-wide snapshot timestamp for reads. Zero means "latest".
     /// </summary>
     public HLCTimestamp ReadTimestamp { get; set; }
+
+    /// <summary>
+    /// Relative importance of this transaction when the server has to choose which of several waiting
+    /// transactions to start first. Only takes effect when the server is saturated; below its concurrency
+    /// ceiling every transaction starts immediately regardless of priority.
+    /// </summary>
+    public TransactionPriority Priority { get; set; } = TransactionPriority.Normal;
 }

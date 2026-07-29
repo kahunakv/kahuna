@@ -93,6 +93,21 @@ public sealed class KahunaCommandLineOptions
     
     [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout (in milliseconds)", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;
+
+    [Option("max-concurrent-transactions", Required = false, HelpText = "Script transactions that may execute concurrently before further ones queue and start in priority order (0 = no limit)", Default = 0)]
+    public int MaxConcurrentTransactions { get; set; }
+
+    [Option("max-concurrent-sessions", Required = false, HelpText = "Interactive transaction sessions that may be open concurrently (0 = no limit)", Default = 0)]
+    public int MaxConcurrentSessions { get; set; }
+
+    [Option("transaction-priority-reserved-slots", Required = false, HelpText = "Slots out of each concurrency ceiling that only high/critical priority transactions may occupy", Default = 0)]
+    public int TransactionPriorityReservedSlots { get; set; }
+
+    [Option("transaction-priority-aging-threshold", Required = false, HelpText = "Milliseconds a queued transaction waits to gain one effective priority level (0 = no aging)", Default = 1000)]
+    public int TransactionPriorityAgingThreshold { get; set; } = 1000;
+
+    [Option("transaction-priority-max-queued", Required = false, HelpText = "Callers that may wait for an admission slot per gate before further ones are refused retryably (0 = unbounded)", Default = 4096)]
+    public int TransactionPriorityMaxQueued { get; set; } = 4096;
     
     [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 8)]
     public int ReadIOThreads { get; set; } = 8;

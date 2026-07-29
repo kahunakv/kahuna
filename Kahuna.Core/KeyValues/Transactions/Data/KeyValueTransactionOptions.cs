@@ -50,4 +50,11 @@ public sealed class KeyValueTransactionOptions
     /// Transaction-wide snapshot timestamp for reads. Zero means "latest".
     /// </summary>
     public HLCTimestamp ReadTimestamp { get; set; }
+
+    /// <summary>
+    /// Relative importance of this transaction for admission ordering when the node is at its concurrency
+    /// ceiling. Defaults to <see cref="TransactionPriority.Normal"/>, so a caller that never sets it competes
+    /// exactly as it did before priorities existed.
+    /// </summary>
+    public TransactionPriority Priority { get; set; } = TransactionPriority.Normal;
 }

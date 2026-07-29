@@ -15,6 +15,7 @@ using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander.Diagnostics;
@@ -1435,7 +1436,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(
             request.Script.Memory,
             request.Hash,
-            GetParameters(request.Parameters)
+            GetParameters(request.Parameters),
+            TransactionPriorityWire.FromGrpc(request.Priority)
         );
 
         GrpcTryExecuteTransactionScriptResponse response = new()
@@ -1743,6 +1745,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             AutoCommit = request.AutoCommit,
             ReadValidation = (ReadValidation)request.ReadValidation,
             DecisionDurability = (DecisionDurability)request.DecisionDurability,
+            Priority = TransactionPriorityWire.FromGrpc(request.Priority),
             ReadTimestamp = new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
         }, context.CancellationToken);
 

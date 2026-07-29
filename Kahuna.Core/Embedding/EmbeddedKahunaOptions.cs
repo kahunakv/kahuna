@@ -95,6 +95,41 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int MaxTransactionTimeout { get; set; } = 300_000;
 
+    /// <summary>
+    /// Script transactions that may execute concurrently on this node before further ones are queued and
+    /// started in priority order. A value &lt;= 0 — the default — disables the gate: every transaction starts
+    /// immediately and priority is recorded for observability only.
+    /// </summary>
+    public int MaxConcurrentTransactions { get; set; }
+
+    /// <summary>
+    /// Interactive transaction sessions that may be open concurrently on this node. Governed separately from
+    /// <see cref="MaxConcurrentTransactions"/> and expected to be far more generous, because a session holds
+    /// its slot for as long as its client keeps it open. A value &lt;= 0 disables the session gate.
+    /// </summary>
+    public int MaxConcurrentSessions { get; set; }
+
+    /// <summary>
+    /// Slots, out of each ceiling above, that only <c>High</c> and <c>Critical</c> transactions may occupy,
+    /// so a flood of bulk work cannot fill every slot. Clamped below its ceiling so ordinary traffic always
+    /// keeps at least one slot.
+    /// </summary>
+    public int TransactionPriorityReservedSlots { get; set; }
+
+    /// <summary>
+    /// Milliseconds a queued transaction must wait to gain one effective priority level, compounding until
+    /// just below <c>Critical</c>. Bounds how long low-priority work can be deferred; a value &lt;= 0
+    /// disables aging.
+    /// </summary>
+    public int TransactionPriorityAgingThreshold { get; set; } = 1_000;
+
+    /// <summary>
+    /// Callers that may wait for an admission slot at once, per gate, before further ones are refused with a
+    /// retryable result rather than queued. Bounds the memory an overload can retain behind the ceiling. A
+    /// value &lt;= 0 leaves the queue unbounded.
+    /// </summary>
+    public int TransactionPriorityMaxQueued { get; set; } = 4_096;
+
     public TimeSpan ScriptCacheExpiration { get; set; } = TimeSpan.FromMinutes(1);
 
     public int RevisionsToKeepCached { get; set; } = 100;

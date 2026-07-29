@@ -11,6 +11,7 @@ using Google.Protobuf.Collections;
 
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks;
@@ -1434,6 +1435,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             AutoCommit = options.AutoCommit,
             ReadValidation = (GrpcReadValidation)options.ReadValidation,
             DecisionDurability = (GrpcDecisionDurability)options.DecisionDurability,
+            Priority = TransactionPriorityWire.ToGrpc(options.Priority),
             ReadTimestampNode = options.ReadTimestamp.N,
             ReadTimestampPhysical = options.ReadTimestamp.L,
             ReadTimestampCounter = options.ReadTimestamp.C,

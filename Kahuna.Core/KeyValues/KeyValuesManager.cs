@@ -59,6 +59,12 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly TransactionCoordinator txCoordinator;
 
     private readonly ScriptTransactionExecutor scriptExecutor;
+
+    /// <summary>Admission gate governing how many interactive sessions may be open at once.</summary>
+    internal readonly TransactionPriorityOrderer sessionOrderer;
+
+    /// <summary>Admission gate governing how many script transactions may execute at once.</summary>
+    internal readonly TransactionPriorityOrderer scriptOrderer;
     
     private readonly IActorRef<ScriptParserEvicterActor, ScriptParserEvicterRequest> scriptParserEvicter;
 
@@ -163,6 +169,8 @@ internal sealed class KeyValuesManager : IDisposable
     // Instance-owned meter for the durable-2PC resident-state gauges; disposed on teardown so a disposed node's
     // stores are not kept reachable by the gauge callbacks.
     private readonly System.Diagnostics.Metrics.Meter durableGaugeMeter;
+
+    private readonly System.Diagnostics.Metrics.Meter admissionGaugeMeter;
 
     /// <summary>The durable-intent 2PC stores and key→partition routing, exposed to the transaction coordinator's
     /// durable finalize path (the sole durable-persistent finalize path).</summary>
@@ -623,8 +631,24 @@ internal sealed class KeyValuesManager : IDisposable
             logger
         );
 
-        txCoordinator = new(this, configuration, raft, logger);
-        scriptExecutor = new(this, configuration, raft, logger, txCoordinator);
+        // Two independent admission gates, because the two transaction shapes hold a slot for very different
+        // durations: a script transaction for its own bounded execution, an interactive session for as long as
+        // its client stays connected. Both are in-memory and per-node — a restart legitimately drops waiters
+        // that had not started yet.
+        sessionOrderer = new(
+            configuration.MaxConcurrentSessions,
+            configuration.TransactionPriorityReservedSlots,
+            configuration.TransactionPriorityAgingThreshold,
+            configuration.TransactionPriorityMaxQueued);
+
+        scriptOrderer = new(
+            configuration.MaxConcurrentTransactions,
+            configuration.TransactionPriorityReservedSlots,
+            configuration.TransactionPriorityAgingThreshold,
+            configuration.TransactionPriorityMaxQueued);
+
+        txCoordinator = new(this, configuration, raft, logger, sessionOrderer);
+        scriptExecutor = new(this, configuration, raft, logger, txCoordinator, scriptOrderer);
 
         // Resident-state gauges for the durable-2PC stores + the admission counter, on an instance-owned meter
         // disposed on teardown so a disposed node's stores are not kept reachable by gauge callbacks.
@@ -634,6 +658,10 @@ internal sealed class KeyValuesManager : IDisposable
             () => preparedIntentStore.Count,
             () => preparedIntentStore.TotalBytes,
             () => txCoordinator.OutstandingDurableCount);
+
+        // Admission-gate gauges on their own instance-owned meter, for the same reason: a disposed node's
+        // orderers must not stay reachable through gauge callbacks.
+        admissionGaugeMeter = Transactions.TransactionPriorityMetrics.RegisterGauges(scriptOrderer, sessionOrderer);
 
         // Periodic reaper for interactive transaction sessions abandoned without commit/rollback.
         actorSystem.Spawn<TransactionReaperActor, TransactionReaperRequest>(
@@ -5767,9 +5795,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="hash"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters)
+    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal)
     {
-        return scriptExecutor.TryExecuteTx(script, hash, parameters);
+        return scriptExecutor.TryExecuteTx(script, hash, parameters, priority);
     }
 
     /// <summary>
@@ -6197,5 +6225,11 @@ internal sealed class KeyValuesManager : IDisposable
         snapshotFloorStore.Dispose();
         rangeSplitTrigger?.Dispose();
         durableGaugeMeter.Dispose();
+        admissionGaugeMeter.Dispose();
+
+        // Fail anything still waiting for a slot rather than leaving callers awaiting an admission that a
+        // torn-down node will never grant.
+        scriptOrderer.Dispose();
+        sessionOrderer.Dispose();
     }
 }
