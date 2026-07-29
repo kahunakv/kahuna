@@ -34,6 +34,19 @@ internal sealed class CompletionReceiptStore
 {
     private readonly ConcurrentDictionary<ReceiptKey, CompletionReceipt> receipts = new();
 
+    // Monotonic change stamp for the receipt set, bumped whenever a receipt is actually added or removed. A
+    // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
+    // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
+    // from a full scan + serialize + rewrite into a counter comparison. Routing changes always arrive together
+    // with replicated receipt handoffs (which bump the stamp), so a skip can never hide a receipt that moved
+    // partitions: until every partition has re-persisted past the handoff, none of them compares equal.
+    private long version;
+
+    // Per-partition value of <see cref="version"/> captured just before that partition's last successful
+    // snapshot write. Captured before the scan, so a mutation racing the scan leaves the stamp ahead and the
+    // next checkpoint rewrites the file.
+    private readonly ConcurrentDictionary<int, long> persistedVersion = new();
+
     /// <summary>
     /// Directory + filename prefix for the per-partition on-disk snapshots, or null when persistence is
     /// disabled (memory-only stores and the no-arg fallback). Each data partition writes the receipts whose key
@@ -98,7 +111,8 @@ internal sealed class CompletionReceiptStore
         if (transactionId == HLCTimestamp.Zero || string.IsNullOrEmpty(key))
             return;
 
-        receipts.TryAdd(new ReceiptKey(transactionId, key), new CompletionReceipt(recordAnchorKey, durability));
+        if (receipts.TryAdd(new ReceiptKey(transactionId, key), new CompletionReceipt(recordAnchorKey, durability)))
+            Interlocked.Increment(ref version);
     }
 
     /// <summary>
@@ -125,7 +139,13 @@ internal sealed class CompletionReceiptStore
     /// true when a receipt was removed. Not called until the durable coordinator decision exists.
     /// </summary>
     public bool Forget(HLCTimestamp transactionId, string key)
-        => receipts.TryRemove(new ReceiptKey(transactionId, key), out _);
+    {
+        if (!receipts.TryRemove(new ReceiptKey(transactionId, key), out _))
+            return false;
+
+        Interlocked.Increment(ref version);
+        return true;
+    }
 
     /// <summary>
     /// Drops every receipt older than <paramref name="ttl"/> and returns how many were removed. This is the age
@@ -163,6 +183,9 @@ internal sealed class CompletionReceiptStore
             if (receipts.TryRemove(receipt))
                 removed++;
         }
+
+        if (removed > 0)
+            Interlocked.Increment(ref version);
 
         return removed;
     }
@@ -358,6 +381,14 @@ internal sealed class CompletionReceiptStore
         if (keyToPartition is null)
             return true;
 
+        // Unchanged since this partition's last durable write: the file already holds exactly this content, so
+        // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
+        // scan and recorded only after a successful write, so a faulted write or a mutation racing the scan
+        // always leaves the partition due for a rewrite.
+        long observedVersion = Interlocked.Read(ref version);
+        if (persistedVersion.TryGetValue(partitionId, out long lastPersisted) && lastPersisted == observedVersion)
+            return true;
+
         GrpcImportCompletionReceiptsRequest message = new();
         foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
         {
@@ -390,6 +421,7 @@ internal sealed class CompletionReceiptStore
                 File.Move(tmp, path, overwrite: true);
             }
 
+            persistedVersion[partitionId] = observedVersion;
             return true;
         }
         catch (Exception ex)

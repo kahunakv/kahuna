@@ -69,6 +69,10 @@ internal sealed record TransactionRecord(
 /// transition must present to bind to the frozen record. It must be stable across processes, runs, and
 /// participant input order (apply/replay never consults process-local hashing), so it is a fixed FNV-1a fold over
 /// the ordinally-sorted participant set plus the frozen scalar identity — never <see cref="object.GetHashCode"/>.
+/// HLC timestamps are folded component-wise (N, L, C) rather than through their string form, so computing the
+/// hash allocates nothing. Changing the fold recipe is safe only because the hash is computed exactly once per
+/// transaction — at freeze in <see cref="DurableFinalizeInputBuilder"/> — and carried as an opaque value
+/// thereafter; no apply, replay, or recovery path ever recomputes it from persisted state to compare.
 /// </summary>
 internal static class TransactionManifest
 {
@@ -83,10 +87,10 @@ internal static class TransactionManifest
         const ulong prime = 1099511628211UL;
 
         ulong h = offset;
-        h = FoldString(h, transactionId.ToString(), prime);
+        h = FoldHlc(h, transactionId, prime);
         h = FoldLong(h, epoch, prime);
         h = FoldString(h, anchorKey, prime);
-        h = FoldString(h, commitTimestamp.ToString(), prime);
+        h = FoldHlc(h, commitTimestamp, prime);
 
         // Order-independent: sort participants by ordinal key (then durability) so the hash does not depend on
         // the order the caller enumerated the modified keys.
@@ -117,6 +121,16 @@ internal static class TransactionManifest
         // Length-delimit so ["ab","c"] and ["a","bc"] do not collide.
         h ^= (ulong)value.Length;
         h *= prime;
+        return h;
+    }
+
+    /// <summary>Folds an HLC timestamp component-wise (N, L, C) — the allocation-free equivalent of folding a
+    /// canonical string form; all three components participate because N is part of HLC identity.</summary>
+    private static ulong FoldHlc(ulong h, HLCTimestamp value, ulong prime)
+    {
+        h = FoldLong(h, value.N, prime);
+        h = FoldLong(h, value.L, prime);
+        h = FoldLong(h, value.C, prime);
         return h;
     }
 

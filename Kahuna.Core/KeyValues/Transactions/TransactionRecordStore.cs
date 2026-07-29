@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
@@ -21,6 +23,19 @@ namespace Kahuna.Server.KeyValues.Transactions;
 internal sealed class TransactionRecordStore
 {
     private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> records = new();
+
+    // Monotonic change stamp for the record set, bumped whenever a record is installed, updated, or removed. A
+    // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
+    // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
+    // from a full scan + serialize + rewrite into a counter comparison. Records only change partitions through
+    // replicated split/merge transfer deltas, which apply here and bump the stamp, so a skip can never hide a
+    // moved record.
+    private long version;
+
+    // Per-partition value of <see cref="version"/> captured just before that partition's last successful
+    // snapshot write. Captured before the scan, so a mutation racing the scan leaves the stamp ahead and the
+    // next checkpoint rewrites the file.
+    private readonly ConcurrentDictionary<int, long> persistedVersion = new();
 
     private readonly string? snapshotDirectory;
 
@@ -74,9 +89,15 @@ internal sealed class TransactionRecordStore
             TransactionRecordApplyResult result = TransactionRecordStateMachine.Apply(existing, command);
 
             if (result.Outcome == TransactionApplyOutcome.Applied && result.Record is not null)
+            {
                 records[key] = result.Record;
+                Interlocked.Increment(ref version);
+            }
             else if (result.Outcome == TransactionApplyOutcome.Removed)
+            {
                 records.TryRemove(key, out _);
+                Interlocked.Increment(ref version);
+            }
 
             return result;
         }
@@ -95,10 +116,39 @@ internal sealed class TransactionRecordStore
 
     public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
 
+    // The node that proposes a delta serialized it from live command objects moments before Raft hands the very
+    // same byte array back to the local apply path, so the decoded form is registered against the produced bytes
+    // and the local apply reuses it instead of parsing and rebuilding every command. The table is weak on the
+    // byte array, so an entry vanishes with the proposal bytes; any reader that misses — a follower, WAL replay
+    // on restart, state transfer, all of which see freshly materialized arrays — parses as before, so
+    // correctness never depends on a hit. Commands, records, and the participant list are immutable, which is
+    // what makes reusing the producer's instances safe even when an in-process transport shares the array.
+    private static readonly ConditionalWeakTable<byte[], TransactionRecordCommand[]> locallyProposedDeltas = new();
+
+    // A hit is taken single-shot: with the redundant-apply ledger only one local apply runs per committed entry,
+    // and clearing on take keeps the WAL's in-memory retention of the bytes from pinning the decoded commands.
+    // A concurrent second taker simply misses and parses, which is the same double work it did before.
+    private static bool TryTakeLocallyProposed(byte[] data, [NotNullWhen(true)] out TransactionRecordCommand[]? commands)
+    {
+        if (!locallyProposedDeltas.TryGetValue(data, out commands))
+            return false;
+
+        locallyProposedDeltas.Remove(data);
+        return true;
+    }
+
     private bool ApplyLog(RaftLog log)
     {
         if (log.LogType != ReplicationTypes.TransactionRecord || log.LogData is null)
             return true;
+
+        if (TryTakeLocallyProposed(log.LogData, out TransactionRecordCommand[]? proposed))
+        {
+            foreach (TransactionRecordCommand command in proposed)
+                Apply(command);
+
+            return true;
+        }
 
         TransactionRecordDeltaMessage delta = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(log.LogData);
 
@@ -108,14 +158,20 @@ internal sealed class TransactionRecordStore
         return true;
     }
 
-    /// <summary>Serializes a batch of transitions for one atomic data-partition log entry.</summary>
+    /// <summary>Serializes a batch of transitions for one atomic data-partition log entry. The produced bytes
+    /// remember their decoded commands so the local apply of this same entry can skip re-parsing them.</summary>
     public static byte[] SerializeDelta(IEnumerable<TransactionRecordCommand> commands)
     {
+        TransactionRecordCommand[] batch = commands as TransactionRecordCommand[] ?? [.. commands];
+
         TransactionRecordDeltaMessage delta = new();
-        foreach (TransactionRecordCommand command in commands)
+        foreach (TransactionRecordCommand command in batch)
             delta.Commands.Add(ToProto(command));
 
-        return ReplicationSerializer.Serialize(delta);
+        byte[] data = ReplicationSerializer.Serialize(delta);
+        locallyProposedDeltas.AddOrUpdate(data, batch);
+
+        return data;
     }
 
     /// <summary>
@@ -278,6 +334,14 @@ internal sealed class TransactionRecordStore
         if (snapshotDirectory is null || snapshotPrefix is null || resolveAnchorPartition is null)
             return true;
 
+        // Unchanged since this partition's last durable write: the file already holds exactly this content, so
+        // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
+        // scan and recorded only after a successful write, so a failed write or a mutation racing the scan
+        // always leaves the partition due for a rewrite.
+        long observedVersion = Interlocked.Read(ref version);
+        if (persistedVersion.TryGetValue(partitionId, out long lastPersisted) && lastPersisted == observedVersion)
+            return true;
+
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
 
         try
@@ -297,6 +361,7 @@ internal sealed class TransactionRecordStore
                 File.Move(tmp, path, overwrite: true);
             }
 
+            persistedVersion[partitionId] = observedVersion;
             return true;
         }
         catch (Exception ex)
@@ -352,6 +417,7 @@ internal sealed class TransactionRecordStore
         if (!records.TryGetValue(key, out TransactionRecord? existing))
         {
             records[key] = incoming;
+            Interlocked.Increment(ref version);
             return;
         }
 
@@ -363,7 +429,10 @@ internal sealed class TransactionRecordStore
         }
 
         if (!existing.IsTerminal && incoming.IsTerminal)
+        {
             records[key] = incoming;
+            Interlocked.Increment(ref version);
+        }
     }
 
     // ── state transfer (split/merge) ────────────────────────────────────────────────

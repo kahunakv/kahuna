@@ -3,6 +3,7 @@ using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kahuna.Server.Tests;
 
@@ -120,6 +121,74 @@ public sealed class TestDurableIntentPersistence : IDisposable
 
         Assert.NotNull(destination.Get("row/5"));
         Assert.Equal(5, destination.Get("row/5")!.Revision);
+    }
+
+    [Fact]
+    public void RecordStore_UnchangedSet_SkipsSnapshotRewrite_AndMutationRearmsIt()
+    {
+        (InitializeTransactionCommand init, CommitTransactionCommand commit) = CommittedTxn(1000, 2, "acct/1");
+
+        TransactionRecordStore store = new(dir, "rev", null);
+        store.AttachAnchorResolver(_ => (PartitionId, 0));
+        store.Apply(init);
+        Assert.True(store.PersistSnapshot(PartitionId));
+
+        // Nothing changed since the last durable write, so the checkpoint must not rewrite the file. Deleting it
+        // makes the skip observable: a rewrite would recreate it.
+        string path = Directory.GetFiles(dir, "transactionrecord_rev_p*.snapshot").Single();
+        File.Delete(path);
+        Assert.True(store.PersistSnapshot(PartitionId));
+        Assert.False(File.Exists(path));
+
+        // Any mutation re-arms the rewrite, and the fresh file reflects the mutated set.
+        store.Apply(commit);
+        Assert.True(store.PersistSnapshot(PartitionId));
+        Assert.True(File.Exists(path));
+
+        TransactionRecordStore reloaded = new(dir, "rev", null);
+        Assert.Equal(TransactionDecision.Commit, reloaded.Get(Ts(1000), 2)!.Decision);
+    }
+
+    [Fact]
+    public void IntentStore_UnchangedSet_SkipsSnapshotRewrite_AndMutationRearmsIt()
+    {
+        PreparedIntentStore store = new(dir, "rev", null);
+        store.AttachPartitionResolver(_ => PartitionId);
+        store.Apply(new PrepareIntentCommand(Intent(1000, 1, "row/1")));
+        Assert.True(store.PersistSnapshot(PartitionId));
+
+        string path = Directory.GetFiles(dir, "preparedintent_rev_p*.snapshot").Single();
+        File.Delete(path);
+        Assert.True(store.PersistSnapshot(PartitionId));
+        Assert.False(File.Exists(path));
+
+        store.Apply(new ResolveIntentCommand(Ts(1000), 1, "row/1", Commit: true));
+        Assert.True(store.PersistSnapshot(PartitionId));
+        Assert.True(File.Exists(path));
+
+        PreparedIntentStore reloaded = new(dir, "rev", null);
+        Assert.Equal(PreparedIntentResolution.Committed, reloaded.Get("row/1")!.Resolution);
+    }
+
+    [Fact]
+    public void ReceiptStore_UnchangedSet_SkipsSnapshotRewrite_AndMutationRearmsIt()
+    {
+        CompletionReceiptStore store = new(dir, "rev", NullLogger<IKahuna>.Instance);
+        store.AttachPartitionResolver(_ => PartitionId);
+        store.Record(Ts(1000), "row/1", "anchor", KeyValueDurability.Persistent);
+        Assert.True(store.PersistSnapshot(PartitionId));
+
+        string path = Directory.GetFiles(dir, "completionreceipts_rev_p*.snapshot").Single();
+        File.Delete(path);
+        Assert.True(store.PersistSnapshot(PartitionId));
+        Assert.False(File.Exists(path));
+
+        Assert.True(store.Forget(Ts(1000), "row/1"));
+        Assert.True(store.PersistSnapshot(PartitionId));
+        Assert.True(File.Exists(path));
+
+        CompletionReceiptStore reloaded = new(dir, "rev", NullLogger<IKahuna>.Instance);
+        Assert.False(reloaded.Contains(Ts(1000), "row/1", KeyValueDurability.Persistent));
     }
 
     [Fact]

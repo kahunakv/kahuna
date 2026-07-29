@@ -82,7 +82,8 @@ public sealed class TestTransactionRecordGc
             s.Apply(new CommitTransactionCommand(TxId, Epoch, init.ManifestHash, Ts(500), Ts(2100)));
         }
 
-        byte[] delta = TransactionRecordStore.SerializeDelta([new PurgeTransactionCommand(TxId, Epoch)]);
+        // Copied so both replicas decode the wire form rather than reusing this process's own proposal commands.
+        byte[] delta = [.. TransactionRecordStore.SerializeDelta([new PurgeTransactionCommand(TxId, Epoch)])];
         Kommander.Data.RaftLog log = new() { LogType = Kahuna.Server.Replication.ReplicationTypes.TransactionRecord, LogData = delta };
 
         Assert.True(a.Replicate(0, log));

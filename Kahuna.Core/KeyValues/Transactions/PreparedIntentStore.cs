@@ -28,6 +28,19 @@ internal sealed class PreparedIntentStore
 {
     private readonly ConcurrentDictionary<string, PreparedIntent> intents = new();
 
+    // Monotonic change stamp for the intent set, bumped whenever an intent is installed, updated, or removed. A
+    // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
+    // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
+    // from a full scan + serialize + rewrite into a counter comparison. Intents only change partitions through
+    // replicated split/merge transfer deltas, which apply here and bump the stamp, so a skip can never hide a
+    // moved intent.
+    private long version;
+
+    // Per-partition value of <see cref="version"/> captured just before that partition's last successful
+    // snapshot write. Captured before the scan, so a mutation racing the scan leaves the stamp ahead and the
+    // next checkpoint rewrites the file.
+    private readonly ConcurrentDictionary<int, long> persistedVersion = new();
+
     private readonly string? snapshotDirectory;
 
     private readonly string? snapshotPrefix;
@@ -93,6 +106,8 @@ internal sealed class PreparedIntentStore
                     intents[key] = result.Intent;
                     Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
                 }
+
+                Interlocked.Increment(ref version);
             }
 
             return result;
@@ -463,6 +478,14 @@ internal sealed class PreparedIntentStore
         if (snapshotDirectory is null || snapshotPrefix is null || resolvePartition is null)
             return true;
 
+        // Unchanged since this partition's last durable write: the file already holds exactly this content, so
+        // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
+        // scan and recorded only after a successful write, so a failed write or a mutation racing the scan
+        // always leaves the partition due for a rewrite.
+        long observedVersion = Interlocked.Read(ref version);
+        if (persistedVersion.TryGetValue(partitionId, out long lastPersisted) && lastPersisted == observedVersion)
+            return true;
+
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
 
         try
@@ -482,6 +505,7 @@ internal sealed class PreparedIntentStore
                 File.Move(tmp, path, overwrite: true);
             }
 
+            persistedVersion[partitionId] = observedVersion;
             return true;
         }
         catch (Exception ex)
@@ -538,6 +562,7 @@ internal sealed class PreparedIntentStore
         {
             intents[incoming.Key] = incoming;
             Interlocked.Add(ref totalBytes, IntentBytes(incoming));
+            Interlocked.Increment(ref version);
             return;
         }
 
@@ -552,6 +577,7 @@ internal sealed class PreparedIntentStore
         {
             intents[incoming.Key] = incoming;
             Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
+            Interlocked.Increment(ref version);
         }
     }
 

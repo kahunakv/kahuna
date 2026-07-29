@@ -163,7 +163,8 @@ public sealed class TestDurableStateTransfer : BaseCluster
         // Manifestless abort tombstone (created from absence).
         source.Apply(new AbortTransactionCommand(tombstoneTx, 1, 77, TransactionAbortClass.PresumedAbort, Ts(1400), Ts(1400), "a", Ts(1100), Ts(9000), Ts(1000)));
 
-        byte[] delta = TransactionRecordStore.SerializeReconstructionDelta(source.Snapshot());
+        // Copied so the destination decodes the wire form rather than reusing this process's own proposal commands.
+        byte[] delta = [.. TransactionRecordStore.SerializeReconstructionDelta(source.Snapshot())];
 
         TransactionRecordStore dest = new();
         dest.Replicate(0, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = delta });

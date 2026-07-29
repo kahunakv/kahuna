@@ -22,8 +22,10 @@ public sealed class TestDurableIntentReplication
 
     // ── transaction record store ────────────────────────────────────────────────
 
+    // Copy the serialized bytes so the apply cannot recognize them as this process's own proposal and must decode
+    // them — these tests assert wire fidelity, which only the decoded path exercises.
     private static RaftLog RecordLog(params TransactionRecordCommand[] commands) =>
-        new() { LogType = ReplicationTypes.TransactionRecord, LogData = TransactionRecordStore.SerializeDelta(commands) };
+        new() { LogType = ReplicationTypes.TransactionRecord, LogData = [.. TransactionRecordStore.SerializeDelta(commands)] };
 
     [Fact]
     public void RecordStore_InitializeThenCommit_RoundTripsThroughReplicate()
@@ -47,6 +49,45 @@ public sealed class TestDurableIntentReplication
         Assert.Equal(Ts(1100), rec.CommitTimestamp);
         Assert.Equal(hash, rec.ManifestHash);
         Assert.Equal(2, rec.Participants.Count);
+    }
+
+    [Fact]
+    public void RecordStore_LocallyProposedDelta_AppliesIdenticallyToItsDecodedForm()
+    {
+        HLCTimestamp txId = Ts(1000);
+        const long epoch = 2;
+        IReadOnlyList<TransactionParticipantRef> manifest = [new("k1", KeyValueDurability.Persistent), new("k2", KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(txId, epoch, "k1", Ts(1100), manifest);
+
+        InitializeTransactionCommand init = new(txId, epoch, "coord", "k1", Ts(1100), Ts(9000), hash, manifest, OpId: Ts(500), CreatedAt: Ts(400));
+        CommitTransactionCommand commit = new(txId, epoch, hash, OpId: Ts(1500), AttemptHlc: Ts(1500));
+
+        byte[] data = TransactionRecordStore.SerializeDelta([init, commit]);
+
+        // The proposing node applies the very byte array it produced (Raft hands it back on commit) and may reuse
+        // the pre-serialization commands; a follower decodes a fresh copy of the same bytes. Both must land on the
+        // same state, or leader and follower silently diverge.
+        TransactionRecordStore proposer = new();
+        Assert.True(proposer.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = data }));
+
+        TransactionRecordStore follower = new();
+        Assert.True(follower.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = [.. data] }));
+
+        TransactionRecord? local = proposer.Get(txId, epoch);
+        TransactionRecord? decoded = follower.Get(txId, epoch);
+        Assert.NotNull(local);
+        Assert.NotNull(decoded);
+
+        // Record equality compares the participant list by reference; compare its content separately and the rest
+        // of the record with the list reference neutralized.
+        Assert.Equal(decoded!.Participants, local!.Participants);
+        Assert.Equal(decoded, local with { Participants = decoded.Participants });
+
+        // Re-applying the same entry (redelivery/replay) after the proposal bytes were already claimed must fall
+        // back to decoding and stay an idempotent no-op.
+        Assert.True(proposer.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = data }));
+        Assert.Equal(1, proposer.Count);
+        Assert.Equal(TransactionDecision.Commit, proposer.Get(txId, epoch)!.Decision);
     }
 
     [Fact]
