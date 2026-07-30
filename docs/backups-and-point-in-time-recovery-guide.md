@@ -398,6 +398,10 @@ restore alone reconstitutes a running system.
 |---|---|---|
 | `PitrWindow` (`--pitr-window`, seconds) | 1 hour | How far back you can recover. Larger = more recovery range, more retained WAL. Max 6 hours. |
 | `BaseSnapshotInterval` (`--base-snapshot-interval`, seconds) | 30 minutes | WAL-retention-floor tick cadence and the safety margin below the window (`floor = now − PitrWindow − BaseSnapshotInterval`). Does **not** schedule backups. Must be ≤ `PitrWindow`. |
+| `BackupRetentionMaxChains` (`--backup-retention-max-chains`) | 0 (off) | Keep at most this many most-recent backup **chains**; older chains are deleted whole. 0 = unbounded. |
+| `BackupRetentionMaxAge` (`--backup-retention-max-age`, seconds) | 0 (off) | Delete any chain whose *newest* backup is older than this. 0 = unbounded. |
+| `BackupRetentionMaxBytes` (`--backup-retention-max-bytes`) | 0 (off) | Keep the most-recent chains whose combined artifact bytes stay within this budget; the single newest chain is always kept. 0 = unbounded. |
+| `BackupGcInterval` (`--backup-gc-interval`, seconds) | 1 hour | Cadence of the background GC pass (orphan sweep + retention), and a startup sweep on its first tick. 0 disables the periodic pass (GC then runs only inline after each backup). |
 
 Rules of thumb:
 
@@ -456,6 +460,63 @@ may already be gone. A full backup whose cut falls **below `W` fails closed**
 > trimmed — including the case where a key's *last* history row is removed, which must still push the
 > floor up rather than leave it at zero.
 
+### Reclaiming backup disk: retention and the orphan sweep
+
+Backups accumulate. Two independent mechanisms keep the backup directory bounded, and it is worth
+being precise about which does what:
+
+- **The orphan sweep** reclaims artifacts that no valid backup accounts for — an artifact directory a
+  crashed or interrupted backup left behind with no manifest, and staging/temporary remnants
+  (`.tmp_`/`.staging_`/`.quarantine_`/`.merge_`) of an interrupted publish, delete, or restore. It
+  **never touches a valid backup**, so it always runs, regardless of any retention configuration.
+- **Retention** deletes *valid* backups once they fall outside the configured bounds. It is **off by
+  default** — Kahuna never deletes a backup you took unless you opt in with a `BackupRetention*`
+  setting.
+
+> **Decision — sweep orphans always, delete real backups only on explicit opt-in.** Reclaiming a
+> crash-orphaned directory is unambiguously safe (nothing valid points at it), so it needs no
+> configuration. Deleting a *real* backup is destructive and irreversible, so it happens only when an
+> operator sets an explicit bound — a data store should never quietly discard the recovery points you
+> asked it to take.
+
+Retention operates on **whole chains**, never individual backups. Recall (§6) that a chain is a Full
+root plus the incrementals built on it; deleting a Full out from under a retained incremental would
+strand it. So retention keeps the most-recent chains that fit within the enabled bounds
+(`MaxChains` / `MaxAge` / `MaxTotalBytes`, evaluated newest-first) and deletes the rest **root and all
+incrementals together**, always leaving at least the single newest chain even if it alone exceeds a
+byte budget.
+
+> **Decision — chain-granular retention, and keep a retained leaf's whole ancestry.** A retained
+> incremental is only restorable if its Full root and every intermediate parent still exist, so the
+> unit of deletion has to be the chain, not the backup. Keeping a chain therefore *pins* its entire
+> parent closure — a Full shared by a still-retained branch is never deleted — and each doomed chain is
+> removed **descendants-first**, so no surviving backup ever briefly points at a deleted parent.
+
+**Crash safety.** A delete removes the **manifest first**, then the artifacts. If the process dies
+between the two steps, the worst case is an artifact directory with no manifest — an orphan the sweep
+reclaims on its next pass — never a manifest that resolves to missing artifacts. Symlinks are never
+followed: if an artifact directory is itself a reparse point, only the link is removed, so a
+swapped-in symlink can't redirect a delete outside the backup directory.
+
+**When GC runs.** A GC pass (sweep, then retention if configured) runs **inline after every backup**,
+and on a **periodic tick** (`BackupGcInterval`, default 1 hour) whose first firing shortly after
+startup doubles as a **startup sweep** — so crash-orphaned artifacts and age-based expiry are reclaimed
+even on a node that has stopped taking backups. GC is serialized against backup creation on each node,
+so a sweep never races a backup that is midway through writing its directory. You can also trigger a
+pass on demand, or preview one without deleting anything (see §11g).
+
+> **Note — retention is per-node and local.** Each node runs GC against its own backup directory. In a
+> multi-node cluster there is not yet a single cluster-wide retention owner; that coordination is
+> future work, tracked with the coordinated-backup ownership contract.
+
+**Observability.** Each pass emits counters (OpenTelemetry names; Prometheus exporters translate dots
+to underscores):
+
+- `kahuna.backup.gc.runs` — passes completed.
+- `kahuna.backup.gc.orphans_reclaimed` — orphaned/leftover artifacts reclaimed.
+- `kahuna.backup.gc.retention_deletions` — backups deleted by retention.
+- `kahuna.backup.gc.bytes_reclaimed` — artifact bytes freed by retention.
+
 ---
 
 ## 11. Triggering backups and inspecting the catalog
@@ -478,6 +539,7 @@ All endpoints return or consume JSON.  Responses use camelCase field names.
 | `GET`  | `/v1/backups/{id}/chain` | Resolve and validate the chain ending at `id`. |
 | `POST` | `/v1/backups/validate-chain` | Validate a chain. Body: `{"leafBackupId":"<guid>","targetDir":"","targetTimeMs":0}`. |
 | `POST` | `/v1/restore` | Offline restore: copies Full checkpoint to `targetDir` and replays WAL to `targetTimeMs`. Body: `{"leafBackupId":"<guid>","targetDir":"/data/restored","targetTimeMs":0}`. |
+| `POST` | `/v1/backups/gc` | Reclaim backup disk: sweep orphaned/leftover artifacts and enforce retention. `?dryRun=true` returns the inventory of what *would* be reclaimed (with reasons and bytes) without deleting anything; default `false` applies it. |
 
 All endpoints return `503` when `--pitr-backup-dir` is not set on the target node.
 
@@ -485,7 +547,8 @@ All endpoints return `503` when `--pitr-backup-dir` is not set on the target nod
 
 A `Backups` service mirrors every REST endpoint.  RPC names match the action:
 `TakeFullBackup`, `TakeIncrementalBackup`, `TakeCoordinatedBackup`, `ListBackups`, `GetBackupChain`,
-`ValidateChain`, `Restore`.  See `Kahuna.Shared/Communication/Grpc/Protos/backups.proto` for message definitions.
+`ValidateChain`, `Restore`, `RunBackupGarbageCollection`.  See
+`Kahuna.Shared/Communication/Grpc/Protos/backups.proto` for message definitions.
 
 ### 11d. `KahunaClient` methods
 
@@ -503,6 +566,11 @@ KahunaRestoreResponse result = await client.RestoreAsync(
     targetDir:    "/data/restored",
     targetTimeMs: 0);  // 0 = chain max; or Unix ms for a specific T
 // Then: start a new node with --storage-path=/data/restored
+
+// Reclaim backup disk (orphan sweep + retention). dryRun previews without deleting.
+KahunaBackupGcResult preview = await client.RunBackupGarbageCollectionAsync(dryRun: true);
+KahunaBackupGcResult done    = await client.RunBackupGarbageCollectionAsync(dryRun: false);
+// done.RetentionDeletions / done.OrphanReclamations / done.BytesReclaimed
 ```
 
 ### 11e. `kahuna.control` CLI verbs
@@ -522,6 +590,10 @@ kahuna.control --list-backups
 
 # Resolve and validate a chain
 kahuna.control --backup-chain <leaf-guid>
+
+# Reclaim backup disk (orphan sweep + retention); add --backup-gc-dry-run to preview without deleting
+kahuna.control --backup-gc
+kahuna.control --backup-gc --backup-gc-dry-run
 
 # Offline restore to a target directory (0 = chain max; set --target-time-ms for a specific T)
 kahuna.control --restore <leaf-guid> --target-dir /data/restored
@@ -547,6 +619,7 @@ traffic and do not affect client latency:
 - Trigger a full, incremental, or coordinated backup.
 - List backups and inspect the catalog.
 - Resolve and validate a chain.
+- Trigger (or dry-run) a garbage-collection pass — orphan sweep + retention.
 
 The following is an **offline operation** (runs via the REST/gRPC/client/CLI surface but writes to
 the local filesystem of the node receiving the request):

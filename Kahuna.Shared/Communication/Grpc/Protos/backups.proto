@@ -8,6 +8,7 @@ service Backups {
   rpc GetBackupChain        (GrpcGetBackupChainRequest)        returns (GrpcListBackupsResponse);
   rpc ValidateChain         (GrpcValidateChainRequest)         returns (GrpcListBackupsResponse);
   rpc Restore               (GrpcRestoreRequest)               returns (GrpcRestoreResponse);
+  rpc RunBackupGarbageCollection (GrpcBackupGcRequest)         returns (GrpcBackupGcResponse);
 }
 
 message GrpcTakeFullBackupRequest {
@@ -74,4 +75,29 @@ message GrpcRestoreResponse {
   string Outcome               = 6; // KahunaBackupOutcome name
   int64  MinRecoverablePhysicalMs = 7;
   int64  MaxRecoverablePhysicalMs = 8;
+}
+
+message GrpcBackupGcRequest {
+  bool DryRun = 1;
+}
+
+message GrpcBackupGcResponse {
+  bool  Applied       = 1;
+  int64 BytesReclaimed = 2;
+  repeated GrpcBackupGcDeletion RetentionDeletions = 3;
+  repeated GrpcBackupGcOrphan   OrphanReclamations = 4;
+}
+
+message GrpcBackupGcDeletion {
+  string BackupId     = 1;
+  string Type         = 2;
+  string CreatedAtUtc = 3;
+  int64  Bytes        = 4;
+  string Reason       = 5;
+}
+
+message GrpcBackupGcOrphan {
+  string Name        = 1;
+  bool   IsDirectory = 2;
+  string Reason      = 3;
 }

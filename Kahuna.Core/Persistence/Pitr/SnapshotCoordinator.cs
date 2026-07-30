@@ -9,20 +9,18 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// Computes the cluster-wide snapshot timestamp T for coordinated backups.
 ///
 /// <para><b>What this protects against:</b> T is placed strictly below the minimum in-flight
-/// (prepared but not yet committed) <c>CommitTimestamp</c> across all actor shards, so any
-/// transaction that is actively mid-commit when the coordinator runs will not be partially
-/// included — its prepared mutations land at <c>Time ≥ T</c> and are excluded by the segment
-/// cap.</para>
+/// (prepared but not yet committed) <c>CommitTimestamp</c> across all actor shards, so a
+/// transaction that is actively mid-commit when the coordinator runs commits with a shared HLC at
+/// or above that minimum — strictly above T — and is therefore excluded as a whole.</para>
 ///
-/// <para><b>Known limitation — already-committed straddles:</b> this mechanism inspects only
-/// live <c>WriteIntent</c> state.  A cross-shard transaction that <em>committed before</em> the
-/// coordinator ran has no live intent; its per-shard commit HLCs are already in the WAL and may
-/// straddle T (shard A at <c>t=240</c>, shard B at <c>t=260</c>, T chosen between them).
-/// <c>min(in-flight)</c> does <em>not</em> prevent that tearing.  The complete unconditional fix
-/// requires stamping a single shared commit HLC on all participating shards — a transaction-layer
-/// change that remains future work.  In quiesced clusters (no in-flight work) the fallback
-/// returns the WAL max committed HLC, which is safe because no straddling is possible when the
-/// cluster is idle.</para>
+/// <para><b>Already-committed cross-shard transactions are not torn.</b> Each participant of a
+/// transaction carries the same shared coordinator commit HLC in its committed value's payload
+/// (<c>LastModified</c>), even though each shard's Raft WAL entry <c>Time</c> is stamped from that
+/// shard's own local clock and the two can straddle T. Backup capture and restore both cut on the
+/// shared commit HLC, not the per-shard WAL <c>Time</c> (see <see cref="RestoreEngine"/> and
+/// <see cref="BackupDriver"/>), so a transaction whose per-shard WAL <c>Time</c> values straddle T
+/// is still included or excluded atomically. In quiesced clusters (no in-flight work) the fallback
+/// returns the WAL max committed HLC.</para>
 ///
 /// <para><b>Testability:</b> the cluster-query is injected as a delegate so unit tests can
 /// supply a simple stub without a live actor system.  The WAL fallback uses
@@ -38,10 +36,10 @@ internal static class SnapshotCoordinator
     ///   <c>CommitTimestamp</c> M across all actor shards.  The delegate returns
     ///   <see cref="HLCTimestamp.Zero"/> when the cluster is quiesced (no in-flight 2PC).</item>
     ///   <item>If M is non-zero, returns <c>Predecessor(M)</c> — the HLC tick immediately
-    ///   before M.  Because the segment reader cap is inclusive (<c>Time ≤ T</c>), any entry
-    ///   with <c>Time ≥ M</c> (including an in-flight commit landing exactly at M) is excluded.
-    ///   Already-committed transactions whose WAL <c>Time</c> values straddle T are NOT
-    ///   protected by this path — see class-level doc for the limitation.</item>
+    ///   before M.  A transaction still in flight commits with a shared HLC <c>≥ M</c> — strictly
+    ///   above T — so the commit-HLC cut applied at capture/restore excludes it as a whole.
+    ///   Already-committed transactions are handled by that same commit-HLC cut regardless of how
+    ///   their per-shard WAL <c>Time</c> values fall relative to T (see class-level doc).</item>
     ///   <item>If quiesced (M == Zero), falls back to the WAL maximum committed HLC.  No
     ///   straddling is possible when the cluster is fully idle, so no decrement is needed.</item>
     /// </list>

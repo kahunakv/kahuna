@@ -391,6 +391,18 @@ public sealed class KahunaCommandLineOptions
     [Option("pitr-backup-dir", Required = false, HelpText = "Root directory for PITR backup artifacts and catalog manifests. Required when --pitr-bootstrap-from is set; also used by the backup service to store new backups.", Default = "")]
     public string PitrBackupDir { get; set; } = "";
 
+    [Option("backup-retention-max-chains", Required = false, HelpText = "Backup retention: keep at most this many most-recent backup chains, deleting older chains whole. 0 = unbounded. Retention is off unless at least one backup-retention-* bound is set.", Default = 0)]
+    public int BackupRetentionMaxChains { get; set; }
+
+    [Option("backup-retention-max-age", Required = false, HelpText = "Backup retention: delete any chain whose newest backup is older than this many seconds. 0 = unbounded.", Default = 0)]
+    public long BackupRetentionMaxAgeSeconds { get; set; }
+
+    [Option("backup-retention-max-bytes", Required = false, HelpText = "Backup retention: keep the most-recent chains whose combined artifact bytes stay within this budget (the newest chain is always kept). 0 = unbounded.", Default = 0)]
+    public long BackupRetentionMaxBytes { get; set; }
+
+    [Option("backup-gc-interval", Required = false, HelpText = "Cadence in seconds of the periodic backup GC pass (orphan/leftover sweep, plus retention when configured); a sweep also runs shortly after startup. 0 disables the periodic pass (GC still runs inline after each backup). Default 3600 (1 hour).", Default = 3600)]
+    public long BackupGcIntervalSeconds { get; set; } = 3600;
+
     [Option("pitr-restore-root", Required = false, HelpText = "Server-owned root directory that restore destinations must be contained within. Setting this enables remote (REST/gRPC) restore, confining all targets under this path.", Default = "")]
     public string PitrRestoreRoot { get; set; } = "";
 

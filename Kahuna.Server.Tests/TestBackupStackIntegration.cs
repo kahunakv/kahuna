@@ -234,6 +234,40 @@ public sealed class TestBackupStackIntegration : IDisposable
     // Restoring to a chosen timestamp into a target directory reconstructs the written key.
 
     [Fact]
+    public async Task RunBackupGarbageCollection_DryRunThenApply_ReclaimsOrphan()
+    {
+        string bakDir = BakDir("gc_e2e");
+        await using EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            BackupDir = bakDir
+        }, loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        await node.Kahuna.TakeFullBackupAsync(TestContext.Current.CancellationToken);
+
+        // An artifact directory orphaned by a crashed earlier backup (no manifest).
+        string orphanName = Guid.NewGuid().ToString("N");
+        string orphan = Path.Combine(bakDir, orphanName);
+        Directory.CreateDirectory(orphan);
+
+        // Dry run reports it without deleting.
+        Kahuna.Shared.Communication.Rest.KahunaBackupGcResult preview =
+            await node.Kahuna.RunBackupGarbageCollectionAsync(dryRun: true, TestContext.Current.CancellationToken);
+        Assert.False(preview.Applied);
+        Assert.Contains(preview.OrphanReclamations, o => o.Name == orphanName);
+        Assert.True(Directory.Exists(orphan));
+
+        // Apply reclaims it.
+        Kahuna.Shared.Communication.Rest.KahunaBackupGcResult applied =
+            await node.Kahuna.RunBackupGarbageCollectionAsync(dryRun: false, TestContext.Current.CancellationToken);
+        Assert.True(applied.Applied);
+        Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
     public async Task RestoreToAsync_AfterWritingData_RestoredDirContainsKey()
     {
         string bakDir = BakDir("restore_e2e");

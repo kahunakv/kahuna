@@ -249,6 +249,7 @@ public class TestManyValuesReadTimestampGrpc
         public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct) => throw new NotImplementedException();
         public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) => throw new NotImplementedException();
         public Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => throw new NotImplementedException();

@@ -104,4 +104,5 @@ public interface IKahunaCommunication
      Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken);
      Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken);
      Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken);
+     Task<KahunaBackupGcResult> RunBackupGarbageCollection(string url, bool dryRun, CancellationToken cancellationToken);
 }

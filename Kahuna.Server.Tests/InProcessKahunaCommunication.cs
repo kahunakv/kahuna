@@ -291,6 +291,9 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken) =>
         kahuna.RestoreToAsync(leafBackupId, targetDir, targetTimeMs, cancellationToken);
 
+    public Task<KahunaBackupGcResult> RunBackupGarbageCollection(string url, bool dryRun, CancellationToken cancellationToken) =>
+        kahuna.RunBackupGarbageCollectionAsync(dryRun, cancellationToken);
+
     public Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
         string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken) =>
         kahuna.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, cancellationToken);

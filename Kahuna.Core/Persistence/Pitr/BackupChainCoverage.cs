@@ -47,7 +47,13 @@ internal static class BackupChainCoverage
         HLCTimestamp lo = min.Value;
         HLCTimestamp target = requestedTarget == HLCTimestamp.Zero ? max : requestedTarget;
 
-        if (target.CompareTo(lo) < 0 || target.CompareTo(max) > 0)
+        // Upper bound at millisecond granularity: a wall-clock target is the inclusive END of its
+        // millisecond (counter = max), so a target within the newest captured millisecond must not be
+        // rejected merely because the newest captured entry sits at a lower counter/node within that
+        // same millisecond — the restore filter (commit HLC ≤ target) still includes exactly what was
+        // captured. Only a target in a strictly later millisecond is genuinely beyond coverage. The
+        // lower bound stays a full-HLC comparison so a target below the base cut is still refused.
+        if (target.CompareTo(lo) < 0 || target.L > max.L)
             throw new BackupDriverException(
                 $"Target {target} is outside this chain's recoverable coverage [{lo}, {max}].")
                 { TargetOutsideCoverage = true };

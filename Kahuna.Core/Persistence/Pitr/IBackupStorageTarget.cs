@@ -10,6 +10,14 @@ internal interface IBackupStorageTarget
     /// <summary>Persist <paramref name="manifest"/>, overwriting any existing entry with the same id.</summary>
     void Put(BackupManifest manifest);
 
+    /// <summary>
+    /// Removes the manifest entry for <paramref name="backupId"/>. Idempotent: a no-op when the entry
+    /// is already absent. Deleting the manifest tombstones the backup — it can no longer be listed,
+    /// resolved, or restored — so callers remove the manifest <b>before</b> the artifacts, ensuring a
+    /// crash mid-delete never leaves a manifest pointing at absent artifacts.
+    /// </summary>
+    void Delete(Guid backupId);
+
     /// <summary>Returns the manifest with <paramref name="backupId"/>, or null if not found.</summary>
     BackupManifest? Get(Guid backupId);
 

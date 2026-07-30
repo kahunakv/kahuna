@@ -2285,6 +2285,34 @@ public class GrpcCommunication : IKahunaCommunication
             };
         });
 
+    public Task<KahunaBackupGcResult> RunBackupGarbageCollection(string url, bool dryRun, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
+        {
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcBackupGcResponse r = await client.RunBackupGarbageCollectionAsync(
+                new GrpcBackupGcRequest { DryRun = dryRun }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new KahunaBackupGcResult
+            {
+                Applied = r.Applied,
+                BytesReclaimed = r.BytesReclaimed,
+                RetentionDeletions = r.RetentionDeletions.Select(d => new KahunaBackupGcDeletion
+                {
+                    BackupId = Guid.Parse(d.BackupId),
+                    Type = d.Type,
+                    CreatedAtUtc = DateTime.Parse(d.CreatedAtUtc),
+                    Bytes = d.Bytes,
+                    Reason = d.Reason
+                }).ToList(),
+                OrphanReclamations = r.OrphanReclamations.Select(o => new KahunaBackupGcOrphan
+                {
+                    Name = o.Name,
+                    IsDirectory = o.IsDirectory,
+                    Reason = o.Reason
+                }).ToList()
+            };
+        });
+
     private static KahunaBackupInfo FromGrpc(GrpcBackupInfoResponse r) => new()
     {
         BackupId = Guid.Parse(r.BackupId),

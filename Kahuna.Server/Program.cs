@@ -315,7 +315,11 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
     BackupDir = opts.PitrBackupDir,
     RestoreRoot = opts.PitrRestoreRoot,
-    AllowUnconfinedRemoteRestore = opts.PitrAllowUnconfinedRemoteRestore
+    AllowUnconfinedRemoteRestore = opts.PitrAllowUnconfinedRemoteRestore,
+    BackupRetentionMaxChains = opts.BackupRetentionMaxChains,
+    BackupRetentionMaxAge = TimeSpan.FromSeconds(opts.BackupRetentionMaxAgeSeconds),
+    BackupRetentionMaxBytes = opts.BackupRetentionMaxBytes,
+    BackupGcInterval = TimeSpan.FromSeconds(opts.BackupGcIntervalSeconds)
 };
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)

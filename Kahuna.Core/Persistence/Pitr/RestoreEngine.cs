@@ -43,8 +43,11 @@ internal static class RestoreEngine
 
     /// <summary>
     /// Replays all incremental WAL segments in <paramref name="chain"/> into
-    /// <paramref name="backend"/>, applying entries whose <c>Time ≤ targetTime</c> and
-    /// stopping at the first entry whose <c>Time > targetTime</c>.
+    /// <paramref name="backend"/>, applying every key-value entry whose transaction commit HLC
+    /// (the payload <c>LastModified</c>, shared across all participants of a transaction) is
+    /// <c>≤ targetTime</c> and skipping those after it. The cut is on the commit HLC, not the
+    /// per-partition WAL entry Time, so a multi-partition transaction is applied whole or not at
+    /// all and can never be torn across partitions.
     /// </summary>
     /// <param name="chain">
     /// The resolved, validated backup chain (Full first, most-recent incremental last).
@@ -55,8 +58,8 @@ internal static class RestoreEngine
     /// (<c>{artifactsDir}/{backupId:N}/</c>).
     /// </param>
     /// <param name="targetTime">
-    /// HLC stop-timestamp T. All entries with <c>Time ≤ T</c> are applied; the first entry
-    /// with <c>Time > T</c> halts replay for that partition.
+    /// HLC stop-timestamp T. Every key-value entry whose commit HLC (payload <c>LastModified</c>)
+    /// is <c>≤ T</c> is applied; entries with a commit HLC <c>&gt; T</c> are skipped.
     /// </param>
     /// <param name="backend">
     /// Persistence backend pre-loaded with the Full backup's checkpoint state.
@@ -129,18 +132,33 @@ internal static class RestoreEngine
                 foreach (WalSegmentEntry entry in entries)
                 {
                     ct.ThrowIfCancellationRequested();
-                    // HLC stop-predicate: entries are in ascending index (and therefore HLC) order.
-                    if (entry.Time.CompareTo(targetTime) > 0)
-                        break;
 
-                    PersistenceRequestItem? item = ToRequestItem(entry);
-                    if (item is null)
+                    (PersistenceRequestItem item, HLCTimestamp commitHlc)? decoded = ToRequestItem(entry);
+
+                    // Cut on the transaction COMMIT HLC carried in the payload, not the Raft WAL entry
+                    // Time. Every participant of a multi-partition transaction shares one commit HLC, but
+                    // each partition stamps its WAL entry with its own local clock — so a WAL-Time cut can
+                    // include one half of a committed transaction and exclude the other (a torn restore).
+                    // Comparing the shared commit HLC includes or excludes a transaction as a whole. A
+                    // non-key-value entry carries no commit HLC; fall back to its WAL Time.
+                    HLCTimestamp cutHlc = decoded?.commitHlc ?? entry.Time;
+
+                    // The commit HLC is NOT monotonic with WAL index across keys (different coordinators,
+                    // different local append clocks), so a single past-target entry does not mean the rest
+                    // of the segment is also past target — skip it and keep scanning rather than break.
+                    // Per key the commit HLC IS monotonic with revision, and StoreKeyValues is an idempotent
+                    // upsert keyed by (key, revision), so applying every at-or-before-target revision and
+                    // dropping every after-target one reconstructs each key's exact as-of-target state.
+                    if (cutHlc.CompareTo(targetTime) > 0)
                         continue;
 
-                    batch.Add(item.Value);
-                    if (entry.Time.CompareTo(lastAppliedTime) >= 0)
+                    if (decoded is null)
+                        continue;
+
+                    batch.Add(decoded.Value.item);
+                    if (cutHlc.CompareTo(lastAppliedTime) >= 0)
                     {
-                        lastAppliedTime = entry.Time;
+                        lastAppliedTime = cutHlc;
                         lastAppliedIndex = entry.Id;
                     }
                     totalApplied++;
@@ -171,8 +189,11 @@ internal static class RestoreEngine
         long nowMs = (long)((nowUtc.Value - DateTime.UnixEpoch).TotalMilliseconds);
         long earliestMs = (long)((nowUtc.Value - pitrWindow.Value - DateTime.UnixEpoch).TotalMilliseconds);
 
+        // Bound with the same inclusive-end-of-millisecond convention the Unix-ms target mapping uses
+        // (counter = uint.MaxValue): a target at the current millisecond, or at the earliest recoverable
+        // millisecond, resolves to the whole millisecond and must not be rejected by a bare (·, ms, 0).
         HLCTimestamp earliest = new(0, earliestMs, 0);
-        HLCTimestamp now = new(0, nowMs, 0);
+        HLCTimestamp now = new(0, nowMs, uint.MaxValue);
 
         if (targetTime.CompareTo(earliest) < 0 || targetTime.CompareTo(now) > 0)
             throw new BackupDriverException(
@@ -182,10 +203,14 @@ internal static class RestoreEngine
 
     /// <summary>
     /// Converts a WAL segment entry to a <see cref="PersistenceRequestItem"/> by decoding
-    /// the protobuf <see cref="KeyValueMessage"/> payload. Returns <c>null</c> for entries
-    /// that are not key-value mutations (e.g. range-map or lock entries).
+    /// the protobuf <see cref="KeyValueMessage"/> payload, and returns the transaction commit
+    /// HLC (<c>LastModified</c>) carried in that payload alongside it. The commit HLC is the
+    /// single timestamp the coordinator stamps identically on every participant of a
+    /// (possibly multi-partition) transaction, so it — not the per-partition WAL entry Time —
+    /// is the correct axis for an as-of cut. Returns <c>null</c> for entries that are not
+    /// key-value mutations (e.g. range-map or lock entries).
     /// </summary>
-    private static PersistenceRequestItem? ToRequestItem(WalSegmentEntry entry)
+    private static (PersistenceRequestItem item, HLCTimestamp commitHlc)? ToRequestItem(WalSegmentEntry entry)
     {
         if (entry.LogType != ReplicationTypes.KeyValues)
             return null;
@@ -200,7 +225,7 @@ internal static class RestoreEngine
         if (state == KeyValueState.Undefined)
             return null;
 
-        return new PersistenceRequestItem(
+        PersistenceRequestItem item = new(
             msg.Key,
             value,
             msg.Revision,
@@ -215,5 +240,9 @@ internal static class RestoreEngine
             msg.LastModifiedCounter,
             (int)state,
             msg.NoRevision);
+
+        HLCTimestamp commitHlc = new(msg.LastModifiedNode, msg.LastModifiedPhysical, msg.LastModifiedCounter);
+
+        return (item, commitHlc);
     }
 }

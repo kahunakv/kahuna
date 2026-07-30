@@ -417,6 +417,14 @@ public interface IKahuna
         long targetTimeMs,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Reclaims backup disk: sweeps orphaned/leftover artifacts and enforces the retention policy.
+    /// When <paramref name="dryRun"/> is true, returns the inventory of what WOULD be reclaimed without
+    /// deleting anything; otherwise applies it. The same work runs automatically after each backup and
+    /// on the periodic tick — this is the on-demand operator entry point.
+    /// </summary>
+    public Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun, CancellationToken ct = default);
+
     // ── MVCC snapshot floor ─────────────────────────────────────────────────────────────────
 
     /// <summary>

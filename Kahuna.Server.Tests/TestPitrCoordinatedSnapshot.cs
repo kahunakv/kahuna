@@ -251,11 +251,15 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
     }
 
     /// <summary>
-    /// Incremental backup at snapshotT caps the WAL segment at T.  Entries committed after T
-    /// are written to the WAL but must not appear in the segment file or in the restore.
+    /// An incremental backup at snapshotT captures the full contiguous committed range — it does NOT
+    /// truncate the segment at T. Truncating by the per-partition WAL Time would drop a committed
+    /// transaction's half whose local append clock ran past the cut while a sibling partition kept its
+    /// half (a torn backup), and truncating by commit HLC would punch an unrecoverable hole in the
+    /// index range. The coordinated cut is instead applied at restore on the commit HLC, so post-T
+    /// entries are absent from the restored state even though they are present in the segment.
     /// </summary>
     [Fact]
-    public async Task IncrementalBackup_SnapshotT_ExcludesPostTEntries()
+    public async Task IncrementalBackup_SnapshotT_ExcludesPostTEntriesAtRestore()
     {
         HLCTimestamp snapshotT = T(250);
 
@@ -283,14 +287,14 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupManifest inc = BackupDriver.RunIncremental(
             wal, [Part(1)], full.BackupId, artifacts, catalog, snapshotT);
 
-        // Segment must stop before k4 (t=300 > T=250).
+        // The full contiguous range is captured (k3, k4, k5); the cut is recorded, not truncated.
         PartitionBackupRange r = inc.PartitionRanges.Single(r => r.PartitionId == 1);
         Assert.Equal(3L, r.FromIndex);
-        Assert.Equal(3L, r.ToIndex);    // only k3 (t=200) included
-        Assert.Equal(T(200), r.ToHlc);
+        Assert.Equal(5L, r.ToIndex);
+        Assert.Equal(T(400), r.ToHlc);
         Assert.Equal(snapshotT, inc.ClusterSnapshotTime);
 
-        // Restore to T=250: k1+k2 from checkpoint, k3 from segment; k4, k5 absent.
+        // Restore to T=250: k1+k2 from checkpoint, k3 from segment; k4, k5 filtered out by commit HLC.
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 

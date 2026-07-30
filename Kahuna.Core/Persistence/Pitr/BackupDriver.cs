@@ -1,6 +1,8 @@
 
 using System.Text.Json;
 using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kommander;
 using Kommander.Data;
 using Kommander.System;
@@ -213,12 +215,12 @@ internal sealed class BackupDriver
                     maxCommittedHlc = lastHlc;
             }
 
-            // Applied-index barrier: before flushing, wait until every captured partition's ToHlc has
-            // been applied and enqueued for persistence, so the flush cannot miss a committed write that
-            // is still mid-apply. Fail closed on timeout — never publish a checkpoint that may lack
-            // committed data.
+            // Applied-index barrier: before flushing, wait until every captured partition's committed
+            // key-value writes (by their commit HLC) have been applied and enqueued for persistence, so
+            // the flush cannot miss a committed write that is still mid-apply. Fail closed on timeout —
+            // never publish a checkpoint that may lack committed data.
             if (appliedHlcProbe is not null)
-                await WaitForAppliedBarrierAsync(ranges, appliedHlcProbe, applyBarrierTimeoutMs, ct);
+                await WaitForAppliedBarrierAsync(wal, ranges, appliedHlcProbe, applyBarrierTimeoutMs, ct);
 
             if (flushBeforeCheckpoint is not null)
                 await flushBeforeCheckpoint();
@@ -423,25 +425,27 @@ internal sealed class BackupDriver
         }
     }
 
-    /// <param name="snapshotT">
-    /// When provided, each partition's WAL segment is capped at the first entry whose
-    /// <c>Time > snapshotT</c> (assuming per-partition HLC monotonicity), and the timestamp
-    /// is stored in the manifest. Combine with a Full backup taken at the same T to form a
-    /// consistent cluster-wide cut.
-    /// </param>
     /// <summary>
-    /// Waits until each captured partition's committed writes up to its <see cref="PartitionBackupRange.ToHlc"/>
-    /// have been applied and enqueued for persistence (observed via <paramref name="appliedHlcProbe"/>).
-    /// Throws a fail-closed <see cref="BackupDriverException"/> on timeout so no checkpoint is published
-    /// while a committed write is still mid-apply. Uses a monotonic clock for the deadline (never wall time).
+    /// Waits until each captured partition's committed key-value writes have been applied and enqueued
+    /// for persistence, observed via <paramref name="appliedHlcProbe"/> (the background writer's
+    /// max-enqueued transaction commit HLC). Throws a fail-closed <see cref="BackupDriverException"/> on
+    /// timeout so no checkpoint is published while a committed write is still mid-apply. Uses a monotonic
+    /// clock for the deadline (never wall time).
+    /// <para>
+    /// The per-partition target is the max <b>commit HLC</b> (payload <c>LastModified</c>) among the
+    /// captured committed writes — the same clock the probe reports. It is deliberately NOT
+    /// <see cref="PartitionBackupRange.ToHlc"/>: that is a per-partition Raft WAL entry Time, stamped
+    /// from the partition's local clock and always at or after the shared commit HLC, so the commit-HLC
+    /// probe could never reach it and the backup would hang until timeout.
+    /// </para>
     /// </summary>
     private static async Task WaitForAppliedBarrierAsync(
-        List<PartitionBackupRange> ranges, Func<int, HLCTimestamp> appliedHlcProbe, int timeoutMs, CancellationToken ct)
+        IWAL wal, List<PartitionBackupRange> ranges, Func<int, HLCTimestamp> appliedHlcProbe, int timeoutMs, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + timeoutMs;
         foreach (PartitionBackupRange range in ranges)
         {
-            HLCTimestamp target = range.ToHlc;
+            HLCTimestamp target = MaxCommittedKeyValueCommitHlc(wal, range.PartitionId, range.ToIndex, ct);
             if (target == HLCTimestamp.Zero)
                 continue;
 
@@ -451,14 +455,68 @@ internal sealed class BackupDriver
                 if (Environment.TickCount64 > deadline)
                     throw new BackupDriverException(
                         $"Timed out waiting for partition {range.PartitionId} to apply and enqueue committed " +
-                        $"writes up to {target}; the checkpoint would be missing committed data, so the backup " +
-                        "was not taken.")
+                        $"writes up to commit HLC {target}; the checkpoint would be missing committed data, so " +
+                        "the backup was not taken.")
                     {
                         ExactCheckpointUnavailable = true
                     };
                 await Task.Delay(10, ct).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// The maximum transaction commit HLC (payload <see cref="KeyValueMessage"/> <c>LastModified</c>)
+    /// among committed key-value entries at or below <paramref name="toIndex"/> on a partition — the
+    /// axis the applied-index barrier compares against, because the background writer's max-enqueued
+    /// HLC is a commit HLC, not the Raft WAL entry Time. Scans backward and stops as soon as an entry's
+    /// WAL Time (monotonic with index and always at or after that entry's commit HLC) drops to or below
+    /// the running maximum, since no earlier entry can then carry a larger commit HLC; in normal
+    /// operation this touches only the newest, still-settling entries.
+    /// Returns <see cref="HLCTimestamp.Zero"/> when no committed key-value entry exists at or below the index.
+    /// </summary>
+    internal static HLCTimestamp MaxCommittedKeyValueCommitHlc(
+        IWAL wal, int partitionId, long toIndex, CancellationToken ct = default)
+    {
+        if (toIndex <= 0)
+            return HLCTimestamp.Zero;
+
+        HLCTimestamp max = HLCTimestamp.Zero;
+        long ceiling = toIndex;
+        while (ceiling > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            long start = Math.Max(1, ceiling - PageSize + 1);
+            List<RaftLog> batch = wal.ReadLogsRange(partitionId, start, PageSize);
+            if (batch.Count == 0)
+                break;
+
+            for (int i = batch.Count - 1; i >= 0; i--)
+            {
+                RaftLog log = batch[i];
+                if (log.Id > toIndex)
+                    continue;
+
+                // Early stop: the WAL entry Time is monotonic with index and never below the entry's
+                // commit HLC, so once it reaches or falls under the running max, no earlier entry can raise it.
+                if (max != HLCTimestamp.Zero && log.Time.CompareTo(max) <= 0)
+                    return max;
+
+                if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
+                    continue;
+                if (log.LogType != ReplicationTypes.KeyValues || log.LogData is null || log.LogData.Length == 0)
+                    continue;
+
+                KeyValueMessage msg = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
+                HLCTimestamp commitHlc = new(msg.LastModifiedNode, msg.LastModifiedPhysical, msg.LastModifiedCounter);
+                if (commitHlc.CompareTo(max) > 0)
+                    max = commitHlc;
+            }
+
+            ceiling = start - 1;
+        }
+
+        return max;
     }
 
     internal static BackupManifest RunIncremental(
@@ -549,8 +607,11 @@ internal sealed class BackupDriver
                         };
                 }
 
+                // Capture the full contiguous committed range; the coordinated cut (snapshotT), when
+                // present, is recorded in the manifest and applied at restore on the commit HLC, not by
+                // truncating the segment here (which would tear straddling multi-partition transactions).
                 (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc) =
-                    ReadSegment(wal, partitionId, fromIndex, snapshotT, ct);
+                    ReadSegment(wal, partitionId, fromIndex, ct);
 
                 if (toIndex == 0)
                     continue;
@@ -701,15 +762,22 @@ internal sealed class BackupDriver
     }
 
     /// <summary>
-    /// Pages through the WAL from <paramref name="fromIndex"/> forward, collecting committed
-    /// entries.  When <paramref name="snapshotT"/> is provided, collection stops at the first
-    /// entry whose <c>Time > snapshotT</c> (per-partition HLC monotonicity is assumed, which
-    /// holds in normal operation).
+    /// Pages through the WAL from <paramref name="fromIndex"/> forward, collecting every committed
+    /// entry as a contiguous index range up to the current WAL end.
+    /// <para>
+    /// The segment is deliberately NOT capped at a coordinated snapshot timestamp. Capping by the
+    /// per-partition WAL entry <c>Time</c> would drop a committed transaction's entry on the partition
+    /// whose local append clock ran ahead of the cut while a sibling partition kept its half — a torn
+    /// backup. Capping by the shared commit HLC instead would punch holes in the index range (an
+    /// after-cut entry sitting between two before-cut entries), and since the next incremental resumes
+    /// at <c>ToIndex + 1</c> a hole would be lost forever. So the whole contiguous range is captured and
+    /// the coordinated cut is applied at restore time on the commit HLC (see <see cref="RestoreEngine"/>),
+    /// which includes or excludes each transaction as a whole.
+    /// </para>
     /// Returns the segment entries, the final log id/hlc/term, and the HLC of the first entry.
     /// </summary>
     private static (List<WalSegmentEntry> entries, long toId, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc)
-        ReadSegment(IWAL wal, int partitionId, long fromIndex, HLCTimestamp? snapshotT = null,
-            CancellationToken ct = default)
+        ReadSegment(IWAL wal, int partitionId, long fromIndex, CancellationToken ct = default)
     {
         List<WalSegmentEntry> entries = [];
         long toId = 0;
@@ -717,10 +785,9 @@ internal sealed class BackupDriver
         long toTerm = 0;
         HLCTimestamp fromHlc = default;
         bool first = true;
-        bool hitCap = false;
         long cursor = fromIndex;
 
-        while (!hitCap)
+        while (true)
         {
             ct.ThrowIfCancellationRequested();
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, cursor, PageSize);
@@ -731,12 +798,6 @@ internal sealed class BackupDriver
             {
                 if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
                     continue;
-
-                if (snapshotT.HasValue && log.Time.CompareTo(snapshotT.Value) > 0)
-                {
-                    hitCap = true;
-                    break;
-                }
 
                 if (first)
                 {

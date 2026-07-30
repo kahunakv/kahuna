@@ -32,6 +32,13 @@ internal sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
         File.Move(tmp, path, overwrite: true);
     }
 
+    public void Delete(Guid backupId)
+    {
+        string path = ManifestPath(backupId);
+        // File.Delete is a no-op when the file is already absent, so this is idempotent.
+        File.Delete(path);
+    }
+
     public BackupManifest? Get(Guid backupId)
     {
         string path = ManifestPath(backupId);

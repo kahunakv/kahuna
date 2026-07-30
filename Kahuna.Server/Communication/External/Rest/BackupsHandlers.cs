@@ -23,6 +23,11 @@ public static class BackupsHandlers
         app.MapGet("/v1/backups", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
             Guard(kahuna, resp, async () => Results.Ok(await kahuna.ListBackupsAsync(ct))));
 
+        // Reclaim backup disk: sweep orphaned/leftover artifacts and enforce retention. ?dryRun=true
+        // returns the inventory of what would be reclaimed without deleting anything (default false).
+        app.MapPost("/v1/backups/gc", ([FromQuery] bool dryRun, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.RunBackupGarbageCollectionAsync(dryRun, ct))));
+
         app.MapGet("/v1/backups/{id}/chain", (Guid id, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
             Guard(kahuna, resp, async () => Results.Ok(await kahuna.GetBackupChainAsync(id, ct))));
 

@@ -1374,6 +1374,14 @@ public class KahunaClient
     public Task<KahunaRestoreResponse> RestoreAsync(Guid leafBackupId, string targetDir, long targetTimeMs = 0, CancellationToken cancellationToken = default) =>
         communication.Restore(GetRoundRobinUrl(), leafBackupId, targetDir, targetTimeMs, cancellationToken);
 
+    /// <summary>
+    /// Reclaims backup disk on the target node: sweeps orphaned/leftover artifacts and enforces the
+    /// retention policy. When <paramref name="dryRun"/> is true, returns the inventory of what would be
+    /// reclaimed without deleting anything.
+    /// </summary>
+    public Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun = false, CancellationToken cancellationToken = default) =>
+        communication.RunBackupGarbageCollection(GetRoundRobinUrl(), dryRun, cancellationToken);
+
     // ── MVCC snapshot floor ──────────────────────────────────────────────────────────────────
 
     /// <summary>

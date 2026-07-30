@@ -62,7 +62,8 @@ public sealed class TestBackupService : IDisposable
         Func<Task>? flush = null,
         Func<Task<HLCTimestamp>>? queryMinInFlight = null,
         StubRaft? raft = null,
-        string? restoreRoot = null)
+        string? restoreRoot = null,
+        BackupRetentionPolicy retentionPolicy = default)
     {
         raft ??= MakeRaft(wal, 1);
         return new BackupService(
@@ -74,7 +75,72 @@ public sealed class TestBackupService : IDisposable
             flushBeforeCheckpoint: flush ?? (() => Task.CompletedTask),
             queryMinInFlight: queryMinInFlight ?? (() => Task.FromResult(HLCTimestamp.Zero)),
             restoreRoot: restoreRoot,
-            acquireRetentionHold: raft.AcquireRetentionHold);
+            acquireRetentionHold: raft.AcquireRetentionHold,
+            retentionPolicy: retentionPolicy);
+    }
+
+    // Absolute path of the backup directory for a service tag (mirrors BackupDir(tag)).
+    private string BackupDirPath(string tag) => BackupDir(tag);
+
+    // ── chain-aware retention + orphan sweep, driven through the real backup entry points ────
+
+    [Fact]
+    public async Task TakeFull_WithMaxChainsRetention_DeletesOlderChainsAndTheirArtifacts()
+    {
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+
+        BackupService svc = MakeService("ret_chains", wal, backend,
+            retentionPolicy: new BackupRetentionPolicy(MaxChains: 1, null, null));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo first = await svc.TakeFullAsync();
+        // A second full backup creates a newer chain; MaxChains:1 retention (run inline) removes the first.
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo second = await svc.TakeFullAsync();
+
+        List<Guid> ids = svc.ListBackups().Select(b => b.BackupId).ToList();
+        Assert.DoesNotContain(first.BackupId, ids);
+        Assert.Contains(second.BackupId, ids);
+        // The deleted backup's artifact directory is gone too.
+        Assert.False(Directory.Exists(Path.Combine(BackupDirPath("ret_chains"), first.BackupId.ToString("N"))));
+    }
+
+    [Fact]
+    public async Task TakeFull_ReclaimsPreexistingOrphanArtifactDirectory()
+    {
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+
+        BackupService svc = MakeService("ret_orphan", wal, backend);
+
+        // Simulate an artifact directory orphaned by a crashed earlier backup (no manifest).
+        string orphan = Path.Combine(BackupDirPath("ret_orphan"), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(orphan);
+        File.WriteAllText(Path.Combine(orphan, "checkpoint"), "leftover");
+
+        await svc.TakeFullAsync(); // GC (orphan sweep) runs inline after a successful backup
+
+        Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
+    public async Task RunGarbageCollection_ReclaimsOrphan_WithoutTakingABackup()
+    {
+        // This is the action the startup sweep and periodic GC tick invoke: reclaim crash-orphaned
+        // artifacts even when no backup is being taken.
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("gc_tick", wal, backend);
+
+        string orphan = Path.Combine(BackupDirPath("gc_tick"), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(orphan);
+        File.WriteAllText(Path.Combine(orphan, "checkpoint"), "leftover");
+
+        BackupGcInventory inventory = await svc.RunGarbageCollectionAsync();
+
+        Assert.False(Directory.Exists(orphan));
+        Assert.Contains(inventory.OrphanReclamations, o => Path.GetFileName(o.Path) == Path.GetFileName(orphan));
     }
 
     private static void Put(MemoryPersistenceBackend b, string key, byte[] value, long rev) =>

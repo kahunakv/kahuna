@@ -109,6 +109,36 @@ public sealed class BackupsService : Backups.BackupsBase
             return response;
         });
 
+    public override Task<GrpcBackupGcResponse> RunBackupGarbageCollection(
+        GrpcBackupGcRequest request, ServerCallContext context) =>
+        Guarded(async () =>
+        {
+            RequireBackup();
+            KahunaBackupGcResult r = await kahuna.RunBackupGarbageCollectionAsync(request.DryRun, context.CancellationToken);
+            GrpcBackupGcResponse response = new()
+            {
+                Applied = r.Applied,
+                BytesReclaimed = r.BytesReclaimed
+            };
+            foreach (KahunaBackupGcDeletion d in r.RetentionDeletions)
+                response.RetentionDeletions.Add(new GrpcBackupGcDeletion
+                {
+                    BackupId = d.BackupId.ToString(),
+                    Type = d.Type,
+                    CreatedAtUtc = d.CreatedAtUtc.ToString("O"),
+                    Bytes = d.Bytes,
+                    Reason = d.Reason
+                });
+            foreach (KahunaBackupGcOrphan o in r.OrphanReclamations)
+                response.OrphanReclamations.Add(new GrpcBackupGcOrphan
+                {
+                    Name = o.Name,
+                    IsDirectory = o.IsDirectory,
+                    Reason = o.Reason
+                });
+            return response;
+        });
+
     /// <summary>
     /// Runs a handler, translating a typed <see cref="KahunaBackupException"/> into an
     /// <see cref="RpcException"/> whose trailers carry the <see cref="KahunaBackupOutcome"/> so the

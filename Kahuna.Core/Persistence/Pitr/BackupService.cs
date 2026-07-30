@@ -25,6 +25,13 @@ internal sealed class BackupService
     private readonly Func<int, long, IDisposable>? _acquireRetentionHold;
     private readonly ILogger? _logger;
     private readonly Func<Task<HLCTimestamp>> _queryMinInFlight;
+    private readonly BackupRetentionPolicy _retentionPolicy;
+
+    // Serializes backup creation with garbage collection so a sweep never observes — and never
+    // reclaims — an artifact directory that a backup is midway through writing. Backups are heavy and
+    // infrequent, so serializing them (and GC) against each other is cheap and removes the race
+    // entirely, without needing to track per-directory in-flight reservations.
+    private readonly SemaphoreSlim _gcGate = new(1, 1);
 
     public BackupService(
         IRaft raft,
@@ -42,7 +49,8 @@ internal sealed class BackupService
         BackupDriver.ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
         BackupDriver.RenewSnapshotHoldDelegate? renewSnapshotHold = null,
         int snapshotHoldLeaseMs = BackupDriver.DefaultSnapshotHoldLeaseMs,
-        Func<int, HLCTimestamp>? appliedHlcProbe = null)
+        Func<int, HLCTimestamp>? appliedHlcProbe = null,
+        BackupRetentionPolicy retentionPolicy = default)
     {
         _raft = raft;
         _backupDir = backupDir;
@@ -56,54 +64,152 @@ internal sealed class BackupService
             acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe);
         _catalog = new BackupCatalog(new LocalDirectoryStorageTarget(backupDir));
         _queryMinInFlight = queryMinInFlight;
+        _retentionPolicy = retentionPolicy;
     }
 
     public async Task<KahunaBackupInfo> TakeFullAsync(HLCTimestamp? snapshotT = null, CancellationToken ct = default)
     {
-        BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
-        return ToDto(manifest);
+        await _gcGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+            KahunaBackupInfo dto = ToDto(manifest);
+            TryRunGcLocked(ct);
+            return dto;
+        }
+        finally { _gcGate.Release(); }
     }
 
     public async Task<KahunaBackupInfo> TakeIncrementalAsync(
         Guid parentBackupId, HLCTimestamp? snapshotT = null, CancellationToken ct = default)
     {
+        await _gcGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            BackupManifest manifest = _driver.TakeIncrementalBackup(
-                parentBackupId, _backupDir, _catalog, snapshotT, ct, _acquireRetentionHold);
-            KahunaBackupInfo dto = ToDto(manifest);
-            dto.RequestedKind = BackupType.Incremental.ToString();
-            return dto;
-        }
-        catch (BackupDriverException ex) when (ex.NeedsFullBackup)
-        {
-            _logger?.LogWarning(
-                "Incremental backup from {ParentId} not possible — WAL compaction floor advanced past " +
-                "parent range. Falling back to full backup. Reason: {Message}",
-                parentBackupId, ex.Message);
+            KahunaBackupInfo dto;
+            try
+            {
+                BackupManifest manifest = _driver.TakeIncrementalBackup(
+                    parentBackupId, _backupDir, _catalog, snapshotT, ct, _acquireRetentionHold);
+                dto = ToDto(manifest);
+                dto.RequestedKind = BackupType.Incremental.ToString();
+            }
+            catch (BackupDriverException ex) when (ex.NeedsFullBackup)
+            {
+                _logger?.LogWarning(
+                    "Incremental backup from {ParentId} not possible — WAL compaction floor advanced past " +
+                    "parent range. Falling back to full backup. Reason: {Message}",
+                    parentBackupId, ex.Message);
 
-            BackupManifest full = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
-            KahunaBackupInfo dto = ToDto(full);
-            // Make the substitution observable: the caller asked for an incremental and got a full.
-            dto.RequestedKind = BackupType.Incremental.ToString();
-            dto.SubstitutionReason =
-                "The WAL compaction floor advanced past the parent backup's range, so an incremental " +
-                "could not be produced; a full backup was taken instead.";
+                BackupManifest full = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+                dto = ToDto(full);
+                // Make the substitution observable: the caller asked for an incremental and got a full.
+                dto.RequestedKind = BackupType.Incremental.ToString();
+                dto.SubstitutionReason =
+                    "The WAL compaction floor advanced past the parent backup's range, so an incremental " +
+                    "could not be produced; a full backup was taken instead.";
+            }
+
+            TryRunGcLocked(ct);
             return dto;
         }
+        finally { _gcGate.Release(); }
     }
 
     public async Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default)
     {
-        HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
-            _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
-        BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
-        return ToDto(manifest);
+        await _gcGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
+                _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
+            BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+            KahunaBackupInfo dto = ToDto(manifest);
+            TryRunGcLocked(ct);
+            return dto;
+        }
+        finally { _gcGate.Release(); }
     }
 
     public async Task<HLCTimestamp> ComputeSafeSnapshotTimeAsync(CancellationToken ct = default) =>
         await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
             _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
+
+    // GC serializes with backup creation via _gcGate, so no backup is ever mid-creation during a sweep.
+    private static readonly HashSet<Guid> NoReservedIds = [];
+
+    /// <summary>
+    /// Dry-run inventory: what a garbage-collection pass would reclaim right now — orphaned/leftover
+    /// artifacts and, when a retention policy is configured, whole chains beyond its bounds — each with
+    /// a reason. Read-only; deletes nothing.
+    /// </summary>
+    internal BackupGcInventory PlanGarbageCollection(CancellationToken ct = default)
+    {
+        IReadOnlyList<BackupManifest> manifests = _catalog.List(ct);
+        HashSet<Guid> validIds = manifests.Select(m => m.BackupId).ToHashSet();
+        IReadOnlyList<OrphanSweepCandidate> orphans =
+            BackupRetention.PlanOrphanSweep(_backupDir, validIds, NoReservedIds, ct);
+        IReadOnlyList<BackupGcCandidate> retention = _retentionPolicy.IsEnabled
+            ? BackupRetention.PlanRetention(manifests, _retentionPolicy, DateTime.UtcNow)
+            : [];
+        return new BackupGcInventory(retention, orphans);
+    }
+
+    /// <summary>
+    /// Reclaims orphaned/leftover artifacts and enforces the retention policy, serialized against backup
+    /// creation. Returns what was reclaimed. Safe to call on startup and on a periodic tick.
+    /// </summary>
+    internal async Task<BackupGcInventory> RunGarbageCollectionAsync(CancellationToken ct = default)
+    {
+        await _gcGate.WaitAsync(ct).ConfigureAwait(false);
+        try { return RunGarbageCollectionLocked(ct); }
+        finally { _gcGate.Release(); }
+    }
+
+    // Must be called while _gcGate is held. Sweeps orphans first (always), then applies retention (only
+    // when a policy is configured), deleting whole chains descendants-first.
+    private BackupGcInventory RunGarbageCollectionLocked(CancellationToken ct)
+    {
+        IReadOnlyList<BackupManifest> manifests = _catalog.List(ct);
+        HashSet<Guid> validIds = manifests.Select(m => m.BackupId).ToHashSet();
+
+        IReadOnlyList<OrphanSweepCandidate> orphans =
+            BackupRetention.PlanOrphanSweep(_backupDir, validIds, NoReservedIds, ct);
+        BackupRetention.ApplyOrphanSweep(orphans, ct);
+
+        IReadOnlyList<BackupGcCandidate> retention = _retentionPolicy.IsEnabled
+            ? BackupRetention.PlanRetention(manifests, _retentionPolicy, DateTime.UtcNow)
+            : [];
+        BackupRetention.ApplyRetention(retention, _catalog, _backupDir, ct);
+
+        long bytesReclaimed = 0;
+        foreach (BackupGcCandidate c in retention)
+            bytesReclaimed += c.Bytes;
+
+        BackupGcMetrics.Runs.Add(1);
+        if (orphans.Count > 0)
+            BackupGcMetrics.OrphansReclaimed.Add(orphans.Count);
+        if (retention.Count > 0)
+        {
+            BackupGcMetrics.RetentionDeletions.Add(retention.Count);
+            BackupGcMetrics.BytesReclaimed.Add(bytesReclaimed);
+        }
+
+        if (orphans.Count > 0 || retention.Count > 0)
+            _logger?.LogInformation(
+                "Backup GC reclaimed {Orphans} orphan/leftover artifact(s) and deleted {Retained} out-of-retention backup(s) ({Bytes} bytes) under {Dir}.",
+                orphans.Count, retention.Count, bytesReclaimed, _backupDir);
+
+        return new BackupGcInventory(retention, orphans);
+    }
+
+    // Best-effort GC after a successful backup (gate already held). A GC failure must never fail the
+    // backup that just succeeded, so everything is swallowed and logged.
+    private void TryRunGcLocked(CancellationToken ct)
+    {
+        try { RunGarbageCollectionLocked(ct); }
+        catch (Exception ex) { _logger?.LogWarning(ex, "Post-backup GC pass failed; the backup itself succeeded."); }
+    }
 
     /// <summary>
     /// Lists every backup, marking invalid ones without hiding them. Each parsed manifest gets a cheap,

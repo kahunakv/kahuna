@@ -174,6 +174,12 @@ if (IsSingleCommand(opts))
             return;
         }
 
+        if (opts.BackupGc)
+        {
+            await BackupGcCommand.Execute(connection, opts.BackupGcDryRun, format);
+            return;
+        }
+
         if (opts.Restore.HasValue)
         {
             if (string.IsNullOrWhiteSpace(opts.TargetDir))
@@ -298,6 +304,9 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (kahunaControlOptions.BackupChain.HasValue)
+        return true;
+
+    if (kahunaControlOptions.BackupGc)
         return true;
 
     if (kahunaControlOptions.Restore.HasValue)

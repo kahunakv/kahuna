@@ -473,4 +473,34 @@ public sealed class KahunaConfiguration
     /// process-writable paths, so remote restore is denied unless explicitly opted in here.
     /// </summary>
     public bool AllowUnconfinedRemoteRestore { get; set; }
+
+    /// <summary>
+    /// Backup retention: keep at most this many most-recent backup chains, deleting older chains whole
+    /// (root Full + all its incrementals). Zero or negative means unbounded — no count-based deletion.
+    /// Retention is OFF by default (all three retention bounds unset), so backups are never reclaimed
+    /// unless an operator explicitly opts in; orphaned/leftover artifacts from crashed backups are
+    /// always swept regardless.
+    /// </summary>
+    public int BackupRetentionMaxChains { get; set; }
+
+    /// <summary>
+    /// Backup retention: delete any chain whose newest backup is older than this. <see cref="TimeSpan.Zero"/>
+    /// means unbounded — no age-based deletion.
+    /// </summary>
+    public TimeSpan BackupRetentionMaxAge { get; set; } = TimeSpan.Zero;
+
+    /// <summary>
+    /// Backup retention: keep the most-recent chains whose combined artifact bytes stay within this
+    /// budget, deleting older chains beyond it (the single most-recent chain is always kept even if it
+    /// alone exceeds the budget). Zero or negative means unbounded — no size-based deletion.
+    /// </summary>
+    public long BackupRetentionMaxBytes { get; set; }
+
+    /// <summary>
+    /// Cadence of the background backup garbage-collection pass (orphan/leftover artifact sweep, plus
+    /// retention enforcement when configured). A pass also runs shortly after startup so crash-orphaned
+    /// artifacts are reclaimed without waiting for the next backup. <see cref="TimeSpan.Zero"/> or
+    /// negative disables the periodic pass entirely (GC then runs only inline after each backup).
+    /// </summary>
+    public TimeSpan BackupGcInterval { get; set; } = TimeSpan.FromHours(1);
 }

@@ -16,6 +16,39 @@ internal sealed class BackupCatalog
 
     public void Put(BackupManifest manifest) => _target.Put(manifest);
 
+    /// <summary>
+    /// Removes a backup: the manifest first (tombstone), then its artifact directory
+    /// <c>{backupDir}/{id:N}/</c>. Manifest-first ordering means a crash between the two steps leaves at
+    /// worst an orphan artifact directory with no manifest — which the orphan sweep reclaims — never a
+    /// manifest resolving to absent artifacts. The artifact directory is removed without following a
+    /// symlink: if the directory itself is a reparse point only the link is unlinked, so a swapped-in
+    /// symlink can never redirect the delete outside the backup directory. Idempotent.
+    /// </summary>
+    public void Delete(Guid backupId, string backupDir)
+    {
+        _target.Delete(backupId);
+        RemoveArtifactDirectory(Path.Combine(backupDir, backupId.ToString("N")));
+    }
+
+    /// <summary>
+    /// Removes a leftover artifact directory (or staging/quarantine remnant) at <paramref name="path"/>
+    /// without following a top-level symlink. Idempotent — a no-op when the path does not exist.
+    /// </summary>
+    internal static void RemoveArtifactDirectory(string path)
+    {
+        if (!Directory.Exists(path))
+            return;
+
+        // A reparse point (symlink/junction) as the directory itself must be unlinked, not recursed
+        // into — a recursive delete through it would reclaim the link target's contents outside the
+        // backup directory. Recursive delete of a real directory does not descend into reparse-point
+        // subdirectories on this runtime, so inner links are removed as links, never followed.
+        if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+            Directory.Delete(path, recursive: false);
+        else
+            Directory.Delete(path, recursive: true);
+    }
+
     public BackupManifest? Get(Guid backupId) => _target.Get(backupId);
 
     public IReadOnlyList<BackupManifest> List(CancellationToken ct = default) => _target.List(ct);

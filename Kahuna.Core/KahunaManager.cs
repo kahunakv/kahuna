@@ -221,7 +221,23 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 snapshotHoldLeaseMs: SnapshotBackupHoldLeaseMs,
                 // Applied-index barrier probe: the backup waits until committed writes are applied and
                 // queued for persistence before flushing, so a checkpoint never misses committed data.
-                appliedHlcProbe: partitionId => BackgroundWriterActor?.GetMaxEnqueuedHlc(partitionId) ?? HLCTimestamp.Zero);
+                appliedHlcProbe: partitionId => BackgroundWriterActor?.GetMaxEnqueuedHlc(partitionId) ?? HLCTimestamp.Zero,
+                // Chain-aware retention bounds; unset dimensions are unbounded, and all-unset (the
+                // default) disables retention entirely so backups are only reclaimed when opted in.
+                retentionPolicy: new BackupRetentionPolicy(
+                    MaxChains: configuration.BackupRetentionMaxChains > 0 ? configuration.BackupRetentionMaxChains : null,
+                    MaxAge: configuration.BackupRetentionMaxAge > TimeSpan.Zero ? configuration.BackupRetentionMaxAge : null,
+                    MaxTotalBytes: configuration.BackupRetentionMaxBytes > 0 ? configuration.BackupRetentionMaxBytes : null));
+
+            // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
+            // retention (when configured), including a startup sweep on its first tick. Disabled when
+            // the interval is non-positive; GC then runs only inline after each backup.
+            if (configuration.BackupGcInterval > TimeSpan.Zero)
+                actorSystem.Spawn<BackupGcReaperActor, BackupGcReaperRequest>(
+                    "backup-gc-reaper",
+                    backupService,
+                    configuration,
+                    logger);
         }
 
         // Restore is administrative: allow it over the network only when a server-owned restore root
@@ -1731,10 +1747,52 @@ public sealed class KahunaManager : IKahuna, IDisposable
         CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
+        // A wall-clock millisecond target means "restore to the inclusive END of that millisecond":
+        // every commit stamped within millisecond targetTimeMs is included. Commit HLCs order by
+        // physical ms, then counter, then node, so the inclusive upper bound for a millisecond is its
+        // maximum counter — otherwise a same-millisecond commit with counter > 0 would sort after a
+        // bare (·, ms, 0) target and be dropped. Zero (targetTimeMs <= 0) means "chain max".
         HLCTimestamp targetTime = targetTimeMs > 0
-            ? new HLCTimestamp(0, targetTimeMs, 0)
+            ? new HLCTimestamp(0, targetTimeMs, uint.MaxValue)
             : HLCTimestamp.Zero;
         try { return Task.FromResult(svc.RestoreTo(leafBackupId, targetDir, targetTime, ct: ct)); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+    }
+
+    public async Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun, CancellationToken ct = default)
+    {
+        BackupService svc = RequireBackupService();
+        try
+        {
+            BackupGcInventory inventory = dryRun
+                ? svc.PlanGarbageCollection(ct)
+                : await svc.RunGarbageCollectionAsync(ct);
+
+            long bytes = 0;
+            KahunaBackupGcResult result = new() { Applied = !dryRun };
+            foreach (BackupGcCandidate c in inventory.RetentionDeletions)
+            {
+                bytes += c.Bytes;
+                result.RetentionDeletions.Add(new KahunaBackupGcDeletion
+                {
+                    BackupId = c.BackupId,
+                    Type = c.Type.ToString(),
+                    CreatedAtUtc = c.CreatedAtUtc,
+                    Bytes = c.Bytes,
+                    Reason = c.Reason
+                });
+            }
+            // Surface only the entry name, never the absolute server path.
+            foreach (OrphanSweepCandidate o in inventory.OrphanReclamations)
+                result.OrphanReclamations.Add(new KahunaBackupGcOrphan
+                {
+                    Name = Path.GetFileName(o.Path),
+                    IsDirectory = o.IsDirectory,
+                    Reason = o.Reason
+                });
+            result.BytesReclaimed = bytes;
+            return result;
+        }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
     }
 

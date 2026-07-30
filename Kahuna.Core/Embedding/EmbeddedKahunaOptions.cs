@@ -311,6 +311,18 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>Allow remote restore without a configured restore root (insecure; default false).</summary>
     public bool AllowUnconfinedRemoteRestore { get; set; }
 
+    /// <summary>Backup retention: keep at most this many most-recent chains (0 = unbounded). Off unless a bound is set.</summary>
+    public int BackupRetentionMaxChains { get; set; }
+
+    /// <summary>Backup retention: delete chains whose newest backup is older than this (Zero = unbounded).</summary>
+    public TimeSpan BackupRetentionMaxAge { get; set; } = TimeSpan.Zero;
+
+    /// <summary>Backup retention: keep the most-recent chains within this byte budget (0 = unbounded; newest always kept).</summary>
+    public long BackupRetentionMaxBytes { get; set; }
+
+    /// <summary>Cadence of the periodic backup GC pass (orphan sweep + retention), plus a startup sweep. Zero disables the periodic pass.</summary>
+    public TimeSpan BackupGcInterval { get; set; } = TimeSpan.FromHours(1);
+
     // ── Range-split knobs ────────────────────────────────────────────────────
 
     /// <summary>

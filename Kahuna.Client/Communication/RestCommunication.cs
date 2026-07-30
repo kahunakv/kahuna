@@ -1388,6 +1388,19 @@ public class RestCommunication : IKahunaCommunication
         return response ?? throw new KahunaException("Restore returned null", LockResponseType.Errored);
     }
 
+    public async Task<KahunaBackupGcResult> RunBackupGarbageCollection(string url, bool dryRun, CancellationToken cancellationToken)
+    {
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+        KahunaBackupGcResult? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+            url.WithOAuthBearerToken("xxx")
+               .AppendPathSegments("v1/backups/gc")
+               .SetQueryParam("dryRun", dryRun)
+               .WithSettings(o => o.HttpVersion = "2.0")
+               .PostJsonAsync(new { }, cancellationToken: cancellationToken)
+               .ReceiveJson<KahunaBackupGcResult>())).ConfigureAwait(false);
+        return response ?? throw new KahunaException("Backup GC returned null", LockResponseType.Errored);
+    }
+
     /// <summary>
     /// Runs a backup REST call, reconstructing a typed <see cref="KahunaBackupException"/> from the
     /// <see cref="KahunaBackupWire.OutcomeHttpHeader"/> response header when the server rejected it.

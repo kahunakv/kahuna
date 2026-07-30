@@ -103,6 +103,12 @@ public sealed class KahunaControlOptions
     [Option("backup-chain", Required = false, HelpText = "Resolves and validates the backup chain for the given leaf backup ID")]
     public Guid? BackupChain { get; set; }
 
+    [Option("backup-gc", Required = false, HelpText = "Reclaims backup disk on the node: sweeps orphaned/leftover artifacts and enforces retention. Add --backup-gc-dry-run to preview without deleting")]
+    public bool BackupGc { get; set; }
+
+    [Option("backup-gc-dry-run", Required = false, HelpText = "With --backup-gc, report what would be reclaimed without deleting anything")]
+    public bool BackupGcDryRun { get; set; }
+
     [Option("parent-backup-id", Required = false, HelpText = "Parent backup ID for incremental backups")]
     public Guid? ParentBackupId { get; set; }
 
