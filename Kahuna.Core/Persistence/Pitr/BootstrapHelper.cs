@@ -152,19 +152,32 @@ internal static class BootstrapHelper
         if (safeWater.Count == 0)
             return;
 
-        List<(int, List<RaftLog>)> writes = [];
-
+        // Seed one partition at a time and verify each write is durable. IWAL.Write is atomic per
+        // partition and overwrites any existing entry with the same (partitionId, id) key, so this is
+        // safe to retry: re-running BootstrapNode re-applies the idempotent backend restore and
+        // re-writes these checkpoints without duplication. Writing per partition (rather than one
+        // batch) lets a partial failure be detected and reported precisely rather than reported as a
+        // successful bootstrap while the WAL trails the state already restored into the backend.
         foreach (KeyValuePair<int, (long index, HLCTimestamp hlc, long term)> kv in safeWater)
         {
-            writes.Add((kv.Key, [new RaftLog
-            {
-                Id   = kv.Value.index,
-                Type = RaftLogType.CommittedCheckpoint,
-                Time = kv.Value.hlc,
-                Term = kv.Value.term,
-            }]));
-        }
+            List<(int, List<RaftLog>)> write =
+            [
+                (kv.Key, [new RaftLog
+                {
+                    Id   = kv.Value.index,
+                    Type = RaftLogType.CommittedCheckpoint,
+                    Time = kv.Value.hlc,
+                    Term = kv.Value.term,
+                }])
+            ];
 
-        walAdapter.Write(writes);
+            RaftOperationStatus status = walAdapter.Write(write);
+            if (status != RaftOperationStatus.Success)
+                throw new BackupDriverException(
+                    $"Failed to seed the WAL checkpoint for partition {kv.Key} at index {kv.Value.index} " +
+                    $"(status {status}); bootstrap did not complete. The backend restore already applied is " +
+                    "idempotent and the checkpoint write overwrites by key, so the bootstrap can be safely " +
+                    "re-run; do not start the node until it completes successfully.");
+        }
     }
 }

@@ -470,7 +470,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
     /// HAZARD (documented, not a bug in the capping mechanism): a T chosen INSIDE the committed
     /// transaction's per-shard HLC span (T = 250, between 240 and 260) tears the transaction —
     /// shard 1's mutation is in the cut, shard 2's is not. This is exactly the half-applied outcome
-    /// P1.8's capping cannot prevent on its own; the coordinator MUST avoid picking such a T. The
+    /// the segment cap cannot prevent on its own; the coordinator MUST avoid picking such a T. The
     /// test pins the tearing so the precondition is explicit rather than hidden.
     /// </summary>
     [Fact]

@@ -1,4 +1,5 @@
 
+using System.Collections.Concurrent;
 using Nixie;
 using Kommander;
 using System.Diagnostics;
@@ -80,6 +81,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// Dirty key-values that need to be written to the persistence backend.
     /// </summary>
     private readonly Queue<BackgroundWriteRequest> dirtyKeyValues = new();
+
+    // Highest LastModified HLC enqueued for persistence per partition. Every committed key-value write
+    // — from the leader's proposal completion and from follower replication alike — is sent here as a
+    // QueueStoreKeyValue, so this is the single point that observes "applied and queued". A full backup
+    // waits until this reaches each partition's captured ToHlc before flushing, so the checkpoint can
+    // never miss a committed write that had not yet been applied/enqueued when the flush ran.
+    private readonly ConcurrentDictionary<int, HLCTimestamp> maxEnqueuedHlc = new();
     
     /// <summary>
     /// Partition IDs that are being tracked for checkpointing.
@@ -130,11 +138,28 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private DateTime lastPitrTickUtc = DateTime.MinValue;
 
     /// <summary>
-    /// Called on the scheduler thread immediately before <c>GetFloorForPrune</c> during both
-    /// targeted cleanup and full sweep. Null in production; set by tests to gate the prune task
-    /// before the floor is sampled so that concurrent hold acquisitions can be observed.
+    /// Called on the scheduler thread immediately before the prune floor is sampled
+    /// (<c>SnapshotFloorStore.BeginPrune</c>) during both targeted cleanup and full sweep. Null in
+    /// production; set by tests to gate the prune task before the floor is sampled so that a hold
+    /// acquired here is reflected in the sampled floor.
     /// </summary>
+    /// <summary>
+    /// The highest LastModified HLC that has been enqueued for persistence for <paramref name="partitionId"/>,
+    /// or <see cref="HLCTimestamp.Zero"/> if none. Thread-safe. A full backup polls this to wait for the
+    /// apply/enqueue pipeline to catch up to a captured watermark before flushing.
+    /// </summary>
+    internal HLCTimestamp GetMaxEnqueuedHlc(int partitionId) =>
+        maxEnqueuedHlc.TryGetValue(partitionId, out HLCTimestamp v) ? v : HLCTimestamp.Zero;
+
     internal Action? BeforePruneSampleHook;
+
+    /// <summary>
+    /// Called on the scheduler thread after the prune floor is sampled and the prune-delete window
+    /// is open, but immediately before the backend delete runs. Null in production; set by tests to
+    /// acquire a hold inside the delete window and verify that acquisition fails closed rather than
+    /// letting the delete remove a boundary the sample never saw.
+    /// </summary>
+    internal Action? AfterPruneSampleHook;
     
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
@@ -183,6 +208,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             
             case BackgroundWriteType.QueueStoreKeyValue:
                 dirtyKeyValues.Enqueue(message);
+                if (message.PartitionId >= 0)
+                    maxEnqueuedHlc.AddOrUpdate(message.PartitionId, message.LastModified,
+                        (_, existing) => message.LastModified.CompareTo(existing) > 0 ? message.LastModified : existing);
                 break;
             
             case BackgroundWriteType.Flush:
@@ -202,9 +230,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 // Explicit pre-backup/pre-close flush: drain fully (ignore the time budget) so the
                 // completion signal means every queued write has landed in storage.
                 await FlushLocks(drainFully: true);
-                await FlushKeyValues(drainFully: true);
+                bool keyValuesFlushed = await FlushKeyValues(drainFully: true);
                 await RunTargetedRevisionCleanup();
-                message.CompletionSource?.TrySetResult(true);
+                if (keyValuesFlushed)
+                    message.CompletionSource?.TrySetResult(true);
+                else
+                    message.CompletionSource?.TrySetException(new IOException(
+                        "The background writer could not durably persist all committed key-values; the flush did not complete."));
                 break;
 
             default:
@@ -416,10 +448,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// completely. Used by the explicit pre-backup/pre-close flush so its completion signal means
     /// every queued write has landed.</param>
     /// <returns>A value task representing the asynchronous operation of flushing key-value items.</returns>
-    private async ValueTask FlushKeyValues(bool drainFully = false)
+    private async ValueTask<bool> FlushKeyValues(bool drainFully = false)
     {
         if (dirtyKeyValues.Count == 0 && pendingKeyValuesItems == null)
-            return;
+            return true;
 
         long budgetMs = configuration.DirtyObjectsWriterDelay > 0
             ? configuration.DirtyObjectsWriterDelay
@@ -507,9 +539,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             if (!success)
             {
+                // Persistence failed after exhausting retries. Keep the items queued for a later retry,
+                // but report the failure so a caller waiting on a full drain (e.g. a full backup) never
+                // treats an incomplete flush as success and publishes a checkpoint missing committed data.
                 pendingKeyValuesItems = items;
                 logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
-                return;
+                return false;
             }
 
             logger.LogSuccessfullyStoredKeyValues(items.Count, stopwatch.ElapsedMilliseconds);
@@ -533,8 +568,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             pendingCheckpoint = true;
 
             if (!drainFully && (Environment.TickCount64 - startTick) >= budgetMs)
-                return;
+                return true;
         }
+
+        return true;
     }
 
     /// <summary>
@@ -566,25 +603,40 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         try
         {
             Action? capturedHook = BeforePruneSampleHook;
+            Action? capturedAfterHook = AfterPruneSampleHook;
             bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
             {
                 capturedHook?.Invoke();
-                // Sample the floor here (inside the task) so any hold acquired while this task
-                // was queued is still observed. A residual window remains: a hold acquired after
-                // GetFloorForPrune returns but before PruneKeyValueRevisions completes is still
-                // invisible. That window is now micro- to low-millisecond; full closure would
-                // require mutual exclusion between acquire and the delete (deferred).
-                HLCTimestamp floor = capturedFloorStore?.GetFloorForPrune(capturedRaft) ?? HLCTimestamp.Zero;
+                // Open a prune-delete window: the floor is sampled under the store's commit lock so
+                // any hold committed before this point is reflected, and any hold that commits after
+                // it observes the open window and fails closed rather than losing its boundary to
+                // the delete below.
+                HLCTimestamp floor;
+                long pruneToken = 0;
+                bool windowOpen = capturedFloorStore is not null;
+                if (windowOpen)
+                    (floor, pruneToken) = capturedFloorStore!.BeginPrune(capturedRaft);
+                else
+                    floor = HLCTimestamp.Zero;
 
-                bool ok = persistenceBackend.PruneKeyValueRevisions(
-                    keysToClean,
-                    configuration.PersistentRevisionRetentionCount,
-                    configuration.PersistentRevisionRetentionAge,
-                    configuration.PersistentRevisionCleanupBatchSize,
-                    floor,
-                    out RevisionPruneResult r);
-                pruneResult = r;
-                return ok;
+                try
+                {
+                    capturedAfterHook?.Invoke();
+                    bool ok = persistenceBackend.PruneKeyValueRevisions(
+                        keysToClean,
+                        configuration.PersistentRevisionRetentionCount,
+                        configuration.PersistentRevisionRetentionAge,
+                        configuration.PersistentRevisionCleanupBatchSize,
+                        floor,
+                        out RevisionPruneResult r);
+                    pruneResult = r;
+                    return ok;
+                }
+                finally
+                {
+                    if (windowOpen)
+                        capturedFloorStore!.EndPrune(pruneToken);
+                }
             });
 
             if (success)
@@ -677,26 +729,42 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         IRaft capturedSweepRaft = raft;
 
         Action? capturedSweepHook = BeforePruneSampleHook;
+        Action? capturedSweepAfterHook = AfterPruneSampleHook;
         try
         {
             bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
             {
                 capturedSweepHook?.Invoke();
-                // Sample the floor here (inside the task) so any hold acquired while this task
-                // was queued is still observed. Residual window: a hold acquired after
-                // GetFloorForPrune returns but before PruneKeyValueRevisions completes is still
-                // invisible. That window is now micro- to low-millisecond; full closure deferred.
-                HLCTimestamp sweepFloor = capturedSweepFloorStore?.GetFloorForPrune(capturedSweepRaft) ?? HLCTimestamp.Zero;
+                // Open a prune-delete window: the floor is sampled under the store's commit lock so
+                // any hold committed before this point is reflected, and any hold that commits after
+                // it observes the open window and fails closed rather than losing its boundary to
+                // the delete below.
+                HLCTimestamp sweepFloor;
+                long sweepToken = 0;
+                bool sweepWindowOpen = capturedSweepFloorStore is not null;
+                if (sweepWindowOpen)
+                    (sweepFloor, sweepToken) = capturedSweepFloorStore!.BeginPrune(capturedSweepRaft);
+                else
+                    sweepFloor = HLCTimestamp.Zero;
 
-                bool ok = persistenceBackend.PruneKeyValueRevisions(
-                    null,
-                    configuration.PersistentRevisionRetentionCount,
-                    configuration.PersistentRevisionRetentionAge,
-                    configuration.PersistentRevisionCleanupBatchSize,
-                    sweepFloor,
-                    out RevisionPruneResult r);
-                pruneResult = r;
-                return ok;
+                try
+                {
+                    capturedSweepAfterHook?.Invoke();
+                    bool ok = persistenceBackend.PruneKeyValueRevisions(
+                        null,
+                        configuration.PersistentRevisionRetentionCount,
+                        configuration.PersistentRevisionRetentionAge,
+                        configuration.PersistentRevisionCleanupBatchSize,
+                        sweepFloor,
+                        out RevisionPruneResult r);
+                    pruneResult = r;
+                    return ok;
+                }
+                finally
+                {
+                    if (sweepWindowOpen)
+                        capturedSweepFloorStore!.EndPrune(sweepToken);
+                }
             });
 
             if (success)
@@ -780,8 +848,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 raft.WalAdapter, partitionId, now,
                 configuration.PitrWindow, configuration.BaseSnapshotInterval);
 
-            // Pass a negative value when no committed entry exists before the boundary so
-            // Kommander clears the floor rather than setting it to 0 (which suppresses all compaction).
+            // Pass a negative value when no committed entry exists before the boundary so Kommander
+            // clears this floor. This is the legacy single-value floor; Kommander composes it with any
+            // concurrent backup retention holds via minimum (IRaft.AcquireRetentionHold), so a backup
+            // capturing a WAL prefix is no longer clobbered by a horizon advance.
             raft.SetMinRetainIndex(partitionId, protectedIndex > 0 ? protectedIndex : -1);
 
             // Recomputes the boundary for the log line; ComputeProtectedIndex derives it

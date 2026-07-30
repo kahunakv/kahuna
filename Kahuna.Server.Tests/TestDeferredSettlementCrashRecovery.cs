@@ -99,7 +99,7 @@ public sealed class TestDeferredSettlementCrashRecovery
 
         try
         {
-            // ── Phase 1: commit a durable transaction, then crash after the decision is durable but before the
+            // ── Step 1: commit a durable transaction, then crash after the decision is durable but before the
             // committed value materializes (materialization is failed by the executor decorator). ──
             {
                 MaterializationBlockingExecutor? blocker = null;
@@ -129,7 +129,7 @@ public sealed class TestDeferredSettlementCrashRecovery
                 Assert.True(kahuna.DurablePreparedIntentStore.Count > 0, "committed intents must still be pending (unmaterialized) before the crash");
             }
 
-            // ── Phase 2: reconstruct the node on the SAME persistent WAL. Recovery must replay the durable decision
+            // ── Step 2: reconstruct the node on the SAME persistent WAL. Recovery must replay the durable decision
             // and its pending intent and finish settlement — no acknowledged commit lost. ──
             {
                 // No decorator: materialization is allowed to succeed this time (the recovery sweep performs it).

@@ -20,7 +20,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// straddle T (shard A at <c>t=240</c>, shard B at <c>t=260</c>, T chosen between them).
 /// <c>min(in-flight)</c> does <em>not</em> prevent that tearing.  The complete unconditional fix
 /// requires stamping a single shared commit HLC on all participating shards — a transaction-layer
-/// change deferred beyond Phase 1.  In quiesced clusters (no in-flight work) the fallback
+/// change that remains future work.  In quiesced clusters (no in-flight work) the fallback
 /// returns the WAL max committed HLC, which is safe because no straddling is possible when the
 /// cluster is idle.</para>
 ///

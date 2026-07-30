@@ -394,7 +394,10 @@ public interface IKahuna
     /// </summary>
     public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default);
 
-    /// <summary>Lists all backup manifests in the local catalog.</summary>
+    /// <summary>
+    /// Lists all backup manifests in the local catalog, marking structurally invalid or unsupported
+    /// entries (via a cheap, manifest-only check) without hiding them.
+    /// </summary>
     public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default);
 
     /// <summary>

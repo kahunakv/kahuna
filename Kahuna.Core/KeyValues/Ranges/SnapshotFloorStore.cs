@@ -74,6 +74,24 @@ internal sealed class SnapshotFloorStore : IDisposable
     private int mutationEpoch;
 
     /// <summary>
+    /// Serializes a hold mutation's in-memory commit against the open/close of a prune-delete
+    /// window (<see cref="BeginPrune"/> / <see cref="EndPrune"/>). Sampling the floor and mutating
+    /// the hold set under the same monitor is what makes acquisition and pruning agree on a single
+    /// order: either the hold is committed before the floor sample (and is therefore reflected in
+    /// it), or the acquire observes the prune window and fails closed.
+    /// </summary>
+    private readonly object pruneCommitLock = new();
+
+    /// <summary>
+    /// Prune-delete window generation. Bumped under <see cref="pruneCommitLock"/> when a backend
+    /// revision delete opens (odd) and closes (even). An acquire that sees this value change — or
+    /// find it odd — across its own commit knows a prune delete overlapped it and cannot prove its
+    /// boundary survived, so it fails closed. Only ever mutated under the lock; read lock-free by
+    /// an acquire capturing the value at entry.
+    /// </summary>
+    private long pruneDeleteGen;
+
+    /// <summary>
     /// Cached result of the last O(N) floor scan. Updated on every mutation and valid until
     /// <see cref="FloorCacheState.NextExpiry"/> is reached (at which point a hold may have
     /// expired and the slow scan is needed again). Between mutations the cache is conservative:
@@ -202,25 +220,14 @@ internal sealed class SnapshotFloorStore : IDisposable
     }
 
     /// <summary>
-    /// Samples the effective floor for use by an off-actor prune task.
+    /// Samples the effective floor for use by an off-actor prune task, retrying if a hold mutation
+    /// lands mid-scan (an <see cref="mutationEpoch"/> change between the two epoch reads that
+    /// bracket the scan re-runs it, so the returned value reflects the mutation).
     ///
-    /// <para><b>What this closes.</b> Moving the sample inside the prune callback (rather than
-    /// reading it on the actor thread before <c>EnqueueTask</c>) eliminates the
-    /// scheduler-queue-latency window: a hold acquired while the task is queued but before it
-    /// starts executing is now always observed. The epoch-retry loop further tightens the sample
-    /// itself: if a <see cref="mutationEpoch"/> change is detected between the two epoch reads
-    /// that bracket the floor scan, the scan is repeated so the returned value reflects the
-    /// mutation.</para>
-    ///
-    /// <para><b>Residual window.</b> A hold acquired in the interval
-    /// [<c>GetFloorForPrune</c> returns → <c>PruneKeyValueRevisions</c> completes] is still
-    /// invisible to the running prune batch — the floor was sampled before the hold arrived and
-    /// the delete cannot be un-done. This window is now micro- to low-millisecond (sample and
-    /// delete are adjacent, no await between) versus the old scheduler-queue-latency window.
-    /// Full closure would require mutual exclusion between acquire and the prune delete (e.g.
-    /// holding <see cref="mutateGate"/> across the backend call), which was deferred as the
-    /// residual probability is very low and CamusDB fork-points are typically well above the
-    /// prune horizon.</para>
+    /// <para>This is the raw sample only; it does not open a prune-delete window. Callers that are
+    /// about to delete revisions must use <see cref="BeginPrune"/>/<see cref="EndPrune"/> instead,
+    /// which sample under <see cref="pruneCommitLock"/> and let a concurrent acquire fail closed.
+    /// This method remains for read-only floor introspection.</para>
     ///
     /// <para>May be called from the scheduler thread — <see cref="holds"/> is a volatile
     /// copy-on-write dict and <see cref="IRaft.HybridLogicalClock"/> is thread-safe.</para>
@@ -243,6 +250,49 @@ internal sealed class SnapshotFloorStore : IDisposable
     }
 
     /// <summary>
+    /// Opens a prune-delete window and returns the floor the delete must honor. The floor is
+    /// sampled under <see cref="pruneCommitLock"/>, the same monitor a hold commit takes, so the
+    /// sample reflects every hold committed before this call — including one acquired during a
+    /// pre-sample pause. A hold that commits <em>after</em> this call instead observes the open
+    /// window (an odd <see cref="pruneDeleteGen"/>) and fails closed, because the delete about to
+    /// run was computed without it.
+    ///
+    /// <para>The returned <c>Token</c> must be passed to <see cref="EndPrune"/> once the backend
+    /// delete finishes — on every path, success or exception — to close the window. The delete
+    /// itself runs <b>outside</b> the lock so a slow backend call never blocks acquisition or the
+    /// meta clock.</para>
+    /// </summary>
+    public (HLCTimestamp Floor, long Token) BeginPrune(IRaft raftClock)
+    {
+        lock (pruneCommitLock)
+        {
+            HLCTimestamp floor = HLCTimestamp.Zero;
+            if (holds.Count > 0)
+            {
+                HLCTimestamp now = raftClock.HybridLogicalClock.TrySendOrLocalEvent(raftClock.GetLocalNodeId());
+                floor = GetEffectiveFloor(now);
+            }
+
+            long token = ++pruneDeleteGen; // odd → a delete is now in flight
+            return (floor, token);
+        }
+    }
+
+    /// <summary>
+    /// Closes the prune-delete window opened by <see cref="BeginPrune"/>. Idempotent and tolerant
+    /// of a stale token (only the matching in-flight token advances the generation), so a
+    /// double-close or an out-of-order call cannot spuriously mark a window as closed.
+    /// </summary>
+    public void EndPrune(long token)
+    {
+        lock (pruneCommitLock)
+        {
+            if (pruneDeleteGen == token) // still the active (odd) window
+                pruneDeleteGen++;        // even → idle
+        }
+    }
+
+    /// <summary>
     /// Acquires or renews a hold. Idempotent by (holderId, timestamp): a repeat returns the same
     /// holdId and renews the lease. Only the meta-partition leader can commit holds; followers
     /// return <see cref="KeyValueResponseType.MustRetry"/>.
@@ -258,6 +308,12 @@ internal sealed class SnapshotFloorStore : IDisposable
 
         if (leaseMs <= 0)
             return (KeyValueResponseType.InvalidInput, string.Empty, HLCTimestamp.Zero);
+
+        // Capture the prune-delete generation before replicating. If any delete window opens,
+        // closes, or is already open across this acquire, the sampled floor that drove that delete
+        // was computed without this hold — so we cannot prove the hold's boundary survived and must
+        // fail closed. Read before the replication round-trip so the whole acquire is covered.
+        long pruneGenAtStart = Volatile.Read(ref pruneDeleteGen);
 
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -282,8 +338,16 @@ internal sealed class SnapshotFloorStore : IDisposable
             Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
             next[holdId] = hold;
 
-            bool ok = await ReplicateDeltaAsync(UpsertDelta(hold), next, ct).ConfigureAwait(false);
+            (bool ok, bool pruneSafe) = await ReplicateAcquiredHoldAsync(
+                UpsertDelta(hold), next, pruneGenAtStart, ct).ConfigureAwait(false);
             if (!ok)
+                return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
+
+            // The hold is committed and durable, but a prune delete overlapped this acquire. The
+            // boundary it was meant to protect may already be gone, so the acquire must not report
+            // success. The committed hold now protects the timestamp for every future prune, and a
+            // retry (idempotent by holderId+timestamp) succeeds once no delete overlaps it.
+            if (!pruneSafe)
                 return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
 
             return (KeyValueResponseType.Set, holdId, expiry);
@@ -436,6 +500,29 @@ internal sealed class SnapshotFloorStore : IDisposable
     private async Task<bool> ReplicateDeltaAsync(
         SnapshotFloorDeltaMessage delta, Dictionary<string, SnapshotHold> next, CancellationToken ct)
     {
+        if (!await ReplicateOnlyAsync(delta, ct).ConfigureAwait(false))
+            return false;
+
+        CommitInMemory(next);
+        return true;
+    }
+
+    // Caller holds mutateGate. Replicates and commits a newly-acquired hold, additionally reporting
+    // whether the commit is safe against concurrent pruning: false when a prune-delete window
+    // opened, closed, or was open across [pruneGenAtStart .. commit], because that delete's floor
+    // was sampled without this hold.
+    private async Task<(bool Replicated, bool PruneSafe)> ReplicateAcquiredHoldAsync(
+        SnapshotFloorDeltaMessage delta, Dictionary<string, SnapshotHold> next, long pruneGenAtStart, CancellationToken ct)
+    {
+        if (!await ReplicateOnlyAsync(delta, ct).ConfigureAwait(false))
+            return (false, false);
+
+        bool pruneSafe = CommitInMemory(next, pruneGenAtStart);
+        return (true, pruneSafe);
+    }
+
+    private async Task<bool> ReplicateOnlyAsync(SnapshotFloorDeltaMessage delta, CancellationToken ct)
+    {
         byte[] data = ReplicationSerializer.Serialize(delta);
 
         RaftReplicationResult result = await raft.ReplicateLogs(
@@ -453,14 +540,34 @@ internal sealed class SnapshotFloorStore : IDisposable
             return false;
         }
 
-        CommitInMemory(next);
         return true;
     }
 
     // Installs the resulting registry: swaps the volatile map, rebuilds the floor cache before
     // bumping the epoch (so a concurrent GetFloorForPrune re-samples), and persists the full set
     // to disk. Idempotent — safe to run for both the eager leader commit and the ordered echo.
+    // Runs under pruneCommitLock so the swap is ordered against BeginPrune's floor sample.
     private void CommitInMemory(Dictionary<string, SnapshotHold> next)
+    {
+        lock (pruneCommitLock)
+            CommitInMemoryLocked(next);
+    }
+
+    // Commits like CommitInMemory and returns whether the commit was free of any overlapping
+    // prune-delete window since pruneGenAtStart. The check runs under the same lock as the swap, so
+    // the ordering an acquire observes is exactly the ordering pruning observes.
+    private bool CommitInMemory(Dictionary<string, SnapshotHold> next, long pruneGenAtStart)
+    {
+        lock (pruneCommitLock)
+        {
+            CommitInMemoryLocked(next);
+            long genNow = pruneDeleteGen;
+            // Safe only if no window opened/closed (generation unchanged) and none is open now.
+            return genNow == pruneGenAtStart && (genNow & 1L) == 0L;
+        }
+    }
+
+    private void CommitInMemoryLocked(Dictionary<string, SnapshotHold> next)
     {
         holds = next;
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());

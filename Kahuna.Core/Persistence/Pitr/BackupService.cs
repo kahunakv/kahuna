@@ -22,6 +22,7 @@ internal sealed class BackupService
     private readonly string _storageRevision;
     private readonly string? _liveStoragePath;
     private readonly string? _restoreRoot;
+    private readonly Func<int, long, IDisposable>? _acquireRetentionHold;
     private readonly ILogger? _logger;
     private readonly Func<Task<HLCTimestamp>> _queryMinInFlight;
 
@@ -35,7 +36,13 @@ internal sealed class BackupService
         Func<Task<HLCTimestamp>> queryMinInFlight,
         ILogger? logger = null,
         string? liveStoragePath = null,
-        string? restoreRoot = null)
+        string? restoreRoot = null,
+        Func<int, long, IDisposable>? acquireRetentionHold = null,
+        BackupDriver.AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
+        BackupDriver.ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
+        BackupDriver.RenewSnapshotHoldDelegate? renewSnapshotHold = null,
+        int snapshotHoldLeaseMs = BackupDriver.DefaultSnapshotHoldLeaseMs,
+        Func<int, HLCTimestamp>? appliedHlcProbe = null)
     {
         _raft = raft;
         _backupDir = backupDir;
@@ -43,8 +50,10 @@ internal sealed class BackupService
         _storageRevision = storageRevision;
         _liveStoragePath = liveStoragePath;
         _restoreRoot = string.IsNullOrWhiteSpace(restoreRoot) ? null : Path.GetFullPath(restoreRoot);
+        _acquireRetentionHold = acquireRetentionHold;
         _logger = logger;
-        _driver = new BackupDriver(raft, persistenceBackend, flushBeforeCheckpoint);
+        _driver = new BackupDriver(raft, persistenceBackend, flushBeforeCheckpoint,
+            acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe);
         _catalog = new BackupCatalog(new LocalDirectoryStorageTarget(backupDir));
         _queryMinInFlight = queryMinInFlight;
     }
@@ -60,7 +69,8 @@ internal sealed class BackupService
     {
         try
         {
-            BackupManifest manifest = _driver.TakeIncrementalBackup(parentBackupId, _backupDir, _catalog, snapshotT, ct);
+            BackupManifest manifest = _driver.TakeIncrementalBackup(
+                parentBackupId, _backupDir, _catalog, snapshotT, ct, _acquireRetentionHold);
             KahunaBackupInfo dto = ToDto(manifest);
             dto.RequestedKind = BackupType.Incremental.ToString();
             return dto;
@@ -95,13 +105,61 @@ internal sealed class BackupService
         await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
             _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
 
-    public IReadOnlyList<KahunaBackupInfo> ListBackups(CancellationToken ct = default)
+    /// <summary>
+    /// Lists every backup, marking invalid ones without hiding them. Each parsed manifest gets a cheap,
+    /// manifest-only structural check (format version, schema, checksum/size keysets); when
+    /// <paramref name="verifyArtifacts"/> is set, a structurally-valid entry is additionally verified
+    /// against its on-disk files and digests (the expensive path — cancellable via <paramref name="ct"/>).
+    /// A single malformed entry never fails the whole list; manifests that fail to deserialize are
+    /// surfaced as explicit invalid entries.
+    /// </summary>
+    public IReadOnlyList<KahunaBackupInfo> ListBackups(bool verifyArtifacts = false, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
-        List<KahunaBackupInfo> result = _catalog.List(ct).Select(ToDto).ToList();
+        List<KahunaBackupInfo> result = [];
 
-        // Surface corrupt/unreadable manifests as explicit invalid entries rather than hiding them.
+        foreach (BackupManifest manifest in _catalog.List(ct))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            KahunaBackupInfo dto = ToDto(manifest);
+            try
+            {
+                string? structuralError = BackupArtifactVerifier.GetStructuralError(manifest);
+                if (structuralError is not null)
+                {
+                    dto.IsInvalid = true;
+                    dto.InvalidReason = structuralError;
+                }
+                else if (verifyArtifacts)
+                {
+                    try
+                    {
+                        BackupArtifactVerifier.Verify(manifest, _backupDir, ct);
+                    }
+                    catch (Exception ex) when (ex is BackupArtifactException or BackupUnsupportedFormatException)
+                    {
+                        dto.IsInvalid = true;
+                        dto.InvalidReason = ex.Message;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // A single unexpected error must never fail the whole list — mark this entry invalid.
+                dto.IsInvalid = true;
+                dto.InvalidReason = $"Structural validation error: {ex.Message}";
+            }
+
+            result.Add(dto);
+        }
+
+        // Surface corrupt/unreadable (non-deserializable) manifests as explicit invalid entries too.
         foreach ((Guid backupId, string reason) in _catalog.ListCorrupt(ct))
             result.Add(new KahunaBackupInfo { BackupId = backupId, IsInvalid = true, InvalidReason = reason });
 
@@ -295,7 +353,10 @@ internal sealed class BackupService
             for (string? p = finalDir; !string.IsNullOrEmpty(p); p = Path.GetDirectoryName(p))
             {
                 string pn = Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
-                if (string.Equals(pn, rootNorm, StringComparison.OrdinalIgnoreCase))
+                // Case-sensitive (ordinal) stop condition: on a case-sensitive volume a case-different
+                // sibling is a distinct tree, not the trusted root — it must NOT stop the walk (so it
+                // is still checked for redirection). Being ordinal is fail-closed on every volume.
+                if (string.Equals(pn, rootNorm, StringComparison.Ordinal))
                     break; // reached the trusted root
 
                 if (Directory.Exists(p) && (new DirectoryInfo(p).Attributes & FileAttributes.ReparsePoint) != 0)
@@ -330,18 +391,27 @@ internal sealed class BackupService
             { TargetConflict = true };
     }
 
-    /// <summary>True when <paramref name="path"/> is the same as or nested under <paramref name="root"/>.</summary>
+    /// <summary>
+    /// True when <paramref name="path"/> is the same as or nested under <paramref name="root"/>.
+    /// Comparison is case-SENSITIVE (ordinal): on a case-sensitive volume a case-different sibling
+    /// (e.g. <c>/srv/restore/out</c> vs root <c>/srv/Restore</c>) is a distinct tree and must never be
+    /// accepted as "within". Ordinal is fail-closed on every volume — on a case-insensitive volume it
+    /// only over-rejects a case-variant of an otherwise-contained path, never accepts an escape.
+    /// </summary>
     private static bool IsWithin(string path, string root)
     {
         string np = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
         string nr = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-        return string.Equals(np, nr, StringComparison.OrdinalIgnoreCase)
-            || np.StartsWith(nr + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(np, nr, StringComparison.Ordinal)
+            || np.StartsWith(nr + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     /// <summary>True when <paramref name="a"/> and <paramref name="b"/> are the same directory or
-    /// one is nested inside the other. Comparison is case-insensitive to be safe on case-insensitive
-    /// filesystems (macOS/Windows).</summary>
+    /// one is nested inside the other. Comparison is case-INSENSITIVE — the conservative direction for
+    /// an overlap check: on a case-insensitive volume case-variant paths ARE the same tree, so
+    /// treating them as overlapping catches a restore that would land in a protected path. On a
+    /// case-sensitive volume this only over-detects overlap (rejects a case-variant sibling), never
+    /// misses one.</summary>
     private static bool PathsOverlap(string a, string b)
     {
         static string Norm(string p) =>

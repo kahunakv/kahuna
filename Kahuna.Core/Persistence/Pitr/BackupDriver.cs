@@ -38,14 +38,58 @@ internal sealed class BackupDriver
     /// that pre-populates the backend with expected data.
     /// </summary>
     private readonly Func<Task>? _flushBeforeCheckpoint;
+    private readonly Func<int, HLCTimestamp>? _appliedHlcProbe;
+
+    internal const int DefaultApplyBarrierTimeoutMs = 30_000;
+
+    /// <summary>
+    /// Acquires an MVCC snapshot-history hold pinning revision history at the given cut, returning a
+    /// hold id, or <c>null</c> when protection cannot be guaranteed (the effective snapshot floor
+    /// already passed the cut, or the hold could not be acquired) — in which case the full backup
+    /// fails closed rather than producing a checkpoint whose history may have been pruned.
+    /// </summary>
+    internal delegate Task<string?> AcquireSnapshotHoldDelegate(HLCTimestamp cut, CancellationToken ct);
+
+    /// <summary>
+    /// Renews the lease on a snapshot-history hold, returning <c>true</c> when the hold is still
+    /// live and its lease was extended, <c>false</c> when it could not be renewed (expired, lost to
+    /// a leadership change, or the mutation could not be committed). A <c>false</c> result — or a
+    /// thrown exception — is treated as renewal loss and fails the backup closed.
+    /// </summary>
+    internal delegate Task<bool> RenewSnapshotHoldDelegate(string holdId, CancellationToken ct);
+
+    /// <summary>Releases a snapshot-history hold acquired by <see cref="AcquireSnapshotHoldDelegate"/>.</summary>
+    internal delegate Task ReleaseSnapshotHoldDelegate(string holdId, CancellationToken ct);
+
+    private readonly AcquireSnapshotHoldDelegate? _acquireSnapshotHold;
+    private readonly RenewSnapshotHoldDelegate? _renewSnapshotHold;
+    private readonly ReleaseSnapshotHoldDelegate? _releaseSnapshotHold;
+    private readonly int _snapshotHoldLeaseMs;
 
     public BackupDriver(IRaft raft, IPersistenceBackend persistenceBackend,
-        Func<Task>? flushBeforeCheckpoint = null)
+        Func<Task>? flushBeforeCheckpoint = null,
+        AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
+        ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
+        RenewSnapshotHoldDelegate? renewSnapshotHold = null,
+        int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
+        Func<int, HLCTimestamp>? appliedHlcProbe = null)
     {
         _raft = raft;
         _persistenceBackend = persistenceBackend;
         _flushBeforeCheckpoint = flushBeforeCheckpoint;
+        _appliedHlcProbe = appliedHlcProbe;
+        _acquireSnapshotHold = acquireSnapshotHold;
+        _releaseSnapshotHold = releaseSnapshotHold;
+        _renewSnapshotHold = renewSnapshotHold;
+        _snapshotHoldLeaseMs = snapshotHoldLeaseMs;
     }
+
+    /// <summary>
+    /// Default snapshot-history hold lease. The lease is renewed at roughly a third of this interval
+    /// (see <see cref="RenewSnapshotHoldLoop"/>), so a hold survives a checkpoint/hash/verify/publish
+    /// cycle far longer than the lease as long as renewal keeps succeeding.
+    /// </summary>
+    internal const int DefaultSnapshotHoldLeaseMs = 600_000;
 
     /// <summary>
     /// Flushes all pending writes to the storage engine, snapshots it, captures per-partition
@@ -58,7 +102,8 @@ internal sealed class BackupDriver
     public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog,
         HLCTimestamp? snapshotT = null, CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
-            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT, ct);
+            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT, ct,
+            _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -71,8 +116,9 @@ internal sealed class BackupDriver
     /// first entry whose <c>Time > T</c> and T is recorded in the manifest.
     /// </summary>
     public BackupManifest TakeIncrementalBackup(Guid parentBackupId, string artifactsDir,
-        BackupCatalog catalog, HLCTimestamp? snapshotT = null, CancellationToken ct = default) =>
-        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT, ct);
+        BackupCatalog catalog, HLCTimestamp? snapshotT = null, CancellationToken ct = default,
+        Func<int, long, IDisposable>? acquireRetentionHold = null) =>
+        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT, ct, acquireRetentionHold);
 
     // ── core logic (internal so tests can exercise without an IRaft) ─────────────────────
 
@@ -95,13 +141,30 @@ internal sealed class BackupDriver
         BackupCatalog catalog,
         Func<Task>? flushBeforeCheckpoint = null,
         HLCTimestamp? snapshotT = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
+        ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
+        RenewSnapshotHoldDelegate? renewSnapshotHold = null,
+        int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
+        Func<int, HLCTimestamp>? appliedHlcProbe = null,
+        int applyBarrierTimeoutMs = DefaultApplyBarrierTimeoutMs)
     {
         ct.ThrowIfCancellationRequested();
 
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
         Directory.CreateDirectory(artifactPath);
+
+        string? snapshotHoldId = null;
+
+        // Renewal machinery: while a hold is held, a background loop keeps its lease alive across the
+        // whole checkpoint/hash/verify/publish window. If renewal is ever lost, renewalLost is
+        // tripped, which cancels workCt so the in-flight work aborts and nothing is published.
+        CancellationTokenSource? renewalLost = null;
+        CancellationTokenSource? renewalStop = null;
+        CancellationTokenSource? linkedWork = null;
+        Task renewalLoop = Task.CompletedTask;
+        CancellationToken workCt = ct;
 
         try
         {
@@ -150,6 +213,13 @@ internal sealed class BackupDriver
                     maxCommittedHlc = lastHlc;
             }
 
+            // Applied-index barrier: before flushing, wait until every captured partition's ToHlc has
+            // been applied and enqueued for persistence, so the flush cannot miss a committed write that
+            // is still mid-apply. Fail closed on timeout — never publish a checkpoint that may lack
+            // committed data.
+            if (appliedHlcProbe is not null)
+                await WaitForAppliedBarrierAsync(ranges, appliedHlcProbe, applyBarrierTimeoutMs, ct);
+
             if (flushBeforeCheckpoint is not null)
                 await flushBeforeCheckpoint();
 
@@ -162,6 +232,51 @@ internal sealed class BackupDriver
             // at the restore target) could never remove a post-cut value.
             HLCTimestamp cut = snapshotT ?? maxCommittedHlc;
 
+            // Refuse a cut whose per-key boundary history retention may already have pruned before this
+            // backup began. A live snapshot hold only fences pruning from here on; it cannot restore a
+            // boundary already gone. The backend's durable pruned-history floor records the highest cut
+            // below which a boundary may be missing, so a cut below it cannot be proven exact.
+            HLCTimestamp prunedHistoryFloor = persistenceBackend.GetPrunedHistoryFloor();
+            if (cut != HLCTimestamp.Zero && prunedHistoryFloor != HLCTimestamp.Zero
+                && cut.CompareTo(prunedHistoryFloor) < 0)
+                throw new BackupDriverException(
+                    $"The backup cut {cut} is below the pruned-history floor {prunedHistoryFloor}; revision " +
+                    "history needed to reconstruct the cut exactly has already been pruned, so the backup " +
+                    "was not taken.")
+                {
+                    ExactCheckpointUnavailable = true
+                };
+
+            // Pin MVCC revision history at the cut for the duration of the checkpoint + verification so
+            // concurrent pruning cannot remove the as-of revisions the trim depends on. Fails closed
+            // when the effective snapshot floor already passed the cut (history may already be gone).
+            if (acquireSnapshotHold is not null && cut != HLCTimestamp.Zero)
+            {
+                snapshotHoldId = await acquireSnapshotHold(cut, ct);
+                if (snapshotHoldId is null)
+                    throw new BackupDriverException(
+                        $"Could not pin MVCC history at the backup cut {cut} (the retention floor has " +
+                        "already passed it, or the hold could not be acquired); an exact backup cannot be taken.")
+                    {
+                        ExactCheckpointUnavailable = true
+                    };
+            }
+
+            // Keep the hold's lease renewed for the entire remaining lifetime (checkpoint, hashing,
+            // verification, publish). A checkpoint copy + trim + VACUUM/compaction + hash + verify can
+            // outlast a single lease, and if it expired mid-run pruning could reclaim the as-of history
+            // the checkpoint depends on. renewalLost cancels workCt the instant a renew fails, so the
+            // work below aborts before publishing anything.
+            if (snapshotHoldId is not null && renewSnapshotHold is not null)
+            {
+                renewalLost = new CancellationTokenSource();
+                renewalStop = new CancellationTokenSource();
+                linkedWork = CancellationTokenSource.CreateLinkedTokenSource(ct, renewalLost.Token);
+                workCt = linkedWork.Token;
+                renewalLoop = RenewSnapshotHoldLoop(
+                    renewSnapshotHold, snapshotHoldId, snapshotHoldLeaseMs, renewalLost, renewalStop.Token);
+            }
+
             // Every captured range must be at or below the cut — otherwise the manifest would claim
             // coverage the trimmed checkpoint does not contain.
             foreach (PartitionBackupRange range in ranges)
@@ -173,12 +288,12 @@ internal sealed class BackupDriver
             }
 
             string checkpointPath = Path.Combine(artifactPath, "checkpoint");
-            persistenceBackend.CreateCheckpointAsOf(checkpointPath, maxAppliedIndex, cut, ct);
+            persistenceBackend.CreateCheckpointAsOf(checkpointPath, maxAppliedIndex, cut, workCt);
 
             // Hash every file the checkpoint produced (data files AND the sidecar), not just the
             // sidecar, so a truncated or altered checkpoint is caught before replay.
             (Dictionary<string, string> checksums, Dictionary<string, long> sizes) =
-                BackupArtifactVerifier.HashDirectory(checkpointPath, "checkpoint/", ct);
+                BackupArtifactVerifier.HashDirectory(checkpointPath, "checkpoint/", workCt);
 
             BackupManifest manifest = BackupManifest.CreateFull(ranges);
             manifest.BackupId = backupId;
@@ -189,15 +304,122 @@ internal sealed class BackupDriver
                 manifest.SetClusterSnapshotTime(snapshotT.Value);
 
             // Fail closed: never publish a manifest whose artifacts don't verify.
-            BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
+            BackupArtifactVerifier.Verify(manifest, artifactsDir, workCt);
+
+            // Final gate before publishing: if renewal was lost at any point the hold may have
+            // expired and pruning may have reclaimed the as-of history, so the checkpoint we just
+            // hashed can no longer be trusted as an exact base image. Never publish it.
+            if (renewalLost is not null && renewalLost.IsCancellationRequested)
+                throw new BackupDriverException(
+                    "The snapshot-history hold could not be renewed during the backup; the base image " +
+                    "may have been pruned, so the backup was not published.")
+                {
+                    ExactCheckpointUnavailable = true
+                };
 
             catalog.Put(manifest);
             return manifest;
+        }
+        catch (OperationCanceledException) when (
+            renewalLost is not null && renewalLost.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // The work was aborted specifically by renewal loss (not by the caller's cancellation).
+            // Surface it as a fail-closed backup error rather than a bare cancellation.
+            TryDeleteDirectory(artifactPath);
+            throw new BackupDriverException(
+                "The snapshot-history hold could not be renewed during the backup; the base image " +
+                "may have been pruned, so the backup was not published.")
+            {
+                ExactCheckpointUnavailable = true
+            };
         }
         catch
         {
             TryDeleteDirectory(artifactPath);
             throw;
+        }
+        finally
+        {
+            // Stop the renewal loop and wait for it to unwind before touching its cancellation
+            // sources, so nothing races on a disposed CTS.
+            renewalStop?.Cancel();
+            try { await renewalLoop.ConfigureAwait(false); } catch { /* loop already unwinding */ }
+            linkedWork?.Dispose();
+            renewalLost?.Dispose();
+            renewalStop?.Dispose();
+
+            // Release the snapshot-history hold after the manifest is published (or the attempt
+            // failed) so pruning is fenced across the whole checkpoint + verification window. This is
+            // best-effort cleanup: once catalog.Put has committed, a release failure must NOT turn a
+            // published, successful backup into a reported failure (that would provoke a duplicate
+            // retry). The hold's lease expires on its own if the release never lands.
+            if (snapshotHoldId is not null && releaseSnapshotHold is not null)
+            {
+                try { await releaseSnapshotHold(snapshotHoldId, CancellationToken.None).ConfigureAwait(false); }
+                catch { /* published state stands; the lease reclaims the hold if release is lost */ }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keeps a snapshot-history hold's lease alive until <paramref name="stopCt"/> is signalled.
+    /// Renews at roughly a third of the lease so a renewal has two more chances before the lease
+    /// would lapse. The first renew that returns <c>false</c> or throws is treated as renewal loss:
+    /// <paramref name="renewalLost"/> is cancelled (which aborts the backup's work) and the loop
+    /// exits. Never throws to its awaiter.
+    /// </summary>
+    internal static async Task RenewSnapshotHoldLoop(
+        RenewSnapshotHoldDelegate renew,
+        string holdId,
+        int leaseMs,
+        CancellationTokenSource renewalLost,
+        CancellationToken stopCt)
+    {
+        // Renew well before expiry. Floor at 1 ms so a short test lease still yields a positive delay.
+        int intervalMs = Math.Max(1, leaseMs / 3);
+
+        try
+        {
+            while (!stopCt.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(intervalMs, stopCt).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return; // stopped normally (backup finished or aborted)
+                }
+
+                bool renewed;
+                try
+                {
+                    renewed = await renew(holdId, stopCt).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return; // stopped normally during the renew call
+                }
+                catch
+                {
+                    renewed = false; // transport or leader-change failure → renewal lost
+                }
+
+                if (!renewed)
+                {
+                    if (!renewalLost.IsCancellationRequested)
+                        renewalLost.Cancel();
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            // Any unexpected loop failure fails closed: treat it as renewal loss.
+            if (!renewalLost.IsCancellationRequested)
+            {
+                try { renewalLost.Cancel(); } catch { /* already disposed/cancelled */ }
+            }
         }
     }
 
@@ -207,6 +429,38 @@ internal sealed class BackupDriver
     /// is stored in the manifest. Combine with a Full backup taken at the same T to form a
     /// consistent cluster-wide cut.
     /// </param>
+    /// <summary>
+    /// Waits until each captured partition's committed writes up to its <see cref="PartitionBackupRange.ToHlc"/>
+    /// have been applied and enqueued for persistence (observed via <paramref name="appliedHlcProbe"/>).
+    /// Throws a fail-closed <see cref="BackupDriverException"/> on timeout so no checkpoint is published
+    /// while a committed write is still mid-apply. Uses a monotonic clock for the deadline (never wall time).
+    /// </summary>
+    private static async Task WaitForAppliedBarrierAsync(
+        List<PartitionBackupRange> ranges, Func<int, HLCTimestamp> appliedHlcProbe, int timeoutMs, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        foreach (PartitionBackupRange range in ranges)
+        {
+            HLCTimestamp target = range.ToHlc;
+            if (target == HLCTimestamp.Zero)
+                continue;
+
+            while (appliedHlcProbe(range.PartitionId).CompareTo(target) < 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (Environment.TickCount64 > deadline)
+                    throw new BackupDriverException(
+                        $"Timed out waiting for partition {range.PartitionId} to apply and enqueue committed " +
+                        $"writes up to {target}; the checkpoint would be missing committed data, so the backup " +
+                        "was not taken.")
+                    {
+                        ExactCheckpointUnavailable = true
+                    };
+                await Task.Delay(10, ct).ConfigureAwait(false);
+            }
+        }
+    }
+
     internal static BackupManifest RunIncremental(
         IWAL wal,
         IReadOnlyList<RaftPartitionRange> partitions,
@@ -214,7 +468,8 @@ internal sealed class BackupDriver
         string artifactsDir,
         BackupCatalog catalog,
         HLCTimestamp? snapshotT = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Func<int, long, IDisposable>? acquireRetentionHold = null)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -226,6 +481,10 @@ internal sealed class BackupDriver
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
         Directory.CreateDirectory(artifactPath);
+
+        // Retention holds keep the WAL prefix each partition starts at from being compacted while we
+        // page the log and until the manifest is published. Released in the finally.
+        List<IDisposable> holds = [];
 
         try
         {
@@ -273,6 +532,23 @@ internal sealed class BackupDriver
                     fromIndex = floor > 0 ? floor : 1;
                 }
 
+                // Hold the retention floor at fromIndex BEFORE paging the WAL so a concurrent horizon
+                // advance cannot compact this prefix mid-read (Kommander composes this hold with the
+                // periodic floor via minimum). Then re-read the floor: if it already passed fromIndex
+                // in the window before the hold took effect, fail closed (NeedsFull).
+                if (acquireRetentionHold is not null)
+                {
+                    holds.Add(acquireRetentionHold(partitionId, fromIndex));
+                    long floorAfterHold = wal.GetLastCheckpoint(partitionId);
+                    if (pr is not null && floorAfterHold > 0 && fromIndex < floorAfterHold)
+                        throw new BackupDriverException(
+                            $"Partition {partitionId}: WAL prefix from {fromIndex} was compacted before the " +
+                            $"retention hold took effect (floor {floorAfterHold}); a new full backup is required.")
+                        {
+                            NeedsFullBackup = true
+                        };
+                }
+
                 (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc) =
                     ReadSegment(wal, partitionId, fromIndex, snapshotT, ct);
 
@@ -306,6 +582,13 @@ internal sealed class BackupDriver
         {
             TryDeleteDirectory(artifactPath);
             throw;
+        }
+        finally
+        {
+            // Release retention holds only after the manifest is published (or the attempt failed),
+            // so the protected prefix is never compacted between capture and publication.
+            foreach (IDisposable hold in holds)
+                hold.Dispose();
         }
     }
 

@@ -11,7 +11,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 
 /// <summary>
 /// Replays a chain of backup manifests into a persistence backend up to a chosen HLC
-/// stop-timestamp, implementing the Phase 1 offline PITR restore.
+/// stop-timestamp — the offline point-in-time restore path.
 ///
 /// <para><b>Preconditions for the caller:</b>
 /// <list type="bullet">

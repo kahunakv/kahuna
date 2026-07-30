@@ -1,5 +1,7 @@
 
 using System.Security.Cryptography;
+using System.Text.Json;
+using Kommander.Time;
 
 namespace Kahuna.Server.Persistence.Pitr;
 
@@ -49,11 +51,12 @@ internal static class BackupArtifactVerifier
     /// <exception cref="BackupArtifactException">On any integrity discrepancy.</exception>
     internal static void Verify(BackupManifest manifest, string artifactsDir, CancellationToken ct = default)
     {
-        if (manifest.FormatVersion < BackupManifest.CurrentFormatVersion)
-            throw new BackupUnsupportedFormatException(
-                $"Backup {manifest.BackupId:N} is in legacy format version {manifest.FormatVersion} " +
-                $"(current is {BackupManifest.CurrentFormatVersion}); it cannot be verified or restored " +
-                "by this version without an explicit upgrade.");
+        EnsureSupportedVersion(manifest);
+
+        // Manifest-level schema: type/parent/base-cut consistency, no duplicate partition ranges,
+        // valid index/HLC bounds, and the artifact-name set required by the type. Checked before any
+        // filesystem work so a structurally invalid manifest fails fast.
+        ValidateManifestSchema(manifest);
 
         string artifactPath = Path.Combine(artifactsDir, manifest.BackupId.ToString("N"));
 
@@ -68,9 +71,12 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N} records no artifact checksums but should have artifacts.");
 
-            // Empty incremental: nothing to verify, but the directory must not contain stray files.
+            // Empty incremental: nothing to verify, but the directory must not contain stray files
+            // and must not itself be a symlinked root.
             if (Directory.Exists(artifactPath))
             {
+                EnsureDirectoryNotReparsePoint(artifactPath,
+                    $"Backup {manifest.BackupId:N}: artifact root is a symlink/reparse point.");
                 foreach (string _ in EnumerateRegularFiles(artifactPath))
                     throw new BackupArtifactException(
                         $"Backup {manifest.BackupId:N}: unexpected files present for an empty incremental.");
@@ -81,6 +87,12 @@ internal static class BackupArtifactVerifier
         if (!Directory.Exists(artifactPath))
             throw new BackupArtifactException(
                 $"Artifact directory for backup {manifest.BackupId:N} is missing.");
+
+        // Reject a reparse point AT the per-backup root itself, not only on the path between a file
+        // and the root: a symlinked {backupId} directory would otherwise pass every child check while
+        // redirecting verification/copy/replay to a tree outside the configured backup directory.
+        EnsureDirectoryNotReparsePoint(artifactPath,
+            $"Backup {manifest.BackupId:N}: artifact root is a symlink/reparse point.");
 
         // Validate + normalize the declared keys before touching the filesystem.
         HashSet<string> expected = new(StringComparer.Ordinal);
@@ -118,18 +130,29 @@ internal static class BackupArtifactVerifier
             // No symlinked artifact — a reparse point could redirect reads/copies outside the root.
             EnsureNoReparsePointOnPath(rootFull, filePath, manifest.BackupId);
 
-            if (manifest.Sizes.TryGetValue(key, out long expectedSize))
-            {
-                long actualSize = new FileInfo(filePath).Length;
-                if (actualSize != expectedSize)
-                    throw new BackupArtifactException(
-                        $"Backup {manifest.BackupId:N}: artifact '{key}' has size {actualSize}, expected {expectedSize}.");
-            }
+            // A size is required for every declared artifact (current-version manifests always record
+            // one); a missing size is a corrupt manifest, not a digest-only fallback.
+            if (!manifest.Sizes.TryGetValue(key, out long expectedSize))
+                throw new BackupArtifactException(
+                    $"Backup {manifest.BackupId:N}: artifact '{key}' has no recorded size.");
+
+            long actualSize = new FileInfo(filePath).Length;
+            if (actualSize != expectedSize)
+                throw new BackupArtifactException(
+                    $"Backup {manifest.BackupId:N}: artifact '{key}' has size {actualSize}, expected {expectedSize}.");
 
             string actualDigest = ComputeSha256(filePath);
             if (!string.Equals(actualDigest, expectedDigest, StringComparison.OrdinalIgnoreCase))
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: artifact '{key}' failed digest verification.");
+        }
+
+        // The size and checksum keysets must match exactly — no size key without a checksum.
+        foreach (string sizeKey in manifest.Sizes.Keys)
+        {
+            if (!manifest.Checksums.ContainsKey(sizeKey))
+                throw new BackupArtifactException(
+                    $"Backup {manifest.BackupId:N}: size recorded for '{sizeKey}' with no matching checksum.");
         }
 
         // No unexpected extra file may sit in the artifact directory (also rejects symlinks).
@@ -139,6 +162,9 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: unexpected extra artifact '{actual}' not present in the manifest.");
         }
+
+        // Artifacts are now byte-verified; validate their semantic content against the manifest.
+        ValidateArtifactContent(manifest, artifactPath, ct);
     }
 
     /// <summary>
@@ -150,6 +176,12 @@ internal static class BackupArtifactVerifier
     internal static void VerifyCheckpointCopy(BackupManifest full, string checkpointDir, CancellationToken ct = default)
     {
         const string prefix = "checkpoint/";
+
+        // The staged checkpoint directory itself must not be a reparse point — a swapped-in symlink
+        // would redirect the files about to be opened outside the staging area.
+        EnsureDirectoryNotReparsePoint(checkpointDir,
+            $"Backup {full.BackupId:N}: staged checkpoint directory is a symlink/reparse point.");
+
         string rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(checkpointDir));
         HashSet<string> expected = new(StringComparer.Ordinal);
 
@@ -171,7 +203,9 @@ internal static class BackupArtifactVerifier
             EnsureNoReparsePointOnPath(rootFull, filePath, full.BackupId);
             expected.Add(rel);
 
-            if (full.Sizes.TryGetValue(key, out long expectedSize) && new FileInfo(filePath).Length != expectedSize)
+            if (!full.Sizes.TryGetValue(key, out long expectedSize))
+                throw new BackupArtifactException($"Backup {full.BackupId:N}: staged checkpoint file '{rel}' has no recorded size.");
+            if (new FileInfo(filePath).Length != expectedSize)
                 throw new BackupArtifactException($"Backup {full.BackupId:N}: staged checkpoint file '{rel}' has wrong size.");
 
             if (!string.Equals(ComputeSha256(filePath), expectedDigest, StringComparison.OrdinalIgnoreCase))
@@ -184,6 +218,222 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {full.BackupId:N}: unexpected file '{actual}' in the staged checkpoint.");
         }
+    }
+
+    private const string CheckpointPrefix = "checkpoint/";
+
+    /// <summary>
+    /// Cheap, manifest-only structural validation: format version, schema (type/parent/base-cut, no
+    /// duplicate ranges, valid index/HLC bounds, required artifact-name set), and checksum/size keyset
+    /// equality. Reads no files and hashes nothing. Returns <c>null</c> when the manifest is
+    /// structurally valid, otherwise the reason it is not — so a listing can mark a valid-JSON but
+    /// semantically invalid or unsupported backup without hiding it, and without the cost of a full
+    /// artifact verification.
+    /// </summary>
+    internal static string? GetStructuralError(BackupManifest manifest)
+    {
+        // A legacy (older) manifest is reported honestly by its FormatVersion, not marked invalid: it
+        // predates the current schema (so validating it against current rules is meaningless) and may
+        // be upgradable. A newer-than-current version, by contrast, is genuinely unreadable and is
+        // flagged. Only current-version manifests get the full structural check.
+        if (manifest.FormatVersion < BackupManifest.CurrentFormatVersion)
+            return null;
+
+        try
+        {
+            EnsureSupportedVersion(manifest); // rejects a newer-than-current (future) version
+            ValidateManifestSchema(manifest);
+            ValidateChecksumSizeKeysets(manifest);
+            return null;
+        }
+        catch (Exception ex) when (ex is BackupArtifactException or BackupUnsupportedFormatException)
+        {
+            return ex.Message;
+        }
+    }
+
+    private static void EnsureSupportedVersion(BackupManifest manifest)
+    {
+        // Only the current format version can be verified against the exact-file-set/coverage rules.
+        // A lower version is legacy; a higher version was written by a newer reader this code cannot
+        // understand — both are unsupported, never silently accepted or treated as "corrupt".
+        if (manifest.FormatVersion != BackupManifest.CurrentFormatVersion)
+            throw new BackupUnsupportedFormatException(
+                $"Backup {manifest.BackupId:N} is in {(manifest.FormatVersion < BackupManifest.CurrentFormatVersion ? "legacy" : "unsupported newer")} " +
+                $"format version {manifest.FormatVersion} (this reader supports {BackupManifest.CurrentFormatVersion}); " +
+                "it cannot be verified or restored by this version without an explicit upgrade.");
+    }
+
+    /// <summary>The size and checksum keysets must match exactly (manifest-only, reads no files).</summary>
+    private static void ValidateChecksumSizeKeysets(BackupManifest m)
+    {
+        foreach (string key in m.Checksums.Keys)
+            if (!m.Sizes.ContainsKey(key))
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: artifact '{key}' has no recorded size.");
+        foreach (string key in m.Sizes.Keys)
+            if (!m.Checksums.ContainsKey(key))
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: size recorded for '{key}' with no matching checksum.");
+    }
+
+    /// <summary>
+    /// Validates the manifest as a document, independent of the filesystem: type/parent/base-cut
+    /// consistency, no duplicate partition ranges, valid index and HLC bounds per range, and the
+    /// exact set of artifact names the type requires (a Full's keys are all under <c>checkpoint/</c>
+    /// and include the checkpoint sidecar; an Incremental's keys are exactly one
+    /// <c>partition_{id}.wal</c> per range, no more, no fewer).
+    /// </summary>
+    private static void ValidateManifestSchema(BackupManifest m)
+    {
+        switch (m.Type)
+        {
+            case BackupType.Full:
+                if (m.ParentBackupId is not null)
+                    throw new BackupArtifactException($"Backup {m.BackupId:N}: a Full backup must not record a parent.");
+                if (m.BaseCut is null)
+                    throw new BackupArtifactException($"Backup {m.BackupId:N}: a Full backup must record a BaseCut.");
+                break;
+
+            case BackupType.Incremental:
+                if (m.ParentBackupId is null)
+                    throw new BackupArtifactException($"Backup {m.BackupId:N}: an Incremental backup must record a parent.");
+                if (m.BaseCut is not null)
+                    throw new BackupArtifactException($"Backup {m.BackupId:N}: an Incremental backup must not record a BaseCut.");
+                break;
+
+            default:
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: unknown backup type {(int)m.Type}.");
+        }
+
+        HashSet<int> seenPartitions = [];
+        foreach (PartitionBackupRange r in m.PartitionRanges)
+        {
+            if (!seenPartitions.Add(r.PartitionId))
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: duplicate partition range for partition {r.PartitionId}.");
+            if (r.FromIndex < 1)
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: partition {r.PartitionId} has invalid FromIndex {r.FromIndex}.");
+            if (r.ToIndex < r.FromIndex)
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: partition {r.PartitionId} has ToIndex {r.ToIndex} below FromIndex {r.FromIndex}.");
+            if (r.ToHlc.CompareTo(r.FromHlc) < 0)
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: partition {r.PartitionId} has ToHlc {r.ToHlc} before FromHlc {r.FromHlc}.");
+        }
+
+        if (m.Type == BackupType.Full)
+        {
+            bool hasSidecar = false;
+            foreach (string key in m.Checksums.Keys)
+            {
+                if (!key.StartsWith(CheckpointPrefix, StringComparison.Ordinal))
+                    throw new BackupArtifactException(
+                        $"Backup {m.BackupId:N}: Full artifact '{key}' is not under '{CheckpointPrefix}'.");
+                if (key == CheckpointPrefix + CheckpointManifest.FileName)
+                    hasSidecar = true;
+            }
+            if (m.Checksums.Count > 0 && !hasSidecar)
+                throw new BackupArtifactException(
+                    $"Backup {m.BackupId:N}: Full backup is missing its checkpoint manifest sidecar.");
+        }
+        else
+        {
+            // Exactly one partition_{id}.wal per range, and nothing else.
+            HashSet<string> expectedSegments = new(StringComparer.Ordinal);
+            foreach (PartitionBackupRange r in m.PartitionRanges)
+                expectedSegments.Add($"partition_{r.PartitionId}.wal");
+
+            if (m.Checksums.Count != expectedSegments.Count)
+                throw new BackupArtifactException(
+                    $"Backup {m.BackupId:N}: incremental has {m.Checksums.Count} artifact(s) for {expectedSegments.Count} partition range(s).");
+            foreach (string key in m.Checksums.Keys)
+                if (!expectedSegments.Contains(key))
+                    throw new BackupArtifactException(
+                        $"Backup {m.BackupId:N}: incremental artifact '{key}' does not match any declared partition range.");
+        }
+    }
+
+    /// <summary>
+    /// Validates artifact <em>content</em> against the manifest, after the files are byte-verified:
+    /// a Full's checkpoint sidecar records the same applied HLC as the manifest's <c>BaseCut</c>; an
+    /// Incremental's every <c>partition_{id}.wal</c> holds entries that are strictly index-ordered,
+    /// HLC-monotonic, within the declared index range, and whose endpoints match the range's
+    /// From/To HLC, ToIndex, and ToTerm — so replay cannot silently skip or misclassify data.
+    /// </summary>
+    private static void ValidateArtifactContent(BackupManifest m, string artifactPath, CancellationToken ct)
+    {
+        if (m.Type == BackupType.Full)
+        {
+            string checkpointDir = Path.Combine(artifactPath, "checkpoint");
+            CheckpointManifest sidecar;
+            try
+            {
+                sidecar = CheckpointManifest.ReadFrom(checkpointDir);
+            }
+            catch (Exception ex) when (ex is not BackupArtifactException)
+            {
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: checkpoint manifest sidecar is unreadable.", ex);
+            }
+
+            if (m.BaseCut is null || sidecar.AppliedTime.CompareTo(m.BaseCut.Value) != 0)
+                throw new BackupArtifactException(
+                    $"Backup {m.BackupId:N}: checkpoint sidecar applied time {sidecar.AppliedTime} does not match the manifest BaseCut {m.BaseCut}.");
+            return;
+        }
+
+        foreach (PartitionBackupRange r in m.PartitionRanges)
+        {
+            ct.ThrowIfCancellationRequested();
+            string segPath = Path.Combine(artifactPath, $"partition_{r.PartitionId}.wal");
+
+            List<WalSegmentEntry>? entries;
+            try
+            {
+                entries = JsonSerializer.Deserialize<List<WalSegmentEntry>>(File.ReadAllText(segPath));
+            }
+            catch (Exception ex) when (ex is not BackupArtifactException)
+            {
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: WAL segment 'partition_{r.PartitionId}.wal' is unreadable.", ex);
+            }
+
+            ValidateSegment(m.BackupId, r, entries);
+        }
+    }
+
+    private static void ValidateSegment(Guid backupId, PartitionBackupRange r, List<WalSegmentEntry>? entries)
+    {
+        if (entries is null || entries.Count == 0)
+            throw new BackupArtifactException(
+                $"Backup {backupId:N}: partition {r.PartitionId} declares a range but its WAL segment is empty.");
+
+        long prevId = long.MinValue;
+        HLCTimestamp prevTime = default;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            WalSegmentEntry e = entries[i];
+            if (e.Id <= prevId)
+                throw new BackupArtifactException(
+                    $"Backup {backupId:N}: partition {r.PartitionId} WAL segment is not strictly index-ordered at entry {i}.");
+            if (e.Id < r.FromIndex || e.Id > r.ToIndex)
+                throw new BackupArtifactException(
+                    $"Backup {backupId:N}: partition {r.PartitionId} WAL segment entry index {e.Id} is outside the declared range [{r.FromIndex}, {r.ToIndex}].");
+            if (i > 0 && e.Time.CompareTo(prevTime) < 0)
+                throw new BackupArtifactException(
+                    $"Backup {backupId:N}: partition {r.PartitionId} WAL segment HLC is not monotonic at entry {i}.");
+            prevId = e.Id;
+            prevTime = e.Time;
+        }
+
+        WalSegmentEntry first = entries[0];
+        WalSegmentEntry last = entries[^1];
+        if (first.Time.CompareTo(r.FromHlc) != 0)
+            throw new BackupArtifactException(
+                $"Backup {backupId:N}: partition {r.PartitionId} first WAL entry HLC {first.Time} does not match the declared FromHlc {r.FromHlc}.");
+        if (last.Id != r.ToIndex)
+            throw new BackupArtifactException(
+                $"Backup {backupId:N}: partition {r.PartitionId} last WAL entry index {last.Id} does not match the declared ToIndex {r.ToIndex}.");
+        if (last.Time.CompareTo(r.ToHlc) != 0)
+            throw new BackupArtifactException(
+                $"Backup {backupId:N}: partition {r.PartitionId} last WAL entry HLC {last.Time} does not match the declared ToHlc {r.ToHlc}.");
+        if (last.Term != r.ToTerm)
+            throw new BackupArtifactException(
+                $"Backup {backupId:N}: partition {r.PartitionId} last WAL entry term {last.Term} does not match the declared ToTerm {r.ToTerm}.");
     }
 
     /// <summary>
@@ -213,6 +463,11 @@ internal static class BackupArtifactVerifier
     {
         List<string> results = [];
         string rootFull = Path.GetFullPath(directory);
+
+        // Check the enumeration root itself before descending — enumerating through a symlinked root
+        // would follow it outside the intended tree. Children are checked as they are visited below.
+        EnsureDirectoryNotReparsePoint(rootFull, $"Backup artifact root is a symlink/reparse point: '{rootFull}'.");
+
         Stack<string> stack = new();
         stack.Push(rootFull);
 
@@ -234,6 +489,18 @@ internal static class BackupArtifactVerifier
 
         results.Sort(StringComparer.Ordinal);
         return results;
+    }
+
+    /// <summary>
+    /// Rejects a reparse point at the directory itself. Used to guard the per-backup artifact root and
+    /// the staged checkpoint directory, which prior checks skipped (they walked ancestors up to, but
+    /// not including, the root, and enumerated only children after pushing it). A non-existent path is
+    /// not a reparse point and passes here — existence is checked by the caller.
+    /// </summary>
+    private static void EnsureDirectoryNotReparsePoint(string dir, string message)
+    {
+        if (Directory.Exists(dir) && (File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0)
+            throw new BackupArtifactException(message);
     }
 
     /// <summary>

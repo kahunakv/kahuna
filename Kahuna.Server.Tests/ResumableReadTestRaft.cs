@@ -97,6 +97,7 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => inner.CommitLogs(partitionId, ticketId, cancellationToken);
     public Task<(bool success, RaftOperationStatus status, long commitLogId)> RollbackLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => inner.RollbackLogs(partitionId, ticketId, cancellationToken);
     public void SetMinRetainIndex(int partitionId, long index) => inner.SetMinRetainIndex(partitionId, index);
+    public IDisposable AcquireRetentionHold(int partitionId, long index) => inner.AcquireRetentionHold(partitionId, index);
     public string GetLocalEndpoint() => inner.GetLocalEndpoint();
     public int GetLocalNodeId() => inner.GetLocalNodeId();
     public string GetLocalNodeName() => inner.GetLocalNodeName();

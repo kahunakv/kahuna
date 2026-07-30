@@ -10,4 +10,6 @@ namespace Kahuna.Server.Persistence.Pitr;
 internal sealed class BackupArtifactException : Exception
 {
     public BackupArtifactException(string message) : base(message) { }
+
+    public BackupArtifactException(string message, Exception innerException) : base(message, innerException) { }
 }

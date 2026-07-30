@@ -381,7 +381,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         Assert.Equal((byte)1, updated.Value![0]);
     }
 
-    // ── as-of: SetNoRevision keys and locks (finding #4) ─────────────────────────────────────
+    // ── as-of: SetNoRevision keys and locks ──────────────────────────────────────────────────
 
     private static PersistenceRequestItem NoRevItem(string key, byte val, long rev, long physicalMs) =>
         new(key, [val], rev, 0, 0, 0, 0, physicalMs, 0, 0, physicalMs, 0, 1, noRevision: true);
@@ -443,39 +443,52 @@ public sealed class TestPitrCheckpoint : IDisposable
         Assert.Null(r.GetLock("res"));
     }
 
+    // A key whose only write is a SetNoRevision write AFTER the cut did not exist at the cut, so it
+    // is omitted from the as-of image — not treated as a fail-closed error. (Failing the whole backup
+    // because one key is newer than the cut is the over-conservative behavior this corrects; the
+    // earliest-no-revision provenance now distinguishes "created after the cut" from "overwritten".)
     [Fact]
-    public void Memory_CreateCheckpointAsOf_NoRevisionKeyAfterCut_FailsClosed()
+    public void Memory_CreateCheckpointAsOf_NoRevisionKeyCreatedAfterCut_Omitted()
     {
         string dir = NewDir("asof_norev_mem");
         using MemoryPersistenceBackend b = new();
-        b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]); // historyless, after cut
+        b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]); // only write, after the cut
 
-        Assert.Throws<ExactCheckpointUnavailableException>(() =>
-            b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100)));
+        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100));
+
+        using MemoryPersistenceBackend r = MemoryPersistenceBackend.OpenCheckpoint(dir);
+        Assert.Null(r.GetKeyValue("nr"));
     }
 
     [Fact]
-    public void Sqlite_CreateCheckpointAsOf_NoRevisionKeyAfterCut_FailsClosed()
+    public void Sqlite_CreateCheckpointAsOf_NoRevisionKeyCreatedAfterCut_Omitted()
     {
         string dbDir = Path.Combine(_tempRoot, "asof_norev_sql");
         Directory.CreateDirectory(dbDir);
-        using SqlitePersistenceBackend b = new(dbDir, "v1");
-        b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]);
+        string cpDir = Path.Combine(_tempRoot, "asof_norev_sql_cp");
+        using (SqlitePersistenceBackend b = new(dbDir, "v1"))
+        {
+            b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]);
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+        }
 
-        Assert.Throws<ExactCheckpointUnavailableException>(() =>
-            b.CreateCheckpointAsOf(Path.Combine(_tempRoot, "asof_norev_sql_cp"), appliedIndex: 1, cut: T(100)));
+        using SqlitePersistenceBackend r = new(cpDir, "v1");
+        Assert.Null(r.GetKeyValue("nr"));
     }
 
     [Fact]
-    public void RocksDb_CreateCheckpointAsOf_NoRevisionKeyAfterCut_FailsClosed()
+    public void RocksDb_CreateCheckpointAsOf_NoRevisionKeyCreatedAfterCut_Omitted()
     {
         string baseDir = Path.Combine(_tempRoot, "asof_norev_rocks");
         Directory.CreateDirectory(baseDir);
-        using RocksDbPersistenceBackend b = new(baseDir, "v1");
-        b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]);
+        using (RocksDbPersistenceBackend b = new(baseDir, "v1"))
+        {
+            b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]);
+            b.CreateCheckpointAsOf(Path.Combine(baseDir, "cp"), appliedIndex: 1, cut: T(100));
+        }
 
-        Assert.Throws<ExactCheckpointUnavailableException>(() =>
-            b.CreateCheckpointAsOf(Path.Combine(baseDir, "cp"), appliedIndex: 1, cut: T(100)));
+        using RocksDbPersistenceBackend r = new(baseDir, "cp");
+        Assert.Null(r.GetKeyValue("nr"));
     }
 
     [Fact]
@@ -491,7 +504,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         Assert.NotNull(r.GetKeyValue("nr"));
     }
 
-    // ── physical purge of post-cut bytes (finding #11) ───────────────────────────────────────
+    // ── physical purge of post-cut bytes ─────────────────────────────────────────────────────
 
     private static PersistenceRequestItem ValItem(string key, byte[] value, long rev, long physicalMs) =>
         new(key, value, rev, 0, 0, 0, 0, physicalMs, 0, 0, physicalMs, 0, 1);

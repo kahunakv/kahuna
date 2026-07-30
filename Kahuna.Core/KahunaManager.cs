@@ -65,6 +65,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     private readonly BackupService? backupService;
 
+    /// <summary>
+    /// Lease for the MVCC snapshot-history hold a full backup pins at its cut. The backup driver
+    /// renews it at roughly a third of this interval for the whole checkpoint/hash/verify/publish
+    /// window, so the hold outlives a long backup as long as renewal keeps succeeding.
+    /// </summary>
+    private const int SnapshotBackupHoldLeaseMs = 600_000;
+
     private readonly bool remoteRestoreAllowed;
 
     /// <summary>
@@ -183,7 +190,38 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 keyValues.GetSafeTimestampAsync,
                 logger,
                 configuration.StoragePath,
-                configuration.RestoreRoot);
+                configuration.RestoreRoot,
+                // Composable WAL retention hold (Kommander) — keeps a captured incremental prefix from
+                // being compacted mid-read; composes with the periodic horizon floor via minimum.
+                acquireRetentionHold: raft.AcquireRetentionHold,
+                // Pin MVCC history at the cut for the checkpoint window; fail closed if the snapshot
+                // floor already passed the cut or the hold cannot be acquired.
+                acquireSnapshotHold: async (cut, holdCt) =>
+                {
+                    (HLCTimestamp floor, _) = await keyValues.GetSnapshotFloor(holdCt);
+                    if (floor.CompareTo(cut) > 0)
+                        return null;
+
+                    (KeyValueResponseType type, string holdId, _) = await keyValues.AcquireSnapshotHold(
+                        "pitr-backup-" + Guid.NewGuid().ToString("N")[..8], cut, SnapshotBackupHoldLeaseMs, holdCt);
+                    return type == KeyValueResponseType.Set && !string.IsNullOrEmpty(holdId) ? holdId : null;
+                },
+                releaseSnapshotHold: async (holdId, holdCt) =>
+                {
+                    await keyValues.ReleaseSnapshotHold(holdId, holdCt);
+                },
+                // Extend the same lease for the whole backup; a lost renewal (expiry, leadership
+                // change, or an un-committable mutation) fails the backup closed rather than letting
+                // pruning reclaim the pinned history mid-run.
+                renewSnapshotHold: async (holdId, holdCt) =>
+                {
+                    (KeyValueResponseType type, _) = await keyValues.RenewSnapshotHold(holdId, SnapshotBackupHoldLeaseMs, holdCt);
+                    return type == KeyValueResponseType.Set;
+                },
+                snapshotHoldLeaseMs: SnapshotBackupHoldLeaseMs,
+                // Applied-index barrier probe: the backup waits until committed writes are applied and
+                // queued for persistence before flushing, so a checkpoint never misses committed data.
+                appliedHlcProbe: partitionId => BackgroundWriterActor?.GetMaxEnqueuedHlc(partitionId) ?? HLCTimestamp.Zero);
         }
 
         // Restore is administrative: allow it over the network only when a server-owned restore root
@@ -1673,7 +1711,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
-        try { return Task.FromResult(svc.ListBackups(ct)); }
+        // Public listing runs the cheap structural check only; full artifact verification (hashing
+        // every file of every backup) is opt-in at the service layer, not on the default network path.
+        try { return Task.FromResult(svc.ListBackups(verifyArtifacts: false, ct)); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
     }
 

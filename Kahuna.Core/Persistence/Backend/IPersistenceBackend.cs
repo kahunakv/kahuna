@@ -103,4 +103,23 @@ internal interface IPersistenceBackend
     /// than the cut). False when it falls back to a physical copy that may over-include recent writes.
     /// </summary>
     public bool SupportsExactAsOfCheckpoint => false;
+
+    /// <summary>
+    /// The durable pruned-history floor: the highest HLC <c>W</c> such that revision history strictly
+    /// below <c>W</c> may have been removed by retention pruning, so an as-of read at a cut below
+    /// <c>W</c> can no longer be proven to return each key's true boundary. A full backup whose cut is
+    /// below this floor cannot be reconstructed exactly and must fail closed.
+    /// <para>
+    /// Concretely, each prune advances the floor to the maximum, across the keys it deleted history
+    /// from, of that key's <b>oldest surviving</b> revision timestamp: at or above that point every
+    /// key's boundary is still present, below it a boundary may be gone. The value is monotonic and
+    /// durable across restart, since the deleted history does not come back.
+    /// </para>
+    /// <para>
+    /// The default is <see cref="HLCTimestamp.Zero"/> — no pruning has removed reconstructable
+    /// history. Backends that never prune (e.g. the in-memory backend) keep this default; backends
+    /// that prune override it and persist it alongside their data.
+    /// </para>
+    /// </summary>
+    public HLCTimestamp GetPrunedHistoryFloor() => HLCTimestamp.Zero;
 }

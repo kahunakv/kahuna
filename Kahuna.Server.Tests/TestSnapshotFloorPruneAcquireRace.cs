@@ -21,21 +21,22 @@ using System.Collections.Concurrent;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Verifies that the snapshot floor is sampled inside the prune scheduler task (late binding),
-/// so a hold acquired after the task is enqueued but before it starts executing is still observed.
+/// Verifies that hold acquisition and revision pruning agree on a single order: a hold committed
+/// before the prune floor is sampled is reflected in that floor, and a hold committed after the
+/// sample (while the prune-delete window is open) causes acquisition to fail closed rather than
+/// letting the delete remove a boundary the sample never saw.
 ///
-/// <para><b>What the fix closes.</b> Before the fix, <c>BackgroundWriterActor</c> sampled the
-/// effective floor on the actor thread, before calling <c>EnqueueTask</c>. A hold acquired between
-/// that sample and the moment the scheduler task started executing was invisible to the prune. The
-/// fix moves the sample inside the callback so the scheduler-queue-latency window is eliminated.
-/// The epoch-retry loop in <c>GetFloorForPrune</c> additionally detects mutations that land while
-/// the floor is being scanned and re-samples in that case.</para>
+/// <para><b>Sampled-before-delete.</b> The floor is sampled inside the prune scheduler task under
+/// the store's commit lock (<c>SnapshotFloorStore.BeginPrune</c>). A hold acquired while the task
+/// is queued, or during the pre-sample pause, is committed before the sample and therefore
+/// observed — its boundary is protected.</para>
 ///
-/// <para><b>Residual window.</b> A hold acquired in the interval
-/// [<c>GetFloorForPrune</c> returns → <c>PruneKeyValueRevisions</c> completes] is still invisible
-/// to the running prune batch — the floor was already captured and the delete cannot be undone.
-/// This window is now micro- to low-millisecond (sample and delete are adjacent); the tests here
-/// cover only the scheduler-queue window (the one the fix closes), not this residual.</para>
+/// <para><b>Committed-during-delete.</b> A hold that commits after the floor sample sees the open
+/// prune-delete window and returns <c>MustRetry</c>. The delete about to run was computed without
+/// it, so a "successful" acquire would be a lie; failing closed lets the caller retry once the
+/// window is clear (the committed hold then protects the timestamp for every subsequent prune).
+/// This closes the former sample→delete residual window, for both targeted cleanup and full
+/// sweep, which share the identical <c>BeginPrune</c>/<c>EndPrune</c> protocol.</para>
 /// </summary>
 [Collection("ClusterTests")]
 public sealed class TestSnapshotFloorPruneAcquireRace
@@ -149,7 +150,11 @@ public sealed class TestSnapshotFloorPruneAcquireRace
     // ── node builder ──────────────────────────────────────────────────────────────────────
 
     private (RaftManager Raft, KahunaManager Kahuna, PruningBackend Backend)
-        BuildNode(int retentionCount = 1)
+        BuildNode(
+            int retentionCount = 1,
+            bool cleanupOnWrite = true,
+            TimeSpan? cleanupInterval = null,
+            int dirtyObjectsWriterDelay = 0)
     {
         ActorSystem actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftComm = new();
@@ -187,9 +192,11 @@ public sealed class TestSnapshotFloorPruneAcquireRace
             CacheEntriesToRemove     = 1_000,
             CollectBatchMax          = 1_000,
             CacheEntryTtl            = TimeSpan.FromMinutes(5),
-            PersistentRevisionCleanupOnWrite   = true,
+            PersistentRevisionCleanupOnWrite   = cleanupOnWrite,
             PersistentRevisionRetentionCount   = retentionCount,
-            PersistentRevisionCleanupBatchSize = 1000
+            PersistentRevisionCleanupBatchSize = 1000,
+            PersistentRevisionCleanupInterval  = cleanupInterval ?? TimeSpan.FromMinutes(5),
+            DirtyObjectsWriterDelay            = dirtyObjectsWriterDelay
         });
 
         PruningBackend backend = new();
@@ -372,6 +379,200 @@ public sealed class TestSnapshotFloorPruneAcquireRace
 
             Assert.True(ok);
             Assert.Equal(holdTs, floor);
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
+    /// Core protocol, deterministic and site-agnostic: a hold acquired while a prune-delete window
+    /// is open (<c>BeginPrune</c> called, <c>EndPrune</c> not yet) fails closed with
+    /// <c>MustRetry</c>, because the delete about to run sampled its floor without this hold. Once
+    /// the window closes, the idempotent re-acquire succeeds. Both targeted cleanup and full sweep
+    /// open the window through this exact pair, so this is the shared guarantee both rely on.
+    /// </summary>
+    [Fact]
+    public async Task Acquire_WhilePruneDeleteWindowOpen_FailsClosed_ThenSucceedsAfterClose()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (RaftManager raft, KahunaManager kahuna, PruningBackend _) = BuildNode();
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            SnapshotFloorStore store = kahuna.SnapshotFloorStore;
+            HLCTimestamp ts = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            // Open a prune-delete window exactly as the background prune does before deleting.
+            (HLCTimestamp _, long token) = store.BeginPrune(raft);
+            try
+            {
+                (KeyValueResponseType inWindow, _, _) =
+                    await kahuna.LocateAndAcquireSnapshotHold("window-holder", ts, leaseMs: 60_000, ct);
+
+                // The delete's floor was sampled without this hold, so the acquire must fail closed.
+                Assert.Equal(KeyValueResponseType.MustRetry, inWindow);
+            }
+            finally
+            {
+                store.EndPrune(token);
+            }
+
+            // Window closed: the idempotent (same holder + timestamp) re-acquire now succeeds.
+            (KeyValueResponseType afterClose, _, _) =
+                await kahuna.LocateAndAcquireSnapshotHold("window-holder", ts, leaseMs: 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, afterClose);
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
+    /// Wired targeted-cleanup path: a hold acquired after the floor is sampled but before the delete
+    /// runs (inside the open window, via <c>AfterPruneSampleHook</c>) fails closed, and the delete —
+    /// which sampled floor=Zero before the hold existed — removes the older revision. This is the
+    /// residual [sample → delete] window, now closed by failing the acquire rather than silently
+    /// dropping a boundary the sample never saw.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_HoldAcquiredInsideDeleteWindow_TargetedCleanup_FailsClosed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(retentionCount: 1);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/race/after-sample";
+
+            await kahuna.FlushPersistenceAsync(); // warm up the background writer
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            ManualResetEventSlim hookEntered = new(false);
+            ManualResetEventSlim gate        = new(false);
+
+            // Fires after the floor is sampled and the window is open, before the backend delete.
+            actor.AfterPruneSampleHook = () =>
+            {
+                hookEntered.Set();
+                gate.Wait(ct);
+            };
+
+            Task flushTask = kahuna.FlushPersistenceAsync();
+
+            bool entered = hookEntered.Wait(TimeSpan.FromSeconds(10), ct);
+            Assert.True(entered, "prune must reach AfterPruneSampleHook within 10 s");
+
+            // Both revisions are persisted by now (stored before the prune step). Acquire a hold at
+            // revision 1's timestamp while the delete window is open — it must fail closed.
+            KeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
+            Assert.NotNull(rev1);
+            HLCTimestamp t1 = rev1.LastModified;
+
+            // The delete's floor was sampled without this hold, so the acquire cannot claim its
+            // boundary is protected: it fails closed. (Whether the delete then removes the revision
+            // is moot — a non-successful acquire makes no protection promise.)
+            (KeyValueResponseType holdType, _, _) =
+                await kahuna.LocateAndAcquireSnapshotHold("after-sample-holder", t1, leaseMs: 60_000, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, holdType);
+
+            gate.Set();
+            actor.AfterPruneSampleHook = null;
+            await flushTask;
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
+    /// Wired full-sweep path (the other prune site): with per-write cleanup disabled and the sweep
+    /// interval elapsed, the periodic sweep opens the same window. A hold acquired inside it fails
+    /// closed, mirroring the targeted case.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_HoldAcquiredInsideDeleteWindow_FullSweep_FailsClosed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // A 1 ms sweep interval survives config validation (which clamps only <= 0 back to the
+        // 5-minute default), so the periodic timer runs the full sweep almost immediately.
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(
+            retentionCount: 1, cleanupOnWrite: false,
+            cleanupInterval: TimeSpan.FromMilliseconds(1), dirtyObjectsWriterDelay: 100);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/race/sweep";
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            // Persist the writes without pruning (per-write cleanup is off; FlushAndNotify never sweeps).
+            // Capture revision 1's timestamp now, before the periodic sweep can prune it.
+            await kahuna.FlushPersistenceAsync();
+            KeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
+            Assert.NotNull(rev1);
+            HLCTimestamp t1 = rev1.LastModified;
+
+            ManualResetEventSlim hookEntered = new(false);
+            ManualResetEventSlim gate        = new(false);
+
+            actor.AfterPruneSampleHook = () =>
+            {
+                hookEntered.Set();
+                gate.Wait(ct);
+            };
+
+            // The periodic timer drives BackgroundWriteType.Flush, which runs the full sweep.
+            bool entered = hookEntered.Wait(TimeSpan.FromSeconds(10), ct);
+            Assert.True(entered, "full sweep must reach AfterPruneSampleHook within 10 s");
+
+            (KeyValueResponseType holdType, _, _) =
+                await kahuna.LocateAndAcquireSnapshotHold("sweep-holder", t1, leaseMs: 60_000, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, holdType);
+
+            actor.AfterPruneSampleHook = null;
+            gate.Set();
+
+            // Let the gated sweep handler drain before teardown so no delete runs against a disposed node.
+            await kahuna.FlushPersistenceAsync();
         }
         finally
         {

@@ -185,16 +185,22 @@ A full backup has two parts written together:
 
 ```
    1. read M  = last committed log position (per partition)   ◄── do this FIRST
-   2. flush   = drain pending writes to the storage backend   ── now disk holds everything ≤ M
-   3. snapshot the storage backend  →  base image
-   4. write manifest (covers up to M) + checksums  →  catalog
+   2. barrier = wait until every captured partition has APPLIED and enqueued its
+                committed writes up to M's timestamp                ── else fail closed
+   3. flush   = drain pending writes to the storage backend   ── now disk holds everything ≤ M
+   4. snapshot the storage backend  →  base image
+   5. write manifest (covers up to M) + checksums  →  catalog
 ```
 
 Recall from §2 that a change can be *committed in the log* but *not yet flushed to disk*. The base
 image is a snapshot of the disk. So the order matters:
 
 - **Read `M` (the last committed position) first.**
-- **Then flush**, which pushes everything committed-so-far onto disk — a superset of `M`.
+- **Wait for the apply barrier.** Committing an entry in the log and *applying* it to in-memory
+  state (which is what the flush later drains) are two steps, and the second lags the first. The
+  backup waits until every captured partition has applied — and enqueued for persistence — its
+  committed writes up to `M` before it flushes.
+- **Then flush**, which pushes everything applied-so-far onto disk — a superset of `M`.
 - **Then snapshot.** The snapshot is now guaranteed to contain everything up to `M`.
 
 > **Decision — capture the position before flushing, never after.** If you snapshotted first and then
@@ -203,6 +209,26 @@ image is a snapshot of the disk. So the order matters:
 > own**, there would be nothing to replay it back from — it would be silently lost on restore. Reading
 > `M` before flushing closes that gap: the image always contains at least what the manifest promises.
 > (If it contains a little *more* than `M`, that's harmless — replay is idempotent, see §7.)
+
+> **Decision — an applied-index barrier before the flush, keyed on HLC, that fails closed.** A flush
+> only drains what has been *applied* to in-memory state. If a write is committed but not yet applied
+> when the flush runs, the flush can't drain it, the snapshot omits it, and the manifest still names
+> it — the same silent-loss bug, one step earlier in the pipeline. So before flushing, the backup
+> waits until each captured partition's applied-and-enqueued progress reaches that partition's
+> covered timestamp. If a partition doesn't catch up within the barrier timeout
+> (`applyBarrierTimeoutMs`, default 30 s), the backup **fails closed** with
+> `ExactCheckpointUnavailable` — no image, no catalog entry — rather than publish a checkpoint that
+> is missing committed writes. The barrier is keyed on **HLC**, not log index, on purpose: the
+> leader's commit-completion path carries only the change's HLC, not a WAL index, so an HLC barrier
+> keeps this a self-contained Kahuna guarantee with no change to the consensus layer.
+
+> **Decision — a flush that cannot durably persist must fault, not report success.** The background
+> writer's drain now reports whether it actually persisted everything. If it can't (a backend I/O
+> failure that survives its retries), it raises an error instead of returning quietly, and the backup
+> aborts with nothing published. Combined with the apply barrier, a full backup now has one honest
+> outcome contract: **either the base image provably contains every committed write up to `M`, or the
+> backup fails and writes no artifact and no catalog entry** — it never publishes a checkpoint it
+> can't stand behind.
 
 ---
 
@@ -402,6 +428,34 @@ Rules of thumb:
   including a snapshot would leak stale or post-cut locks. A restored/bootstrapped node starts with no
   persisted locks and re-establishes them at runtime (from the cluster / re-acquisition).
 
+**The pruned-history floor (why an as-of cut below a point can be refused):**
+
+Exact as-of reconstruction (§10, first bullet) depends on the *older* revisions of a key still being
+present — to roll a key back to time `T`, the revision that was current at `T` must not have been
+trimmed. But MVCC retention *does* trim old revisions to bound storage. So each backend that prunes
+tracks a **pruned-history floor** `W`: the highest timestamp below which some key's boundary revision
+may already be gone. A full backup whose cut falls **below `W` fails closed**
+(`ExactCheckpointUnavailable`) rather than reconstruct a state it can't prove is exact. At or above
+`W`, every key's boundary still survives, so the cut is exact.
+
+> **Decision — persist the floor write-ahead, and fail closed if it is lost or unreadable.** The floor
+> is only useful if it never *under*-reports what was pruned. Two failure modes are closed off
+> explicitly:
+> - **It is written before the deletes it accounts for.** Each prune persists the advanced floor
+>   (in the backend's own metadata, per shard) *ahead of* deleting the revisions that advance it, so a
+>   crash between the two steps leaves the floor covering data that is still present — conservative,
+>   never optimistic. The floor is monotonic and durable: pruned history does not come back, so the
+>   floor only ever moves up and survives restart.
+> - **A missing or corrupt floor is treated as "everything might be pruned," not "nothing was."** If a
+>   backend that may have pruned can't read back a trustworthy floor, it reports a *fail-closed* floor
+>   that refuses every cut until the metadata is repaired — instead of defaulting to zero, which would
+>   silently declare all history intact and let an inexact backup through. (Backends that never prune,
+>   such as the in-memory engine, keep the floor at zero legitimately.)
+
+> Concretely, a prune advances `W` to the **oldest surviving** revision timestamp across the keys it
+> trimmed — including the case where a key's *last* history row is removed, which must still push the
+> floor up rather than leave it at zero.
+
 ---
 
 ## 11. Triggering backups and inspecting the catalog
@@ -502,6 +556,17 @@ the local filesystem of the node receiving the request):
   operator then starts a **fresh** node with `--storage-path=<targetDir>` to use the restored image.
   The restored node joins the cluster and catches up via normal Raft AppendEntries.
 
+> **Decision — confine every restore target under a server-owned restore root, comparing paths
+> case-sensitively.** A restore writes files to a caller-supplied `targetDir`; left unchecked, a
+> network caller could aim it anywhere on the node's filesystem. So a node only accepts restore over
+> the network when it is configured with a **restore root**, and it rejects any `targetDir` that does
+> not resolve to a path inside that root. The containment check is **ordinal (case-sensitive)**: on a
+> case-sensitive filesystem `/data/restore` and `/data/Restore` are genuinely different directories,
+> so a case-insensitive comparison would accept a target that actually lands *outside* the root. The
+> check normalizes both paths and confirms the target equals the root or sits beneath `root +
+> separator`; anything else is refused before any file is staged. When in doubt it **fails closed** —
+> rejecting a legitimate-but-unconfined target is safe; accepting an escaping one is not.
+
 The following is **out of scope for v1 and not supported**:
 
 - **Hot in-place restore** of a running node.  Shutdown the node, use the offline restore above to
@@ -520,6 +585,24 @@ The following is **out of scope for v1 and not supported**:
 - Backup artifacts carry SHA-256 checksums, and chains are validated before restore, so corruption is
   detected rather than silently restored.
 
+Artifact verification hardens several ways an artifact directory could lie about its contents, all
+checked before any file is trusted for copy or replay:
+
+- **Every declared artifact must match its recorded size *and* checksum**, and the size and checksum
+  key-sets must correspond exactly — a size with no matching checksum (or vice-versa) is a corrupt
+  manifest, not a partial match to tolerate.
+- **Symlinks / reparse points are rejected — including at the artifact root itself,** not only on the
+  path between a file and its root. A symlinked per-backup directory would otherwise pass every child
+  check while redirecting reads, copies, and replay to a tree *outside* the configured backup
+  directory; the staging checkpoint directory is checked the same way before its files are opened.
+- **Manifest schema is validated before any filesystem work** — type/parent/base-cut consistency, no
+  duplicate partition ranges, valid index/HLC bounds, and the artifact-name set the backup type
+  requires — so a structurally invalid manifest fails fast instead of part-way through a restore.
+- **Bootstrap seeds the WAL one partition at a time and checks each write is durable.** The backend
+  restore it follows is idempotent and each checkpoint write overwrites by key, so a partial failure
+  is reported precisely and the bootstrap is safe to re-run — rather than being reported as a success
+  while the WAL trails the state already restored into the backend.
+
 ---
 
 ## 13. The mental model in one paragraph
@@ -531,5 +614,8 @@ at exactly the timestamp you ask for. A **sliding window** (1–6 hours) bounds 
 and how much log is kept, by holding a retention floor that prevents the log from being trimmed too
 soon. Across the cluster, one chosen timestamp gives every partition a consistent cut. Uncommitted
 transactions are never in a backup, replays are idempotent, and every chain is validated before it is
-trusted — so a restore either reproduces a real past state or refuses, but never silently invents
-one.
+trusted. The whole subsystem is built to **fail closed**: a full backup waits until its committed
+writes are provably on their way to disk and refuses to publish otherwise; a cut below the
+pruned-history floor is refused rather than reconstructed inexactly; a restore is confined under its
+server-owned root; and a corrupt or symlinked artifact is rejected before it is trusted — so a backup
+or restore either reproduces a real past state or refuses, but never silently invents one.

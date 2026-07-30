@@ -164,6 +164,56 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
     }
 
     [Fact]
+    public async Task RunFull_PinsSnapshotHistoryHoldAtCut_AndReleases()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100)); // cut = 100
+        BackupCatalog catalog = NewCatalog("hold_ok");
+        string artifacts = ArtifactsDir("hold_ok");
+        MemoryPersistenceBackend backend = new();
+        PutAt(backend, "k", "v", 1, physicalMs: 50);
+
+        HLCTimestamp? pinnedAt = null;
+        string? releasedId = null;
+        BackupDriver.AcquireSnapshotHoldDelegate acquire = (cut, _) => { pinnedAt = cut; return Task.FromResult<string?>("hold-1"); };
+        BackupDriver.ReleaseSnapshotHoldDelegate release = (id, _) => { releasedId = id; return Task.CompletedTask; };
+
+        BackupManifest full = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], backend, artifacts, catalog,
+            flushBeforeCheckpoint: null, snapshotT: null, ct: default,
+            acquireSnapshotHold: acquire, releaseSnapshotHold: release);
+
+        Assert.Equal(new HLCTimestamp(0, 100, 0), pinnedAt); // pinned at the declared cut
+        Assert.Equal("hold-1", releasedId);                  // released after publish
+        Assert.Equal(new HLCTimestamp(0, 100, 0), full.BaseCut);
+    }
+
+    [Fact]
+    public async Task RunFull_SnapshotFloorPastCut_FailsClosed()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupCatalog catalog = NewCatalog("hold_fail");
+        string artifacts = ArtifactsDir("hold_fail");
+        MemoryPersistenceBackend backend = new();
+        PutAt(backend, "k", "v", 1, physicalMs: 50);
+
+        // Acquire returns null → the snapshot floor already passed the cut (history may be gone).
+        BackupDriver.AcquireSnapshotHoldDelegate acquire = (_, _) => Task.FromResult<string?>(null);
+        bool released = false;
+        BackupDriver.ReleaseSnapshotHoldDelegate release = (_, _) => { released = true; return Task.CompletedTask; };
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog,
+                flushBeforeCheckpoint: null, snapshotT: null, ct: default,
+                acquireSnapshotHold: acquire, releaseSnapshotHold: release));
+
+        Assert.True(ex.ExactCheckpointUnavailable);
+        Assert.Empty(catalog.List());
+        Assert.False(released); // nothing to release — the hold was never acquired
+        if (Directory.Exists(artifacts))
+            Assert.Empty(Directory.GetDirectories(artifacts));
+    }
+
+    [Fact]
     public async Task RunFull_BackendWithoutExactAsOf_FailsClosed()
     {
         InMemoryWAL wal = BuildWal((1, 1, 100));

@@ -331,7 +331,7 @@ public sealed class TestEmbeddedKahunaNode
             const string key = "sweep/pre-existing/key1";
             const string storageRevision = "sweep-tests";
 
-            // Phase 1: write revisions with retention disabled so nothing is pruned on write.
+            // Step 1: write revisions with retention disabled so nothing is pruned on write.
             EmbeddedKahunaOptions phaseOneOptions = new()
             {
                 Storage = "sqlite",
@@ -362,7 +362,7 @@ public sealed class TestEmbeddedKahunaNode
 
             Assert.Equal(6, CountRevisionRows(storagePath, key, storageRevision));
 
-            // Phase 2: restart with retention enabled.
+            // Step 2: restart with retention enabled.
             // DirtyObjectsWriterDelay = 100 ms → timer fires at 100 ms and every 100 ms after.
             // CleanupInterval = 50 ms → after the first 100 ms tick, (100 ms − 0 ms) ≥ 50 ms,
             // so the sweep fires on the first cycle. CleanupOnWrite is off so only the sweep prunes.

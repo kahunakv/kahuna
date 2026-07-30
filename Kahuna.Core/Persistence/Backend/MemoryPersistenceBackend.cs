@@ -38,6 +38,17 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> keyValueRevisions = new();
 
     /// <summary>
+    /// Per-key provenance for no-revision writes: the earliest and latest HLC at which the key was
+    /// written with SetNoRevision. A no-revision write leaves no retained history row, so an as-of
+    /// read whose boundary falls on an overwritten no-revision value cannot reconstruct it — this
+    /// lets <see cref="CreateCheckpointAsOf"/> fail closed instead of silently returning a stale
+    /// revision or omitting the key. Guarded by <see cref="kvLock"/>. Rebuilt naturally on WAL replay
+    /// since every write flows through <see cref="StoreKeyValues"/>.
+    /// </summary>
+    private readonly Dictionary<string, (HLCTimestamp Earliest, HLCTimestamp Latest)> noRevisionWrites =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
     /// Stores locks in the persistence backend. Updates existing locks or adds new ones
     /// based on the provided list of persistence request items.
     /// </summary>
@@ -105,6 +116,20 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                         LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                         State = (KeyValueState)item.State
                     });
+                }
+
+                // Record no-revision provenance: the earliest/latest HLC this key was written without
+                // retaining history. Used by the as-of checkpoint to fail closed when a cut's boundary
+                // could be an overwritten no-revision value.
+                if (item.NoRevision)
+                {
+                    HLCTimestamp writeHlc = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
+                    if (noRevisionWrites.TryGetValue(item.Key, out (HLCTimestamp Earliest, HLCTimestamp Latest) span))
+                        noRevisionWrites[item.Key] = (
+                            span.Earliest == HLCTimestamp.Zero || writeHlc.CompareTo(span.Earliest) < 0 ? writeHlc : span.Earliest,
+                            writeHlc.CompareTo(span.Latest) > 0 ? writeHlc : span.Latest);
+                    else
+                        noRevisionWrites[item.Key] = (writeHlc, writeHlc);
                 }
 
                 // Store an independent snapshot per revision — NOT a reference to the shared current
@@ -312,25 +337,36 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
             kvEntries = new(keyValues.Count);
             foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
             {
-                KeyValueEntry? asOf;
-                if (keyValueRevisions.ContainsKey(kv.Key))
+                // The current value is the latest write. If it is at or before the cut, it is the
+                // exact as-of state regardless of how it was written (revisioned or SetNoRevision) —
+                // nothing newer exists. This is what makes a revisioned→no-revision key correct: a cut
+                // after the no-revision write returns that value, not a stale older revision.
+                if (kv.Value.LastModified.CompareTo(cut) <= 0)
                 {
-                    asOf = GetKeyValueRevisionAtOrBefore(kv.Key, long.MaxValue, cut);
-                }
-                else
-                {
-                    // Historyless key (written with SetNoRevision): no retained revision to roll back
-                    // to. If its only value is newer than the cut, its as-of-cut state is
-                    // unrecoverable — fail closed rather than drop it or over-include a post-cut value.
-                    if (kv.Value.LastModified.CompareTo(cut) > 0)
-                        throw new ExactCheckpointUnavailableException(
-                            $"Key '{kv.Key}' was written with SetNoRevision and last modified after the " +
-                            $"backup cut {cut}; its state as-of the cut cannot be reconstructed.");
-                    asOf = kv.Value;
+                    kvEntries.Add(ToCheckpointEntry(kv.Key, kv.Value));
+                    continue;
                 }
 
-                if (asOf is not null)
-                    kvEntries.Add(ToCheckpointEntry(kv.Key, asOf));
+                // The current value is after the cut. The boundary is the newest write at or before
+                // the cut — a retained revision if one exists, but possibly an overwritten
+                // no-revision value that left no history row.
+                KeyValueEntry? boundary = GetKeyValueRevisionAtOrBefore(kv.Key, long.MaxValue, cut);
+                HLCTimestamp boundaryHlc = boundary?.LastModified ?? HLCTimestamp.Zero;
+
+                // Fail closed when a no-revision write at or before the cut is newer than the newest
+                // retained revision at/before the cut: its value was overwritten and cannot be
+                // reconstructed, so it — not the older revision — may be the true as-of state.
+                if (noRevisionWrites.TryGetValue(kv.Key, out (HLCTimestamp Earliest, HLCTimestamp Latest) span)
+                    && span.Earliest.CompareTo(cut) <= 0
+                    && span.Latest.CompareTo(boundaryHlc) > 0)
+                    throw new ExactCheckpointUnavailableException(
+                        $"Key '{kv.Key}' has a SetNoRevision write in its as-of-{cut} boundary window whose " +
+                        "value was overwritten and cannot be reconstructed; the cut cannot be produced exactly.");
+
+                // Otherwise the newest retained revision at/before the cut is the exact state; a key
+                // whose entire history is newer than the cut is correctly omitted.
+                if (boundary is not null)
+                    kvEntries.Add(ToCheckpointEntry(kv.Key, boundary));
             }
         }
 

@@ -577,6 +577,7 @@ public sealed class TestMembership : BaseCluster
         public void AppendLogs(AppendLogsRequest request) { }
         public void CompleteAppendLogs(CompleteAppendLogsRequest request) { }
         public void SetMinRetainIndex(int partitionId, long index) { }
+        public IDisposable AcquireRetentionHold(int partitionId, long index) => NoopDisposable.Instance;
         public int GetLocalNodeId() => 98;
         public string GetLocalNodeName() => "stub-e7";
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }
@@ -670,6 +671,7 @@ public sealed class TestMembership : BaseCluster
         public void AppendLogs(AppendLogsRequest request) { }
         public void CompleteAppendLogs(CompleteAppendLogsRequest request) { }
         public void SetMinRetainIndex(int partitionId, long index) { }
+        public IDisposable AcquireRetentionHold(int partitionId, long index) => NoopDisposable.Instance;
         public int GetLocalNodeId() => 99;
         public string GetLocalNodeName() => "stub";
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }

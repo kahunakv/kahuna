@@ -57,6 +57,15 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
     private readonly ILogger logger;
 
+    // Durable pruned-history floor, stored per shard in the pitr_meta table and written (write-ahead)
+    // before the revision deletes that advance it, so a crash cannot leave the floor trailing the
+    // deleted history. A corrupt/unreadable floor for a store that may have pruned yields
+    // FailClosedFloor so backups refuse every cut until repaired.
+    private static readonly HLCTimestamp FailClosedFloor = new(int.MaxValue, long.MaxValue, uint.MaxValue);
+    private readonly object _floorLock = new();
+    private HLCTimestamp? _prunedFloorCache; // null until first loaded from the shards
+    private bool _prunedFloorCorrupt;
+
     /// <summary>
     /// Shard at which the next backend-wide revision sweep should resume.
     /// </summary>
@@ -80,6 +89,86 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         this.path = path;
         this.dbRevision = dbRevision;
         this.logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+    }
+
+    public HLCTimestamp GetPrunedHistoryFloor()
+    {
+        lock (_floorLock)
+        {
+            if (_prunedFloorCorrupt)
+                return FailClosedFloor;
+            if (_prunedFloorCache is null)
+                LoadPrunedFloorLocked();
+            return _prunedFloorCorrupt ? FailClosedFloor : _prunedFloorCache!.Value;
+        }
+    }
+
+    private const string PrunedFloorKey = "pruned_history_floor";
+
+    // Must hold _floorLock. The durable floor is the max of every existing shard's pitr_meta row.
+    private void LoadPrunedFloorLocked()
+    {
+        HLCTimestamp max = HLCTimestamp.Zero;
+        try
+        {
+            for (int shard = 0; shard < MaxShards; shard++)
+            {
+                if (!File.Exists(Path.Combine(path, $"kahuna{shard}_{dbRevision}.db")))
+                    continue;
+
+                (ReaderWriterLock rwLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+                rwLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+                try
+                {
+                    using SqliteCommand cmd = new(
+                        "SELECT node, physical, counter FROM pitr_meta WHERE k = @k", connection);
+                    cmd.Parameters.AddWithValue("@k", PrunedFloorKey);
+                    using SqliteDataReader reader = cmd.ExecuteReader();
+                    if (reader.Read())
+                    {
+                        HLCTimestamp v = new(reader.GetInt32(0), reader.GetInt64(1), (uint)reader.GetInt64(2));
+                        if (v.CompareTo(max) > 0)
+                            max = v;
+                    }
+                }
+                finally { rwLock.ReleaseReaderLock(); }
+            }
+            _prunedFloorCache = max;
+        }
+        catch
+        {
+            _prunedFloorCorrupt = true;
+        }
+    }
+
+    // Write-ahead upsert of a shard's pitr_meta floor to max(existing, candidate), by HLC order.
+    // Durable (auto-commit / WAL) and issued BEFORE the delete that produced the candidate.
+    private static void UpsertPrunedFloor(SqliteConnection connection, HLCTimestamp candidate)
+    {
+        const string sql = """
+            INSERT INTO pitr_meta (k, node, physical, counter)
+            VALUES (@k, @n, @p, @c)
+            ON CONFLICT(k) DO UPDATE SET
+              node     = CASE WHEN @p > physical OR (@p = physical AND @c > counter) OR (@p = physical AND @c = counter AND @n > node) THEN @n ELSE node END,
+              counter  = CASE WHEN @p > physical OR (@p = physical AND @c > counter) OR (@p = physical AND @c = counter AND @n > node) THEN @c ELSE counter END,
+              physical = CASE WHEN @p > physical OR (@p = physical AND @c > counter) OR (@p = physical AND @c = counter AND @n > node) THEN @p ELSE physical END;
+            """;
+        using SqliteCommand cmd = new(sql, connection);
+        cmd.Parameters.AddWithValue("@k", PrunedFloorKey);
+        cmd.Parameters.AddWithValue("@n", candidate.N);
+        cmd.Parameters.AddWithValue("@p", candidate.L);
+        cmd.Parameters.AddWithValue("@c", (long)candidate.C);
+        cmd.ExecuteNonQuery();
+    }
+
+    private void CommitPrunedFloorCache(HLCTimestamp value)
+    {
+        lock (_floorLock)
+        {
+            if (_prunedFloorCorrupt) return;
+            if (_prunedFloorCache is null || value.CompareTo(_prunedFloorCache.Value) > 0)
+                _prunedFloorCache = value;
+        }
     }
 
     /// <summary>
@@ -212,6 +301,33 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
             using (SqliteCommand commandIndex2 = new(createRevisionModifiedIndexQuery, connection))
                 commandIndex2.ExecuteNonQuery();
+
+            // Per-key provenance for SetNoRevision writes: the earliest and latest HLC the key was
+            // written without a retained revision row. A no-revision value that is later overwritten
+            // cannot be reconstructed, so the as-of trim uses this to fail closed when a cut's boundary
+            // could be such a lost value. A new table (not new columns), so it is created on existing
+            // databases too.
+            const string createNoRevTableQuery = """
+                CREATE TABLE IF NOT EXISTS keys_norev (
+                    key STRING,
+                    earliestNode INT, earliestPhysical INT, earliestCounter INT,
+                    latestNode INT, latestPhysical INT, latestCounter INT,
+                    PRIMARY KEY (key)
+                );
+                """;
+            using (SqliteCommand commandNoRev = new(createNoRevTableQuery, connection))
+                commandNoRev.ExecuteNonQuery();
+
+            // Durable pruned-history floor for this shard (write-ahead-coupled with revision deletes).
+            const string createPitrMetaQuery = """
+                CREATE TABLE IF NOT EXISTS pitr_meta (
+                    k STRING,
+                    node INT, physical INT, counter INT,
+                    PRIMARY KEY (k)
+                );
+                """;
+            using (SqliteCommand commandPitrMeta = new(createPitrMetaQuery, connection))
+                commandPitrMeta.ExecuteNonQuery();
 
             const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
             using SqliteCommand command4 = new(pragmasQuery, connection);
@@ -351,6 +467,21 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         return false;
     }
 
+    // Upserts a key's no-revision provenance, keeping the earliest (min) and latest (max) write HLC in
+    // physical→counter→node order. SQLite evaluates every CASE against the pre-update row, so the
+    // interdependent SET clauses are consistent.
+    private const string UpsertNoRevProvenanceSql = """
+        INSERT INTO keys_norev (key, earliestNode, earliestPhysical, earliestCounter, latestNode, latestPhysical, latestCounter)
+        VALUES (@key, @n, @p, @c, @n, @p, @c)
+        ON CONFLICT(key) DO UPDATE SET
+          earliestNode     = CASE WHEN @p < earliestPhysical OR (@p = earliestPhysical AND @c < earliestCounter) OR (@p = earliestPhysical AND @c = earliestCounter AND @n < earliestNode) THEN @n ELSE earliestNode END,
+          earliestCounter  = CASE WHEN @p < earliestPhysical OR (@p = earliestPhysical AND @c < earliestCounter) OR (@p = earliestPhysical AND @c = earliestCounter AND @n < earliestNode) THEN @c ELSE earliestCounter END,
+          earliestPhysical = CASE WHEN @p < earliestPhysical OR (@p = earliestPhysical AND @c < earliestCounter) OR (@p = earliestPhysical AND @c = earliestCounter AND @n < earliestNode) THEN @p ELSE earliestPhysical END,
+          latestNode       = CASE WHEN @p > latestPhysical OR (@p = latestPhysical AND @c > latestCounter) OR (@p = latestPhysical AND @c = latestCounter AND @n > latestNode) THEN @n ELSE latestNode END,
+          latestCounter    = CASE WHEN @p > latestPhysical OR (@p = latestPhysical AND @c > latestCounter) OR (@p = latestPhysical AND @c = latestCounter AND @n > latestNode) THEN @c ELSE latestCounter END,
+          latestPhysical   = CASE WHEN @p > latestPhysical OR (@p = latestPhysical AND @c > latestCounter) OR (@p = latestPhysical AND @c = latestCounter AND @n > latestNode) THEN @p ELSE latestPhysical END;
+        """;
+
     /// <summary>
     /// Stores a collection of key-value pairs in the database, ensuring persistent storage for the specified items.
     /// </summary>
@@ -435,12 +566,30 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         ShardInsertParameters keysParams = ShardInsertParameters.Create(keysCommand);
                         keysCommand.Prepare();
 
+                        // Records the earliest/latest no-revision write HLC per key, taking min/max in
+                        // HLC (physical→counter→node) order against the existing row.
+                        using SqliteCommand noRevCommand = new(UpsertNoRevProvenanceSql, connection);
+                        noRevCommand.Transaction = transaction;
+                        SqliteParameter nrKey = noRevCommand.Parameters.Add("@key", SqliteType.Text);
+                        SqliteParameter nrN = noRevCommand.Parameters.Add("@n", SqliteType.Integer);
+                        SqliteParameter nrP = noRevCommand.Parameters.Add("@p", SqliteType.Integer);
+                        SqliteParameter nrC = noRevCommand.Parameters.Add("@c", SqliteType.Integer);
+                        noRevCommand.Prepare();
+
                         foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(kv.Value))
                         {
                             if (!item.NoRevision)
                             {
                                 revisionsParams.Bind(in item);
                                 revisionsCommand.ExecuteNonQuery();
+                            }
+                            else
+                            {
+                                nrKey.Value = item.Key;
+                                nrN.Value = item.LastModifiedNode;
+                                nrP.Value = item.LastModifiedPhysical;
+                                nrC.Value = (long)item.LastModifiedCounter;
+                                noRevCommand.ExecuteNonQuery();
                             }
 
                             keysParams.Bind(in item);
@@ -937,6 +1086,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         int floorViolations = 0;
         bool batchLimitReached = false;
         List<string>? remaining = null;
+        HLCTimestamp passFloor = HLCTimestamp.Zero;
 
         if (keys is { Count: > 0 })
         {
@@ -982,10 +1132,13 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             cutoffPhysical,
                             budget,
                             floorTimestamp,
-                            out int violationsForKey);
+                            out int violationsForKey,
+                            out HLCTimestamp oldestForKey);
 
                         deleted += deletedForKey;
                         floorViolations += violationsForKey;
+                        if (oldestForKey.CompareTo(passFloor) > 0)
+                            passFloor = oldestForKey;
 
                         // Only a delete that consumed the whole per-key budget can have left more
                         // work behind; a short delete removed every matching row for this key.
@@ -1060,10 +1213,13 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             cutoffPhysical,
                             budget,
                             floorTimestamp,
-                            out int violationsForKey);
+                            out int violationsForKey,
+                            out HLCTimestamp oldestForKey);
 
                         deleted += deletedForKey;
                         floorViolations += violationsForKey;
+                        if (oldestForKey.CompareTo(passFloor) > 0)
+                            passFloor = oldestForKey;
 
                         if (deletedForKey == budget)
                         {
@@ -1104,6 +1260,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 sweepKeyCursor = null;
             }
         }
+
+        // The durable floor was recorded write-ahead per key (in pitr_meta). Refresh the in-memory
+        // cache so subsequent GetPrunedHistoryFloor reads reflect this pass without re-reading shards.
+        if (passFloor != HLCTimestamp.Zero)
+            CommitPrunedFloorCache(passFloor);
 
         result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations);
         return true;
@@ -1158,6 +1319,22 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         return keys;
     }
 
+    // Binds the shared prune-predicate parameters (@key, @currentRevision, and the active
+    // count/age/floor bounds) so the will-delete probe and kept-min query match the delete exactly.
+    private static void BindPrunePredicate(
+        SqliteCommand cmd, string key, long currentRevision,
+        bool floorActive, long floorRevision, bool countEnabled, int retentionCount, bool ageEnabled, long cutoffPhysical)
+    {
+        cmd.Parameters.AddWithValue("@key", key);
+        cmd.Parameters.AddWithValue("@currentRevision", currentRevision);
+        if (floorActive)
+            cmd.Parameters.AddWithValue("@floorRevision", floorRevision);
+        if (countEnabled)
+            cmd.Parameters.AddWithValue("@retentionCount", retentionCount);
+        if (ageEnabled)
+            cmd.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+    }
+
     private static long? GetCurrentRevision(SqliteConnection connection, string key)
     {
         const string query = "SELECT revision FROM keys WHERE key = @key";
@@ -1181,9 +1358,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         long cutoffPhysical,
         int limit,
         HLCTimestamp floorTimestamp,
-        out int floorViolations)
+        out int floorViolations,
+        out HLCTimestamp oldestSurviving)
     {
         floorViolations = 0;
+        oldestSurviving = HLCTimestamp.Zero;
 
         if (limit <= 0)
             return 0;
@@ -1277,6 +1456,47 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
         command.Parameters.AddWithValue("@limit", limit);
 
+        // Write-ahead the pruned-history floor: before deleting, compute the boundary that would
+        // survive full retention (the min HLC of the kept set, or the current row's HLC when the key's
+        // only surviving value is a no-revision write) and durably record it. Recording the floor
+        // before the delete guarantees the floor can never trail the deleted history on a crash; a
+        // truncated (batch-limited) delete only over-records, which the next pass refines.
+        HLCTimestamp candidate = HLCTimestamp.Zero;
+        {
+            string willDeleteSql = $"SELECT EXISTS(SELECT 1 FROM keys_revisions WHERE key = @key AND revision <> @currentRevision {floorFilter} AND ({policy}) LIMIT 1)";
+            using SqliteCommand willCmd = new(willDeleteSql, connection);
+            BindPrunePredicate(willCmd, key, currentRevision.Value, floorActive, floorRevision, countEnabled, retentionCount, ageEnabled, cutoffPhysical);
+            bool willDelete = Convert.ToInt64(willCmd.ExecuteScalar()) != 0;
+            if (willDelete)
+            {
+                string keptMinSql = $"""
+                    SELECT lastModifiedNode, lastModifiedPhysical, lastModifiedCounter
+                    FROM keys_revisions
+                    WHERE key = @key AND NOT (revision <> @currentRevision {floorFilter} AND ({policy}))
+                    ORDER BY lastModifiedPhysical ASC, lastModifiedCounter ASC, lastModifiedNode ASC
+                    LIMIT 1
+                    """;
+                using (SqliteCommand keptCmd = new(keptMinSql, connection))
+                {
+                    BindPrunePredicate(keptCmd, key, currentRevision.Value, floorActive, floorRevision, countEnabled, retentionCount, ageEnabled, cutoffPhysical);
+                    using SqliteDataReader kr = keptCmd.ExecuteReader();
+                    if (kr.Read())
+                        candidate = new HLCTimestamp(kr.GetInt32(0), kr.GetInt64(1), (uint)kr.GetInt64(2));
+                }
+                if (candidate == HLCTimestamp.Zero)
+                {
+                    using SqliteCommand curCmd = new(
+                        "SELECT lastModifiedNode, lastModifiedPhysical, lastModifiedCounter FROM keys WHERE key = @key", connection);
+                    curCmd.Parameters.AddWithValue("@key", key);
+                    using SqliteDataReader cr = curCmd.ExecuteReader();
+                    if (cr.Read())
+                        candidate = new HLCTimestamp(cr.GetInt32(0), cr.GetInt64(1), (uint)cr.GetInt64(2));
+                }
+                if (candidate != HLCTimestamp.Zero)
+                    UpsertPrunedFloor(connection, candidate);
+            }
+        }
+
         // Independent floor-protection audit. The DELETE above must never remove a revision at or
         // above the floor boundary (revision >= floorRevision), which the floorFilter enforces.
         // To catch a regression in that filter, count protected rows before and after the delete
@@ -1293,6 +1513,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             if (delta > 0)
                 floorViolations = (int)delta;
         }
+
+        // The floor was recorded write-ahead above, before the delete. Return the same candidate so
+        // the caller can advance the in-memory cache after the pass.
+        oldestSurviving = candidate;
 
         return deletedForKey;
     }
@@ -1522,25 +1746,48 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         conn.Open();
         using SqliteTransaction tx = conn.BeginTransaction();
 
-        // 0) Fail closed on historyless keys (SetNoRevision) whose only value is newer than the cut:
-        //    with no retained revision there is no way to reconstruct their as-of-cut state. Checked
-        //    before any deletion, while keys_revisions is intact.
+        // 1) Drop every revision committed after the cut. Afterwards the max surviving revision per
+        //    key is that key's boundary (newest revision at/before the cut).
+        RunTrim(conn, tx, $"DELETE FROM keys_revisions WHERE {afterCut};", cut);
+
+        // 1a) Fail closed when a key whose current value is after the cut has a SetNoRevision write in
+        //     its as-of boundary window: earliest no-revision write ≤ cut, and latest no-revision
+        //     write is newer than the surviving revision boundary (0 if the key has no revision at or
+        //     before the cut). Such a boundary value was overwritten and left no history row, so the
+        //     cut cannot be reconstructed exactly — unlike a key whose current no-revision value is
+        //     itself ≤ the cut (handled by keeping the current row), or one created entirely after the
+        //     cut (correctly omitted below).
         using (SqliteCommand check = new(
-            $"SELECT COUNT(*) FROM keys WHERE {afterCut} " +
-            "AND NOT EXISTS (SELECT 1 FROM keys_revisions kr WHERE kr.key = keys.key);", conn, tx))
+            """
+            SELECT COUNT(*)
+            FROM keys k
+            JOIN keys_norev nr ON nr.key = k.key
+            LEFT JOIN (
+                SELECT kr.key AS bkey,
+                       kr.lastModifiedPhysical AS bP, kr.lastModifiedCounter AS bC, kr.lastModifiedNode AS bN
+                FROM keys_revisions kr
+                WHERE kr.revision = (SELECT MAX(revision) FROM keys_revisions k2 WHERE k2.key = kr.key)
+            ) b ON b.bkey = k.key
+            WHERE (k.lastModifiedPhysical > @cutL
+                   OR (k.lastModifiedPhysical = @cutL AND k.lastModifiedCounter > @cutC)
+                   OR (k.lastModifiedPhysical = @cutL AND k.lastModifiedCounter = @cutC AND k.lastModifiedNode > @cutN))
+              AND (nr.earliestPhysical < @cutL
+                   OR (nr.earliestPhysical = @cutL AND nr.earliestCounter < @cutC)
+                   OR (nr.earliestPhysical = @cutL AND nr.earliestCounter = @cutC AND nr.earliestNode <= @cutN))
+              AND (nr.latestPhysical > COALESCE(b.bP, 0)
+                   OR (nr.latestPhysical = COALESCE(b.bP, 0) AND nr.latestCounter > COALESCE(b.bC, 0))
+                   OR (nr.latestPhysical = COALESCE(b.bP, 0) AND nr.latestCounter = COALESCE(b.bC, 0) AND nr.latestNode > COALESCE(b.bN, 0)));
+            """, conn, tx))
         {
             check.Parameters.AddWithValue("@cutL", cut.L);
             check.Parameters.AddWithValue("@cutC", cut.C);
             check.Parameters.AddWithValue("@cutN", cut.N);
-            long historyless = Convert.ToInt64(check.ExecuteScalar());
-            if (historyless > 0)
+            long unreconstructable = Convert.ToInt64(check.ExecuteScalar());
+            if (unreconstructable > 0)
                 throw new ExactCheckpointUnavailableException(
-                    $"{historyless} key(s) written with SetNoRevision were modified after the backup cut " +
-                    $"{cut}; their state as-of the cut cannot be reconstructed.");
+                    $"{unreconstructable} key(s) have a SetNoRevision write in their as-of-{cut} boundary " +
+                    "window whose value was overwritten and cannot be reconstructed; the cut cannot be produced exactly.");
         }
-
-        // 1) Drop every revision committed after the cut.
-        RunTrim(conn, tx, $"DELETE FROM keys_revisions WHERE {afterCut};", cut);
 
         // 2) Drop latest-rows that are after the cut AND have no surviving revision (NoRevision keys
         //    newer than the cut, and keys whose entire revision history was after the cut).
@@ -1548,8 +1795,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             $"DELETE FROM keys WHERE {afterCut} AND NOT EXISTS " +
             "(SELECT 1 FROM keys_revisions kr WHERE kr.key = keys.key);", cut);
 
-        // 3) Reset each remaining revisioned key's latest row to its surviving max revision.
-        RunTrim(conn, tx, """
+        // 3) Roll back to the surviving max revision ONLY for keys whose current value is after the
+        //    cut. A key whose current value is at/before the cut — including one whose current value
+        //    is a SetNoRevision write newer than every revision — is already exact and must be kept as
+        //    is, never reset to an older revision.
+        RunTrim(conn, tx, $"""
             UPDATE keys
                SET revision = src.revision,
                    value = src.value,
@@ -1564,8 +1814,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                    FROM keys_revisions kr
                   WHERE kr.revision = (SELECT MAX(revision) FROM keys_revisions k2 WHERE k2.key = kr.key)
               ) AS src
-             WHERE keys.key = src.key;
-            """, cut: null);
+             WHERE keys.key = src.key
+               AND (keys.lastModifiedPhysical > @cutL
+                    OR (keys.lastModifiedPhysical = @cutL AND keys.lastModifiedCounter > @cutC)
+                    OR (keys.lastModifiedPhysical = @cutL AND keys.lastModifiedCounter = @cutC AND keys.lastModifiedNode > @cutN));
+            """, cut);
 
         // 4) Exclude locks from the as-of image — volatile lease state re-established at runtime.
         RunTrim(conn, tx, "DELETE FROM locks;", cut: null);

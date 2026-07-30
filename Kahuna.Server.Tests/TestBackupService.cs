@@ -73,7 +73,8 @@ public sealed class TestBackupService : IDisposable
             storageRevision: "",
             flushBeforeCheckpoint: flush ?? (() => Task.CompletedTask),
             queryMinInFlight: queryMinInFlight ?? (() => Task.FromResult(HLCTimestamp.Zero)),
-            restoreRoot: restoreRoot);
+            restoreRoot: restoreRoot,
+            acquireRetentionHold: raft.AcquireRetentionHold);
     }
 
     private static void Put(MemoryPersistenceBackend b, string key, byte[] value, long rev) =>
@@ -152,6 +153,113 @@ public sealed class TestBackupService : IDisposable
         Assert.Equal(2, all.Count);
         Assert.Contains(all, b => b.BackupId == full.BackupId);
         Assert.Contains(all, b => b.BackupId == inc.BackupId);
+    }
+
+    // ── listing surfaces valid-JSON structurally-corrupt / unsupported backups ────────────────
+
+    private static void MutateManifest(string backupDir, Guid id, Action<BackupManifest> mutate)
+    {
+        string path = Path.Combine(backupDir, id.ToString("N") + ".manifest");
+        BackupManifest m = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(path))!;
+        mutate(m);
+        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(m));
+    }
+
+    private static Kahuna.Shared.Communication.Rest.KahunaBackupInfo Entry(
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> list, Guid id) =>
+        list.Single(b => b.BackupId == id);
+
+    [Fact]
+    public async Task ListBackups_ValidJsonUnsupportedVersion_MarkedInvalid()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_ver", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+
+        MutateManifest(BackupDir("list_ver"), full.BackupId, m => m.FormatVersion = BackupManifest.CurrentFormatVersion + 1);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(svc.ListBackups(), full.BackupId);
+        Assert.True(e.IsInvalid);
+        Assert.Contains("version", e.InvalidReason!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ListBackups_DuplicatePartitionRange_MarkedInvalid()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_dup", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+
+        MutateManifest(BackupDir("list_dup"), full.BackupId, m => m.PartitionRanges.Add(m.PartitionRanges[0]));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(svc.ListBackups(), full.BackupId);
+        Assert.True(e.IsInvalid);
+        Assert.Contains("duplicate", e.InvalidReason!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ListBackups_IncompleteSizeMetadata_MarkedInvalid()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_size", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+
+        MutateManifest(BackupDir("list_size"), full.BackupId, m => m.Sizes.Remove(m.Sizes.Keys.First()));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(svc.ListBackups(), full.BackupId);
+        Assert.True(e.IsInvalid);
+        Assert.Contains("size", e.InvalidReason!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ListBackups_OneBadEntry_DoesNotFailWholeList()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_mixed", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc = await svc.TakeIncrementalAsync(full.BackupId);
+
+        MutateManifest(BackupDir("list_mixed"), full.BackupId, m => m.PartitionRanges.Add(m.PartitionRanges[0]));
+
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> all = svc.ListBackups();
+        Assert.Equal(2, all.Count); // both entries still present
+        Assert.True(Entry(all, full.BackupId).IsInvalid);
+        Assert.False(Entry(all, inc.BackupId).IsInvalid);
+    }
+
+    [Fact]
+    public async Task ListBackups_StructuralOnly_DoesNotHashArtifacts_ButVerifyArtifactsCatchesDigest()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_digest", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+
+        // Corrupt a checkpoint file's bytes without touching the manifest's recorded size/digest.
+        string storeJson = Path.Combine(BackupDir("list_digest"), full.BackupId.ToString("N"), "checkpoint", "store.json");
+        File.AppendAllText(storeJson, "corruption");
+
+        // Cheap structural listing does not read artifacts, so the entry is not marked invalid.
+        Assert.False(Entry(svc.ListBackups(), full.BackupId).IsInvalid);
+
+        // Full artifact verification catches the byte-level corruption.
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo verified = Entry(svc.ListBackups(verifyArtifacts: true), full.BackupId);
+        Assert.True(verified.IsInvalid);
+    }
+
+    [Fact]
+    public async Task ListBackups_VerifyArtifacts_MissingFile_MarkedInvalid()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_missing", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+
+        string storeJson = Path.Combine(BackupDir("list_missing"), full.BackupId.ToString("N"), "checkpoint", "store.json");
+        File.Delete(storeJson);
+
+        // Structural listing passes (no files read); full verification flags the missing artifact.
+        Assert.False(Entry(svc.ListBackups(), full.BackupId).IsInvalid);
+        Assert.True(Entry(svc.ListBackups(verifyArtifacts: true), full.BackupId).IsInvalid);
     }
 
     [Fact]
@@ -532,7 +640,32 @@ public sealed class TestBackupService : IDisposable
         Assert.Empty(Directory.GetDirectories(_tempRoot, "corrupt_restore_out.staging_*"));
     }
 
-    // ── restore destination confinement (finding #8) ─────────────────────────────────────────
+    // ── WAL retention hold during incremental capture ────────────────────────────────────────
+
+    [Fact]
+    public async Task TakeIncremental_AcquiresRetentionHoldAtFromIndex_AndReleases()
+    {
+        // Full covers P1 through index 1; an incremental starting at index 2 must hold the retention
+        // floor at its fromIndex (via Kommander's composable AcquireRetentionHold) while it pages the
+        // WAL, and release it after the manifest is published.
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        StubRaft raft = MakeRaft(wal, 1);
+        MemoryPersistenceBackend backend = new();
+        BackupService svc = MakeService("hold_inc", wal, backend, raft: raft);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+
+        raft.RetentionHoldsAcquired.Clear();
+        raft.RetentionHoldsReleased = 0;
+
+        await svc.TakeIncrementalAsync(full.BackupId);
+
+        Assert.Contains((1, 2L), raft.RetentionHoldsAcquired);      // held at fromIndex = full.ToIndex(1)+1
+        Assert.Equal(raft.RetentionHoldsAcquired.Count, raft.RetentionHoldsReleased); // all released
+    }
+
+    // ── restore destination confinement ──────────────────────────────────────────────────────
 
     [Fact]
     public async Task RestoreTo_OutsideConfiguredRoot_ThrowsTargetConflict()
@@ -551,6 +684,33 @@ public sealed class TestBackupService : IDisposable
             svc.RestoreTo(full.BackupId, outside, HLCTimestamp.Zero));
         Assert.True(ex.TargetConflict);
         Assert.False(Directory.Exists(outside));
+    }
+
+    [Fact]
+    public async Task RestoreTo_CaseDifferentSiblingOfRoot_ThrowsTargetConflict_BeforeAnyOutput()
+    {
+        // Configured root differs from the target only by case. On a case-sensitive volume these are
+        // distinct trees, so the target escapes the root; confinement must reject it (fail-closed on
+        // every volume). Assert the rejection happens before any staging/output directory is created.
+        string root = Path.Combine(_tempRoot, "CaseSensRoot");
+        Directory.CreateDirectory(root);
+
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+        BackupService svc = MakeService("confine_case", wal, backend, restoreRoot: root);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+
+        string caseDifferentTarget = Path.Combine(_tempRoot, "casesensroot", "out");
+        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
+            svc.RestoreTo(full.BackupId, caseDifferentTarget, HLCTimestamp.Zero));
+        Assert.True(ex.TargetConflict);
+
+        Assert.False(Directory.Exists(caseDifferentTarget));
+        // No staging sibling of the rejected target was created either.
+        string? parent = Path.GetDirectoryName(Path.GetFullPath(caseDifferentTarget));
+        if (parent is not null && Directory.Exists(parent))
+            Assert.DoesNotContain(Directory.GetDirectories(parent), d => Path.GetFileName(d).StartsWith("out.staging_"));
     }
 
     [Fact]
@@ -667,7 +827,26 @@ public sealed class TestBackupService : IDisposable
         public void Vote(VoteRequest request) { }
         public void AppendLogs(AppendLogsRequest request) { }
         public void CompleteAppendLogs(CompleteAppendLogsRequest request) { }
-        public void SetMinRetainIndex(int partitionId, long index) { }
+        public readonly Dictionary<int, long> MinRetainIndexByPartition = [];
+        public void SetMinRetainIndex(int partitionId, long index) => MinRetainIndexByPartition[partitionId] = index;
+
+        public readonly List<(int partitionId, long index)> RetentionHoldsAcquired = [];
+        public int RetentionHoldsReleased;
+        public IDisposable AcquireRetentionHold(int partitionId, long index)
+        {
+            RetentionHoldsAcquired.Add((partitionId, index));
+            return new ReleaseRecorder(this);
+        }
+
+        private sealed class ReleaseRecorder(StubRaft owner) : IDisposable
+        {
+            private int _disposed;
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                    owner.RetentionHoldsReleased++;
+            }
+        }
         public int GetLocalNodeId() => 99;
         public string GetLocalNodeName() => "stub";
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }

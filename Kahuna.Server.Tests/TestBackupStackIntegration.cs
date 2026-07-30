@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Integration tests for the P1.11 backup/restore stack end-to-end:
+/// Integration tests for the backup/restore stack end-to-end:
 /// KahunaManager → BackupService → BackupDriver / RestoreEngine.
 /// Uses EmbeddedKahunaNode so BackupDir is wired through the full
 /// IKahuna interface (KahunaManager.IsBackupConfigured, TakeFullBackupAsync,
@@ -122,7 +122,7 @@ public sealed class TestBackupStackIntegration : IDisposable
     }
 
     // ── C3: flush hook is actually invoked through the KahunaManager path ─────────────────
-    // (P1.11a's acceptance criterion: "flush hook actually invoked")
+    // A full backup must drive the persistence flush so freshly-written data lands in the checkpoint.
 
     [Fact]
     public async Task TakeFullBackupAsync_FlushHookActuallyInvoked_DataAppearsInCheckpoint()
@@ -231,7 +231,7 @@ public sealed class TestBackupStackIntegration : IDisposable
     }
 
     // ── C6: offline restore ───────────────────────────────────────────────────────────────────
-    // This is the P1.11f accept criterion: "restore to a T into a target dir against a running test server"
+    // Restoring to a chosen timestamp into a target directory reconstructs the written key.
 
     [Fact]
     public async Task RestoreToAsync_AfterWritingData_RestoredDirContainsKey()
