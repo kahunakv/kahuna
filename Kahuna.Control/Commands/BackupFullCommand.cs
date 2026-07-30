@@ -30,6 +30,9 @@ public static class BackupFullCommand
             AnsiConsole.MarkupLine("  Parent:         [yellow]{0}[/]", info.ParentBackupId.Value);
         if (info.ClusterSnapshotPhysical.HasValue)
             AnsiConsole.MarkupLine("  Snapshot time:  [blue]{0}ms[/]", info.ClusterSnapshotPhysical.Value);
+        if (!string.IsNullOrEmpty(info.SubstitutionReason))
+            AnsiConsole.MarkupLine("  [yellow]Substituted:[/]    requested [white]{0}[/], produced [white]{1}[/] — {2}",
+                info.RequestedKind ?? "?", info.ActualKind ?? info.Type, Markup.Escape(info.SubstitutionReason));
         AnsiConsole.WriteLine();
     }
 }

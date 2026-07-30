@@ -313,7 +313,9 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
     PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
     BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
-    BackupDir = opts.PitrBackupDir
+    BackupDir = opts.PitrBackupDir,
+    RestoreRoot = opts.PitrRestoreRoot,
+    AllowUnconfinedRemoteRestore = opts.PitrAllowUnconfinedRemoteRestore
 };
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)

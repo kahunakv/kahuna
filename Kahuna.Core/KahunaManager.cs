@@ -65,6 +65,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     private readonly BackupService? backupService;
 
+    private readonly bool remoteRestoreAllowed;
+
     /// <summary>
     /// Exposes the persistence backend for PITR bootstrap tests that need to extract a
     /// checkpoint from an already-running node before seeding a joining peer.
@@ -178,8 +180,16 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 configuration.Storage,
                 configuration.StorageRevision,
                 FlushPersistenceAsync,
-                keyValues.GetSafeTimestampAsync);
+                keyValues.GetSafeTimestampAsync,
+                logger,
+                configuration.StoragePath,
+                configuration.RestoreRoot);
         }
+
+        // Restore is administrative: allow it over the network only when a server-owned restore root
+        // confines destinations, or an explicit unconfined opt-in is set.
+        remoteRestoreAllowed = !string.IsNullOrWhiteSpace(configuration.RestoreRoot)
+            || configuration.AllowUnconfinedRemoteRestore;
     }
 
     /// <summary>Drains the key/value write aggregator (releases queued writes retryably and awaits in-flight
@@ -226,14 +236,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
         BackupCatalog catalog = new(new LocalDirectoryStorageTarget(backupDir));
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(leafBackupId);
 
-        if (targetTime == HLCTimestamp.Zero)
-        {
-            targetTime = chain
-                .SelectMany(m => m.PartitionRanges)
-                .Select(r => r.ToHlc)
-                .Aggregate(HLCTimestamp.Zero, (acc, hlc) => hlc.CompareTo(acc) > 0 ? hlc : acc);
-        }
-
+        // Coverage validation (Zero → natural end, fail closed on out-of-range / unknown lower bound)
+        // is centralized in BootstrapHelper.BootstrapNode so it happens before any backend/WAL mutation.
         await FlushPersistenceAsync();
         BootstrapHelper.BootstrapNode(chain, backupDir, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
     }
@@ -1643,20 +1647,42 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     public bool IsBackupConfigured => backupService is not null;
 
-    public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) =>
-        RequireBackupService().TakeFullAsync();
+    public bool IsRemoteRestoreAllowed => remoteRestoreAllowed;
 
-    public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) =>
-        RequireBackupService().TakeIncrementalAsync(parentBackupId);
+    public async Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default)
+    {
+        BackupService svc = RequireBackupService();
+        try { return await svc.TakeFullAsync(ct: ct); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+    }
 
-    public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) =>
-        RequireBackupService().TakeCoordinatedBackupAsync();
+    public async Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default)
+    {
+        BackupService svc = RequireBackupService();
+        try { return await svc.TakeIncrementalAsync(parentBackupId, ct: ct); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+    }
 
-    public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) =>
-        Task.FromResult(RequireBackupService().ListBackups());
+    public async Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default)
+    {
+        BackupService svc = RequireBackupService();
+        try { return await svc.TakeCoordinatedBackupAsync(ct); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+    }
 
-    public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) =>
-        Task.FromResult(RequireBackupService().ResolveAndValidate(leafBackupId));
+    public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default)
+    {
+        BackupService svc = RequireBackupService();
+        try { return Task.FromResult(svc.ListBackups(ct)); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+    }
+
+    public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default)
+    {
+        BackupService svc = RequireBackupService();
+        try { return Task.FromResult(svc.ResolveAndValidate(leafBackupId, ct)); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+    }
 
     public Task<KahunaRestoreResponse> RestoreToAsync(
         Guid leafBackupId,
@@ -1664,16 +1690,66 @@ public sealed class KahunaManager : IKahuna, IDisposable
         long targetTimeMs,
         CancellationToken ct = default)
     {
+        BackupService svc = RequireBackupService();
         HLCTimestamp targetTime = targetTimeMs > 0
             ? new HLCTimestamp(0, targetTimeMs, 0)
             : HLCTimestamp.Zero;
-        KahunaRestoreResponse result = RequireBackupService().RestoreTo(leafBackupId, targetDir, targetTime);
-        return Task.FromResult(result);
+        try { return Task.FromResult(svc.RestoreTo(leafBackupId, targetDir, targetTime, ct: ct)); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
     }
 
     private BackupService RequireBackupService() =>
         backupService ?? throw new InvalidOperationException(
             "Backup is not configured on this node. Set BackupDir in configuration or --pitr-backup-dir.");
+
+    /// <summary>
+    /// True for internal backup failures that should be surfaced to API callers as a typed
+    /// <see cref="KahunaBackupException"/>. Cancellation and already-typed exceptions pass through
+    /// unchanged.
+    /// </summary>
+    private static bool ShouldMap(Exception ex) =>
+        ex is not OperationCanceledException and not KahunaBackupException;
+
+    /// <summary>
+    /// Maps an internal backup exception to a public, sanitized <see cref="KahunaBackupException"/>
+    /// so callers classify failures by <see cref="KahunaBackupOutcome"/> rather than by internal
+    /// exception type or message. Messages intentionally omit absolute paths and raw backend text.
+    /// </summary>
+    private static KahunaBackupException MapBackupException(Exception ex) => ex switch
+    {
+        BackupDriverException d when d.NeedsFullBackup =>
+            new(KahunaBackupOutcome.NeedsFull,
+                "An incremental backup could not be produced because the WAL compaction floor " +
+                "advanced past the parent backup; take a full backup instead."),
+        BackupDriverException d when d.ParentMissing =>
+            new(KahunaBackupOutcome.ParentMissing, "The requested parent backup was not found."),
+        BackupDriverException d when d.TargetConflict =>
+            new(KahunaBackupOutcome.TargetConflict,
+                "The restore destination already exists or overlaps a protected path."),
+        BackupDriverException d when d.TargetOutsideCoverage =>
+            new(KahunaBackupOutcome.TargetOutsideCoverage,
+                "The requested restore time is outside the recoverable coverage of this backup chain."),
+        BackupDriverException d when d.ExactCheckpointUnavailable =>
+            new(KahunaBackupOutcome.ExactCheckpointUnavailable,
+                "This node's storage backend cannot produce an exact as-of backup image."),
+        ExactCheckpointUnavailableException =>
+            new(KahunaBackupOutcome.ExactCheckpointUnavailable,
+                "An exact as-of backup image cannot be produced because a historyless (SetNoRevision) " +
+                "key was modified after the backup cut."),
+        BackupUnsupportedFormatException =>
+            new(KahunaBackupOutcome.UnsupportedFormat,
+                "The backup is in a legacy or unsupported format and cannot be restored by this version."),
+        BackupArtifactException =>
+            new(KahunaBackupOutcome.CorruptArtifact,
+                "A backup artifact is missing, altered, or failed integrity verification."),
+        BackupChainException =>
+            new(KahunaBackupOutcome.CorruptChain, "The backup chain is structurally invalid."),
+        BackupDriverException =>
+            new(KahunaBackupOutcome.IoError, "The backup operation could not be completed."),
+        IOException =>
+            new(KahunaBackupOutcome.IoError, "The backup operation failed due to an I/O error."),
+        _ => new(KahunaBackupOutcome.IoError, "The backup operation failed."),
+    };
 
     // ── MVCC snapshot floor ─────────────────────────────────────────────────────────────────
 

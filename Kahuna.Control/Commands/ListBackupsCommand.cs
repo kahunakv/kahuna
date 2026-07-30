@@ -32,7 +32,20 @@ public static class ListBackupsCommand
 
         foreach (KahunaBackupInfo b in backups.OrderBy(b => b.CreatedAtUtc))
         {
+            if (b.IsInvalid)
+            {
+                table.AddRow(
+                    b.BackupId.ToString(),
+                    "[red]INVALID[/]",
+                    "-",
+                    "-",
+                    Markup.Escape(b.InvalidReason ?? "unreadable manifest"));
+                continue;
+            }
+
             string typeMarkup = b.Type == "Full" ? "[green]Full[/]" : "[blue]Incremental[/]";
+            if (b.FormatVersion == 0)
+                typeMarkup += " [yellow](legacy)[/]";
             table.AddRow(
                 b.BackupId.ToString(),
                 typeMarkup,

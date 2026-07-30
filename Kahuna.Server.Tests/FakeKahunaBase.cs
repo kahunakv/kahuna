@@ -120,6 +120,7 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual bool IsBackupConfigured => throw new NotImplementedException();
+    public virtual bool IsRemoteRestoreAllowed => throw new NotImplementedException();
     public virtual Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();

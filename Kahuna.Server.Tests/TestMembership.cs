@@ -800,6 +800,7 @@ public sealed class TestMembership : BaseCluster
         public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public bool IsBackupConfigured => false;
+        public bool IsRemoteRestoreAllowed => false;
         public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();

@@ -58,8 +58,11 @@ internal static class SnapshotCoordinator
     internal static async Task<HLCTimestamp> ComputeSafeSnapshotTimeAsync(
         Func<Task<HLCTimestamp>> queryClusterMinInFlight,
         IWAL wal,
-        IReadOnlyList<RaftPartitionRange> partitions)
+        IReadOnlyList<RaftPartitionRange> partitions,
+        CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+
         HLCTimestamp minInFlight = await queryClusterMinInFlight();
 
         if (minInFlight != HLCTimestamp.Zero)
@@ -69,10 +72,12 @@ internal static class SnapshotCoordinator
         HLCTimestamp maxCommitted = HLCTimestamp.Zero;
         foreach (RaftPartitionRange partition in partitions)
         {
+            ct.ThrowIfCancellationRequested();
+
             if (partition.State is RaftPartitionState.Draining or RaftPartitionState.Removed)
                 continue;
 
-            (_, HLCTimestamp hlc, _) = BackupDriver.FindLastCommitted(wal, partition.PartitionId);
+            (_, HLCTimestamp hlc, _) = BackupDriver.FindLastCommitted(wal, partition.PartitionId, ct);
             if (hlc.CompareTo(maxCommitted) > 0)
                 maxCommitted = hlc;
         }

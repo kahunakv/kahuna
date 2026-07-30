@@ -1222,36 +1222,36 @@ public class RestCommunication : IKahunaCommunication
     public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupInfo? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaBackupInfo? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/full")
                .WithSettings(o => o.HttpVersion = "2.0")
                .PostJsonAsync(new { }, cancellationToken: cancellationToken)
-               .ReceiveJson<KahunaBackupInfo>()).ConfigureAwait(false);
+               .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeFullBackup returned null", LockResponseType.Errored);
     }
 
     public async Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupInfo? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaBackupInfo? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/incremental")
                .WithSettings(o => o.HttpVersion = "2.0")
                .PostJsonAsync(new KahunaBackupIncrementalRequest { ParentBackupId = parentBackupId }, cancellationToken: cancellationToken)
-               .ReceiveJson<KahunaBackupInfo>()).ConfigureAwait(false);
+               .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeIncrementalBackup returned null", LockResponseType.Errored);
     }
 
     public async Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupInfo? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaBackupInfo? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/coordinated")
                .WithSettings(o => o.HttpVersion = "2.0")
                .PostJsonAsync(new { }, cancellationToken: cancellationToken)
-               .ReceiveJson<KahunaBackupInfo>()).ConfigureAwait(false);
+               .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeCoordinatedBackup returned null", LockResponseType.Errored);
     }
 
@@ -1350,31 +1350,31 @@ public class RestCommunication : IKahunaCommunication
     public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        List<KahunaBackupInfo>? response = await retryPolicy.ExecuteAsync(() =>
+        List<KahunaBackupInfo>? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups")
                .WithSettings(o => o.HttpVersion = "2.0")
                .GetAsync(cancellationToken: cancellationToken)
-               .ReceiveJson<List<KahunaBackupInfo>>()).ConfigureAwait(false);
+               .ReceiveJson<List<KahunaBackupInfo>>())).ConfigureAwait(false);
         return response ?? [];
     }
 
     public async Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        List<KahunaBackupInfo>? response = await retryPolicy.ExecuteAsync(() =>
+        List<KahunaBackupInfo>? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups", leafBackupId.ToString(), "chain")
                .WithSettings(o => o.HttpVersion = "2.0")
                .GetAsync(cancellationToken: cancellationToken)
-               .ReceiveJson<List<KahunaBackupInfo>>()).ConfigureAwait(false);
+               .ReceiveJson<List<KahunaBackupInfo>>())).ConfigureAwait(false);
         return response ?? [];
     }
 
     public async Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaRestoreResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaRestoreResponse? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/restore")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -1384,7 +1384,28 @@ public class RestCommunication : IKahunaCommunication
                    TargetDir = targetDir,
                    TargetTimeMs = targetTimeMs
                }, cancellationToken: cancellationToken)
-               .ReceiveJson<KahunaRestoreResponse>()).ConfigureAwait(false);
+               .ReceiveJson<KahunaRestoreResponse>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("Restore returned null", LockResponseType.Errored);
+    }
+
+    /// <summary>
+    /// Runs a backup REST call, reconstructing a typed <see cref="KahunaBackupException"/> from the
+    /// <see cref="KahunaBackupWire.OutcomeHttpHeader"/> response header when the server rejected it.
+    /// </summary>
+    private static async Task<T> InvokeBackupRest<T>(Func<Task<T>> call)
+    {
+        try
+        {
+            return await call().ConfigureAwait(false);
+        }
+        catch (FlurlHttpException ex)
+        {
+            IFlurlResponse? resp = ex.Call?.Response;
+            if (resp is not null &&
+                resp.Headers.TryGetFirst(KahunaBackupWire.OutcomeHttpHeader, out string? name) &&
+                Enum.TryParse(name, out KahunaBackupOutcome outcome))
+                throw new KahunaBackupException(outcome, ex.Message);
+            throw;
+        }
     }
 }

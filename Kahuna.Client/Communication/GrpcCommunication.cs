@@ -2212,69 +2212,78 @@ public class GrpcCommunication : IKahunaCommunication
         _                                                 => "NotMember"
     };
 
-    public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
-    {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = GetBackupsClient(channel);
-        GrpcBackupInfoResponse r = await client.TakeFullBackupAsync(
-            new GrpcTakeFullBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return FromGrpc(r);
-    }
-
-    public async Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken)
-    {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = GetBackupsClient(channel);
-        GrpcBackupInfoResponse r = await client.TakeIncrementalBackupAsync(
-            new GrpcTakeIncrementalBackupRequest { ParentBackupId = parentBackupId.ToString() },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        return FromGrpc(r);
-    }
-
-    public async Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken)
-    {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = GetBackupsClient(channel);
-        GrpcBackupInfoResponse r = await client.TakeCoordinatedBackupAsync(
-            new GrpcTakeCoordinatedBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return FromGrpc(r);
-    }
-
-    public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
-    {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = GetBackupsClient(channel);
-        GrpcListBackupsResponse r = await client.ListBackupsAsync(
-            new GrpcListBackupsRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return r.Backups.Select(FromGrpc).ToList();
-    }
-
-    public async Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken)
-    {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = GetBackupsClient(channel);
-        GrpcListBackupsResponse r = await client.GetBackupChainAsync(
-            new GrpcGetBackupChainRequest { LeafBackupId = leafBackupId.ToString() },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        return r.Backups.Select(FromGrpc).ToList();
-    }
-
-    public async Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken)
-    {
-        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
-        Backups.BackupsClient client = GetBackupsClient(channel);
-        GrpcRestoreResponse r = await client.RestoreAsync(
-            new GrpcRestoreRequest { LeafBackupId = leafBackupId.ToString(), TargetDir = targetDir, TargetTimeMs = targetTimeMs },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        return new KahunaRestoreResponse
+    public Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
         {
-            TargetDir = r.TargetDir,
-            PartitionsRestored = r.PartitionsRestored,
-            EntriesApplied = r.EntriesApplied,
-            LastAppliedPhysicalMs = r.LastAppliedPhysicalMs,
-            Chain = r.Chain.Select(FromGrpc).ToList()
-        };
-    }
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcBackupInfoResponse r = await client.TakeFullBackupAsync(
+                new GrpcTakeFullBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+            return FromGrpc(r);
+        });
+
+    public Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
+        {
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcBackupInfoResponse r = await client.TakeIncrementalBackupAsync(
+                new GrpcTakeIncrementalBackupRequest { ParentBackupId = parentBackupId.ToString() },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return FromGrpc(r);
+        });
+
+    public Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
+        {
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcBackupInfoResponse r = await client.TakeCoordinatedBackupAsync(
+                new GrpcTakeCoordinatedBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+            return FromGrpc(r);
+        });
+
+    public Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
+        {
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcListBackupsResponse r = await client.ListBackupsAsync(
+                new GrpcListBackupsRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+            return r.Backups.Select(FromGrpc).ToList();
+        });
+
+    public Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
+        {
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcListBackupsResponse r = await client.GetBackupChainAsync(
+                new GrpcGetBackupChainRequest { LeafBackupId = leafBackupId.ToString() },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return r.Backups.Select(FromGrpc).ToList();
+        });
+
+    public Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken) =>
+        InvokeBackup(async () =>
+        {
+            GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+            Backups.BackupsClient client = GetBackupsClient(channel);
+            GrpcRestoreResponse r = await client.RestoreAsync(
+                new GrpcRestoreRequest { LeafBackupId = leafBackupId.ToString(), TargetDir = targetDir, TargetTimeMs = targetTimeMs },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new KahunaRestoreResponse
+            {
+                TargetDir = r.TargetDir,
+                PartitionsRestored = r.PartitionsRestored,
+                EntriesApplied = r.EntriesApplied,
+                LastAppliedPhysicalMs = r.LastAppliedPhysicalMs,
+                Chain = r.Chain.Select(FromGrpc).ToList(),
+                Outcome = Enum.TryParse(r.Outcome, out KahunaBackupOutcome o) ? o : KahunaBackupOutcome.Ok,
+                MinRecoverablePhysicalMs = r.MinRecoverablePhysicalMs,
+                MaxRecoverablePhysicalMs = r.MaxRecoverablePhysicalMs
+            };
+        });
 
     private static KahunaBackupInfo FromGrpc(GrpcBackupInfoResponse r) => new()
     {
@@ -2285,6 +2294,34 @@ public class GrpcCommunication : IKahunaCommunication
         PartitionCount = r.PartitionCount,
         ClusterSnapshotNode = r.HasSnapshotTime ? r.SnapshotNode : null,
         ClusterSnapshotPhysical = r.HasSnapshotTime ? r.SnapshotPhysical : null,
-        ClusterSnapshotCounter = r.HasSnapshotTime ? r.SnapshotCounter : null
+        ClusterSnapshotCounter = r.HasSnapshotTime ? r.SnapshotCounter : null,
+        RequestedKind = string.IsNullOrEmpty(r.RequestedKind) ? null : r.RequestedKind,
+        ActualKind = string.IsNullOrEmpty(r.ActualKind) ? null : r.ActualKind,
+        SubstitutionReason = string.IsNullOrEmpty(r.SubstitutionReason) ? null : r.SubstitutionReason,
+        FormatVersion = r.FormatVersion,
+        IsInvalid = r.IsInvalid,
+        InvalidReason = string.IsNullOrEmpty(r.InvalidReason) ? null : r.InvalidReason,
+        MinRecoverablePhysicalMs = r.HasCoverage ? r.MinRecoverablePhysicalMs : null,
+        MaxRecoverablePhysicalMs = r.HasCoverage ? r.MaxRecoverablePhysicalMs : null
     };
+
+    /// <summary>
+    /// Runs a backup gRPC call, reconstructing a typed <see cref="KahunaBackupException"/> from the
+    /// outcome trailer when the server rejected the operation.
+    /// </summary>
+    private static async Task<T> InvokeBackup<T>(Func<Task<T>> call)
+    {
+        try
+        {
+            return await call().ConfigureAwait(false);
+        }
+        catch (RpcException ex)
+        {
+            Metadata.Entry? outcomeEntry = ex.Trailers.Get(KahunaBackupWire.OutcomeGrpcTrailer);
+            if (outcomeEntry is not null &&
+                Enum.TryParse(outcomeEntry.Value, out KahunaBackupOutcome outcome))
+                throw new KahunaBackupException(outcome, ex.Status.Detail);
+            throw;
+        }
+    }
 }

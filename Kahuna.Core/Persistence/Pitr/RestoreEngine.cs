@@ -75,9 +75,18 @@ internal static class RestoreEngine
         HLCTimestamp targetTime,
         IPersistenceBackend backend,
         TimeSpan? pitrWindow = null,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        CancellationToken ct = default,
+        bool alreadyVerified = false)
     {
         ValidateWindow(targetTime, pitrWindow, nowUtc);
+
+        // Verify the Full's artifacts up front (fail closed before mutating anything). Incrementals
+        // are verified at point of use — immediately before their segments are read — to minimize the
+        // verify-then-use window. Callers that verify externally (e.g. after staging the checkpoint)
+        // pass alreadyVerified to skip re-hashing here.
+        if (!alreadyVerified && chain.Count > 0)
+            BackupArtifactVerifier.Verify(chain[0], artifactsDir, ct);
 
         long totalApplied = 0;
         HLCTimestamp lastAppliedTime = default;
@@ -88,6 +97,12 @@ internal static class RestoreEngine
         // Replay incrementals in chronological order.
         foreach (BackupManifest manifest in chain.Skip(1))
         {
+            ct.ThrowIfCancellationRequested();
+
+            // Verify this incremental's artifacts immediately before consuming them.
+            if (!alreadyVerified)
+                BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
+
             string artifactPath = Path.Combine(artifactsDir, manifest.BackupId.ToString("N"));
 
             foreach (PartitionBackupRange range in manifest.PartitionRanges)
@@ -95,8 +110,13 @@ internal static class RestoreEngine
                 int partitionId = range.PartitionId;
                 string walFile = Path.Combine(artifactPath, $"partition_{partitionId}.wal");
 
+                // Every range in an incremental manifest was written with a segment file. A missing
+                // file is corruption, not an empty partition — fail closed rather than silently
+                // dropping the partition's changes.
                 if (!File.Exists(walFile))
-                    continue;
+                    throw new BackupArtifactException(
+                        $"Backup {manifest.BackupId:N}: declared segment for partition {partitionId} " +
+                        $"is missing ({walFile}).");
 
                 List<WalSegmentEntry>? entries = JsonSerializer.Deserialize<List<WalSegmentEntry>>(
                     File.ReadAllText(walFile), JsonOptions);
@@ -108,6 +128,7 @@ internal static class RestoreEngine
 
                 foreach (WalSegmentEntry entry in entries)
                 {
+                    ct.ThrowIfCancellationRequested();
                     // HLC stop-predicate: entries are in ascending index (and therefore HLC) order.
                     if (entry.Time.CompareTo(targetTime) > 0)
                         break;

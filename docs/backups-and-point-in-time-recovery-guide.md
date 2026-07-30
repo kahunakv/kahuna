@@ -120,9 +120,11 @@ liability.
 Two settings control this:
 
 - **`PitrWindow`** (default 1 hour, max 6 hours) — how far back you can recover.
-- **`BaseSnapshotInterval`** (default 30 minutes) — how often a fresh base image is taken. It must be
-  no larger than the window, so a base image always exists within reach of the oldest recoverable
-  point.
+- **`BaseSnapshotInterval`** (default 30 minutes) — the cadence at which the WAL-retention floor is
+  recomputed, and a safety margin added below the window when computing that floor (the protected
+  boundary is `now − PitrWindow − BaseSnapshotInterval`). It does **not** schedule backups — Kahuna
+  takes no base image on its own; full and incremental backups are operator-triggered (§5–§6). Keep it
+  no larger than the window so the retained log always reaches back to the oldest recoverable point.
 
 > **Concept — compaction and the retention floor.** Normally the WAL is *compacted* (old entries
 > trimmed) once their effects are safely on disk — otherwise the log grows forever. But PITR needs the
@@ -153,10 +155,12 @@ Before the mechanics, the shape of the whole system:
 ```
 
 > **Decision — base image + deltas, not "a full copy every time."** A full copy of a large dataset is
-> expensive and slow. Instead Kahuna takes an occasional **base image** and then captures cheap
-> **deltas** (log slices) between them. Restoring means "load the nearest base, then replay the few
-> deltas on top." This is the classic trade that makes frequent backups affordable and restores fast,
-> as long as a base image is never too far behind (which `BaseSnapshotInterval` guarantees).
+> expensive and slow. Instead an operator takes an occasional **base image** (a full backup) and then
+> captures cheap **deltas** (incrementals — log slices) between them. Restoring means "load the nearest
+> base, then replay the few deltas on top." This is the classic trade that makes frequent backups
+> affordable and restores fast — provided the operator (or their scheduler) takes a fresh full often
+> enough that a base image is never too far behind. `BaseSnapshotInterval` does not do this for you; it
+> only bounds how long the WAL is retained so an incremental can still be cut against the last base.
 
 The next two sections are just these two shapes in detail.
 
@@ -367,16 +371,36 @@ restore alone reconstitutes a running system.
 | Setting | Default | What it controls |
 |---|---|---|
 | `PitrWindow` (`--pitr-window`, seconds) | 1 hour | How far back you can recover. Larger = more recovery range, more retained WAL. Max 6 hours. |
-| `BaseSnapshotInterval` (`--base-snapshot-interval`, seconds) | 30 minutes | How often a fresh base image is taken. Smaller = faster restores (less log to replay), more snapshot overhead. Must be ≤ `PitrWindow`. |
+| `BaseSnapshotInterval` (`--base-snapshot-interval`, seconds) | 30 minutes | WAL-retention-floor tick cadence and the safety margin below the window (`floor = now − PitrWindow − BaseSnapshotInterval`). Does **not** schedule backups. Must be ≤ `PitrWindow`. |
 
 Rules of thumb:
 
 - **Storage cost** is roughly `PitrWindow × write throughput` of retained WAL, plus the base images
   overlapping the window. Pick the window from how far back you realistically need to recover.
-- **Restore speed** depends on how much log must be replayed after the base image — so a shorter
-  `BaseSnapshotInterval` makes restores faster at the cost of taking snapshots more often.
+- **Restore speed** depends on how much log must be replayed after the base image — so taking a fresh
+  full backup more often makes restores faster at the cost of more snapshot overhead. This cadence is
+  set by whatever schedules your backups (an operator/cron calling `TakeFullBackup`), **not** by
+  `BaseSnapshotInterval` — that setting only governs how long WAL is retained so an incremental can
+  still be cut against the last base.
 - **A `T` outside the window is rejected.** If you need to recover further back than the window, you
   need an external archive of older full backups; the live system intentionally does not keep them.
+- **Restore-target coverage is exact, not wall-clock-based.** A resolved chain reports its recoverable
+  window `[MinRecoverablePhysicalMs, MaxRecoverablePhysicalMs]` on the head (Full) entry of
+  `GetBackupChain`, and restore rejects a target outside it with a `TargetOutsideCoverage` outcome —
+  independent of how much time has passed since the backup was taken.
+
+**Persisted-state contract (what a PITR image contains):**
+
+- **Key-values with history** (the default) are captured *exactly* as-of the cut — the newest revision
+  with `LastModified ≤ cut`, rolling back anything newer.
+- **Keys written with `SetNoRevision`** keep no history, so a value written after the cut cannot be
+  rolled back and an overwrite is indistinguishable from a brand-new key. A backup **fails closed**
+  (`ExactCheckpointUnavailable`) if any such key was modified after the cut, rather than silently
+  dropping or over-including it. Reserve `SetNoRevision` for keys you don't need point-in-time recovery
+  on, or expect backups to fail while such keys are being written.
+- **Locks are not part of a PITR image.** They are volatile lease/coordination state with no history;
+  including a snapshot would leak stale or post-cut locks. A restored/bootstrapped node starts with no
+  persisted locks and re-establishes them at runtime (from the cluster / re-acquisition).
 
 ---
 

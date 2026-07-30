@@ -10,80 +10,83 @@ public static class BackupsHandlers
 {
     public static void MapBackupsRoutes(WebApplication app)
     {
-        app.MapPost("/v1/backups/full", async (IKahuna kahuna, CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
+        app.MapPost("/v1/backups/full", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeFullBackupAsync(ct))));
 
-            KahunaBackupInfo info = await kahuna.TakeFullBackupAsync(ct);
-            return Results.Ok(info);
-        });
+        app.MapPost("/v1/backups/incremental", (
+            [FromBody] KahunaBackupIncrementalRequest req, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeIncrementalBackupAsync(req.ParentBackupId, ct))));
 
-        app.MapPost("/v1/backups/incremental", async (
-            [FromBody] KahunaBackupIncrementalRequest req,
-            IKahuna kahuna,
-            CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
+        app.MapPost("/v1/backups/coordinated", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeCoordinatedBackupAsync(ct))));
 
-            KahunaBackupInfo info = await kahuna.TakeIncrementalBackupAsync(req.ParentBackupId, ct);
-            return Results.Ok(info);
-        });
+        app.MapGet("/v1/backups", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.ListBackupsAsync(ct))));
 
-        app.MapPost("/v1/backups/coordinated", async (IKahuna kahuna, CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
+        app.MapGet("/v1/backups/{id}/chain", (Guid id, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.GetBackupChainAsync(id, ct))));
 
-            KahunaBackupInfo info = await kahuna.TakeCoordinatedBackupAsync(ct);
-            return Results.Ok(info);
-        });
+        app.MapPost("/v1/backups/validate-chain", (
+            [FromBody] KahunaBackupRestoreRequest req, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.GetBackupChainAsync(req.LeafBackupId, ct))));
 
-        app.MapGet("/v1/backups", async (IKahuna kahuna, CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
+        app.MapPost("/v1/restore", (
+            [FromBody] KahunaBackupRestoreRequest req, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
+            Guard(kahuna, resp, async () =>
+            {
+                if (!kahuna.IsRemoteRestoreAllowed)
+                {
+                    resp.Headers[KahunaBackupWire.OutcomeHttpHeader] = nameof(KahunaBackupOutcome.NotConfigured);
+                    return Results.Problem(
+                        "Remote restore is disabled on this node. Configure a server-owned restore root " +
+                        "(RestoreRoot) or explicitly allow unconfined remote restore.",
+                        statusCode: 403,
+                        extensions: new Dictionary<string, object?> { ["outcome"] = nameof(KahunaBackupOutcome.NotConfigured) });
+                }
 
-            IReadOnlyList<KahunaBackupInfo> list = await kahuna.ListBackupsAsync(ct);
-            return Results.Ok(list);
-        });
+                if (string.IsNullOrWhiteSpace(req.TargetDir))
+                    return Results.Problem("targetDir is required.", statusCode: 400);
 
-        app.MapGet("/v1/backups/{id}/chain", async (Guid id, IKahuna kahuna, CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
-
-            IReadOnlyList<KahunaBackupInfo> chain = await kahuna.GetBackupChainAsync(id, ct);
-            return Results.Ok(chain);
-        });
-
-        app.MapPost("/v1/backups/validate-chain", async (
-            [FromBody] KahunaBackupRestoreRequest req,
-            IKahuna kahuna,
-            CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
-
-            IReadOnlyList<KahunaBackupInfo> chain = await kahuna.GetBackupChainAsync(req.LeafBackupId, ct);
-            return Results.Ok(chain);
-        });
-
-        app.MapPost("/v1/restore", async (
-            [FromBody] KahunaBackupRestoreRequest req,
-            IKahuna kahuna,
-            CancellationToken ct) =>
-        {
-            if (!kahuna.IsBackupConfigured)
-                return Results.Problem("Backup is not configured on this node.", statusCode: 503);
-
-            if (string.IsNullOrWhiteSpace(req.TargetDir))
-                return Results.Problem("targetDir is required.", statusCode: 400);
-
-            KahunaRestoreResponse result = await kahuna.RestoreToAsync(
-                req.LeafBackupId, req.TargetDir, req.TargetTimeMs, ct);
-            return Results.Ok(result);
-        });
+                return Results.Ok(await kahuna.RestoreToAsync(req.LeafBackupId, req.TargetDir, req.TargetTimeMs, ct));
+            }));
     }
+
+    /// <summary>
+    /// Checks backup configuration, runs the handler, and translates a typed
+    /// <see cref="KahunaBackupException"/> into a stable ProblemDetails carrying the
+    /// <see cref="KahunaBackupOutcome"/> (as an <c>outcome</c> extension and the
+    /// <see cref="KahunaBackupWire.OutcomeHttpHeader"/> response header) so remote clients can
+    /// reconstruct the typed exception.
+    /// </summary>
+    private static async Task<IResult> Guard(IKahuna kahuna, HttpResponse resp, Func<Task<IResult>> body)
+    {
+        if (!kahuna.IsBackupConfigured)
+        {
+            resp.Headers[KahunaBackupWire.OutcomeHttpHeader] = nameof(KahunaBackupOutcome.NotConfigured);
+            return Results.Problem("Backup is not configured on this node.", statusCode: 503,
+                extensions: new Dictionary<string, object?> { ["outcome"] = nameof(KahunaBackupOutcome.NotConfigured) });
+        }
+
+        try
+        {
+            return await body();
+        }
+        catch (KahunaBackupException ex)
+        {
+            resp.Headers[KahunaBackupWire.OutcomeHttpHeader] = ex.Outcome.ToString();
+            return Results.Problem(ex.Message, statusCode: MapHttpStatus(ex.Outcome),
+                extensions: new Dictionary<string, object?> { ["outcome"] = ex.Outcome.ToString() });
+        }
+    }
+
+    private static int MapHttpStatus(KahunaBackupOutcome outcome) => outcome switch
+    {
+        KahunaBackupOutcome.NotConfigured => 503,
+        KahunaBackupOutcome.RetryableLeadershipLoss => 503,
+        KahunaBackupOutcome.ParentMissing => 404,
+        KahunaBackupOutcome.TargetConflict => 409,
+        KahunaBackupOutcome.Cancelled => 499,
+        KahunaBackupOutcome.IoError => 500,
+        _ => 422 // correctness/precondition failures (corrupt, coverage, needs-full, unsupported, …)
+    };
 }

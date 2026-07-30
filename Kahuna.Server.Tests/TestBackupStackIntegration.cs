@@ -65,6 +65,31 @@ public sealed class TestBackupStackIntegration : IDisposable
         Assert.True(node.Kahuna.IsBackupConfigured);
     }
 
+    [Fact]
+    public async Task IsRemoteRestoreAllowed_FalseByDefault_TrueWithRestoreRoot()
+    {
+        await using EmbeddedKahunaNode denied = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            BackupDir = BakDir("rr_denied")
+        }, loggerFactory);
+        await denied.StartAsync(TestContext.Current.CancellationToken);
+        Assert.False(denied.Kahuna.IsRemoteRestoreAllowed); // administrative: denied by default
+
+        await using EmbeddedKahunaNode allowed = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            BackupDir = BakDir("rr_allowed"),
+            RestoreRoot = BakDir("rr_root")
+        }, loggerFactory);
+        await allowed.StartAsync(TestContext.Current.CancellationToken);
+        Assert.True(allowed.Kahuna.IsRemoteRestoreAllowed); // enabled by configuring a server-owned root
+    }
+
     // ── C2: TakeFullBackupAsync flushes dirty data, returns Full DTO ────────────────────────
 
     [Fact]

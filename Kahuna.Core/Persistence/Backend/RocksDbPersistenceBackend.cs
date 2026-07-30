@@ -1022,7 +1022,22 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
     }
 
+    public bool SupportsExactAsOfCheckpoint => true;
+
     public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)
+        => CreateCheckpointCore(destinationPath, appliedIndex, appliedTime, cut: null);
+
+    /// <summary>
+    /// Exact as-of-<paramref name="cut"/> checkpoint: takes a native checkpoint, then trims the copy
+    /// so each key is left at its newest revision with <c>LastModified ≤ cut</c> (or removed if its
+    /// whole history is newer). The live database is never modified — only the checkpoint copy.
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default)
+        => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, ct: ct);
+
+    private CheckpointResult CreateCheckpointCore(
+        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut, CancellationToken ct = default)
     {
         // rocksdb_checkpoint_create requires the leaf to NOT exist — it creates the directory
         // itself. Use a temp sibling so a failure before the rename can never leave a partial
@@ -1035,8 +1050,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         try
         {
-            using Checkpoint cp = db.Checkpoint();
-            cp.Save(tmpPath, logSizeForFlush: 0); // RocksDB creates tmpPath
+            using (Checkpoint cp = db.Checkpoint())
+                cp.Save(tmpPath, logSizeForFlush: 0); // RocksDB creates tmpPath
+
+            if (cut.HasValue)
+                TrimCheckpointAsOf(tmpPath, cut.Value, ct);
 
             CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
             manifest.WriteTo(tmpPath);
@@ -1051,6 +1069,179 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 Directory.Delete(tmpPath, recursive: true);
             throw;
         }
+    }
+
+    private sealed class KeyTrimState
+    {
+        public long BestRevision = -1;
+        public byte[]? BestValue;
+        public bool HasAnyRevision;
+        public byte[]? CurrentKey;
+        public HLCTimestamp CurrentLastModified;
+        public readonly List<byte[]> FutureRevisionKeys = [];
+    }
+
+    // Flush the write batch to the copy after this many buffered operations, so neither the batch
+    // nor managed state grows with the store size.
+    private const int TrimBatchFlushThreshold = 4096;
+
+    /// <summary>
+    /// Opens the checkpoint copy at <paramref name="checkpointPath"/> and removes all state newer than
+    /// <paramref name="cut"/> from the <c>kv</c> column family: future revision rows are deleted, each
+    /// key's <c>~CURRENT</c> row is reset to its newest surviving revision (or deleted if none survive),
+    /// historyless keys newer than the cut fail closed, and the <c>locks</c> family is emptied. A final
+    /// full compaction physically rewrites the SSTs so no post-cut payload remains in the artifact.
+    /// <para>Streams one logical key's rows at a time (they are contiguous in sorted order) and flushes
+    /// bounded write batches, so peak memory and batch size are independent of the store size.</para>
+    /// </summary>
+    private static void TrimCheckpointAsOf(string checkpointPath, HLCTimestamp cut, CancellationToken ct)
+    {
+        DbOptions options = new DbOptions()
+            .SetCreateIfMissing(false)
+            .SetCreateMissingColumnFamilies(false);
+
+        ColumnFamilies columnFamilies = new()
+        {
+            { "kv", new ColumnFamilyOptions() },
+            { "locks", new ColumnFamilyOptions() }
+        };
+
+        using RocksDb copy = RocksDb.Open(options, checkpointPath, columnFamilies);
+        ColumnFamilyHandle kv = copy.GetColumnFamily("kv");
+        ColumnFamilyHandle locksCf = copy.GetColumnFamily("locks");
+
+        WriteBatch batch = new();
+        int batchOps = 0;
+
+        void FlushIfLarge()
+        {
+            if (batchOps < TrimBatchFlushThreshold)
+                return;
+            copy.Write(batch);
+            batch.Dispose();
+            batch = new WriteBatch();
+            batchOps = 0;
+        }
+
+        try
+        {
+            string? currentLogical = null;
+            KeyTrimState st = new();
+
+            void FlushGroup()
+            {
+                if (currentLogical is null)
+                    return;
+
+                if (st.BestRevision >= 0)
+                {
+                    // Reset ~CURRENT to the newest surviving revision (same serialized message)...
+                    batch.Put(st.CurrentKey ?? BuildCurrentKey(currentLogical), st.BestValue!, cf: kv);
+                    batchOps++;
+                }
+                else if (st.HasAnyRevision)
+                {
+                    // ...every revision was after the cut → the key did not exist at the cut.
+                    if (st.CurrentKey is not null) { batch.Delete(st.CurrentKey, cf: kv); batchOps++; }
+                }
+                else if (st.CurrentLastModified.CompareTo(cut) > 0)
+                {
+                    // Historyless key (SetNoRevision) newer than the cut — unrecoverable. Fail closed
+                    // (nothing durable has been written yet beyond bounded intermediate flushes, and
+                    // the whole checkpoint copy is discarded by the caller on throw).
+                    throw new ExactCheckpointUnavailableException(
+                        $"Key '{currentLogical}' was written with SetNoRevision and last modified after " +
+                        $"the backup cut {cut}; its state as-of the cut cannot be reconstructed.");
+                }
+
+                foreach (byte[] futureRev in st.FutureRevisionKeys) { batch.Delete(futureRev, cf: kv); batchOps++; }
+            }
+
+            using (Iterator it = copy.NewIterator(cf: kv))
+            {
+                it.SeekToFirst();
+                while (it.Valid())
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    ReadOnlySpan<byte> rawKey = it.GetKeySpan();
+                    int lastTilde = rawKey.LastIndexOf((byte)'~');
+                    if (lastTilde < 0) { it.Next(); continue; }
+
+                    ReadOnlySpan<byte> suffix = rawKey[(lastTilde + 1)..];
+                    string logicalKey = Encoding.UTF8.GetString(rawKey[..lastTilde]);
+
+                    // All rows of one logical key are contiguous in sorted order — a change of logical
+                    // key closes the previous group and starts a new one, keeping memory bounded.
+                    if (logicalKey != currentLogical)
+                    {
+                        FlushGroup();
+                        FlushIfLarge();
+                        currentLogical = logicalKey;
+                        st = new KeyTrimState();
+                    }
+
+                    RocksDbKeyValueMessage message = UnserializeKeyValueMessage(it.GetValueSpan());
+                    HLCTimestamp lm = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter);
+
+                    if (suffix.SequenceEqual(CurrentMarkerUtf8[1..]))
+                    {
+                        st.CurrentKey = rawKey.ToArray();
+                        st.CurrentLastModified = lm;
+                    }
+                    else if (Utf8Parser.TryParse(suffix, out long revision, out int consumed) && consumed == suffix.Length)
+                    {
+                        st.HasAnyRevision = true;
+                        if (lm.CompareTo(cut) > 0)
+                            st.FutureRevisionKeys.Add(rawKey.ToArray()); // committed after the cut → drop
+                        else if (revision > st.BestRevision)
+                        {
+                            st.BestRevision = revision;
+                            st.BestValue = it.GetValueSpan().ToArray();
+                        }
+                    }
+
+                    it.Next();
+                }
+            }
+
+            FlushGroup();
+
+            // Exclude locks from the as-of image — volatile lease state re-established at runtime.
+            using (Iterator lockIt = copy.NewIterator(cf: locksCf))
+            {
+                lockIt.SeekToFirst();
+                while (lockIt.Valid())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    batch.Delete(lockIt.GetKeySpan().ToArray(), cf: locksCf);
+                    batchOps++;
+                    FlushIfLarge();
+                    lockIt.Next();
+                }
+            }
+
+            copy.Write(batch);
+        }
+        finally
+        {
+            batch.Dispose();
+        }
+
+        // Physically purge: a full compaction rewrites the SSTs, dropping the deleted/overwritten
+        // post-cut values so no artifact byte discloses state newer than the cut. Null bounds compact
+        // the entire column family.
+        copy.CompactRange((byte[]?)null, (byte[]?)null, kv);
+        copy.CompactRange((byte[]?)null, (byte[]?)null, locksCf);
+    }
+
+    private static byte[] BuildCurrentKey(string logicalKey)
+    {
+        int keyLen = Encoding.UTF8.GetByteCount(logicalKey);
+        byte[] buffer = new byte[keyLen + CurrentMarkerUtf8.Length];
+        Encoding.UTF8.GetBytes(logicalKey, buffer);
+        CurrentMarkerUtf8.CopyTo(buffer.AsSpan(keyLen));
+        return buffer;
     }
 
     public void Dispose()

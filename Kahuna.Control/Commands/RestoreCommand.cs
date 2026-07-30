@@ -22,6 +22,8 @@ public static class RestoreCommand
         AnsiConsole.MarkupLine("  WAL entries applied: [green]{0}[/]", result.EntriesApplied);
         if (result.LastAppliedPhysicalMs > 0)
             AnsiConsole.MarkupLine("  Last applied time:   [green]{0} ms[/]", result.LastAppliedPhysicalMs);
+        AnsiConsole.MarkupLine("  Recoverable window:  [blue]{0}..{1} ms[/]",
+            result.MinRecoverablePhysicalMs, result.MaxRecoverablePhysicalMs);
         AnsiConsole.MarkupLine("\nChain ({0} entries):", result.Chain.Count);
         foreach (KahunaBackupInfo b in result.Chain)
             AnsiConsole.MarkupLine("  [white]{0}[/]  {1}", b.BackupId, b.Type);

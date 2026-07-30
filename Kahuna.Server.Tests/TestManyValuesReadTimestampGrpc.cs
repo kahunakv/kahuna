@@ -242,6 +242,7 @@ public class TestManyValuesReadTimestampGrpc
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public bool IsBackupConfigured => throw new NotImplementedException();
+        public bool IsRemoteRestoreAllowed => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();

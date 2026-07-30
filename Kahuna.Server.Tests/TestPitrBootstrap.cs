@@ -223,7 +223,8 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        BootstrapHelper.BootstrapNode(chain, artifacts, T(300), dst, dstWal,
+        // Zero → the chain's natural end (max captured HLC).
+        BootstrapHelper.BootstrapNode(chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         RaftLog? cp1 = FindCheckpoint(dstWal, 1);
@@ -264,7 +265,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        BootstrapHelper.BootstrapNode(chain, artifacts, T(300), dst, dstWal,
+        BootstrapHelper.BootstrapNode(chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         RaftLog? cp = FindCheckpoint(dstWal, 1);
@@ -347,7 +348,7 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL dstWal = new(Log);
 
         RestoreResult result = BootstrapHelper.BootstrapNode(
-            chain, artifacts, T(250), dst, dstWal,
+            chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         // At least the incremental entry was applied.
@@ -381,11 +382,84 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL dstWal = new(Log);
 
         RestoreResult result = BootstrapHelper.BootstrapNode(
-            chain, artifacts, T(100), dst, dstWal,
+            chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         Assert.Equal(0, result.EntriesApplied);
         // No WAL entries written for partition 1.
         Assert.Empty(dstWal.ReadLogsRange(1, 0));
+    }
+
+    // ── coverage-bound enforcement ────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Bootstrap_TargetBelowBaseCut_RejectsAndLeavesWalUnchanged()
+    {
+        string artifacts = ArtifactsDir("cov_below");
+        BackupCatalog catalog = NewCatalog("cov_below");
+
+        // Base cut = 100 (the max committed HLC captured by the full).
+        InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)));
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog);
+        Assert.Equal(T(100), full.BaseCut);
+
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
+        MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
+        InMemoryWAL dstWal = new(Log);
+
+        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
+            BootstrapHelper.BootstrapNode(chain, artifacts, T(50), dst, dstWal, TimeSpan.FromHours(1), NowUtc(200)));
+
+        Assert.True(ex.TargetOutsideCoverage);
+        // Validation ran before any mutation: no synthetic checkpoint was seeded.
+        Assert.Null(FindCheckpoint(dstWal, 1));
+    }
+
+    [Fact]
+    public async Task Bootstrap_TargetAboveCoverage_Rejects()
+    {
+        string artifacts = ArtifactsDir("cov_above");
+        BackupCatalog catalog = NewCatalog("cov_above");
+
+        InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)));
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog);
+
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
+        MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
+        InMemoryWAL dstWal = new(Log);
+
+        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
+            BootstrapHelper.BootstrapNode(chain, artifacts, T(150), dst, dstWal, TimeSpan.FromHours(1), NowUtc(200)));
+
+        Assert.True(ex.TargetOutsideCoverage);
+        Assert.Null(FindCheckpoint(dstWal, 1));
+    }
+
+    [Fact]
+    public async Task Bootstrap_ZeroTarget_SucceedsAtNaturalEnd_WithDivergentPartitionHlcs()
+    {
+        string artifacts = ArtifactsDir("cov_zero");
+        BackupCatalog catalog = NewCatalog("cov_zero");
+
+        // Divergent partition HLCs: P1 ends at HLC 100, P2 at HLC 500. Base cut = max HLC = 500.
+        InMemoryWAL wal = BuildWal(
+            (1, KvLog(1, 100, "k1", "v1", 1)),
+            (2, KvLog(1, 500, "k2", "v2", 1)));
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], new MemoryPersistenceBackend(), artifacts, catalog);
+        Assert.Equal(T(500), full.BaseCut);
+
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
+        MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
+        InMemoryWAL dstWal = new(Log);
+
+        // Zero → validated natural end (500); window is large enough (now = 600 ms) to pass the guard.
+        BootstrapHelper.BootstrapNode(chain, artifacts, HLCTimestamp.Zero, dst, dstWal, TimeSpan.FromHours(1), NowUtc(600));
+
+        // Both partitions seeded at their captured high-water marks.
+        Assert.NotNull(FindCheckpoint(dstWal, 1));
+        Assert.NotNull(FindCheckpoint(dstWal, 2));
     }
 }

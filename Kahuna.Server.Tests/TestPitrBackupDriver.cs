@@ -416,6 +416,63 @@ public sealed class TestPitrBackupDriver : IDisposable
         Assert.Equal(BackupType.Incremental, chain[1].Type);
     }
 
+    // ── sparse-incremental high-water marks ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Incremental_SparseParent_ContinuesFromTransitiveHighWater()
+    {
+        // Full covers P1 through index 2. An empty incremental omits P1 (no new entries). A later
+        // incremental must continue from the FULL's high-water (index 3), not restart at 1.
+        InMemoryWAL wal = BuildWal(
+            (1, 1, 100, RaftLogType.Committed),
+            (1, 2, 200, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("sparse");
+        string artifacts = ArtifactsDir("sparse");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog);
+
+        // No new WAL entries → empty incremental, P1 omitted.
+        BackupManifest inc1 = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        Assert.Empty(inc1.PartitionRanges);
+
+        // A new entry appears after inc1.
+        wal.Write([(1, [new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) }])]);
+
+        BackupManifest inc2 = BackupDriver.RunIncremental(wal, [Part(1)], inc1.BackupId, artifacts, catalog);
+
+        PartitionBackupRange? p1 = inc2.PartitionRanges.FirstOrDefault(r => r.PartitionId == 1);
+        Assert.NotNull(p1);
+        Assert.Equal(3L, p1!.FromIndex); // transitive: full.ToIndex(2)+1 — NOT a restart at 1
+        Assert.Equal(3L, p1.ToIndex);
+    }
+
+    [Fact]
+    public void Validate_HiddenGapAcrossSparseIncremental_Throws()
+    {
+        BackupManifest full = BackupManifest.CreateFull(
+            [PartitionBackupRange.Create(1, 1, default, 2, new HLCTimestamp(0, 200, 0))]);
+        BackupManifest inc1 = BackupManifest.CreateIncremental(full.BackupId, []); // sparse: omits P1
+        BackupManifest inc2 = BackupManifest.CreateIncremental(inc1.BackupId,
+            [PartitionBackupRange.Create(1, 1, new HLCTimestamp(0, 100, 0), 5, new HLCTimestamp(0, 500, 0))]);
+
+        // inc2 restarts P1 at index 1 while the transitive high-water is 2 → hidden gap, rejected.
+        Assert.Throws<BackupChainException>(() => BackupCatalog.Validate([full, inc1, inc2]));
+    }
+
+    [Fact]
+    public void Validate_TransitiveContiguityAcrossSparseIncremental_Accepts()
+    {
+        BackupManifest full = BackupManifest.CreateFull(
+            [PartitionBackupRange.Create(1, 1, default, 2, new HLCTimestamp(0, 200, 0))]);
+        BackupManifest inc1 = BackupManifest.CreateIncremental(full.BackupId, []); // sparse: omits P1
+        BackupManifest inc2 = BackupManifest.CreateIncremental(inc1.BackupId,
+            [PartitionBackupRange.Create(1, 3, new HLCTimestamp(0, 300, 0), 5, new HLCTimestamp(0, 500, 0))]);
+
+        // inc2 continues from the full's high-water (2)+1 = 3 across the sparse link → accepted.
+        BackupCatalog.Validate([full, inc1, inc2]);
+    }
+
     // ── test helpers ────────────────────────────────────────────────────────────────────────
 
     /// <summary>

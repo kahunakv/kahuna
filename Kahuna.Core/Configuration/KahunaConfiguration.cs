@@ -455,4 +455,22 @@ public sealed class KahunaConfiguration
     /// When empty, backup operations are disabled.
     /// </summary>
     public string BackupDir { get; set; } = "";
+
+    /// <summary>
+    /// Server-owned root directory that restore destinations must be canonically contained within.
+    /// When set, a restore <c>targetDir</c> (from any caller, including remote REST/gRPC requests) is
+    /// confined under this root after resolving symlinks on every ancestor. When empty, no root
+    /// confinement is applied — and remote restore is refused by default (see
+    /// <see cref="AllowUnconfinedRemoteRestore"/>): configuring a restore root is the opt-in that
+    /// enables remote restore.
+    /// </summary>
+    public string RestoreRoot { get; set; } = "";
+
+    /// <summary>
+    /// Escape hatch to allow remote (REST/gRPC) restore requests even when no <see cref="RestoreRoot"/>
+    /// is configured. Default false — restore is an administrative operation, and without a
+    /// server-owned root or authentication a remote caller could plant/oversize files at arbitrary
+    /// process-writable paths, so remote restore is denied unless explicitly opted in here.
+    /// </summary>
+    public bool AllowUnconfinedRemoteRestore { get; set; }
 }

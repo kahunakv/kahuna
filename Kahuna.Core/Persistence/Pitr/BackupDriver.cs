@@ -1,5 +1,4 @@
 
-using System.Security.Cryptography;
 using System.Text.Json;
 using Kahuna.Server.Persistence.Backend;
 using Kommander;
@@ -57,9 +56,9 @@ internal sealed class BackupDriver
     /// cluster-wide consistent-cut timestamp.
     /// </summary>
     public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog,
-        HLCTimestamp? snapshotT = null) =>
+        HLCTimestamp? snapshotT = null, CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
-            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT);
+            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT, ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -72,8 +71,8 @@ internal sealed class BackupDriver
     /// first entry whose <c>Time > T</c> and T is recorded in the manifest.
     /// </summary>
     public BackupManifest TakeIncrementalBackup(Guid parentBackupId, string artifactsDir,
-        BackupCatalog catalog, HLCTimestamp? snapshotT = null) =>
-        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT);
+        BackupCatalog catalog, HLCTimestamp? snapshotT = null, CancellationToken ct = default) =>
+        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT, ct);
 
     // ── core logic (internal so tests can exercise without an IRaft) ─────────────────────
 
@@ -95,64 +94,111 @@ internal sealed class BackupDriver
         string artifactsDir,
         BackupCatalog catalog,
         Func<Task>? flushBeforeCheckpoint = null,
-        HLCTimestamp? snapshotT = null)
+        HLCTimestamp? snapshotT = null,
+        CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
         Directory.CreateDirectory(artifactPath);
 
-        // Read M (per-partition committed max) BEFORE flushing. The flush drains everything
-        // committed as of its call, which is a superset of M. The checkpoint that follows only
-        // adds more — so checkpoint ⊇ [1..M] is guaranteed. The safe order is: read M → flush
-        // → checkpoint. Reversing flush and read leaves a window where a write that commits
-        // after the flush but before M is read is counted in ToIndex yet absent from the backend
-        // when the checkpoint fires (the original gap, just narrower).
-        List<PartitionBackupRange> ranges = [];
-        long maxAppliedIndex = 0;
-        HLCTimestamp maxAppliedTime = default;
-
-        foreach (RaftPartitionRange partition in partitions)
+        try
         {
-            if (partition.State is RaftPartitionState.Draining or RaftPartitionState.Removed)
-                continue;
+            // Read M (per-partition committed max) BEFORE flushing. The flush drains everything
+            // committed as of its call, which is a superset of M. The checkpoint that follows only
+            // adds more — so checkpoint ⊇ [1..M] is guaranteed. The safe order is: read M → flush
+            // → checkpoint. Reversing flush and read leaves a window where a write that commits
+            // after the flush but before M is read is counted in ToIndex yet absent from the backend
+            // when the checkpoint fires (the original gap, just narrower).
+            // An exact as-of image is required for a full backup: a physical-copy fallback would
+            // over-include state committed after the cut, making the recorded BaseCut a lie. Fail
+            // closed rather than publish an unprovable base image.
+            if (!persistenceBackend.SupportsExactAsOfCheckpoint)
+                throw new BackupDriverException(
+                    "The persistence backend cannot produce an exact as-of checkpoint; a full backup " +
+                    "with a proven base cut cannot be taken.") { ExactCheckpointUnavailable = true };
 
-            int partitionId = partition.PartitionId;
-            (long lastId, HLCTimestamp lastHlc, long lastTerm) = snapshotT.HasValue
-                ? FindLastCommittedAtOrBefore(wal, partitionId, snapshotT.Value)
-                : FindLastCommitted(wal, partitionId);
-            if (lastId <= 0)
-                continue;
+            List<PartitionBackupRange> ranges = [];
+            long maxAppliedIndex = 0;
+            HLCTimestamp maxCommittedHlc = default;
 
-            // Full ranges are always anchored at index 1; FromHlc is left at default because
-            // the checkpoint image, not a WAL entry, is the actual starting point on restore.
-            ranges.Add(PartitionBackupRange.Create(partitionId, 1, default, lastId, lastHlc, lastTerm));
-
-            if (lastId > maxAppliedIndex)
+            foreach (RaftPartitionRange partition in partitions)
             {
-                maxAppliedIndex = lastId;
-                maxAppliedTime = lastHlc;
+                ct.ThrowIfCancellationRequested();
+
+                if (partition.State is RaftPartitionState.Draining or RaftPartitionState.Removed)
+                    continue;
+
+                int partitionId = partition.PartitionId;
+                (long lastId, HLCTimestamp lastHlc, long lastTerm) = snapshotT.HasValue
+                    ? FindLastCommittedAtOrBefore(wal, partitionId, snapshotT.Value, ct)
+                    : FindLastCommitted(wal, partitionId, ct);
+                if (lastId <= 0)
+                    continue;
+
+                // Full ranges are always anchored at index 1; FromHlc is left at default because
+                // the checkpoint image, not a WAL entry, is the actual starting point on restore.
+                ranges.Add(PartitionBackupRange.Create(partitionId, 1, default, lastId, lastHlc, lastTerm));
+
+                // The sidecar index is the largest committed index seen; it is per-partition-derived
+                // metadata, NOT a global position. The cut is taken from HLC order below, not from
+                // whichever partition happens to hold the largest index.
+                if (lastId > maxAppliedIndex)
+                    maxAppliedIndex = lastId;
+                if (lastHlc.CompareTo(maxCommittedHlc) > 0)
+                    maxCommittedHlc = lastHlc;
             }
+
+            if (flushBeforeCheckpoint is not null)
+                await flushBeforeCheckpoint();
+
+            ct.ThrowIfCancellationRequested();
+
+            // Cut the base image at a single HLC: the coordinated snapshot T when supplied, else the
+            // maximum committed HLC across all captured partitions (by HLC order — partition log
+            // indexes are partition-local and cannot be compared across partitions). No committed
+            // state newer than the cut belongs in the image — otherwise replay (forward-only, stops
+            // at the restore target) could never remove a post-cut value.
+            HLCTimestamp cut = snapshotT ?? maxCommittedHlc;
+
+            // Every captured range must be at or below the cut — otherwise the manifest would claim
+            // coverage the trimmed checkpoint does not contain.
+            foreach (PartitionBackupRange range in ranges)
+            {
+                if (range.ToHlc.CompareTo(cut) > 0)
+                    throw new BackupDriverException(
+                        $"Partition {range.PartitionId} range ends at {range.ToHlc} which is after the " +
+                        $"base cut {cut}; refusing to publish an inconsistent full backup.");
+            }
+
+            string checkpointPath = Path.Combine(artifactPath, "checkpoint");
+            persistenceBackend.CreateCheckpointAsOf(checkpointPath, maxAppliedIndex, cut, ct);
+
+            // Hash every file the checkpoint produced (data files AND the sidecar), not just the
+            // sidecar, so a truncated or altered checkpoint is caught before replay.
+            (Dictionary<string, string> checksums, Dictionary<string, long> sizes) =
+                BackupArtifactVerifier.HashDirectory(checkpointPath, "checkpoint/", ct);
+
+            BackupManifest manifest = BackupManifest.CreateFull(ranges);
+            manifest.BackupId = backupId;
+            manifest.Checksums = checksums;
+            manifest.Sizes = sizes;
+            manifest.SetBaseCut(cut);
+            if (snapshotT.HasValue)
+                manifest.SetClusterSnapshotTime(snapshotT.Value);
+
+            // Fail closed: never publish a manifest whose artifacts don't verify.
+            BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
+
+            catalog.Put(manifest);
+            return manifest;
         }
-
-        if (flushBeforeCheckpoint is not null)
-            await flushBeforeCheckpoint();
-
-        string checkpointPath = Path.Combine(artifactPath, "checkpoint");
-        persistenceBackend.CreateCheckpoint(checkpointPath, maxAppliedIndex, maxAppliedTime);
-
-        Dictionary<string, string> checksums = [];
-        string manifestSidecar = Path.Combine(checkpointPath, CheckpointManifest.FileName);
-        if (File.Exists(manifestSidecar))
-            checksums["checkpoint/" + CheckpointManifest.FileName] = ComputeSha256(manifestSidecar);
-
-        BackupManifest manifest = BackupManifest.CreateFull(ranges);
-        manifest.BackupId = backupId;
-        manifest.Checksums = checksums;
-        if (snapshotT.HasValue)
-            manifest.SetClusterSnapshotTime(snapshotT.Value);
-
-        catalog.Put(manifest);
-        return manifest;
+        catch
+        {
+            TryDeleteDirectory(artifactPath);
+            throw;
+        }
     }
 
     /// <param name="snapshotT">
@@ -167,77 +213,136 @@ internal sealed class BackupDriver
         Guid parentBackupId,
         string artifactsDir,
         BackupCatalog catalog,
-        HLCTimestamp? snapshotT = null)
+        HLCTimestamp? snapshotT = null,
+        CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+
         BackupManifest? parentManifest = catalog.Get(parentBackupId);
         if (parentManifest is null)
             throw new BackupDriverException(
-                $"Parent backup {parentBackupId:N} not found in catalog.");
+                $"Parent backup {parentBackupId:N} not found in catalog.") { ParentMissing = true };
 
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
         Directory.CreateDirectory(artifactPath);
 
-        Dictionary<int, PartitionBackupRange> parentRanges =
-            parentManifest.PartitionRanges.ToDictionary(r => r.PartitionId);
-
-        List<PartitionBackupRange> ranges = [];
-        Dictionary<string, string> checksums = [];
-
-        foreach (RaftPartitionRange partition in partitions)
+        try
         {
-            if (partition.State is RaftPartitionState.Draining or RaftPartitionState.Removed)
-                continue;
+            // Derive each partition's start from its TRANSITIVE high-water mark across the whole
+            // ancestor chain (Full → … → parent), not just the immediate parent. A sparse/empty
+            // parent that omitted an unchanged partition must not make this incremental treat that
+            // partition as new (which would restart at the WAL floor/1 — silently skipping entries
+            // after compaction, or duplicating the whole WAL without it).
+            IReadOnlyList<BackupManifest> ancestors = catalog.ResolveChain(parentBackupId, ct);
+            Dictionary<int, PartitionBackupRange> parentRanges = BuildHighWaterMarks(ancestors);
 
-            int partitionId = partition.PartitionId;
-            parentRanges.TryGetValue(partitionId, out PartitionBackupRange? pr);
-            long floor = wal.GetLastCheckpoint(partitionId);
+            List<PartitionBackupRange> ranges = [];
+            Dictionary<string, string> checksums = [];
+            Dictionary<string, long> sizes = [];
 
-            long fromIndex;
-            if (pr is not null)
+            foreach (RaftPartitionRange partition in partitions)
             {
-                fromIndex = pr.ToIndex + 1;
-                // Parent's coverage ends before the compaction floor: entries in [parent.ToIndex+1, floor)
-                // may already be gone. A new full is required to recover this partition.
-                if (floor > 0 && fromIndex < floor)
-                    throw new BackupDriverException(
-                        $"Partition {partitionId}: incremental would start at WAL index {fromIndex} " +
-                        $"but the compaction floor is {floor}; a new full backup is required.")
-                    {
-                        NeedsFullBackup = true
-                    };
+                ct.ThrowIfCancellationRequested();
+
+                if (partition.State is RaftPartitionState.Draining or RaftPartitionState.Removed)
+                    continue;
+
+                int partitionId = partition.PartitionId;
+                parentRanges.TryGetValue(partitionId, out PartitionBackupRange? pr);
+                long floor = wal.GetLastCheckpoint(partitionId);
+
+                long fromIndex;
+                if (pr is not null)
+                {
+                    fromIndex = pr.ToIndex + 1;
+                    // Transitive coverage ends before the compaction floor: entries in
+                    // [highWater.ToIndex+1, floor) may already be gone. A new full is required.
+                    if (floor > 0 && fromIndex < floor)
+                        throw new BackupDriverException(
+                            $"Partition {partitionId}: incremental would start at WAL index {fromIndex} " +
+                            $"but the compaction floor is {floor}; a new full backup is required.")
+                        {
+                            NeedsFullBackup = true
+                        };
+                }
+                else
+                {
+                    // Partition appears in NO ancestor manifest — genuinely new. Start from the floor
+                    // so we don't request entries that compaction has already removed.
+                    fromIndex = floor > 0 ? floor : 1;
+                }
+
+                (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc) =
+                    ReadSegment(wal, partitionId, fromIndex, snapshotT, ct);
+
+                if (toIndex == 0)
+                    continue;
+
+                string relPath = $"partition_{partitionId}.wal";
+                string walFile = Path.Combine(artifactPath, relPath);
+                WriteSegmentFile(walFile, segment);
+                checksums[relPath] = BackupArtifactVerifier.ComputeSha256(walFile);
+                sizes[relPath] = new FileInfo(walFile).Length;
+
+                ranges.Add(PartitionBackupRange.Create(partitionId, fromIndex, fromHlc, toIndex, toHlc, toTerm));
             }
-            else
-            {
-                // Partition first appears after the parent snapshot. Start from the floor so we
-                // don't request entries that compaction has already removed.
-                fromIndex = floor > 0 ? floor : 1;
-            }
 
-            (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc) =
-                ReadSegment(wal, partitionId, fromIndex, snapshotT);
+            BackupManifest manifest = BackupManifest.CreateIncremental(parentBackupId, ranges);
+            manifest.BackupId = backupId;
+            manifest.Checksums = checksums;
+            manifest.Sizes = sizes;
+            if (snapshotT.HasValue)
+                manifest.SetClusterSnapshotTime(snapshotT.Value);
 
-            if (toIndex == 0)
-                continue;
+            // Fail closed: never publish a manifest whose artifacts don't verify. The verifier
+            // treats a genuinely empty incremental (no ranges, no segments) as valid.
+            BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
 
-            string walFile = Path.Combine(artifactPath, $"partition_{partitionId}.wal");
-            WriteSegmentFile(walFile, segment);
-            checksums[$"partition_{partitionId}.wal"] = ComputeSha256(walFile);
-
-            ranges.Add(PartitionBackupRange.Create(partitionId, fromIndex, fromHlc, toIndex, toHlc, toTerm));
+            catalog.Put(manifest);
+            return manifest;
         }
-
-        BackupManifest manifest = BackupManifest.CreateIncremental(parentBackupId, ranges);
-        manifest.BackupId = backupId;
-        manifest.Checksums = checksums;
-        if (snapshotT.HasValue)
-            manifest.SetClusterSnapshotTime(snapshotT.Value);
-
-        catalog.Put(manifest);
-        return manifest;
+        catch
+        {
+            TryDeleteDirectory(artifactPath);
+            throw;
+        }
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds the per-partition high-water mark across a resolved ancestor chain: for each partition,
+    /// the range with the greatest <see cref="PartitionBackupRange.ToIndex"/> seen anywhere in the
+    /// chain. Used so a sparse/empty intermediate manifest cannot lower a partition's continuation point.
+    /// </summary>
+    private static Dictionary<int, PartitionBackupRange> BuildHighWaterMarks(IReadOnlyList<BackupManifest> chain)
+    {
+        Dictionary<int, PartitionBackupRange> highWater = [];
+        foreach (BackupManifest manifest in chain)
+        {
+            foreach (PartitionBackupRange range in manifest.PartitionRanges)
+            {
+                if (!highWater.TryGetValue(range.PartitionId, out PartitionBackupRange? cur) || range.ToIndex > cur.ToIndex)
+                    highWater[range.PartitionId] = range;
+            }
+        }
+        return highWater;
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, recursive: true);
+        }
+        catch
+        {
+            // Best-effort cleanup of a partial artifact directory; a leftover dir with no manifest
+            // is swept by the orphan-cleanup path and never chained (it has no catalog entry).
+        }
+    }
 
     private const int PageSize = 256;
 
@@ -248,7 +353,8 @@ internal sealed class BackupDriver
     /// Pages until a committed entry is found or the start of the log is reached.
     /// Returns (0, default, 0) when the partition has no committed entries at all.
     /// </summary>
-    internal static (long id, HLCTimestamp hlc, long term) FindLastCommitted(IWAL wal, int partitionId)
+    internal static (long id, HLCTimestamp hlc, long term) FindLastCommitted(
+        IWAL wal, int partitionId, CancellationToken ct = default)
     {
         long maxLog = wal.GetMaxLog(partitionId);
         if (maxLog <= 0)
@@ -257,6 +363,7 @@ internal sealed class BackupDriver
         long ceiling = maxLog;
         while (ceiling > 0)
         {
+            ct.ThrowIfCancellationRequested();
             long start = Math.Max(1, ceiling - PageSize + 1);
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, start, PageSize);
             if (batch.Count == 0)
@@ -281,7 +388,7 @@ internal sealed class BackupDriver
     /// Returns (0, default, 0) when no qualifying committed entry exists.
     /// </summary>
     private static (long id, HLCTimestamp hlc, long term) FindLastCommittedAtOrBefore(
-        IWAL wal, int partitionId, HLCTimestamp snapshotT)
+        IWAL wal, int partitionId, HLCTimestamp snapshotT, CancellationToken ct = default)
     {
         long maxLog = wal.GetMaxLog(partitionId);
         if (maxLog <= 0)
@@ -290,6 +397,7 @@ internal sealed class BackupDriver
         long ceiling = maxLog;
         while (ceiling > 0)
         {
+            ct.ThrowIfCancellationRequested();
             long start = Math.Max(1, ceiling - PageSize + 1);
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, start, PageSize);
             if (batch.Count == 0)
@@ -317,7 +425,8 @@ internal sealed class BackupDriver
     /// Returns the segment entries, the final log id/hlc/term, and the HLC of the first entry.
     /// </summary>
     private static (List<WalSegmentEntry> entries, long toId, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc)
-        ReadSegment(IWAL wal, int partitionId, long fromIndex, HLCTimestamp? snapshotT = null)
+        ReadSegment(IWAL wal, int partitionId, long fromIndex, HLCTimestamp? snapshotT = null,
+            CancellationToken ct = default)
     {
         List<WalSegmentEntry> entries = [];
         long toId = 0;
@@ -330,6 +439,7 @@ internal sealed class BackupDriver
 
         while (!hitCap)
         {
+            ct.ThrowIfCancellationRequested();
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, cursor, PageSize);
             if (batch.Count == 0)
                 break;
@@ -372,12 +482,5 @@ internal sealed class BackupDriver
         string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
         File.WriteAllText(tmp, JsonSerializer.Serialize(entries, JsonOptions));
         File.Move(tmp, path, overwrite: true);
-    }
-
-    private static string ComputeSha256(string filePath)
-    {
-        using FileStream stream = File.OpenRead(filePath);
-        byte[] hash = SHA256.HashData(stream);
-        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 }

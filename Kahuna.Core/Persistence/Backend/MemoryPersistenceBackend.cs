@@ -280,42 +280,97 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return true;
     }
 
+    public bool SupportsExactAsOfCheckpoint => true;
+
     public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)
+    {
+        List<MemoryCheckpointEntry> kvEntries;
+        lock (kvLock)
+        {
+            kvEntries = new(keyValues.Count);
+            foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
+                kvEntries.Add(ToCheckpointEntry(kv.Key, kv.Value));
+        }
+
+        return WriteCheckpoint(destinationPath, appliedIndex, appliedTime, kvEntries, includeLocks: true);
+    }
+
+    /// <summary>
+    /// Writes an exact as-of-<paramref name="cut"/> checkpoint: for each key the newest revision with
+    /// <c>LastModified ≤ cut</c> (resolved from retained revision history), omitting keys whose entire
+    /// history is newer than the cut. Keys that carry no revision history (NoRevision writes) are
+    /// included only if their latest value is itself ≤ the cut.
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        List<MemoryCheckpointEntry> kvEntries;
+        lock (kvLock)
+        {
+            kvEntries = new(keyValues.Count);
+            foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
+            {
+                KeyValueEntry? asOf;
+                if (keyValueRevisions.ContainsKey(kv.Key))
+                {
+                    asOf = GetKeyValueRevisionAtOrBefore(kv.Key, long.MaxValue, cut);
+                }
+                else
+                {
+                    // Historyless key (written with SetNoRevision): no retained revision to roll back
+                    // to. If its only value is newer than the cut, its as-of-cut state is
+                    // unrecoverable — fail closed rather than drop it or over-include a post-cut value.
+                    if (kv.Value.LastModified.CompareTo(cut) > 0)
+                        throw new ExactCheckpointUnavailableException(
+                            $"Key '{kv.Key}' was written with SetNoRevision and last modified after the " +
+                            $"backup cut {cut}; its state as-of the cut cannot be reconstructed.");
+                    asOf = kv.Value;
+                }
+
+                if (asOf is not null)
+                    kvEntries.Add(ToCheckpointEntry(kv.Key, asOf));
+            }
+        }
+
+        // Locks are excluded from as-of images: they are volatile lease/coordination state with no
+        // history, so a physical snapshot would leak stale/post-cut locks. A restored node re-derives
+        // lock state at runtime (from the cluster / re-acquisition).
+        return WriteCheckpoint(destinationPath, appliedIndex, cut, kvEntries, includeLocks: false);
+    }
+
+    private static MemoryCheckpointEntry ToCheckpointEntry(string key, KeyValueEntry e) => new()
+    {
+        Key = key,
+        Value = e.Value,
+        Revision = e.Revision,
+        ExpiresNode = e.Expires.N,
+        ExpiresPhysical = e.Expires.L,
+        ExpiresCounter = e.Expires.C,
+        LastUsedNode = e.LastUsed.N,
+        LastUsedPhysical = e.LastUsed.L,
+        LastUsedCounter = e.LastUsed.C,
+        LastModifiedNode = e.LastModified.N,
+        LastModifiedPhysical = e.LastModified.L,
+        LastModifiedCounter = e.LastModified.C,
+        State = (int)e.State
+    };
+
+    private CheckpointResult WriteCheckpoint(
+        string destinationPath, long appliedIndex, HLCTimestamp appliedTime,
+        List<MemoryCheckpointEntry> kvEntries, bool includeLocks)
     {
         string tmpPath = destinationPath + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
         Directory.CreateDirectory(tmpPath);
 
         try
         {
-            List<MemoryCheckpointEntry> kvEntries;
-            lock (kvLock)
-            {
-                kvEntries = new(keyValues.Count);
-                foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
-                {
-                    KeyValueEntry e = kv.Value;
-                    kvEntries.Add(new()
-                    {
-                        Key = kv.Key,
-                        Value = e.Value,
-                        Revision = e.Revision,
-                        ExpiresNode = e.Expires.N,
-                        ExpiresPhysical = e.Expires.L,
-                        ExpiresCounter = e.Expires.C,
-                        LastUsedNode = e.LastUsed.N,
-                        LastUsedPhysical = e.LastUsed.L,
-                        LastUsedCounter = e.LastUsed.C,
-                        LastModifiedNode = e.LastModified.N,
-                        LastModifiedPhysical = e.LastModified.L,
-                        LastModifiedCounter = e.LastModified.C,
-                        State = (int)e.State
-                    });
-                }
-            }
-
-            List<MemoryCheckpointLockEntry> lockEntries = new(locks.Count);
+            List<MemoryCheckpointLockEntry> lockEntries = [];
             foreach (KeyValuePair<string, LockEntry> kv in locks)
             {
+                if (!includeLocks)
+                    break;
                 LockEntry l = kv.Value;
                 lockEntries.Add(new()
                 {

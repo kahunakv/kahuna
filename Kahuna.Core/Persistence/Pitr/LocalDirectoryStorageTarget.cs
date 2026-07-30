@@ -41,12 +41,13 @@ internal sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
         return JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(path), JsonOptions);
     }
 
-    public IReadOnlyList<BackupManifest> List()
+    public IReadOnlyList<BackupManifest> List(CancellationToken ct = default)
     {
         List<BackupManifest> results = [];
 
         foreach (string file in Directory.GetFiles(_directory, "*" + Extension))
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
                 BackupManifest? m = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(file), JsonOptions);
@@ -55,13 +56,49 @@ internal sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
             }
             catch (JsonException)
             {
-                // Skip corrupt or partially-written manifests so one bad file does not
-                // blind the entire listing. Callers that need the specific file (Get,
-                // ResolveChain) will surface the error when they attempt to load it directly.
+                // Corrupt/partially-written manifests are not returned here so one bad file does not
+                // blind the entire listing, but they are NOT silently dropped: ListCorrupt() reports
+                // them so callers can present them as invalid entries.
             }
         }
 
         return results;
+    }
+
+    public IReadOnlyList<(Guid backupId, string reason)> ListCorrupt(CancellationToken ct = default)
+    {
+        List<(Guid, string)> corrupt = [];
+
+        foreach (string file in Directory.GetFiles(_directory, "*" + Extension))
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                BackupManifest? m = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(file), JsonOptions);
+                if (m is null)
+                    corrupt.Add((ParseId(file), "Manifest deserialized to null."));
+            }
+            catch (JsonException ex)
+            {
+                corrupt.Add((ParseId(file), $"Manifest is not valid JSON: {ex.Message}"));
+            }
+            catch (IOException ex)
+            {
+                corrupt.Add((ParseId(file), $"Manifest could not be read: {ex.Message}"));
+            }
+        }
+
+        return corrupt;
+    }
+
+    /// <summary>
+    /// Recovers the backup id from a manifest filename ({id:N}.manifest). Returns
+    /// <see cref="Guid.Empty"/> when the filename is not a recognizable id.
+    /// </summary>
+    private static Guid ParseId(string filePath)
+    {
+        string name = Path.GetFileNameWithoutExtension(filePath);
+        return Guid.TryParseExact(name, "N", out Guid id) ? id : Guid.Empty;
     }
 
     private string ManifestPath(Guid id) =>

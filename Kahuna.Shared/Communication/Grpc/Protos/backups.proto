@@ -41,6 +41,18 @@ message GrpcBackupInfoResponse {
   int32  SnapshotNode       = 7;
   int64  SnapshotPhysical   = 8;
   uint32 SnapshotCounter    = 9;
+  // Requested vs actual kind and substitution reason (empty string = null).
+  string RequestedKind      = 10;
+  string ActualKind         = 11;
+  string SubstitutionReason = 12;
+  // Legacy/invalid listing.
+  int32  FormatVersion      = 13;
+  bool   IsInvalid          = 14;
+  string InvalidReason      = 15;
+  // Chain coverage bounds (only set on a resolved chain's head entry).
+  bool   HasCoverage        = 16;
+  int64  MinRecoverablePhysicalMs = 17;
+  int64  MaxRecoverablePhysicalMs = 18;
 }
 
 message GrpcListBackupsResponse {
@@ -59,4 +71,7 @@ message GrpcRestoreResponse {
   int64  EntriesApplied        = 3;
   int64  LastAppliedPhysicalMs = 4;
   repeated GrpcBackupInfoResponse Chain = 5;
+  string Outcome               = 6; // KahunaBackupOutcome name
+  int64  MinRecoverablePhysicalMs = 7;
+  int64  MaxRecoverablePhysicalMs = 8;
 }

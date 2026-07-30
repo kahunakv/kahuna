@@ -81,4 +81,26 @@ internal interface IPersistenceBackend
     /// </para>
     /// </summary>
     public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime);
+
+    /// <summary>
+    /// Produces a checkpoint that reflects the store's state <b>as of</b> <paramref name="cut"/>:
+    /// for each key the newest revision whose <c>LastModified ≤ cut</c>, omitting keys whose entire
+    /// history is newer than <paramref name="cut"/>. This yields an exact base image that contains
+    /// no committed state newer than the declared cut, so replaying incremental segments (which stop
+    /// at the restore target) reconstructs the state at any point ≥ <paramref name="cut"/>.
+    /// <para>
+    /// The default implementation falls back to <see cref="CreateCheckpoint"/> — a physical copy that
+    /// may include writes committed after <paramref name="cut"/> (a superset of the as-of image).
+    /// Backends that retain per-revision history override this to produce the exact cut.
+    /// </para>
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default) =>
+        CreateCheckpoint(destinationPath, appliedIndex, cut);
+
+    /// <summary>
+    /// True when <see cref="CreateCheckpointAsOf"/> produces an exact as-of image (no state newer
+    /// than the cut). False when it falls back to a physical copy that may over-include recent writes.
+    /// </summary>
+    public bool SupportsExactAsOfCheckpoint => false;
 }

@@ -391,6 +391,12 @@ public sealed class KahunaCommandLineOptions
     [Option("pitr-backup-dir", Required = false, HelpText = "Root directory for PITR backup artifacts and catalog manifests. Required when --pitr-bootstrap-from is set; also used by the backup service to store new backups.", Default = "")]
     public string PitrBackupDir { get; set; } = "";
 
+    [Option("pitr-restore-root", Required = false, HelpText = "Server-owned root directory that restore destinations must be contained within. Setting this enables remote (REST/gRPC) restore, confining all targets under this path.", Default = "")]
+    public string PitrRestoreRoot { get; set; } = "";
+
+    [Option("pitr-allow-unconfined-remote-restore", Required = false, HelpText = "Allow remote restore requests even without a configured restore root. Insecure; disabled by default.", Default = false)]
+    public bool PitrAllowUnconfinedRemoteRestore { get; set; }
+
     [Option("pitr-bootstrap-from", Required = false, HelpText = "Backup ID (GUID) of the leaf backup to restore from before joining the cluster. Must be combined with --join-existing and --pitr-backup-dir. When omitted the node starts normally without seeding.")]
     public Guid? PitrBootstrapFrom { get; set; }
 

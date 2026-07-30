@@ -1407,7 +1407,22 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         return command.ExecuteScalar() is not null;
     }
 
+    public bool SupportsExactAsOfCheckpoint => true;
+
     public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime)
+        => CreateCheckpointCore(destinationPath, appliedIndex, appliedTime, cut: null);
+
+    /// <summary>
+    /// Exact as-of-<paramref name="cut"/> checkpoint: after copying each shard, trims the copy so it
+    /// contains, per key, the newest revision with <c>LastModified ≤ cut</c> and no state newer than
+    /// the cut. The live database is never modified — only the checkpoint copy.
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default)
+        => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, ct: ct);
+
+    private CheckpointResult CreateCheckpointCore(
+        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut, CancellationToken ct = default)
     {
         // Write into a temp sibling so any failure — lock timeout or VACUUM error — cannot
         // leave a partial checkpoint at destinationPath that a catalog scan might treat as valid.
@@ -1420,6 +1435,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             // stalling writes to that shard. Schedule off the hot write path.
             for (int shard = 0; shard < MaxShards; shard++)
             {
+                ct.ThrowIfCancellationRequested();
+
                 // Skip shards whose DB file does not exist yet — opening an absent shard just
                 // to VACUUM INTO it would create empty .db files in the checkpoint directory.
                 string shardFile = Path.Combine(path, $"kahuna{shard}_{dbRevision}.db");
@@ -1443,6 +1460,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     if (lockTaken)
                         rwLock.ReleaseWriterLock();
                 }
+
+                // Trim the copy (not the live DB) to the as-of cut. A separate connection to the
+                // copied file — no contention with the live shard.
+                if (cut.HasValue)
+                    TrimShardAsOf(destFile, cut.Value, ct);
             }
 
             CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
@@ -1458,6 +1480,116 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 Directory.Delete(tmpPath, recursive: true);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Removes all state newer than <paramref name="cut"/> from a copied shard database, leaving each
+    /// key at its newest revision with <c>LastModified ≤ cut</c> (or absent if its whole history is
+    /// newer). Uses the same physical→counter→node HLC ordering as
+    /// <see cref="GetKeyValueRevisionAtOrBefore"/>.
+    /// </summary>
+    private static void TrimShardAsOf(string destFile, HLCTimestamp cut, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        // Preflight: VACUUM (below) rewrites the whole DB into a temp file, needing roughly the DB
+        // size again in free space. Fail before mutating if the volume clearly can't hold it.
+        long dbBytes = new FileInfo(destFile).Length;
+        string? destDir = Path.GetDirectoryName(destFile);
+        if (destDir is not null)
+        {
+            try
+            {
+                long free = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(destDir))!).AvailableFreeSpace;
+                if (free < dbBytes + (64L * 1024 * 1024))
+                    throw new IOException(
+                        $"Insufficient free space to compact the checkpoint copy: need ~{dbBytes} bytes, " +
+                        $"have {free}.");
+            }
+            catch (Exception ex) when (ex is not IOException)
+            {
+                // DriveInfo can throw on some paths/platforms; a failed preflight is best-effort.
+            }
+        }
+
+        // Rows strictly after the cut, matching the read path's L→C→N compare.
+        const string afterCut =
+            "(lastModifiedPhysical > @cutL " +
+            "OR (lastModifiedPhysical = @cutL AND lastModifiedCounter > @cutC) " +
+            "OR (lastModifiedPhysical = @cutL AND lastModifiedCounter = @cutC AND lastModifiedNode > @cutN))";
+
+        using SqliteConnection conn = new($"Data Source={destFile.Replace("'", "''")};Pooling=False");
+        conn.Open();
+        using SqliteTransaction tx = conn.BeginTransaction();
+
+        // 0) Fail closed on historyless keys (SetNoRevision) whose only value is newer than the cut:
+        //    with no retained revision there is no way to reconstruct their as-of-cut state. Checked
+        //    before any deletion, while keys_revisions is intact.
+        using (SqliteCommand check = new(
+            $"SELECT COUNT(*) FROM keys WHERE {afterCut} " +
+            "AND NOT EXISTS (SELECT 1 FROM keys_revisions kr WHERE kr.key = keys.key);", conn, tx))
+        {
+            check.Parameters.AddWithValue("@cutL", cut.L);
+            check.Parameters.AddWithValue("@cutC", cut.C);
+            check.Parameters.AddWithValue("@cutN", cut.N);
+            long historyless = Convert.ToInt64(check.ExecuteScalar());
+            if (historyless > 0)
+                throw new ExactCheckpointUnavailableException(
+                    $"{historyless} key(s) written with SetNoRevision were modified after the backup cut " +
+                    $"{cut}; their state as-of the cut cannot be reconstructed.");
+        }
+
+        // 1) Drop every revision committed after the cut.
+        RunTrim(conn, tx, $"DELETE FROM keys_revisions WHERE {afterCut};", cut);
+
+        // 2) Drop latest-rows that are after the cut AND have no surviving revision (NoRevision keys
+        //    newer than the cut, and keys whose entire revision history was after the cut).
+        RunTrim(conn, tx,
+            $"DELETE FROM keys WHERE {afterCut} AND NOT EXISTS " +
+            "(SELECT 1 FROM keys_revisions kr WHERE kr.key = keys.key);", cut);
+
+        // 3) Reset each remaining revisioned key's latest row to its surviving max revision.
+        RunTrim(conn, tx, """
+            UPDATE keys
+               SET revision = src.revision,
+                   value = src.value,
+                   expiresNode = src.expiresNode, expiresPhysical = src.expiresPhysical, expiresCounter = src.expiresCounter,
+                   lastUsedNode = src.lastUsedNode, lastUsedPhysical = src.lastUsedPhysical, lastUsedCounter = src.lastUsedCounter,
+                   lastModifiedNode = src.lastModifiedNode, lastModifiedPhysical = src.lastModifiedPhysical, lastModifiedCounter = src.lastModifiedCounter,
+                   state = src.state
+              FROM (
+                 SELECT kr.key, kr.revision, kr.value, kr.expiresNode, kr.expiresPhysical, kr.expiresCounter,
+                        kr.lastUsedNode, kr.lastUsedPhysical, kr.lastUsedCounter,
+                        kr.lastModifiedNode, kr.lastModifiedPhysical, kr.lastModifiedCounter, kr.state
+                   FROM keys_revisions kr
+                  WHERE kr.revision = (SELECT MAX(revision) FROM keys_revisions k2 WHERE k2.key = kr.key)
+              ) AS src
+             WHERE keys.key = src.key;
+            """, cut: null);
+
+        // 4) Exclude locks from the as-of image — volatile lease state re-established at runtime.
+        RunTrim(conn, tx, "DELETE FROM locks;", cut: null);
+
+        tx.Commit();
+
+        ct.ThrowIfCancellationRequested();
+
+        // Physically purge: VACUUM rebuilds the file, reclaiming the free pages left by the deletes so
+        // no post-cut payload lingers in the artifact's free space. (Must run outside a transaction.)
+        using (SqliteCommand vacuum = new("VACUUM;", conn))
+            vacuum.ExecuteNonQuery();
+    }
+
+    private static void RunTrim(SqliteConnection conn, SqliteTransaction tx, string sql, HLCTimestamp? cut)
+    {
+        using SqliteCommand cmd = new(sql, conn, tx);
+        if (cut.HasValue)
+        {
+            cmd.Parameters.AddWithValue("@cutL", cut.Value.L);
+            cmd.Parameters.AddWithValue("@cutC", cut.Value.C);
+            cmd.Parameters.AddWithValue("@cutN", cut.Value.N);
+        }
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose()

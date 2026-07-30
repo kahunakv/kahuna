@@ -18,7 +18,10 @@ internal sealed class BackupCatalog
 
     public BackupManifest? Get(Guid backupId) => _target.Get(backupId);
 
-    public IReadOnlyList<BackupManifest> List() => _target.List();
+    public IReadOnlyList<BackupManifest> List(CancellationToken ct = default) => _target.List(ct);
+
+    public IReadOnlyList<(Guid backupId, string reason)> ListCorrupt(CancellationToken ct = default) =>
+        _target.ListCorrupt(ct);
 
     /// <summary>
     /// Resolves the backup chain ending at <paramref name="leafBackupId"/> by walking
@@ -28,7 +31,7 @@ internal sealed class BackupCatalog
     /// <exception cref="BackupChainException">
     /// Thrown when a manifest in the chain is missing from the catalog.
     /// </exception>
-    public IReadOnlyList<BackupManifest> ResolveChain(Guid leafBackupId)
+    public IReadOnlyList<BackupManifest> ResolveChain(Guid leafBackupId, CancellationToken ct = default)
     {
         List<BackupManifest> reversed = [];
         HashSet<Guid> seen = [];
@@ -36,6 +39,8 @@ internal sealed class BackupCatalog
 
         while (current.HasValue)
         {
+            ct.ThrowIfCancellationRequested();
+
             if (!seen.Add(current.Value))
                 throw new BackupChainException(
                     $"Cycle detected in backup chain at {current.Value:N} while resolving from {leafBackupId:N}.");
@@ -57,9 +62,9 @@ internal sealed class BackupCatalog
     /// Resolves the chain and immediately validates it.
     /// Equivalent to <c>Validate(ResolveChain(leafBackupId))</c>.
     /// </summary>
-    public IReadOnlyList<BackupManifest> ResolveAndValidate(Guid leafBackupId)
+    public IReadOnlyList<BackupManifest> ResolveAndValidate(Guid leafBackupId, CancellationToken ct = default)
     {
-        IReadOnlyList<BackupManifest> chain = ResolveChain(leafBackupId);
+        IReadOnlyList<BackupManifest> chain = ResolveChain(leafBackupId, ct);
         Validate(chain);
         return chain;
     }
@@ -84,6 +89,27 @@ internal sealed class BackupCatalog
             throw new BackupChainException(
                 $"Chain must start with a Full backup; found {chain[0].Type} ({chain[0].BackupId:N}).");
 
+        // Every range's HLC bounds must be ordered (FromHlc ≤ ToHlc). A range whose start sorts
+        // after its end is a corrupt manifest, independent of the index-continuity checks below.
+        foreach (BackupManifest manifest in chain)
+        {
+            foreach (PartitionBackupRange range in manifest.PartitionRanges)
+            {
+                if (range.FromHlc.CompareTo(range.ToHlc) > 0)
+                    throw new BackupChainException(
+                        $"Backup {manifest.BackupId:N}, partition {range.PartitionId}: FromHlc {range.FromHlc} " +
+                        $"sorts after ToHlc {range.ToHlc}.");
+            }
+        }
+
+        // Running per-partition high-water mark (greatest ToIndex seen so far across the chain). A
+        // sparse/empty intermediate manifest that omits an unchanged partition must NOT reset that
+        // partition's expected continuation point — otherwise a later incremental could restart at 1
+        // (duplicating the WAL) or skip a prefix (hidden gap after compaction) undetected.
+        Dictionary<int, PartitionBackupRange> highWater = [];
+        foreach (PartitionBackupRange range in chain[0].PartitionRanges)
+            highWater[range.PartitionId] = range;
+
         for (int i = 1; i < chain.Count; i++)
         {
             BackupManifest prev = chain[i - 1];
@@ -98,21 +124,27 @@ internal sealed class BackupCatalog
                     $"Broken parent link at position {i}: expected parent {prev.BackupId:N}, " +
                     $"got {curr.ParentBackupId?.ToString("N") ?? "null"}.");
 
-            // Build a lookup for the previous entry's partition ranges.
-            Dictionary<int, PartitionBackupRange> prevRanges =
-                prev.PartitionRanges.ToDictionary(r => r.PartitionId);
-
+            // Validate each range against the latest earlier range for that partition anywhere in the
+            // chain, not just the immediate predecessor.
             foreach (PartitionBackupRange currRange in curr.PartitionRanges)
             {
-                if (!prevRanges.TryGetValue(currRange.PartitionId, out PartitionBackupRange? prevRange))
-                    continue; // partition first appears in this incremental — acceptable
+                if (!highWater.TryGetValue(currRange.PartitionId, out PartitionBackupRange? hw))
+                    continue; // partition appears for the first time in the whole chain — acceptable
 
-                long expectedFrom = prevRange.ToIndex + 1;
+                long expectedFrom = hw.ToIndex + 1;
                 if (currRange.FromIndex != expectedFrom)
                     throw new BackupChainException(
-                        $"Index gap on partition {currRange.PartitionId} between backup {prev.BackupId:N} " +
-                        $"(ToIndex={prevRange.ToIndex}) and {curr.BackupId:N} " +
-                        $"(FromIndex={currRange.FromIndex}); expected {expectedFrom}.");
+                        $"Index gap on partition {currRange.PartitionId}: {curr.BackupId:N} starts at " +
+                        $"FromIndex={currRange.FromIndex} but the latest earlier coverage ends at " +
+                        $"ToIndex={hw.ToIndex}; expected {expectedFrom}.");
+            }
+
+            // Advance the running high-water mark with this manifest's ranges.
+            foreach (PartitionBackupRange currRange in curr.PartitionRanges)
+            {
+                if (!highWater.TryGetValue(currRange.PartitionId, out PartitionBackupRange? cur) ||
+                    currRange.ToIndex > cur.ToIndex)
+                    highWater[currRange.PartitionId] = currRange;
             }
         }
     }

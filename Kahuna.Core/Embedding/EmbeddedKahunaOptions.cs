@@ -305,6 +305,12 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public string BackupDir { get; set; } = "";
 
+    /// <summary>Server-owned root that restore destinations must be contained within. Enables remote restore.</summary>
+    public string RestoreRoot { get; set; } = "";
+
+    /// <summary>Allow remote restore without a configured restore root (insecure; default false).</summary>
+    public bool AllowUnconfinedRemoteRestore { get; set; }
+
     // ── Range-split knobs ────────────────────────────────────────────────────
 
     /// <summary>

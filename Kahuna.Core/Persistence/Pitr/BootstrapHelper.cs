@@ -71,6 +71,12 @@ internal static class BootstrapHelper
         DateTime nowUtc,
         TimeSpan baseSnapshotInterval = default)
     {
+        // Validate the target against the chain's exact recoverable coverage BEFORE touching the
+        // backend or WAL — a target below the base cut or above captured coverage (or a chain with an
+        // unknown lower bound) fails closed here, so we never seed WAL checkpoints for a state that
+        // was never reconstructed. Zero resolves to the validated natural end.
+        targetTime = BackupChainCoverage.Resolve(chain, targetTime);
+
         // Guard rail: T must be within the effective PITR window.
         // The real WAL compaction floor on the leader is not exactly now−pitrWindow: compaction
         // fires every baseSnapshotInterval, so the oldest retained entry is up to one interval

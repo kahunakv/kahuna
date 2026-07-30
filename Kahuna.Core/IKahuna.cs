@@ -375,6 +375,13 @@ public interface IKahuna
     /// <summary>Returns true when a backup directory is configured on this node.</summary>
     public bool IsBackupConfigured { get; }
 
+    /// <summary>
+    /// Returns true when remote (REST/gRPC) restore requests are permitted on this node. Restore is
+    /// administrative: it is denied by default and enabled only when a server-owned restore root is
+    /// configured (destinations are then confined to it) or an explicit unconfined opt-in is set.
+    /// </summary>
+    public bool IsRemoteRestoreAllowed { get; }
+
     /// <summary>Takes a full backup and returns its manifest summary.</summary>
     public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default);
 
