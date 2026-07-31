@@ -148,16 +148,15 @@ public sealed class TestPitrRestore : IDisposable
         string artifacts = ArtifactsDir("all_entries");
 
         // Full backup at T=300 (all committed).
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         // No incremental needed — all entries are in the checkpoint.
         // Open checkpoint as the restore base.
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("v1", GetValue(restored, "a"));
         Assert.Equal("v2", GetValue(restored, "b"));
@@ -180,20 +179,19 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("stop_at_t");
         string artifacts = ArtifactsDir("stop_at_t");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         // Add entries after full backup.
         wal.Write([(1, [KvLog(3, 300, "c", "v3", 1), KvLog(4, 400, "d", "v4", 1)])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         // Restore to T=300: c included, d excluded.
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("v1", GetValue(restored, "a"));
         Assert.Equal("v2", GetValue(restored, "b"));
@@ -216,21 +214,20 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("idempotent");
         string artifacts = ArtifactsDir("idempotent");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [KvLog(3, 300, "c", "v3", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
 
         // First restore.
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(400), restored);
+        await RestoreEngine.RestoreAsync(chain, artifacts, T(400), restored, ct: TestContext.Current.CancellationToken);
 
         // Second restore into same backend — should be a no-op (upsert semantics).
-        RestoreResult result2 = await RestoreEngine.RestoreAsync(chain, artifacts, T(400), restored);
+        RestoreResult result2 = await RestoreEngine.RestoreAsync(chain, artifacts, T(400), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("v3", GetValue(restored, "c"));
         Assert.Equal(1, result2.EntriesApplied); // segment re-applied
@@ -251,7 +248,7 @@ public sealed class TestPitrRestore : IDisposable
         MemoryPersistenceBackend backend = new();
         IReadOnlyList<BackupManifest> chain = [full];
 
-        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, tooOld, backend, window, now));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, tooOld, backend, window, now, TestContext.Current.CancellationToken));
 
         Assert.Contains("outside the recoverable window", ex.Message);
     }
@@ -269,7 +266,7 @@ public sealed class TestPitrRestore : IDisposable
         string artifacts = ArtifactsDir("window_future");
 
         IReadOnlyList<BackupManifest> chain = [full];
-        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, future, new MemoryPersistenceBackend(), window, now));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, future, new MemoryPersistenceBackend(), window, now, TestContext.Current.CancellationToken));
 
         Assert.Contains("outside the recoverable window", ex.Message);
     }
@@ -289,20 +286,19 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("inc_chain");
         string artifacts = ArtifactsDir("inc_chain");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [KvLog(3, 300, "k3", "v3", 1), KvLog(4, 400, "k4", "v4", 1)])]);
-        BackupManifest inc1 = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc1 = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [KvLog(5, 500, "k5", "v5", 1), KvLog(6, 600, "k6", "v6", 1)])]);
-        BackupManifest inc2 = BackupDriver.RunIncremental(wal, [Part(1)], inc1.BackupId, artifacts, catalog);
+        BackupManifest inc2 = BackupDriver.RunIncremental(wal, [Part(1)], inc1.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc2.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(600), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc2.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(600), restored, ct: TestContext.Current.CancellationToken);
 
         for (int i = 1; i <= 6; i++)
             Assert.Equal($"v{i}", GetValue(restored, $"k{i}"));
@@ -324,17 +320,16 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("delete");
         string artifacts = ArtifactsDir("delete");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [KvLog(2, 300, "k1", "", 2, KeyValueRequestType.TryDelete)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, ct: TestContext.Current.CancellationToken);
 
         // Key is present but marked deleted — state reflects the delete.
         object? entry = restored.GetKeyValue("k1");
@@ -356,17 +351,16 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("stats");
         string artifacts = ArtifactsDir("stats");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [KvLog(2, 200, "y", "2", 1), KvLog(3, 300, "z", "3", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(2, result.EntriesApplied);
         Assert.Equal(1, result.PartitionsRestored);
@@ -394,20 +388,18 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("multipart_max");
         string artifacts = ArtifactsDir("multipart_max");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [KvLog(3, 600, "p1c", "v5", 1)])]);
         wal.Write([(2, [KvLog(3, 250, "p2c", "v6", 1)])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(
-            wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(600), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(600), restored, ct: TestContext.Current.CancellationToken);
 
         // The entry with the highest HLC is p1c at T(600).
         Assert.Equal(T(600), result.LastAppliedTime);
@@ -444,22 +436,21 @@ public sealed class TestPitrRestore : IDisposable
         // RunFullAsync calls it (after reading M, before CreateCheckpoint).
         Task Flush() { FlushWalToBackend(wal, 1, fullBackend); return Task.CompletedTask; }
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], fullBackend, artifacts, catalog, Flush);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, Flush, ct: TestContext.Current.CancellationToken);
 
         // Full manifest should record ToIndex = 3 (last committed entry).
         Assert.Equal(3L, full.PartitionRanges[0].ToIndex);
 
         // Add entries 4–5 after the Full backup.
         wal.Write([(1, [KvLog(4, 400, "k4", "v4", 1), KvLog(5, 500, "k5", "v5", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         // Restore: open the Full checkpoint, then replay the incremental segment.
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(500), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(500), restored, ct: TestContext.Current.CancellationToken);
 
         // All 5 entries must be present: 1–3 from the checkpoint, 4–5 from the segment.
         for (int i = 1; i <= 5; i++)
@@ -482,9 +473,9 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("jsonl_fmt");
         string artifacts = ArtifactsDir("jsonl_fmt");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
         wal.Write([(1, [KvLog(2, 200, "b", "v2", 1), KvLog(3, 300, "c", "v3", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string seg = Path.Combine(artifacts, inc.BackupId.ToString("N"), "partition_1.wal");
         string[] lines = File.ReadAllLines(seg);
@@ -502,9 +493,9 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("legacy_arr");
         string artifacts = ArtifactsDir("legacy_arr");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
         wal.Write([(1, [KvLog(2, 200, "b", "v2", 1), KvLog(3, 300, "c", "v3", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         // Rewrite the JSON-Lines segment as one legacy JSON array (what pre-streaming backups produced),
         // and re-point the manifest's checksum/size at it so integrity passes. Restore must still read it.
@@ -517,8 +508,8 @@ public sealed class TestPitrRestore : IDisposable
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("v1", GetValue(restored, "a"));
         Assert.Equal("v2", GetValue(restored, "b"));

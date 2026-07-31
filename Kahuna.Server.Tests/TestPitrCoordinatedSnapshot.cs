@@ -175,9 +175,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("cap_toidx");
         string artifacts = ArtifactsDir("cap_toidx");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: snapshotT);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: snapshotT, ct: TestContext.Current.CancellationToken);
 
         // Partition 1: last committed ≤ T(250) is index 2 (t=200).
         PartitionBackupRange p1 = manifest.PartitionRanges.Single(r => r.PartitionId == 1);
@@ -224,9 +222,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("cross_shard");
         string artifacts = ArtifactsDir("cross_shard");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: snapshotT);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: snapshotT, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(snapshotT, full.ClusterSnapshotTime);
 
@@ -234,8 +230,8 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored, ct: TestContext.Current.CancellationToken);
 
         // Transaction A: both shards fully committed before T → present.
         Assert.Equal("committed", GetValue(restored, "txA_p1"));
@@ -274,8 +270,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("inc_cap");
         string artifacts = ArtifactsDir("inc_cap");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], backend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         // Add entries: k3 at t=200 (≤ T=250), k4 at t=300 (> T=250), k5 at t=400 (> T=250).
         wal.Write([(1, [
@@ -284,8 +279,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
             KvLog(5, 400, "k5", "v5", 1)
         ])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(
-            wal, [Part(1)], full.BackupId, artifacts, catalog, snapshotT);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, snapshotT, TestContext.Current.CancellationToken);
 
         // The full contiguous range is captured (k3, k4, k5); the cut is recorded, not truncated.
         PartitionBackupRange r = inc.PartitionRanges.Single(r => r.PartitionId == 1);
@@ -298,8 +292,8 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("v1", GetValue(restored, "k1"));
         Assert.Equal("v2", GetValue(restored, "k2"));
@@ -324,9 +318,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("empty_snap");
         string artifacts = ArtifactsDir("empty_snap");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], new MemoryPersistenceBackend(), artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: T(100));
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], new MemoryPersistenceBackend(), artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: T(100), ct: TestContext.Current.CancellationToken);
 
         Assert.Empty(manifest.PartitionRanges);
         Assert.Equal(T(100), manifest.ClusterSnapshotTime);
@@ -356,9 +348,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("chain_roundtrip");
         string artifacts = ArtifactsDir("chain_roundtrip");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: snapshotT);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: snapshotT, ct: TestContext.Current.CancellationToken);
 
         // Add post-full entries on both partitions (still ≤ T=300).
         wal.Write([(1, [KvLog(3, 280, "p1k3", "e", 1)])]);
@@ -367,8 +357,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         wal.Write([(1, [KvLog(4, 400, "p1k4", "x", 1)])]);
         wal.Write([(2, [KvLog(4, 450, "p2k4", "y", 1)])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(
-            wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog, snapshotT);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog, snapshotT, TestContext.Current.CancellationToken);
 
         Assert.Equal(snapshotT, full.ClusterSnapshotTime);
         Assert.Equal(snapshotT, inc.ClusterSnapshotTime);
@@ -377,8 +366,8 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored, ct: TestContext.Current.CancellationToken);
 
         // Pre-full entries: from checkpoint.
         Assert.Equal("a", GetValue(restored, "p1k1"));
@@ -429,13 +418,11 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("safe_below");
         string artifacts = ArtifactsDir("safe_below");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: snapshotT);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: snapshotT, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Null(GetValue(restored, "txC_p1"));
         Assert.Null(GetValue(restored, "txC_p2"));   // both absent → consistent
@@ -458,13 +445,11 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("safe_above");
         string artifacts = ArtifactsDir("safe_above");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: snapshotT);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: snapshotT, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("c1", GetValue(restored, "txC_p1"));
         Assert.Equal("c2", GetValue(restored, "txC_p2"));   // both present → consistent
@@ -490,13 +475,11 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("unsafe_mid");
         string artifacts = ArtifactsDir("unsafe_mid");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: snapshotT);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: snapshotT, ct: TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored, ct: TestContext.Current.CancellationToken);
 
         // Torn: shard 1 (t=240 ≤ 250) present, shard 2 (t=260 > 250) absent. This documents the
         // hazard a safe-T choice must avoid — it is NOT the desired production outcome.
@@ -520,10 +503,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
             (2, KvLog(1, 200, "p1", "u1", 1)));
 
         // Simulate quiesced cluster: delegate returns Zero.
-        HLCTimestamp safeT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
-            () => Task.FromResult(HLCTimestamp.Zero),
-            wal,
-            [Part(1), Part(2)]);
+        HLCTimestamp safeT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(() => Task.FromResult(HLCTimestamp.Zero), wal, [Part(1), Part(2)], TestContext.Current.CancellationToken);
 
         // Expected: max committed across both partitions = t=300 (partition 1, index 2).
         Assert.Equal(T(300), safeT);
@@ -539,10 +519,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
     {
         HLCTimestamp inFlight = T(400);
 
-        HLCTimestamp safeT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
-            () => Task.FromResult(inFlight),
-            new InMemoryWAL(Log),
-            [Part(1)]);
+        HLCTimestamp safeT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(() => Task.FromResult(inFlight), new InMemoryWAL(Log), [Part(1)], TestContext.Current.CancellationToken);
 
         // Safe T must be strictly below the in-flight minimum.
         Assert.True(safeT.CompareTo(inFlight) < 0);
@@ -673,10 +650,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         // Coordinator must return Predecessor(T(300)) so T < T(300) and the segment cap excludes
         // any committed entry landing at exactly T(300).
         HLCTimestamp inFlight = T(300);
-        HLCTimestamp safeT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
-            () => Task.FromResult(inFlight),
-            wal,
-            [Part(1)]);
+        HLCTimestamp safeT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(() => Task.FromResult(inFlight), wal, [Part(1)], TestContext.Current.CancellationToken);
 
         Assert.True(safeT.CompareTo(inFlight) < 0, "safe T must be strictly below in-flight min");
 
@@ -686,9 +660,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         BackupCatalog catalog = NewCatalog("infl_cap");
         string artifacts = ArtifactsDir("infl_cap");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: safeT);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: safeT, ct: TestContext.Current.CancellationToken);
 
         // FindLastCommittedAtOrBefore at safeT: entries at t=100 and t=200 qualify (L < 300),
         // Proposed at t=300 is skipped by type filter. ToIndex == 2.
@@ -697,7 +669,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, safeT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, safeT, restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("a", GetValue(restored, "settled1"));
         Assert.Equal("b", GetValue(restored, "settled2"));
