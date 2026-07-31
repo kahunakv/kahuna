@@ -33,6 +33,9 @@ jobs:
         run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)
       - name: Run Client Tests
         run: (cd Kahuna.Client.Tests && dotnet test -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none)
+      - name: Dump Kahuna Server logs
+        if: failure()
+        run: docker compose -f docker/local.yml logs --timestamps
       - name: Stop Kahuna Server
         if: always()
         run: docker compose -f docker/local.yml down -v

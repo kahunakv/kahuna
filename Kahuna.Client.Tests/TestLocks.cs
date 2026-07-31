@@ -8,6 +8,15 @@ namespace Kahuna.Client.Tests;
 
 public class TestLocks
 {
+    /// <summary>
+    /// Per-test-case ceiling. The lock client retries MustRetry indefinitely and relies on the
+    /// caller's CancellationToken to give up, so without this a stuck cluster partition hangs the
+    /// test forever (and --blame-hang then aborts the whole run). The timeout cancels
+    /// TestContext.Current.CancellationToken, which every client call here observes, turning a
+    /// wedged server into a single failed test with a message instead of a silent run abort.
+    /// </summary>
+    private const int TestTimeout = 60_000;
+
     private const string url = "https://localhost:8082";
 
     private readonly string[] urls = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
@@ -19,7 +28,7 @@ public class TestLocks
         return Guid.NewGuid().ToString("N")[..10];
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestValidateAcquireSingleLock(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -37,7 +46,7 @@ public class TestLocks
         Assert.Equal(0, kLock.FencingToken);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestLockAcquisitionAndExpiresWithMilliseconds(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -68,7 +77,7 @@ public class TestLocks
         Assert.Equal(1, kLock3.FencingToken);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestValidateAcquireLockExpiresWithTimeSpan(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -91,7 +100,7 @@ public class TestLocks
         Assert.Equal(1, kLock2.FencingToken);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestValidateAcquireLockExpires4(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -122,7 +131,7 @@ public class TestLocks
         Assert.Equal(1, kLock2.FencingToken);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestValidateAcquireLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -162,7 +171,7 @@ public class TestLocks
         Assert.Equal(1, kLock2.FencingToken);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestValidateAcquireSameLockExpiresRace(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -205,7 +214,7 @@ public class TestLocks
         Interlocked.Increment(ref total);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestValidateAcquireAndExtendLock(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
@@ -245,7 +254,7 @@ public class TestLocks
         //Assert.Equal(lockInfo.Expires > DateTime.UtcNow, true);
     }
     
-    [Theory, CombinatorialData]
+    [Theory(Timeout = TestTimeout), CombinatorialData]
     public async Task TestAcquireLockAndGetInfo(
         [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType, 
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType, 
