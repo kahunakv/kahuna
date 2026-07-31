@@ -63,7 +63,7 @@ public sealed class TestPitrCatalog : IDisposable
         cat.Put(full);
         cat.Put(inc);
 
-        IReadOnlyList<BackupManifest> all = cat.List();
+        IReadOnlyList<BackupManifest> all = cat.List(TestContext.Current.CancellationToken);
         Assert.Equal(2, all.Count);
     }
 
@@ -92,7 +92,7 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
         cat.Put(full);
 
-        IReadOnlyList<BackupManifest> chain = cat.ResolveChain(full.BackupId);
+        IReadOnlyList<BackupManifest> chain = cat.ResolveChain(full.BackupId, TestContext.Current.CancellationToken);
         Assert.Single(chain);
         Assert.Equal(full.BackupId, chain[0].BackupId);
     }
@@ -108,7 +108,7 @@ public sealed class TestPitrCatalog : IDisposable
         cat.Put(inc1);
         cat.Put(inc2);
 
-        IReadOnlyList<BackupManifest> chain = cat.ResolveChain(inc2.BackupId);
+        IReadOnlyList<BackupManifest> chain = cat.ResolveChain(inc2.BackupId, TestContext.Current.CancellationToken);
 
         Assert.Equal(3, chain.Count);
         Assert.Equal(full.BackupId, chain[0].BackupId);
@@ -124,7 +124,7 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest inc = BackupManifest.CreateIncremental(Guid.NewGuid(), [Range(1, 11, 20)]);
         cat.Put(inc);
 
-        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(inc.BackupId));
+        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(inc.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("not found", ex.Message);
     }
 
@@ -137,7 +137,7 @@ public sealed class TestPitrCatalog : IDisposable
         m.ParentBackupId = m.BackupId;
         cat.Put(m);
 
-        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(m.BackupId));
+        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(m.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("Cycle", ex.Message);
     }
 
@@ -152,7 +152,7 @@ public sealed class TestPitrCatalog : IDisposable
         cat.Put(a);
         cat.Put(b);
 
-        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(b.BackupId));
+        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(b.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("Cycle", ex.Message);
     }
 
@@ -233,7 +233,7 @@ public sealed class TestPitrCatalog : IDisposable
         cat.Put(inc1);
         cat.Put(inc2);
 
-        IReadOnlyList<BackupManifest> chain = cat.ResolveAndValidate(inc2.BackupId);
+        IReadOnlyList<BackupManifest> chain = cat.ResolveAndValidate(inc2.BackupId, TestContext.Current.CancellationToken);
 
         Assert.Equal(3, chain.Count);
         Assert.Equal(BackupType.Full, chain[0].Type);

@@ -341,7 +341,7 @@ public sealed class TestPitrCheckpoint : IDisposable
             backend.StoreKeyValues([Item("updated", 1, rev: 1, physicalMs: 50)]);  // as-of value
             backend.StoreKeyValues([Item("updated", 2, rev: 2, physicalMs: 200)]); // after cut → rolled back
 
-            backend.CreateCheckpointAsOf(cpDir, appliedIndex: 10, cut: T(100));
+            backend.CreateCheckpointAsOf(cpDir, appliedIndex: 10, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using SqlitePersistenceBackend r = new(cpDir, "v1");
@@ -368,7 +368,7 @@ public sealed class TestPitrCheckpoint : IDisposable
             backend.StoreKeyValues([Item("updated", 1, rev: 1, physicalMs: 50)]);
             backend.StoreKeyValues([Item("updated", 2, rev: 2, physicalMs: 200)]);
 
-            backend.CreateCheckpointAsOf(cpDir, appliedIndex: 10, cut: T(100));
+            backend.CreateCheckpointAsOf(cpDir, appliedIndex: 10, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using RocksDbPersistenceBackend r = new(baseDir, "cp");
@@ -398,7 +398,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         Put(b, "k", [1], 1);                         // revisioned KV at LM=1
         b.StoreLocks([LockItem("res", 50)]);
 
-        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100));
+        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
 
         MemoryPersistenceBackend r = MemoryPersistenceBackend.OpenCheckpoint(dir);
         Assert.NotNull(r.GetKeyValue("k"));
@@ -416,7 +416,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         {
             b.StoreKeyValues([Item("k", 1, rev: 1, physicalMs: 1)]);
             b.StoreLocks([LockItem("res", 50)]);
-            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using SqlitePersistenceBackend r = new(cpDir, "v1");
@@ -435,7 +435,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         {
             b.StoreKeyValues([Item("k", 1, rev: 1, physicalMs: 1)]);
             b.StoreLocks([LockItem("res", 50)]);
-            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using RocksDbPersistenceBackend r = new(baseDir, "cp");
@@ -454,7 +454,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         using MemoryPersistenceBackend b = new();
         b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]); // only write, after the cut
 
-        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100));
+        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
 
         using MemoryPersistenceBackend r = MemoryPersistenceBackend.OpenCheckpoint(dir);
         Assert.Null(r.GetKeyValue("nr"));
@@ -469,7 +469,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         using (SqlitePersistenceBackend b = new(dbDir, "v1"))
         {
             b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]);
-            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using SqlitePersistenceBackend r = new(cpDir, "v1");
@@ -484,7 +484,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         using (RocksDbPersistenceBackend b = new(baseDir, "v1"))
         {
             b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 200)]);
-            b.CreateCheckpointAsOf(Path.Combine(baseDir, "cp"), appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(Path.Combine(baseDir, "cp"), appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using RocksDbPersistenceBackend r = new(baseDir, "cp");
@@ -498,7 +498,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         using MemoryPersistenceBackend b = new();
         b.StoreKeyValues([NoRevItem("nr", 9, rev: 1, physicalMs: 100)]); // historyless, == cut
 
-        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100));
+        b.CreateCheckpointAsOf(dir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
 
         MemoryPersistenceBackend r = MemoryPersistenceBackend.OpenCheckpoint(dir);
         Assert.NotNull(r.GetKeyValue("nr"));
@@ -545,7 +545,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         {
             b.StoreKeyValues([ValItem("k", PreCutSentinel, rev: 1, physicalMs: 50)]);   // ≤ cut
             b.StoreKeyValues([ValItem("k", PostCutSentinel, rev: 2, physicalMs: 200)]); // > cut → purged
-            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         Assert.True(DirContainsBytes(cpDir, PreCutSentinel), "pre-cut value must remain restorable");
@@ -563,7 +563,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         {
             b.StoreKeyValues([ValItem("k", PreCutSentinel, rev: 1, physicalMs: 50)]);
             b.StoreKeyValues([ValItem("k", PostCutSentinel, rev: 2, physicalMs: 200)]);
-            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         Assert.True(DirContainsBytes(cpDir, PreCutSentinel), "pre-cut value must remain restorable");
@@ -586,7 +586,7 @@ public sealed class TestPitrCheckpoint : IDisposable
                 b.StoreKeyValues([Item($"k/{i:D5}", (byte)(i & 0xFF), rev: 1, physicalMs: 50)]);   // ≤ cut
                 b.StoreKeyValues([Item($"k/{i:D5}", (byte)0xEE, rev: 2, physicalMs: 200)]);         // > cut
             }
-            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100));
+            b.CreateCheckpointAsOf(cpDir, appliedIndex: 1, cut: T(100), ct: TestContext.Current.CancellationToken);
         }
 
         using RocksDbPersistenceBackend r = new(baseDir, "cp");

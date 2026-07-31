@@ -109,9 +109,9 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)));
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
@@ -136,8 +136,8 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)));
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -162,8 +162,8 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL wal = BuildWal((1, KvLog(1, floorMs, "k", "v", 1)));
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -186,8 +186,8 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL wal = BuildWal((1, KvLog(5, 200, "k", "v", 1)));
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -215,9 +215,8 @@ public sealed class TestPitrBootstrap : IDisposable
             (2, KvLog(7, 200, "b", "vb", 1)));
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1), Part(2)], src, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], src, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -252,14 +251,11 @@ public sealed class TestPitrBootstrap : IDisposable
             (1, KvLog(8, 200, "k", "v2", 2)));
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], src, artifacts, catalog,
-            flushBeforeCheckpoint: null);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
 
-        BackupManifest inc = BackupDriver.RunIncremental(
-            wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -287,18 +283,15 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend src = new();
 
         // Full backup: ToIndex=3, ToHlc=T(100).
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], src, artifacts, catalog,
-            flushBeforeCheckpoint: null);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
 
         // Add the post-Full entry (index 8, t=300) — this is what the incremental will capture.
         wal.Write([(1, [KvLog(8, 300, "k", "v2", 2)])]);
 
         // Incremental: ToIndex=8, ToHlc=T(300) > T=150 → straddles.
-        BackupManifest inc = BackupDriver.RunIncremental(
-            wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -331,17 +324,14 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend src = new();
 
         // Full backup captures the checkpoint; incremental captures log2.
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], src, artifacts, catalog,
-            flushBeforeCheckpoint: null);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
 
         // Add log2 to the WAL after the Full is taken.
         wal.Write([(1, [log2])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(
-            wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -371,11 +361,9 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL wal = new(Log);
         MemoryPersistenceBackend src = new();
 
-        BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], src, artifacts, catalog,
-            flushBeforeCheckpoint: null);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, artifacts, catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -400,10 +388,10 @@ public sealed class TestPitrBootstrap : IDisposable
 
         // Base cut = 100 (the max committed HLC captured by the full).
         InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)));
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
         Assert.Equal(T(100), full.BaseCut);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
@@ -422,9 +410,9 @@ public sealed class TestPitrBootstrap : IDisposable
         BackupCatalog catalog = NewCatalog("cov_above");
 
         InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)));
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
@@ -445,10 +433,10 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL wal = BuildWal(
             (1, KvLog(1, 100, "k1", "v1", 1)),
             (2, KvLog(1, 500, "k2", "v2", 1)));
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], new MemoryPersistenceBackend(), artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
         Assert.Equal(T(500), full.BaseCut);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId, TestContext.Current.CancellationToken);
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
