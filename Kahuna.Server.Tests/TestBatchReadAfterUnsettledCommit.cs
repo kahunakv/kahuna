@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// the base later materializes, conflicting (Aborted) on the follow-up read. This mirrors CamusDB's UPDATE/DELETE
 /// path (scan to locate rows, then batch-read them to mutate) which regressed when deferred settlement shipped on.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestBatchReadAfterUnsettledCommit
 {
     private readonly ILoggerFactory loggerFactory;

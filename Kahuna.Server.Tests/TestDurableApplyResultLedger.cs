@@ -104,7 +104,6 @@ public sealed class TestDurableApplyResultLedger
 /// apply itself. That costs the original double apply and nothing else, which is why this drives a batch of
 /// transactions and asserts that skipping happens rather than that it happens every time.</para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableApplyResultLedgerEndToEnd
 {
     private readonly ILoggerFactory loggerFactory;

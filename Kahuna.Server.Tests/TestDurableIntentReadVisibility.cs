@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// prepared value even though nothing materialized into MVCC, an undecided intent makes the read wait, and an
 /// aborted intent is invisible. Intents are injected directly to simulate the pre-materialization window.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableIntentReadVisibility
 {
     private readonly ILoggerFactory loggerFactory;

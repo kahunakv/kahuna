@@ -8,7 +8,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
-[Collection("ClusterTests")]
 public class TestSnapshotPointRead : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

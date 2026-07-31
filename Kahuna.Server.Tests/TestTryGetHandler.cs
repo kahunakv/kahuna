@@ -30,7 +30,6 @@ namespace Kahuna.Server.Tests;
 /// and <see cref="PersistentCacheMiss_BackendReadFaults_ResolvesMustRetry"/> covers a faulting read
 /// (which must surface as MustRetry, never a false-negative DoesNotExist).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTryGetHandler
 {
     // ── Resident cache hit — no disk load, no detour ──────────────────────────────────────

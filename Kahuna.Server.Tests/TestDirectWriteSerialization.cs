@@ -22,7 +22,6 @@ namespace Kahuna.Server.Tests;
 /// suppressed. The current behavior is pinned green; a skipped test states the target the unified serializer
 /// must reach.</para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDirectWriteSerialization
 {
     private readonly ILoggerFactory loggerFactory;

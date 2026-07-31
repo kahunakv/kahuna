@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// cursor-paged GetByRange calls. Tests cover single-node, multi-node, snapshot isolation,
 /// cancellation, and the retry-resumes-from-cursor guarantee.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestLocateAndScanRange : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;

@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// MvccEntryRemovedBytes / EstimateRevisionRemovedBytes failed to refund DictionaryOverheadBytes
 /// when the last entry was removed from the dict.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestCachedBytesAccounting : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

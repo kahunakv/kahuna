@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// ends, so a burst backpressures with <c>MustRetry</c> (nothing prepared) instead of admitting unbounded
 /// prepared state — and the slot frees for the next transaction once the first completes.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableAdmissionGate
 {
     private readonly ILoggerFactory loggerFactory;

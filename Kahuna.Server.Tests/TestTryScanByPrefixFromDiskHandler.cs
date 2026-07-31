@@ -27,7 +27,6 @@ namespace Kahuna.Server.Tests;
 /// The entire GetKeyValueByPrefix (plus optional per-key snapshot projection)
 /// runs off-actor in stage 2; stage 3 filters deleted/expired entries and resolves.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTryScanByPrefixFromDiskHandler
 {
     // ── Disk returns entries → resolved as Get after detach ───────────────────────────────

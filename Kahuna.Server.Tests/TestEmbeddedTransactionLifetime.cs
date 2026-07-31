@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// Verifies that EmbeddedKahunaOptions.MaxTransactionTimeout is wired through both embedded
 /// constructors and that ConfigurationValidator enforces the documented constraints.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestEmbeddedTransactionLifetime
 {
     private static EmbeddedKahunaOptions BaseOptions(int maxTimeoutMs = 300_000) => new()

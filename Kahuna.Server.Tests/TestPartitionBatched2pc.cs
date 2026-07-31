@@ -17,7 +17,6 @@ namespace Kahuna.Server.Tests;
 /// canonical record, whose single atomic decision makes a partial commit unrepresentable — the cases here
 /// assert that all-or-nothing property for commit and rollback across partitions.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestPartitionBatched2pc
 {
     private readonly ILoggerFactory loggerFactory;

@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// counter <em>does</em> advance, so a zero elsewhere is proof the path was avoided, not proof the counter is
 /// inert.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestManualTicketPathInvariant
 {
     private readonly ILoggerFactory loggerFactory;

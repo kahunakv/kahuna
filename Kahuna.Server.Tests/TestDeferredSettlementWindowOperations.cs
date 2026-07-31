@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// (and be rejected), and after a committed delete the unique slot must be reusable. Read and update over the window
 /// are covered by <see cref="TestDeferredSettlementReadYourWrite"/>; this covers delete and unique-index reuse.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlementWindowOperations
 {
     private readonly ILoggerFactory loggerFactory;

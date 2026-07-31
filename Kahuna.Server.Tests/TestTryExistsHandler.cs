@@ -26,7 +26,6 @@ namespace Kahuna.Server.Tests;
 /// GetKeyValueRevision off the actor mailbox. The non-by-revision path (which still uses the
 /// blocking GetKeyValueEntry) is not exercised here.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTryExistsHandler
 {
     // ── By-revision: stage-1 shortcuts (no disk, no detach) ──────────────────────────────

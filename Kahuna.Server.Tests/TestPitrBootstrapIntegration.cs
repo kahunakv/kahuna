@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// cluster via AppendEntries (delta) rather than InstallSnapshot, by asserting that the
 /// snapshot-export hook is never invoked during the join.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
 {
     private readonly ILogger<IRaft> raftLogger;

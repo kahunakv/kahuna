@@ -13,7 +13,6 @@ namespace Kahuna.Server.Tests;
 /// replica of that partition drops the proof — not just the node that ran the coordinator drive. A node-local
 /// forget would leave the followers holding the receipt forever while the decision record reports it released.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestReceiptReleaseReplication : BaseCluster
 {
     private const int Pid = RangeMapStore.FirstDataPartitionId;

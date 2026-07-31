@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// the outcome — serving the committed value (or the prior value on abort) — instead of spinning until settlement
 /// propagates the decision to the key's partition.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableReadRoutedResolution : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

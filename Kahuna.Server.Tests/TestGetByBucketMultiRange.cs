@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// Tests requiring RPC-level instrumentation (Bucket_QueriesOnlySpannedPartitions,
 /// Bucket_SplitMidScan_RetriesOnlyAffectedRange) are deferred until a mock transport is available.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestGetByBucketMultiRange : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;

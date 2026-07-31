@@ -18,7 +18,6 @@ using Nixie;
 
 namespace Kahuna.Server.Tests;
 
-[Collection("ClusterTests")]
 public sealed class TestKeyValueCollection
 {
     private readonly ILoggerFactory loggerFactory;

@@ -13,7 +13,6 @@ namespace Kahuna.Server.Tests;
 /// Acceptance tests for the size-based automatic split trigger.
 /// Each cluster test uses a 4-partition 3-node cluster (meta P1 + data P2).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestAutoSplit : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;

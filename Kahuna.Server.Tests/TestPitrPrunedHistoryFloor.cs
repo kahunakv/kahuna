@@ -22,7 +22,6 @@ namespace Kahuna.Server.Tests;
 /// durable pruned-history floor (the highest oldest-surviving boundary a prune produced); the driver
 /// refuses a cut below it. The memory backend never prunes, so its floor stays Zero.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestPitrPrunedHistoryFloor : IDisposable
 {
     private static readonly ILogger<IRaft> Log = NullLogger<IRaft>.Instance;

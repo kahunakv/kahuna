@@ -38,7 +38,6 @@ namespace Kahuna.Server.Tests;
 /// This closes the former sample→delete residual window, for both targeted cleanup and full
 /// sweep, which share the identical <c>BeginPrune</c>/<c>EndPrune</c> protocol.</para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestSnapshotFloorPruneAcquireRace
 {
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;

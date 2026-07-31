@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// have lapsed. These tests exercise the background-reaper code path by invoking
 /// <c>PurgeExpiredHoldsAsync</c> directly (rather than waiting for the periodic timer).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestSnapshotFloorLeaseExpiry
 {
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;

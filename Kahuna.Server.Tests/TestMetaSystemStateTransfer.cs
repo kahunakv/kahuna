@@ -19,7 +19,6 @@ namespace Kahuna.Server.Tests;
 /// so both state machines are restored atomically. These exercise the public export/import surface
 /// directly — no cluster or leader election needed.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
 {
     private readonly ILogger<IRaft> raftLogger;

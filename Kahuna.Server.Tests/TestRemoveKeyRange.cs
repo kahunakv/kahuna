@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// Tests for <c>RemoveKeyRangeAsync</c> (T1), registry-as-projection reconcile (T2), and
 /// quiesce-window safety (T3).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRemoveKeyRange
 {
     private readonly ILogger<IRaft> raftLogger;

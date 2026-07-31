@@ -13,7 +13,6 @@ namespace Kahuna.Server.Tests;
 /// (AS-OF + transactional) takes the snapshot-visibility path, matching point-read
 /// behaviour for the same (transactionId, readTimestamp) pair.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestScanAsOfSnapshot : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

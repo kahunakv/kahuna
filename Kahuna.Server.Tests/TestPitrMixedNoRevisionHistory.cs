@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// an older revision) and fail closed when the cut's boundary is an overwritten no-revision value
 /// that cannot be reconstructed (a no-revision→revisioned key must not silently omit the key).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestPitrMixedNoRevisionHistory : IDisposable
 {
     private readonly string _tempRoot =

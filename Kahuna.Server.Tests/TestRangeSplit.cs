@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// Acceptance tests for the key-range split transaction.
 /// Each test uses a 4-partition 3-node cluster (meta P1 + data P2/P3/P4).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeSplit : BaseCluster
 {
     private const string Space = "t:s";

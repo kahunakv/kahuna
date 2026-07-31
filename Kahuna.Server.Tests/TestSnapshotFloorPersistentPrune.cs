@@ -13,7 +13,7 @@ namespace Kahuna.Server.Tests;
 /// count/age retention policy. Runs against both SQLite and RocksDB — the two backends compute the
 /// floor boundary by different mechanisms (SQL comparison vs. deserialized-HLC LINQ) and must agree.
 /// </summary>
-[Collection("ClusterTests")]
+[Collection("SnapshotFloorMetrics")]
 public sealed class TestSnapshotFloorPersistentPrune
 {
     private static (IPersistenceBackend Backend, string Path) CreateBackend(string storage)

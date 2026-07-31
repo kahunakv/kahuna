@@ -1,0 +1,36 @@
+Test run for /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/bin/Debug/net10.0/Kahuna.Server.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v3.1.5+1b188a7b0a (64-bit .NET 10.0.10)
+[xUnit.net 00:00:00.11]   Discovering: Kahuna.Server.Tests
+[xUnit.net 00:00:00.42]   Discovered:  Kahuna.Server.Tests
+[xUnit.net 00:00:00.62]   Starting:    Kahuna.Server.Tests
+  Passed Kahuna.Server.Tests.TestFinalizeSlot.OwnerPublishingOnFailurePath_NeverLeavesAWaiterHanging [14 ms]
+  Passed Kahuna.Server.Tests.TestDurableAdmissionGate.PreparedIntentBytes_Exceeded_RefusesBeforePrepare_SmallerAdmitted [4 s]
+  Passed Kahuna.Server.Tests.TestWriteRangeFence.Flush_GenerationBumpedSinceAdmission_Stale [1 ms]
+  Passed Kahuna.Server.Tests.TestTransactionRecordGcBatching.Sweep_ReleasesReceipts_OncePerPartition_NotOncePerRecord [4 s]
+  Passed Kahuna.Server.Tests.TestCompletionReceiptTransfer.MovedReceipts_ImportedLocally_WhenNodeIsPartitionLeader [13 s]
+  Passed Kahuna.Server.Tests.TestTryScanByPrefixFromDiskHandler.PrefixFromDiskScan_BackendFaults_ResolvesMustRetry [12 ms]
+  Passed Kahuna.Server.Tests.TestDurableTransactionRecovery.UndecidedWithinDeadline_IsSkipped [9 ms]
+  Passed Kahuna.Server.Tests.TestSnapshotPointRead.PointRead_WithReadTimestamp_ServesSnapshot(storage: "memory", partitions: 8) [13 s]
+  Passed Kahuna.Server.Tests.TestWalSyncWritesConfiguration.ServerCliDefaultsWalSyncWritesToEnabled [36 ms]
+  Passed Kahuna.Server.Tests.TestDeferredSettlementCrashRecovery.DurableCommit_SurvivesCrashBeforeMaterialization_RecoveryMaterializes [8 s]
+  Passed Kahuna.Server.Tests.TestKeyValueLruEviction.DirtyIdleEntry_NotEvictedByIdleSweep_EvenWhenStale [3 ms]
+  Passed Kahuna.Server.Tests.TestDirectWriteSerialization.DirectWrites_CompleteWithTheirProposalKindResponse [4 s]
+  Passed Kahuna.Server.Tests.TestPreparedIntentDeltaEncoding.SingleTransactionBatch_RoundTripsEveryField [8 ms]
+  Passed Kahuna.Server.Tests.TestLeaderBalancerCluster.TestCommittedDataSurvivesBalancerPasses(storage: "memory", partitions: 4) [16 s]
+  Passed Kahuna.Server.Tests.TestSnapshotFloorBoundaryTrim.WithHold_HighestQualifyingBelowCutoff_SelectedAsBoundary [9 ms]
+  Passed Kahuna.Server.Tests.TestRocksDbSharedResources.Backend_WithSharedBundle_ChargesSharedMemtableBudget [176 ms]
+  Passed Kahuna.Server.Tests.TestTransactionConcurrencyPolicy.WriteIntentCheck_PreventsWriteSkew_AcrossConcurrentTransactions [3 s]
+  Passed Kahuna.Server.Tests.TestClientPointRead.GetKeyValue_AsOf_BeforeWrite_ReturnsNotFound [4 s]
+  Passed Kahuna.Server.Tests.TestLocks.TestLockConcurrentOperations(storage: "memory", partitions: 8, durability: Ephemeral) [3 s]
+  Passed Kahuna.Server.Tests.TestLocks.TestLockConcurrentOperations(storage: "memory", partitions: 8, durability: Persistent) [3 s]
+  Passed Kahuna.Server.Tests.TestPitrBackupDriver.TakeFullBackup_CommittedBelowProposedTail_StillFound [39 ms]
+  Passed Kahuna.Server.Tests.TestDeferredSettlementBacklogBound.SustainedOverload_AdmissionEngages_BacklogDrains_NoCommitLost [4 s]
+  Passed Kahuna.Server.Tests.TestEmbeddedWitnessLiveness.TestWitnessesSurviveSuspicionAndEvictionGrace [41 s]
+  Passed Kahuna.Server.Tests.TestRangeLockWriteFence.Write_OutsideRange_Succeeds [13 s]
+  Passed Kahuna.Server.Tests.TestClientSnapshotExists.ExistsKeyValue_AsOf_BeforeWrite_ReturnsFalse [3 s]
+  Passed Kahuna.Server.Tests.TestPitrAsOfCheckpoint.RunFull_PinsSnapshotHistoryHoldAtCut_AndReleases [19 ms]
+  Passed Kahuna.Server.Tests.TestTransactionRecordStateMachine.Purge_AbortTombstone_Removes [5 ms]
+  Passed Kahuna.Server.Tests.TestPitrTransactionConsistentCut.MultiPartitionTxn_StraddlingWalTimes_RestoredAtomically(restoreMs: 250, present: True) [35 ms]
+  Passed Kahuna.Server.Tests.TestPitrTransactionConsistentCut.MultiPartitionTxn_StraddlingWalTimes_RestoredAtomically(restoreMs: 260, present: True) [9 ms]
+  Passed Kahuna.Server.Tests.TestPitrTransactionConsistentCut.MultiPartitionTxn_StraddlingWalTimes_RestoredAtomically(restoreMs: 245, present: False) [3 ms]

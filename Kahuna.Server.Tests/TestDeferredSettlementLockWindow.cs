@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// <see cref="TestDeferredSettlementWindowOperations"/> covers the value-visibility side (delete, unique insert);
 /// this covers the lock the holder leaves behind.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlementLockWindow
 {
     private readonly ILoggerFactory loggerFactory;

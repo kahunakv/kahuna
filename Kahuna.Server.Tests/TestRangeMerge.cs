@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// Acceptance tests for the key-range merge transaction.
 /// Each test uses a 4-partition 3-node cluster (meta P1 + data P2 + data P3).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeMerge : BaseCluster
 {
     private const string Space = "t:m";

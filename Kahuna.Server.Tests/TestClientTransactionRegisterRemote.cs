@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// cluster; here the identity flows through the in-process IKahuna, so the routing and recording
 /// logic is covered without the gRPC codec.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestClientTransactionRegisterRemote
 {
     private readonly ILoggerFactory loggerFactory;

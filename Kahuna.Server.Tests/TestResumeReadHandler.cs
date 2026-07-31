@@ -22,7 +22,6 @@ namespace Kahuna.Server.Tests;
 /// Unit tests for the resumable-read infrastructure: the ResumeReadHandler and the
 /// ReadContinuation abstraction it delegates to.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestResumeReadHandler
 {
     // ── (a) Disk result, no concurrent write — disk value served and cached ───────────────

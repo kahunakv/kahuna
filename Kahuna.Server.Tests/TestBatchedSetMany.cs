@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// (<see cref="KeyValuesManager.LocateAndTrySetManyKeyValue"/>) and assert the observable outcome — values
 /// land, revisions advance by exactly one per write (no double-apply), and mixed durability still works.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestBatchedSetMany
 {
     private readonly ILoggerFactory loggerFactory;

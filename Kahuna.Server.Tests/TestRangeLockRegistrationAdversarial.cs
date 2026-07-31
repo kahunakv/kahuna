@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// transaction, a partial-acquire rollback that must not leak a descriptor into the working set, and a
 /// renewal that races a finalize.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeLockRegistrationAdversarial : BaseCluster
 {
     private const string Space = "adv:rl";

@@ -17,7 +17,6 @@ namespace Kahuna.Server.Tests;
 /// <c>ReplicateEntries</c> proposals issued by the shared partition write scheduler. It prints a report at several
 /// concurrency levels and asserts the structural coalescing trend without imposing a machine-speed threshold.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class BenchmarkDurableTransactionThroughput
 {
     private readonly ITestOutputHelper output;

@@ -31,7 +31,6 @@ namespace Kahuna.Server.Tests;
 /// multi-node cluster — it isolates the LOCAL fsync/proposal-overhead and the prepare-latency cost, which are
 /// the factors that decide whether the slice is worth its complexity.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class BenchmarkPrepareCoalescing
 {
     private readonly ITestOutputHelper output;

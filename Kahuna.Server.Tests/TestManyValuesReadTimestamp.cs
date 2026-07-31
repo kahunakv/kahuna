@@ -13,7 +13,6 @@ namespace Kahuna.Server.Tests;
 /// readTimestamp, and that the batch result at a given snapshot is byte-identical to N separate
 /// single-key LocateAndTryGetValue / LocateAndTryExistsValue calls at the same snapshot.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestManyValuesReadTimestamp : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

@@ -30,7 +30,6 @@ namespace Kahuna.Server.Tests;
 /// which mirrors real-world cadence: a new writer on the same key triggers cleanup of any stale
 /// read snapshots left by a previous reader.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestKeyValueMvccSnapshotReap
 {
     // ── committed-session path ───────────────────────────────────────────────────────────

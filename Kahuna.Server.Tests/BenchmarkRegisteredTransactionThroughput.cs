@@ -13,7 +13,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kahuna.Server.Tests;
 
-[Collection("ClusterTests")]
 public sealed class BenchmarkRegisteredTransactionThroughput
 {
     private readonly ITestOutputHelper output;

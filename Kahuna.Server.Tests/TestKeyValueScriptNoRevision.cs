@@ -17,7 +17,6 @@ namespace Kahuna.Server.Tests;
 /// and honored by the in-memory and persistence write sites. The modifier suppresses historical
 /// revision archiving while the monotonic revision counter and conditional-set semantics keep working.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestKeyValueScriptNoRevision : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

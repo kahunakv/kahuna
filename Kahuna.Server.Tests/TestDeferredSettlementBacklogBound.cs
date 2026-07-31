@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// that outruns settlement is backpressured with the retryable <c>MustRetry</c> rather than admitted — and once the
 /// inflow relents the backlog drains to zero. No acknowledged commit is lost to the backpressure.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlementBacklogBound
 {
     private readonly ILoggerFactory loggerFactory;

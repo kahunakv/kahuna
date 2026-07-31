@@ -24,7 +24,6 @@ namespace Kahuna.Server.Tests;
 /// suites, since the aggregator emits byte-identical log records. Partition independence, admit-during-in-flight,
 /// and the flush-time fence are asserted deterministically at the component level (TestPartitionWriteAggregator).</para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestPartitionWriteAggregatorEndToEnd
 {
     private readonly ILoggerFactory loggerFactory;

@@ -37,7 +37,7 @@ namespace Kahuna.Server.Tests;
 ///   revision is pinned (bounded: at most RetentionCount + 1 in memory).</item>
 /// </list></para>
 /// </summary>
-[Collection("ClusterTests")]
+[Collection("SnapshotFloorMetrics")]
 public sealed class TestSnapshotFloorBoundaryTrim
 {
     // ── thin subclass to expose RemoveExpiredRevisions for unit testing ──────────────────

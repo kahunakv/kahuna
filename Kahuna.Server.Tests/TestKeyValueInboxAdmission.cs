@@ -24,7 +24,6 @@ namespace Kahuna.Server.Tests;
 /// manager boundary), while priority control messages — completions, cache-coherence, maintenance —
 /// are exempt from the bound and always admitted, so an in-flight read completion is never stranded.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestKeyValueInboxAdmission
 {
     [Fact]

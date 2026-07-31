@@ -27,7 +27,6 @@ namespace Kahuna.Server.Tests;
 /// revision-based (Revision &gt; FlushedRevision) — a dirty entry stays pinned until the background
 /// writer acknowledges its flush, with no time-based override.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestKeyValueDirtyEvictionGuard
 {
     private readonly ILoggerFactory loggerFactory;

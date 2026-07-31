@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// the durable-intent path (so the ticket path can then be retired). Persistent effects survive via the persistent
 /// store (GET); ephemeral effects via the ephemeral store (EGET); a rollback discards both.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestMixedTransactionCharacterization
 {
     private readonly ILoggerFactory loggerFactory;

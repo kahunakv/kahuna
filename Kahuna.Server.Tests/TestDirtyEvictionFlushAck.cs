@@ -26,7 +26,6 @@ namespace Kahuna.Server.Tests;
 ///   • With the background flush stalled well past the old 10 s window, the only cached copy of a
 ///     committed persistent entry is never evicted, so a read still returns it.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDirtyEvictionFlushAck
 {
     private readonly ILoggerFactory loggerFactory;

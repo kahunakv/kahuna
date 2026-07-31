@@ -23,7 +23,6 @@ namespace Kahuna.Server.Tests;
 /// receipt/leader-change resolution) are covered for the durable path in TestDurableOutcomeConsultation,
 /// TestDurableStateTransfer, and TestDurableReadRoutedResolution.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTwoPhaseCommitRecovery
 {
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;

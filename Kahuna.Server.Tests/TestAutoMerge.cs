@@ -21,7 +21,6 @@ namespace Kahuna.Server.Tests;
 /// exercising the trigger.
 /// </para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestAutoMerge : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;

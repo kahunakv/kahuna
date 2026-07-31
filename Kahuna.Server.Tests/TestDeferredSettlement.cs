@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// value through the durable-intent visibility path (the canonical record, locally or routed) even before the
 /// value materializes into MVCC — and the value must ultimately materialize.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlement
 {
     private readonly ILoggerFactory loggerFactory;

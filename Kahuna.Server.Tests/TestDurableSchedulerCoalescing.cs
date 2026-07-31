@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// partition must issue far fewer <c>ReplicateEntries</c> proposals than they would if each transaction's records
 /// (init, prepare, decision, resolution) were proposed separately.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableSchedulerCoalescing
 {
     private readonly ILoggerFactory loggerFactory;

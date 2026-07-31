@@ -21,7 +21,6 @@ namespace Kahuna.Server.Tests;
 /// number of owning nodes rather than the number of keys, is exercised on a real three-node cluster against the
 /// transport's own call counters.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestManyWriteIntentProbe : BaseCluster
 {
     private readonly ITestOutputHelper output;

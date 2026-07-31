@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// decision record — no manual Raft ticket — and its values materialize into visible MVCC on commit. Runs on a
 /// real embedded node so the actual coordinator → finalizer → replicate → replicator apply path is exercised.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableIntentTransactionEndToEnd
 {
     private readonly ILoggerFactory loggerFactory;

@@ -37,7 +37,7 @@ namespace Kahuna.Server.Tests;
 /// from memory), the snapshot read falls back to disk and the counter goes to 1.
 /// If the pin is working, the boundary is found in memory and the counter stays at 0.</para>
 /// </summary>
-[Collection("ClusterTests")]
+[Collection("SnapshotFloorMetrics")]
 public sealed class TestSnapshotFloorPinEndToEnd
 {
     private readonly ILogger<IRaft>    raftLogger   = NullLogger<IRaft>.Instance;

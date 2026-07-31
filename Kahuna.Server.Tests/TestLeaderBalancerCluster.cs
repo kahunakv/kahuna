@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// no leaderless partitions). They deliberately do NOT assert a particular rebalanced distribution:
 /// that is Kommander's own concern and is non-deterministic in an in-process multi-node harness.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestLeaderBalancerCluster : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

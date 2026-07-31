@@ -23,7 +23,6 @@ namespace Kahuna.Server.Tests;
 /// <see cref="BaseCluster.RunUnderStableLeadership"/>, which retries it if the leader moved mid-scenario and
 /// discarded that state — a failure with leadership unchanged still fails the test.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestSnapshotSafeTime : BaseCluster
 {
     private readonly ILogger<IRaft>   raftLogger;

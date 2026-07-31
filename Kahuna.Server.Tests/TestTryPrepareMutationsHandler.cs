@@ -25,7 +25,6 @@ namespace Kahuna.Server.Tests;
 /// Ephemeral durability is used so preparation stops at write-intent creation and never touches the
 /// Raft proposal path.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTryPrepareMutationsHandler
 {
     [Fact]

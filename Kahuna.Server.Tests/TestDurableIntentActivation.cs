@@ -18,7 +18,6 @@ namespace Kahuna.Server.Tests;
 /// record is created and the durable records replicate through the shared partition write scheduler (one
 /// heterogeneous <c>ReplicateEntries</c> proposal). Covers single-key and multi-key (SET) transactions.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableIntentActivation
 {
     private readonly ILoggerFactory loggerFactory;

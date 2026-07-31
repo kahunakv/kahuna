@@ -18,7 +18,6 @@ namespace Kahuna.Server.Tests;
 /// re-creates a receipt no acknowledgement will ever release. These tests prove the orphan is really created, that
 /// the record sweep alone leaves it retained forever, and that the age sweep reclaims it once past its window.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestCompletionReceiptRetention
 {
     private readonly ILoggerFactory loggerFactory;

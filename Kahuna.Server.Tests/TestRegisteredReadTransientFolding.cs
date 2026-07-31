@@ -22,7 +22,6 @@ namespace Kahuna.Server.Tests;
 /// otherwise conflict-free optimistic commit. Also pins the point-read and range-read transient-cancel
 /// behavior and documents the re-execute/first-observation-authoritative contract for duplicate-id reads.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRegisteredReadTransientFolding
 {
     private readonly ILogger<IRaft> raftLogger;

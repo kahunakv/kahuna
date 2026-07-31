@@ -13,7 +13,6 @@ namespace Kahuna.Server.Tests;
 /// array, or a non-array-backed buffer. This guards the memory-typed script entry point
 /// against reading the whole backing array or assuming array-backing anywhere downstream.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestScriptMemoryInput
 {
     private readonly ILoggerFactory loggerFactory;

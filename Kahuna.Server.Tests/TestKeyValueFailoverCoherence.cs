@@ -21,7 +21,6 @@ namespace Kahuna.Server.Tests;
 /// the owning actor's in-memory cache must be updated to the new revision so that a node promoted
 /// to leader immediately serves the latest value without a disk round-trip.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestKeyValueFailoverCoherence
 {
     private readonly ILogger<IRaft>    raftLogger    = NullLogger<IRaft>.Instance;

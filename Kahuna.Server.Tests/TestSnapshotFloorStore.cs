@@ -30,7 +30,6 @@ namespace Kahuna.Server.Tests;
 /// <c>ReplicateLogs</c> are exercised by a 3-node in-memory cluster, mirroring the pattern in
 /// <see cref="TestRangeMapReplication"/>.</para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestSnapshotFloorStore
 {
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;

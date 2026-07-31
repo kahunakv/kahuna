@@ -12,7 +12,6 @@ namespace Kahuna.Server.Tests;
 /// These tests exercise the lock-transfer plumbing (proto, export, import, clamping, dedup, release fix)
 /// <b>without</b> wiring split or merge, so they cannot regress the topology paths.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeLockTransfer : BaseCluster
 {
     private const string Space = "t:lt";

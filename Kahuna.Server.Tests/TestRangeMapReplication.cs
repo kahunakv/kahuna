@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// (<c>OnLogRestored</c>), follower replication + failover (<c>OnReplicationReceived</c>), and the
 /// single-writer serialization of <see cref="RangeMapStore.MutateAsync"/>.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeMapReplication
 {
     private readonly ILogger<IRaft> raftLogger;

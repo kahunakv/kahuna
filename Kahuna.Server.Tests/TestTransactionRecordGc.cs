@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// window has elapsed, reclaims a committed transaction's canonical record <b>and</b> releases its participant
 /// completion receipts — so neither store grows for the node's lifetime.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTransactionRecordGc
 {
     private readonly ILoggerFactory loggerFactory;

@@ -12,7 +12,6 @@ namespace Kahuna.Server.Tests;
 /// proposal actor, that schema-log spaces stay hash-routed, and that the registry guard prevents
 /// accidental KeyRange registration of schema-log key spaces.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestKeySpaceRouting : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

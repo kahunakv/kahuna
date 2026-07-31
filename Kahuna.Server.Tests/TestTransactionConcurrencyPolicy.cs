@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// merely round-tripping through the option models. Each policy is exercised through the public
 /// client API against a single embedded node.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTransactionConcurrencyPolicy
 {
     private readonly ILoggerFactory loggerFactory;

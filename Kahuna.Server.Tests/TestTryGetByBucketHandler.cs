@@ -27,7 +27,6 @@ namespace Kahuna.Server.Tests;
 /// detach-from-actor-mailbox path. Stage 1 is the in-memory scan; stage 2 runs
 /// GetKeyValueByPrefix off-actor; stage 3 merges the disk page against the current store.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTryGetByBucketHandler
 {
     // ── Stage-1 shortcut: all matches resident in memory, no disk needed ────────────────

@@ -20,7 +20,6 @@ namespace Kahuna.Server.Tests;
 /// (canonical record + prepared intents) rather than the manual ticket path. The durable canonical record is the
 /// distinguishing evidence: the ticket path leaves none.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRegisteredDurableStaging
 {
     private readonly ILoggerFactory loggerFactory;

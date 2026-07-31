@@ -30,7 +30,6 @@ namespace Kahuna.Server.Tests;
 /// Stage 2 (scheduler thread) — disk read.
 /// Stage 3 (actor thread, ResumeRead) — K-way merge; dispatch next page or resolve.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTryGetByRangeHandler
 {
     // ── Basic single-page scan ────────────────────────────────────────────────────────────

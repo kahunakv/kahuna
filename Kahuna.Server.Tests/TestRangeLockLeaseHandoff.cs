@@ -19,7 +19,6 @@ namespace Kahuna.Server.Tests;
 /// the lease window under load, and a slow participant can block the reaper). Each test is written
 /// so that reverting the production edit it covers causes the assertion to fail.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeLockLeaseHandoff : BaseCluster
 {
     private const string Space = "t:rlh";

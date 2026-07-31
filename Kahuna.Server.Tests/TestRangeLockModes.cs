@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// and drive the handler via <see cref="KahunaManager.TryAcquireRangeLock"/>.
 /// All locks use the prefix "t:rlm" so they land on the same partition actor.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestRangeLockModes : BaseCluster
 {
     private const string Prefix    = "t:rlm";

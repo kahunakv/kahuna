@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// that must be revision 0. Ephemeral actors now carry no durable-intent store, so the ephemeral path never consults
 /// it. The anomaly only appears while the persistent intent is unsettled, so it exercises deferred settlement.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlementEphemeralIsolation
 {
     private readonly ILoggerFactory loggerFactory;

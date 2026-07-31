@@ -31,7 +31,6 @@ namespace Kahuna.Server.Tests;
 /// Uses a pre-configured backend (no full cluster, no background-writer timing dependency) to
 /// exercise the fallback directly.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestSnapshotPointReadFromDiskHistory
 {
     private static byte[] B(string s) => Encoding.UTF8.GetBytes(s);
@@ -299,7 +298,6 @@ public class TestSnapshotPointReadFromDiskHistory
 /// end-to-end path: the trim really happens, the revisions really land on disk after a flush,
 /// and the handler's disk fallback really serves the correct historical value.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestSnapshotPointReadDiskFallbackIntegration : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

@@ -32,7 +32,6 @@ namespace Kahuna.Server.Tests;
 /// timing-sensitive (Raft election, leadership), and running these in a parallel collection adds CPU
 /// contention that can destabilize them under load.
 /// </summary>
-[Collection("ClusterTests")]
 public class TestManyValuesReadTimestampGrpc
 {
     // A readTimestamp whose physical component exceeds int.MaxValue and whose counter is large, so a

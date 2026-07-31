@@ -11,7 +11,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
-[Collection("ClusterTests")]
 public class TestLocks : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;

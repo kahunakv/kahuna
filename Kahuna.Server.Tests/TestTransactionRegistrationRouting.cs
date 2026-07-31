@@ -22,7 +22,6 @@ namespace Kahuna.Server.Tests;
 /// instead of applying the mutation a second time, and a reused id with a different declaration is
 /// rejected.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTransactionRegistrationRouting
 {
     private readonly ILogger<IRaft> raftLogger;

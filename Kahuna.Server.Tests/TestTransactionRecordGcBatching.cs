@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// that batching has to preserve: a partition whose forget was not durable retains only the records that depend
 /// on it, while records whose receipts all landed elsewhere still purge in the same pass.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTransactionRecordGcBatching
 {
     private readonly ILoggerFactory loggerFactory;

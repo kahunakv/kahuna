@@ -19,7 +19,6 @@ namespace Kahuna.Server.Tests;
 /// including the inter-node forward when the source is not the leader) without driving a live split, so they
 /// isolate the transfer path.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableStateTransfer : BaseCluster
 {
     private const int Pid = RangeMapStore.FirstDataPartitionId;

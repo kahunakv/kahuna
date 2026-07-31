@@ -11,7 +11,6 @@ namespace Kahuna.Server.Tests;
 /// Integration tests for GetByRange.
 /// All tests use an in-process single-node EmbeddedKahunaNode (memory storage).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestGetByRange
 {
     private readonly ILoggerFactory loggerFactory;

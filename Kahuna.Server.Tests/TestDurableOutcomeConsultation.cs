@@ -16,7 +16,6 @@ namespace Kahuna.Server.Tests;
 /// evicted or its node failed; a transaction with no resident record stays unknown <c>Errored</c>; and a rollback
 /// cannot override a durably committed transaction.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDurableOutcomeConsultation
 {
     private const long Epoch = 1;

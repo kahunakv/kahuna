@@ -6,7 +6,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
-[Collection("ClusterTests")]
 public sealed class TestSnapshotFloorTransport
 {
     private readonly ILoggerFactory loggerFactory;

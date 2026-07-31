@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// ordinary MVCC read, so without an explicit guard the foreign intent preempts the reader's own write and serves
 /// the prior value (a read-your-own-write violation seen only while the earlier commit is still unsettled).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlementReadYourWrite
 {
     private readonly ILoggerFactory loggerFactory;

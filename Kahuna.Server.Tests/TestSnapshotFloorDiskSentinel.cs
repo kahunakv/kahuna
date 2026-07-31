@@ -30,7 +30,7 @@ namespace Kahuna.Server.Tests;
 /// regression). All production backends return <c>FloorViolations = 0</c>; the defective
 /// backend here returns 1 to simulate the regression and verify the counter fires.
 /// </summary>
-[Collection("ClusterTests")]
+[Collection("SnapshotFloorMetrics")]
 public sealed class TestSnapshotFloorDiskSentinel
 {
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;

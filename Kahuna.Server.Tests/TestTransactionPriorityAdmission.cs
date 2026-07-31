@@ -17,7 +17,6 @@ namespace Kahuna.Server.Tests;
 /// do not involve the client cooperating), and that a node left in the default configuration behaves exactly as
 /// it did before the gate existed.</para>
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestTransactionPriorityAdmission
 {
     private readonly ILoggerFactory loggerFactory;

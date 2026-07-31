@@ -25,7 +25,6 @@ namespace Kahuna.Server.Tests;
 /// measured path returned the expected responses and that the numbers are well-formed, so the report stays
 /// meaningful without becoming a speed test.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class BenchmarkReadSetValidation : BaseCluster
 {
     private static readonly int[] ReadSetSizes = [1, 10, 100, 1000];

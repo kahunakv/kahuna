@@ -25,7 +25,6 @@ namespace Kahuna.Server.Tests;
 /// replicate (an ordinary key/value record) while letting the prepare and decision records through, so the durable
 /// state left on disk is exactly a committed-but-unmaterialized intent.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestDeferredSettlementCrashRecovery
 {
     private readonly ILoggerFactory loggerFactory;

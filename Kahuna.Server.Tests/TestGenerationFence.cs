@@ -14,7 +14,6 @@ namespace Kahuna.Server.Tests;
 /// it with <c>MustRetry</c> if the current descriptor generation no longer matches — the range
 /// moved/split since routing. Hash spaces are unaffected.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestGenerationFence : BaseCluster
 {
     private const string Space = "t:r";

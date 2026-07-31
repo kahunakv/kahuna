@@ -15,7 +15,6 @@ namespace Kahuna.Server.Tests;
 /// isolate the transfer path from replication (which in an all-nodes-in-all-groups test cluster would
 /// otherwise place a receipt on every node regardless of the transfer).
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestCompletionReceiptTransfer : BaseCluster
 {
     // Data partition that owns the moved range in these tests.

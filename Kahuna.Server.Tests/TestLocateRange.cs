@@ -11,7 +11,6 @@ namespace Kahuna.Server.Tests;
 /// two coexist. No caller is switched yet; these tests exercise the function and the
 /// single-source-of-truth that keeps the locator and the proposal actor from drifting.
 /// </summary>
-[Collection("ClusterTests")]
 public sealed class TestLocateRange : BaseCluster
 {
     private readonly ILogger<IRaft> raftLogger;
