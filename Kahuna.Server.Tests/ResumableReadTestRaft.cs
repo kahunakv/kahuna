@@ -106,6 +106,7 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => inner.AmILeader(partitionId, cancellationToken);
     public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => inner.WaitForLeader(partitionId, cancellationToken);
     public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => inner.WaitForLeaderStableAsync(partitionId, minStableFor, cancellationToken);
+    public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, TimeSpan timeout, CancellationToken cancellationToken = default) => inner.WaitForLeaderStableAsync(partitionId, minStableFor, timeout, cancellationToken);
     public Task<RaftOperationStatus> ForceLeaderForTestingAsync(int partitionId, CancellationToken cancellationToken = default) => inner.ForceLeaderForTestingAsync(partitionId, cancellationToken);
     public Task<RaftOperationStatus> StepDownAsync(int partitionId, CancellationToken cancellationToken = default) => inner.StepDownAsync(partitionId, cancellationToken);
     public Task<RaftOperationStatus> TransferLeadershipAsync(int partitionId, string targetEndpoint, CancellationToken cancellationToken = default) => inner.TransferLeadershipAsync(partitionId, targetEndpoint, cancellationToken);

@@ -265,6 +265,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
         keyValues.Dispose();
 
+        backupService?.Dispose();
+
         if (persistenceBackend is IDisposable disposable)
             disposable.Dispose();
     }

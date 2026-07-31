@@ -974,6 +974,7 @@ public sealed class TestBackupService : IDisposable
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);
+        public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, TimeSpan timeout, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);
         public Task UpdateNodes() => Task.CompletedTask;
         public IList<RaftNode> GetNodes() => Array.Empty<RaftNode>();
         public HLCTimestamp GetLastNodeActivity(string endpoint) => HLCTimestamp.Zero;

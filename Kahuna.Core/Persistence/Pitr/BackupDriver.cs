@@ -104,8 +104,9 @@ internal sealed class BackupDriver
     public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog,
         HLCTimestamp? snapshotT = null, CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
-            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT, ct,
-            _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe);
+            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT,
+            _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
+            ct: ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -118,9 +119,9 @@ internal sealed class BackupDriver
     /// first entry whose <c>Time > T</c> and T is recorded in the manifest.
     /// </summary>
     public BackupManifest TakeIncrementalBackup(Guid parentBackupId, string artifactsDir,
-        BackupCatalog catalog, HLCTimestamp? snapshotT = null, CancellationToken ct = default,
-        Func<int, long, IDisposable>? acquireRetentionHold = null) =>
-        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT, ct, acquireRetentionHold);
+        BackupCatalog catalog, HLCTimestamp? snapshotT = null,
+        Func<int, long, IDisposable>? acquireRetentionHold = null, CancellationToken ct = default) =>
+        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT, acquireRetentionHold, ct);
 
     // ── core logic (internal so tests can exercise without an IRaft) ─────────────────────
 
@@ -143,13 +144,13 @@ internal sealed class BackupDriver
         BackupCatalog catalog,
         Func<Task>? flushBeforeCheckpoint = null,
         HLCTimestamp? snapshotT = null,
-        CancellationToken ct = default,
         AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
         ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
         RenewSnapshotHoldDelegate? renewSnapshotHold = null,
         int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
-        int applyBarrierTimeoutMs = DefaultApplyBarrierTimeoutMs)
+        int applyBarrierTimeoutMs = DefaultApplyBarrierTimeoutMs,
+        CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -526,8 +527,8 @@ internal sealed class BackupDriver
         string artifactsDir,
         BackupCatalog catalog,
         HLCTimestamp? snapshotT = null,
-        CancellationToken ct = default,
-        Func<int, long, IDisposable>? acquireRetentionHold = null)
+        Func<int, long, IDisposable>? acquireRetentionHold = null,
+        CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 

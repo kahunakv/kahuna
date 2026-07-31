@@ -248,7 +248,7 @@ public sealed class TestPitrRestore : IDisposable
         MemoryPersistenceBackend backend = new();
         IReadOnlyList<BackupManifest> chain = [full];
 
-        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, tooOld, backend, window, now, TestContext.Current.CancellationToken));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, tooOld, backend, window, now, ct: TestContext.Current.CancellationToken));
 
         Assert.Contains("outside the recoverable window", ex.Message);
     }
@@ -266,7 +266,7 @@ public sealed class TestPitrRestore : IDisposable
         string artifacts = ArtifactsDir("window_future");
 
         IReadOnlyList<BackupManifest> chain = [full];
-        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, future, new MemoryPersistenceBackend(), window, now, TestContext.Current.CancellationToken));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => RestoreEngine.RestoreAsync(chain, artifacts, future, new MemoryPersistenceBackend(), window, now, ct: TestContext.Current.CancellationToken));
 
         Assert.Contains("outside the recoverable window", ex.Message);
     }

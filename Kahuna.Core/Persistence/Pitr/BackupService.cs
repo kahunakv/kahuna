@@ -14,7 +14,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// Exposes full/incremental/coordinated backup, catalog listing, chain resolution,
 /// and offline restore-to-directory operations.
 /// </summary>
-internal sealed class BackupService
+internal sealed class BackupService : IDisposable
 {
     private readonly BackupDriver _driver;
     private readonly BackupCatalog _catalog;
@@ -75,6 +75,11 @@ internal sealed class BackupService
         _copyThrottleBytesPerSec = copyThrottleBytesPerSec;
     }
 
+    public void Dispose()
+    {
+        _gcGate.Dispose();
+    }
+
     public async Task<KahunaBackupInfo> TakeFullAsync(HLCTimestamp? snapshotT = null, CancellationToken ct = default)
     {
         await _gcGate.WaitAsync(ct).ConfigureAwait(false);
@@ -102,7 +107,7 @@ internal sealed class BackupService
             try
             {
                 BackupManifest manifest = _driver.TakeIncrementalBackup(
-                    parentBackupId, _backupDir, _catalog, snapshotT, ct, _acquireRetentionHold);
+                    parentBackupId, _backupDir, _catalog, snapshotT, _acquireRetentionHold, ct);
                 RecordBackupSuccess(manifest, start);
                 dto = ToDto(manifest);
                 dto.RequestedKind = BackupType.Incremental.ToString();
@@ -232,8 +237,8 @@ internal sealed class BackupService
             BackupGcMetrics.BytesReclaimed.Add(bytesReclaimed);
         }
 
-        if (orphans.Count > 0 || retention.Count > 0)
-            _logger?.LogInformation(
+        if ((orphans.Count > 0 || retention.Count > 0) && _logger is not null && _logger.IsEnabled(LogLevel.Information))
+            _logger.LogInformation(
                 "Backup GC reclaimed {Orphans} orphan/leftover artifact(s) and deleted {Retained} out-of-retention backup(s) ({Bytes} bytes) under {Dir}.",
                 orphans.Count, retention.Count, bytesReclaimed, _backupDir);
 
@@ -414,7 +419,7 @@ internal sealed class BackupService
                 // before replaying it (point-of-use), minimizing the verify-then-use window on WAL
                 // segments read from the source artifacts.
                 result = await RestoreEngine.RestoreAsync(
-                    chain, _backupDir, targetTime, targetBackend, pitrWindow, nowUtc: null, ct, alreadyVerified: false).ConfigureAwait(false);
+                    chain, _backupDir, targetTime, targetBackend, pitrWindow, nowUtc: null, alreadyVerified: false, ct: ct).ConfigureAwait(false);
 
                 // For memory backends, StoreKeyValues only updates the in-memory object; the files in
                 // staging are still the Full backup's state. Flush the merged result back to disk so a
