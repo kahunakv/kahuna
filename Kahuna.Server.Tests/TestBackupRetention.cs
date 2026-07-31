@@ -162,8 +162,7 @@ public sealed class TestBackupRetention : IDisposable
         Directory.CreateDirectory(Path.Combine(_tempRoot, "not-a-backup-dir"));
         File.WriteAllText(Path.Combine(_tempRoot, valid.ToString("N") + ".manifest.tmp_deadbeef"), "x");
 
-        IReadOnlyList<OrphanSweepCandidate> plan = BackupRetention.PlanOrphanSweep(
-            _tempRoot, validManifestIds: new HashSet<Guid> { valid }, reservedIds: new HashSet<Guid> { reserved });
+        IReadOnlyList<OrphanSweepCandidate> plan = BackupRetention.PlanOrphanSweep(_tempRoot, validManifestIds: new HashSet<Guid> { valid }, reservedIds: new HashSet<Guid> { reserved }, ct: TestContext.Current.CancellationToken);
 
         HashSet<string> names = plan.Select(c => Path.GetFileName(c.Path)).ToHashSet();
         Assert.Contains(orphan.ToString("N"), names);                      // no manifest → orphan
@@ -188,20 +187,20 @@ public sealed class TestBackupRetention : IDisposable
         File.WriteAllText(Path.Combine(_tempRoot, id.ToString("N") + ".manifest"), "{ broken ");
 
         // The parsed listing loses the id, but the filename-only scan still owns it.
-        Assert.DoesNotContain(id, catalog.List().Select(m => m.BackupId));
-        Assert.Contains(id, catalog.ListManifestIds());
+        Assert.DoesNotContain(id, catalog.List(TestContext.Current.CancellationToken).Select(m => m.BackupId));
+        Assert.Contains(id, catalog.ListManifestIds(TestContext.Current.CancellationToken));
 
-        HashSet<Guid> valid = catalog.List().Select(m => m.BackupId).ToHashSet();
-        HashSet<Guid> protectedIds = catalog.ListManifestIds().ToHashSet();
+        HashSet<Guid> valid = catalog.List(TestContext.Current.CancellationToken).Select(m => m.BackupId).ToHashSet();
+        HashSet<Guid> protectedIds = catalog.ListManifestIds(TestContext.Current.CancellationToken).ToHashSet();
 
         // Protected by manifest presence → the directory is NOT swept.
         IReadOnlyList<OrphanSweepCandidate> plan =
-            BackupRetention.PlanOrphanSweep(_tempRoot, valid, protectedIds);
+            BackupRetention.PlanOrphanSweep(_tempRoot, valid, protectedIds, TestContext.Current.CancellationToken);
         Assert.DoesNotContain(id.ToString("N"), plan.Select(c => Path.GetFileName(c.Path)));
 
         // Without that protection (the pre-fix behavior) the same directory WOULD have been destroyed.
         IReadOnlyList<OrphanSweepCandidate> unprotected =
-            BackupRetention.PlanOrphanSweep(_tempRoot, valid, new HashSet<Guid>());
+            BackupRetention.PlanOrphanSweep(_tempRoot, valid, new HashSet<Guid>(), TestContext.Current.CancellationToken);
         Assert.Contains(id.ToString("N"), unprotected.Select(c => Path.GetFileName(c.Path)));
     }
 
@@ -245,10 +244,10 @@ public sealed class TestBackupRetention : IDisposable
         // sweep now reclaims the directory.
         Assert.Null(catalog.Get(id));
         IReadOnlyList<OrphanSweepCandidate> sweep =
-            BackupRetention.PlanOrphanSweep(_tempRoot, new HashSet<Guid>(), new HashSet<Guid>());
+            BackupRetention.PlanOrphanSweep(_tempRoot, new HashSet<Guid>(), new HashSet<Guid>(), TestContext.Current.CancellationToken);
         Assert.Contains(id.ToString("N"), sweep.Select(c => Path.GetFileName(c.Path)));
 
-        BackupRetention.ApplyOrphanSweep(sweep);
+        BackupRetention.ApplyOrphanSweep(sweep, TestContext.Current.CancellationToken);
         Assert.False(Directory.Exists(artifactDir));
     }
 }

@@ -81,8 +81,8 @@ internal static class RestoreEngine
         IPersistenceBackend backend,
         TimeSpan? pitrWindow = null,
         DateTime? nowUtc = null,
-        CancellationToken ct = default,
-        bool alreadyVerified = false)
+        bool alreadyVerified = false,
+        CancellationToken ct = default)
     {
         ValidateWindow(targetTime, pitrWindow, nowUtc);
 

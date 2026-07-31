@@ -122,12 +122,10 @@ public sealed class TestPitrAppliedBarrier : IDisposable
         BackupCatalog cat = NewCatalog("axis");
         string art = ArtifactsDir("axis");
 
-        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat,
-            flushBeforeCheckpoint: null, snapshotT: null, ct: default,
-            appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 500);
+        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 500);
 
         Assert.NotNull(m);
-        Assert.Single(cat.List());
+        Assert.Single(cat.List(TestContext.Current.CancellationToken));
     }
 
     [Fact]

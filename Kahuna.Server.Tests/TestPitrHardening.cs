@@ -168,7 +168,7 @@ public sealed class TestPitrHardening : IDisposable
         FailingBackend backend = new(MemoryPersistenceBackend.OpenCheckpoint(cp), failOnCall: 2);
 
         await Assert.ThrowsAsync<BackupDriverException>(() =>
-            RestoreEngine.RestoreAsync(chain, artifacts, T(100_000), backend));
+            RestoreEngine.RestoreAsync(chain, artifacts, T(100_000), backend, ct: TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public sealed class TestPitrHardening : IDisposable
         FailingBackend backend = new(inner, failOnCall: 2);
 
         await Assert.ThrowsAsync<BackupDriverException>(() =>
-            RestoreEngine.RestoreAsync(chain, artifacts, T(100_000), backend));
+            RestoreEngine.RestoreAsync(chain, artifacts, T(100_000), backend, ct: TestContext.Current.CancellationToken));
 
         // A failed batch aborts the restore even though the first batch was already applied.
         Assert.True(backend.StoreCalls >= 2);
@@ -200,7 +200,7 @@ public sealed class TestPitrHardening : IDisposable
             Seg(12, 300, Encoding.UTF8.GetBytes("third")),
         ];
 
-        WalSegmentEntry.SegmentWriteResult r = WalSegmentEntry.WriteSegmentStreaming(path, entries);
+        WalSegmentEntry.SegmentWriteResult r = WalSegmentEntry.WriteSegmentStreaming(path, entries, TestContext.Current.CancellationToken);
 
         Assert.Equal(3, r.EntryCount);
         Assert.Equal(new FileInfo(path).Length, r.ByteLength);
@@ -222,7 +222,7 @@ public sealed class TestPitrHardening : IDisposable
         Directory.CreateDirectory(_tempRoot);
         string path = Path.Combine(_tempRoot, "seg_empty.wal");
 
-        WalSegmentEntry.SegmentWriteResult r = WalSegmentEntry.WriteSegmentStreaming(path, []);
+        WalSegmentEntry.SegmentWriteResult r = WalSegmentEntry.WriteSegmentStreaming(path, [], TestContext.Current.CancellationToken);
 
         Assert.Equal(0, r.EntryCount);
         Assert.False(File.Exists(path));
@@ -272,14 +272,14 @@ public sealed class TestPitrHardening : IDisposable
 
         // Write as a modern JSON-Lines segment, then rewrite it as one legacy JSON array.
         string jsonl = Path.Combine(_tempRoot, "legacy_src.wal");
-        WalSegmentEntry.WriteSegmentStreaming(jsonl, entries);
+        WalSegmentEntry.WriteSegmentStreaming(jsonl, entries, TestContext.Current.CancellationToken);
         string arrayPath = Path.Combine(_tempRoot, "legacy_arr.wal");
         string asArray = "[" + string.Join(",", File.ReadLines(jsonl).Where(l => l.Length > 0)) + "]";
         File.WriteAllText(arrayPath, asArray);
 
         List<WalSegmentEntry> sync = WalSegmentEntry.ReadSegment(arrayPath).ToList();
         List<WalSegmentEntry> async = [];
-        await foreach (WalSegmentEntry e in WalSegmentEntry.ReadSegmentAsync(arrayPath))
+        await foreach (WalSegmentEntry e in WalSegmentEntry.ReadSegmentAsync(arrayPath, TestContext.Current.CancellationToken))
             async.Add(e);
 
         Assert.Equal(entries.Count, sync.Count);
@@ -305,9 +305,9 @@ public sealed class TestPitrHardening : IDisposable
         BackupCatalog catalog = NewCatalog("tamper");
         string artifacts = ArtifactsDir("tamper");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
         wal.Write([(1, [KvLog(2, 200, "b", "vvv", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
 
         string seg = Path.Combine(artifacts, inc.BackupId.ToString("N"), "partition_1.wal");
 
@@ -326,12 +326,12 @@ public sealed class TestPitrHardening : IDisposable
 
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(
             Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint"));
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
 
         // alreadyVerified:true isolates the point-of-use binding — even when the up-front verify is skipped,
         // staging re-hashes the bytes actually consumed and rejects the swap before anything is applied.
         await Assert.ThrowsAsync<BackupArtifactException>(() =>
-            RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, alreadyVerified: true));
+            RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, alreadyVerified: true, ct: TestContext.Current.CancellationToken));
 
         // The tampered value never reached the backend.
         Assert.Null(GetValue(restored, "b"));
@@ -357,29 +357,29 @@ public sealed class TestPitrHardening : IDisposable
         BackupCatalog catalog = NewCatalog("eom");
         string artifacts = ArtifactsDir("eom");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
         wal.Write([(1,
         [
             KvLog(2, 200, "b", "v2", 1, counter: 0),
             KvLog(3, 200, "c", "v3", 1, counter: 5),
             KvLog(4, 201, "d", "v4", 1, counter: 0),
         ])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
         string cp = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
 
         // Inclusive end-of-millisecond target for ms 200 (what bootstrap and the restore API both resolve to).
         HLCTimestamp target = PitrTargetResolver.FromUnixMilliseconds(200);
 
         MemoryPersistenceBackend inclusive = MemoryPersistenceBackend.OpenCheckpoint(cp);
-        await RestoreEngine.RestoreAsync(chain, artifacts, target, inclusive);
+        await RestoreEngine.RestoreAsync(chain, artifacts, target, inclusive, ct: TestContext.Current.CancellationToken);
         Assert.Equal("v2", GetValue(inclusive, "b"));
         Assert.Equal("v3", GetValue(inclusive, "c")); // counter-5 same-ms commit IS included
         Assert.Null(GetValue(inclusive, "d"));         // the next millisecond is excluded
 
         // The buggy bare (·, 200, 0) target would have dropped the counter-5 commit.
         MemoryPersistenceBackend bare = MemoryPersistenceBackend.OpenCheckpoint(cp);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(200), bare);
+        await RestoreEngine.RestoreAsync(chain, artifacts, T(200), bare, ct: TestContext.Current.CancellationToken);
         Assert.Equal("v2", GetValue(bare, "b"));
         Assert.Null(GetValue(bare, "c")); // demonstrates the excluded-commit bug the fix prevents
     }
