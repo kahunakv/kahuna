@@ -503,4 +503,10 @@ public sealed class KahunaConfiguration
     /// negative disables the periodic pass entirely (GC then runs only inline after each backup).
     /// </summary>
     public TimeSpan BackupGcInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Throughput budget, in bytes per second, for a restore's bulk checkpoint copy. Caps the copy so a
+    /// restore does not saturate the disk and starve foreground traffic. Zero or negative = unlimited.
+    /// </summary>
+    public long BackupRestoreThrottleBytesPerSec { get; set; }
 }

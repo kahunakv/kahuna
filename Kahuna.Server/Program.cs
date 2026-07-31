@@ -319,7 +319,8 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     BackupRetentionMaxChains = opts.BackupRetentionMaxChains,
     BackupRetentionMaxAge = TimeSpan.FromSeconds(opts.BackupRetentionMaxAgeSeconds),
     BackupRetentionMaxBytes = opts.BackupRetentionMaxBytes,
-    BackupGcInterval = TimeSpan.FromSeconds(opts.BackupGcIntervalSeconds)
+    BackupGcInterval = TimeSpan.FromSeconds(opts.BackupGcIntervalSeconds),
+    BackupRestoreThrottleBytesPerSec = (long)opts.BackupRestoreThrottleMbps * 1_000_000
 };
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)

@@ -402,6 +402,7 @@ restore alone reconstitutes a running system.
 | `BackupRetentionMaxAge` (`--backup-retention-max-age`, seconds) | 0 (off) | Delete any chain whose *newest* backup is older than this. 0 = unbounded. |
 | `BackupRetentionMaxBytes` (`--backup-retention-max-bytes`) | 0 (off) | Keep the most-recent chains whose combined artifact bytes stay within this budget; the single newest chain is always kept. 0 = unbounded. |
 | `BackupGcInterval` (`--backup-gc-interval`, seconds) | 1 hour | Cadence of the background GC pass (orphan sweep + retention), and a startup sweep on its first tick. 0 disables the periodic pass (GC then runs only inline after each backup). |
+| `BackupRestoreThrottleBytesPerSec` (`--backup-restore-throttle-mbps`, MB/s) | 0 (unlimited) | Throughput budget for a restore's bulk checkpoint copy, so a restore does not saturate the disk and starve foreground traffic. 0 = unlimited. |
 
 Rules of thumb:
 
@@ -613,13 +614,33 @@ list backups
 
 ### 11f. Online versus offline operations (v1 boundary)
 
-In v1 the following operations are **online and safe** — they run while the node is serving
-traffic and do not affect client latency:
+In v1 the following operations are **online** — they run while the node is serving traffic, without
+taking the node offline:
 
 - Trigger a full, incremental, or coordinated backup.
 - List backups and inspect the catalog.
 - Resolve and validate a chain.
 - Trigger (or dry-run) a garbage-collection pass — orphan sweep + retention.
+
+> **Online is not free.** "Online" means these run without stopping the node — not that they are
+> invisible to client latency. Taking the base image consumes real I/O and cache bandwidth on the
+> backup volume, and for the **SQLite** backend the `VACUUM INTO` that copies a shard holds that
+> shard's writer lock for the whole copy, so writes to that shard stall until it finishes (reads and
+> other shards are unaffected). RocksDB's checkpoint is a near-instant hard-link and does not hold a
+> writer lock, but still competes for disk bandwidth. Restore replays segments with memory bounded to
+> one write batch (segments stream one record at a time), but it too consumes I/O. Prefer taking
+> backups off-peak, or against a follower, on latency-sensitive SQLite deployments; benchmark the
+> impact for your workload before advertising backups as latency-transparent.
+>
+> A repeatable backend-level benchmark ships in the test suite
+> (`BenchmarkOnlineBackupImpact`, env-gated so CI skips it — run it with
+> `KAHUNA_BENCH=1 dotnet test --filter FullyQualifiedName~BenchmarkOnlineBackupImpact`). It measures
+> foreground write p50/p95/p99 while a checkpoint runs under concurrent load. Indicative shape on a
+> dev laptop (40k×1 KB seed, 4 writers — measure on your own hardware): **SQLite** — aggregate
+> percentiles barely move, but a write landing on the shard being vacuumed stalls for that shard's
+> `VACUUM INTO` (hundreds of milliseconds worst-case), so the impact is a tail-latency spike, not a
+> throughput loss; **RocksDB** — the hard-link checkpoint finishes in well under a second and inflates
+> p95/p99 only modestly (≈1.5–2×) from I/O contention, with no multi-hundred-millisecond stall.
 
 The following is an **offline operation** (runs via the REST/gRPC/client/CLI surface but writes to
 the local filesystem of the node receiving the request):
@@ -649,14 +670,27 @@ The following is **out of scope for v1 and not supported**:
 
 ## 12. What to expect at scale
 
-- Backups read the WAL a page at a time and write segment files atomically; they do not block the
-  partitions serving live traffic.
+- Backups read the WAL a page at a time and write segment files atomically. They do not stop a
+  partition, but they are not latency-free: the base image consumes I/O/cache bandwidth, and the
+  SQLite `VACUUM INTO` copy holds the affected shard's writer lock for its duration (see §11f).
+- **Restore streams; its memory is bounded by one write batch, not the segment size.** Segments are
+  stored as JSON Lines (one record per line) and replayed one record at a time, so restoring a
+  multi-gigabyte incremental does not load the whole segment into memory. Segment *verification* streams
+  the same way. (Backups written before this format — a single JSON array — are still read, via a
+  whole-file parse, for compatibility.)
 - Incremental backups are proportional to the *changes* since the last one, not the dataset size, so
   frequent incrementals stay cheap.
 - The retention floor advances on a slow tick (tied to the snapshot interval), so its overhead is
   negligible.
 - Backup artifacts carry SHA-256 checksums, and chains are validated before restore, so corruption is
   detected rather than silently restored.
+
+Backup and restore emit metrics (OpenTelemetry names; Prometheus exporters translate dots to
+underscores) so you can watch throughput, latency, and failures: `kahuna.backup.operations` /
+`kahuna.backup.failures` / `kahuna.backup.bytes` / `kahuna.backup.duration_ms`, and
+`kahuna.restore.operations` / `kahuna.restore.failures` / `kahuna.restore.bytes` /
+`kahuna.restore.entries_applied` / `kahuna.restore.duration_ms` (plus the `kahuna.backup.gc.*` counters
+in §10). Restore's checkpoint copy honors the `--backup-restore-throttle-mbps` budget above.
 
 Artifact verification hardens several ways an artifact directory could lie about its contents, all
 checked before any file is trusted for copy or replay:

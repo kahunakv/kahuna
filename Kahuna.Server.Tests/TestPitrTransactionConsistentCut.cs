@@ -164,7 +164,7 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreEngine.Restore(chain, artifacts, T(restoreMs), restored);
+        await RestoreEngine.RestoreAsync(chain, artifacts, T(restoreMs), restored);
 
         // Both halves share the same fate at every T — never one present and the other absent.
         string? a = GetValue(restored, "txA");
@@ -196,7 +196,7 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreEngine.Restore(chain, artifacts, T(250), restored);
+        await RestoreEngine.RestoreAsync(chain, artifacts, T(250), restored);
 
         Assert.Equal("va", GetValue(restored, "txA"));
         Assert.Equal("vb", GetValue(restored, "txB"));
@@ -222,7 +222,7 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreEngine.Restore(chain, artifacts, T(300), restored);
+        await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored);
 
         // The past-cut entry at index 2 (commit 400) is excluded; the before-cut entry at index 3
         // (commit 200) is still applied despite sitting after it in the log.
@@ -252,7 +252,7 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreEngine.Restore(chain, artifacts, new HLCTimestamp(0, 500, targetCounter), restored);
+        await RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 500, targetCounter), restored);
 
         Assert.Equal("v0", GetValue(restored, "c0"));                 // always at or before the cut
         Assert.Equal(bothIncluded ? "v3" : null, GetValue(restored, "c3"));

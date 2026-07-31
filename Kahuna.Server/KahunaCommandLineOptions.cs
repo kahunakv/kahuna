@@ -109,8 +109,8 @@ public sealed class KahunaCommandLineOptions
     [Option("transaction-priority-max-queued", Required = false, HelpText = "Callers that may wait for an admission slot per gate before further ones are refused retryably (0 = unbounded)", Default = 4096)]
     public int TransactionPriorityMaxQueued { get; set; } = 4096;
     
-    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 8)]
-    public int ReadIOThreads { get; set; } = 8;
+    [Option("read-io-threads", Required = false, HelpText = "Read I/O threads", Default = 4)]
+    public int ReadIOThreads { get; set; } = 4;
     
     [Option("write-io-threads", Required = false, HelpText = "Write I/O threads", Default = 16)]
     public int WriteIOThreads { get; set; } = 16;
@@ -402,6 +402,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("backup-gc-interval", Required = false, HelpText = "Cadence in seconds of the periodic backup GC pass (orphan/leftover sweep, plus retention when configured); a sweep also runs shortly after startup. 0 disables the periodic pass (GC still runs inline after each backup). Default 3600 (1 hour).", Default = 3600)]
     public long BackupGcIntervalSeconds { get; set; } = 3600;
+
+    [Option("backup-restore-throttle-mbps", Required = false, HelpText = "Throughput budget in MB/s for a restore's checkpoint copy, so a restore does not saturate the disk and starve foreground traffic. 0 = unlimited.", Default = 0)]
+    public int BackupRestoreThrottleMbps { get; set; }
 
     [Option("pitr-restore-root", Required = false, HelpText = "Server-owned root directory that restore destinations must be contained within. Setting this enables remote (REST/gRPC) restore, confining all targets under this path.", Default = "")]
     public string PitrRestoreRoot { get; set; } = "";

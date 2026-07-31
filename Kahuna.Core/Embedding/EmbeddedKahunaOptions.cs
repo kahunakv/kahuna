@@ -197,7 +197,7 @@ public sealed class EmbeddedKahunaOptions
 
     public int DirtyObjectsWriterDelay { get; set; } = 1000;
 
-    public int ReadIOThreads { get; set; } = 8;
+    public int ReadIOThreads { get; set; } = 4;
 
     public int WriteIOThreads { get; set; } = 8;
 
@@ -322,6 +322,9 @@ public sealed class EmbeddedKahunaOptions
 
     /// <summary>Cadence of the periodic backup GC pass (orphan sweep + retention), plus a startup sweep. Zero disables the periodic pass.</summary>
     public TimeSpan BackupGcInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>Throughput budget (bytes/sec) for a restore's checkpoint copy; 0 = unlimited.</summary>
+    public long BackupRestoreThrottleBytesPerSec { get; set; }
 
     // ── Range-split knobs ────────────────────────────────────────────────────
 

@@ -382,31 +382,30 @@ internal static class BackupArtifactVerifier
             ct.ThrowIfCancellationRequested();
             string segPath = Path.Combine(artifactPath, $"partition_{r.PartitionId}.wal");
 
-            List<WalSegmentEntry>? entries;
+            // Stream the segment: validation only needs sequential access plus the first/last entry, so
+            // the whole segment never has to be resident. A read/parse failure surfaces during iteration
+            // (the reader is lazy) and is mapped to an "unreadable" error here.
             try
             {
-                entries = JsonSerializer.Deserialize<List<WalSegmentEntry>>(File.ReadAllText(segPath));
+                ValidateSegment(m.BackupId, r, WalSegmentEntry.ReadSegment(segPath));
             }
             catch (Exception ex) when (ex is not BackupArtifactException)
             {
                 throw new BackupArtifactException($"Backup {m.BackupId:N}: WAL segment 'partition_{r.PartitionId}.wal' is unreadable.", ex);
             }
-
-            ValidateSegment(m.BackupId, r, entries);
         }
     }
 
-    private static void ValidateSegment(Guid backupId, PartitionBackupRange r, List<WalSegmentEntry>? entries)
+    private static void ValidateSegment(Guid backupId, PartitionBackupRange r, IEnumerable<WalSegmentEntry> entries)
     {
-        if (entries is null || entries.Count == 0)
-            throw new BackupArtifactException(
-                $"Backup {backupId:N}: partition {r.PartitionId} declares a range but its WAL segment is empty.");
-
         long prevId = long.MinValue;
         HLCTimestamp prevTime = default;
-        for (int i = 0; i < entries.Count; i++)
+        WalSegmentEntry? first = null;
+        WalSegmentEntry? last = null;
+        int i = 0;
+
+        foreach (WalSegmentEntry e in entries)
         {
-            WalSegmentEntry e = entries[i];
             if (e.Id <= prevId)
                 throw new BackupArtifactException(
                     $"Backup {backupId:N}: partition {r.PartitionId} WAL segment is not strictly index-ordered at entry {i}.");
@@ -416,12 +415,17 @@ internal static class BackupArtifactVerifier
             if (i > 0 && e.Time.CompareTo(prevTime) < 0)
                 throw new BackupArtifactException(
                     $"Backup {backupId:N}: partition {r.PartitionId} WAL segment HLC is not monotonic at entry {i}.");
+            first ??= e;
+            last = e;
             prevId = e.Id;
             prevTime = e.Time;
+            i++;
         }
 
-        WalSegmentEntry first = entries[0];
-        WalSegmentEntry last = entries[^1];
+        if (first is null || last is null)
+            throw new BackupArtifactException(
+                $"Backup {backupId:N}: partition {r.PartitionId} declares a range but its WAL segment is empty.");
+
         if (first.Time.CompareTo(r.FromHlc) != 0)
             throw new BackupArtifactException(
                 $"Backup {backupId:N}: partition {r.PartitionId} first WAL entry HLC {first.Time} does not match the declared FromHlc {r.FromHlc}.");

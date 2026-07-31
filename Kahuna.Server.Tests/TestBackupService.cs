@@ -82,6 +82,47 @@ public sealed class TestBackupService : IDisposable
     // Absolute path of the backup directory for a service tag (mirrors BackupDir(tag)).
     private string BackupDirPath(string tag) => BackupDir(tag);
 
+    // ── I/O budget + metrics (part 4) ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void ThrottleDelaySeconds_PacesToBudget()
+    {
+        // Unlimited budget → never wait.
+        Assert.Equal(0, BackupService.ThrottleDelaySeconds(1_000_000, 0, 0.0));
+        // 1 MB copied instantly against a 1 MB/s budget → wait ~1 s to hit the target rate.
+        Assert.Equal(1.0, BackupService.ThrottleDelaySeconds(1_000_000, 1_000_000, 0.0), 3);
+        // Already behind the target rate (1.5 s elapsed for 1 MB at 1 MB/s) → no wait.
+        Assert.Equal(0, BackupService.ThrottleDelaySeconds(1_000_000, 1_000_000, 1.5));
+    }
+
+    [Fact]
+    public async Task Backup_EmitsIoMetrics()
+    {
+        long ops = 0, bytes = 0;
+        using System.Diagnostics.Metrics.MeterListener listener = new();
+        listener.InstrumentPublished = (inst, l) =>
+        {
+            if (inst.Meter.Name == "Kahuna" && inst.Name.StartsWith("kahuna.backup.", StringComparison.Ordinal))
+                l.EnableMeasurementEvents(inst);
+        };
+        listener.SetMeasurementEventCallback<long>((inst, val, _, _) =>
+        {
+            if (inst.Name == "kahuna.backup.operations") Interlocked.Add(ref ops, val);
+            else if (inst.Name == "kahuna.backup.bytes") Interlocked.Add(ref bytes, val);
+        });
+        listener.Start();
+
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+        BackupService svc = MakeService("io_metrics", wal, backend);
+        await svc.TakeFullAsync();
+
+        listener.Dispose();
+        Assert.True(ops >= 1, "expected at least one backup operation counted");
+        Assert.True(bytes > 0, "expected non-zero artifact bytes counted");
+    }
+
     // ── chain-aware retention + orphan sweep, driven through the real backup entry points ────
 
     [Fact]
@@ -122,6 +163,36 @@ public sealed class TestBackupService : IDisposable
         await svc.TakeFullAsync(); // GC (orphan sweep) runs inline after a successful backup
 
         Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
+    public async Task RestoreRacingGc_ReclaimedChain_FailsClosed_NoPartialTarget()
+    {
+        // An operator restores a chain that a retention pass reclaims. Deleting is manifest-first, so a
+        // restore that races it either completes (chain retained) or fails closed (chain gone) — never
+        // reads half-deleted artifacts or leaves a usable partial target.
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+        BackupService svc = MakeService("restore_race", wal, backend,
+            retentionPolicy: new BackupRetentionPolicy(MaxChains: 1, null, null));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo first = await svc.TakeFullAsync();
+        // A second full backup's inline GC applies MaxChains:1 retention, reclaiming `first` entirely.
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo second = await svc.TakeFullAsync();
+
+        // Restoring the reclaimed chain fails closed (its manifest is gone) — a typed backup error.
+        string goneTarget = Path.Combine(_tempRoot, "restore_race_gone");
+        await Assert.ThrowsAnyAsync<Exception>(() => svc.RestoreToAsync(first.BackupId, goneTarget, HLCTimestamp.Zero));
+        // No partial/usable target was produced.
+        Assert.False(Directory.Exists(goneTarget) && Directory.GetFileSystemEntries(goneTarget).Length > 0);
+
+        // The retained chain still restores cleanly (the "completes" branch).
+        string okTarget = Path.Combine(_tempRoot, "restore_race_ok");
+        Kahuna.Shared.Communication.Rest.KahunaRestoreResponse ok =
+            await svc.RestoreToAsync(second.BackupId, okTarget, HLCTimestamp.Zero);
+        Assert.Equal(okTarget, ok.TargetDir);
+        Assert.True(Directory.Exists(okTarget));
     }
 
     [Fact]
@@ -366,7 +437,7 @@ public sealed class TestBackupService : IDisposable
 
         // Act
         Kahuna.Shared.Communication.Rest.KahunaRestoreResponse result =
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero);
+            await svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero);
 
         // Assert: target dir exists; chain has one entry; an OpenCheckpoint from target reads the key
         Assert.True(Directory.Exists(targetDir));
@@ -391,7 +462,7 @@ public sealed class TestBackupService : IDisposable
 
         // Act
         Kahuna.Shared.Communication.Rest.KahunaRestoreResponse result =
-            svc.RestoreTo(inc.BackupId, targetDir, HLCTimestamp.Zero);
+            await svc.RestoreToAsync(inc.BackupId, targetDir, HLCTimestamp.Zero);
 
         // Full + incremental chain
         Assert.Equal(2, result.Chain.Count);
@@ -422,7 +493,7 @@ public sealed class TestBackupService : IDisposable
 
         // Must not throw; chain must be returned intact.
         Kahuna.Shared.Communication.Rest.KahunaRestoreResponse result =
-            svc.RestoreTo(inc.BackupId, targetDir, HLCTimestamp.Zero);
+            await svc.RestoreToAsync(inc.BackupId, targetDir, HLCTimestamp.Zero);
 
         Assert.Equal(2, result.Chain.Count);
         Assert.Equal(targetDir, result.TargetDir);
@@ -442,8 +513,7 @@ public sealed class TestBackupService : IDisposable
         Directory.Delete(checkpointDir, recursive: true);
 
         string targetDir = Path.Combine(_tempRoot, "restored_miss");
-        Assert.Throws<BackupArtifactException>(() =>
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero));
     }
 
     // ── B5: flush hook NOT provided → checkpoint is taken but data may be absent ──────────
@@ -532,7 +602,7 @@ public sealed class TestBackupService : IDisposable
 
         string targetDir = Path.Combine(_tempRoot, "restore_ok_target");
         Kahuna.Shared.Communication.Rest.KahunaRestoreResponse result =
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero);
+            await svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero);
 
         Assert.Equal(Kahuna.Shared.Communication.Rest.KahunaBackupOutcome.Ok, result.Outcome);
     }
@@ -547,8 +617,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
 
         string targetDir = Path.Combine(_tempRoot, "cov_low_out");
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, targetDir, new HLCTimestamp(0, 50, 0)));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, targetDir, new HLCTimestamp(0, 50, 0)));
 
         Assert.True(ex.TargetOutsideCoverage);
         Assert.False(Directory.Exists(targetDir));
@@ -562,8 +631,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
 
         string targetDir = Path.Combine(_tempRoot, "cov_high_out");
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, targetDir, new HLCTimestamp(0, 999, 0)));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, targetDir, new HLCTimestamp(0, 999, 0)));
 
         Assert.True(ex.TargetOutsideCoverage);
     }
@@ -579,7 +647,7 @@ public sealed class TestBackupService : IDisposable
 
         string targetDir = Path.Combine(_tempRoot, "cov_ok_out");
         Kahuna.Shared.Communication.Rest.KahunaRestoreResponse result =
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero);
+            await svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero);
 
         Assert.Equal(100, result.MinRecoverablePhysicalMs);
         Assert.Equal(100, result.MaxRecoverablePhysicalMs);
@@ -647,8 +715,7 @@ public sealed class TestBackupService : IDisposable
         Directory.CreateDirectory(targetDir);
         await File.WriteAllTextAsync(Path.Combine(targetDir, "occupied.txt"), "x");
 
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero));
         Assert.True(ex.TargetConflict);
 
         // The pre-existing content is untouched.
@@ -664,8 +731,7 @@ public sealed class TestBackupService : IDisposable
 
         // A fresh (non-existent) directory nested under the backup root → overlap, not non-empty.
         string targetDir = Path.Combine(BackupDir("conf_overlap"), "nested_restore");
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero));
         Assert.True(ex.TargetConflict);
     }
 
@@ -679,7 +745,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
 
         string targetDir = Path.Combine(_tempRoot, "nostage_out");
-        svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero);
+        await svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero);
 
         Assert.True(Directory.Exists(targetDir));
         Assert.Empty(Directory.GetDirectories(_tempRoot, "nostage_out.staging_*"));
@@ -699,8 +765,7 @@ public sealed class TestBackupService : IDisposable
         await File.WriteAllTextAsync(storeJson, "corrupted");
 
         string targetDir = Path.Combine(_tempRoot, "corrupt_restore_out");
-        Assert.Throws<BackupArtifactException>(() =>
-            svc.RestoreTo(full.BackupId, targetDir, HLCTimestamp.Zero));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => svc.RestoreToAsync(full.BackupId, targetDir, HLCTimestamp.Zero));
 
         Assert.False(Directory.Exists(targetDir));
         Assert.Empty(Directory.GetDirectories(_tempRoot, "corrupt_restore_out.staging_*"));
@@ -746,8 +811,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
 
         string outside = Path.Combine(_tempRoot, "outside_target");
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, outside, HLCTimestamp.Zero));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, outside, HLCTimestamp.Zero));
         Assert.True(ex.TargetConflict);
         Assert.False(Directory.Exists(outside));
     }
@@ -768,8 +832,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
 
         string caseDifferentTarget = Path.Combine(_tempRoot, "casesensroot", "out");
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, caseDifferentTarget, HLCTimestamp.Zero));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, caseDifferentTarget, HLCTimestamp.Zero));
         Assert.True(ex.TargetConflict);
 
         Assert.False(Directory.Exists(caseDifferentTarget));
@@ -793,7 +856,7 @@ public sealed class TestBackupService : IDisposable
 
         string target = Path.Combine(root, "restore_here");
         Kahuna.Shared.Communication.Rest.KahunaRestoreResponse result =
-            svc.RestoreTo(full.BackupId, target, HLCTimestamp.Zero);
+            await svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero);
         Assert.Equal(target, result.TargetDir);
         Assert.True(Directory.Exists(target));
     }
@@ -817,8 +880,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
 
         string target = Path.Combine(linkUnderRoot, "restore_here");
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            svc.RestoreTo(full.BackupId, target, HLCTimestamp.Zero));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero));
         Assert.True(ex.TargetConflict);
     }
 

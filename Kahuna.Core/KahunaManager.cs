@@ -227,7 +227,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 retentionPolicy: new BackupRetentionPolicy(
                     MaxChains: configuration.BackupRetentionMaxChains > 0 ? configuration.BackupRetentionMaxChains : null,
                     MaxAge: configuration.BackupRetentionMaxAge > TimeSpan.Zero ? configuration.BackupRetentionMaxAge : null,
-                    MaxTotalBytes: configuration.BackupRetentionMaxBytes > 0 ? configuration.BackupRetentionMaxBytes : null));
+                    MaxTotalBytes: configuration.BackupRetentionMaxBytes > 0 ? configuration.BackupRetentionMaxBytes : null),
+                // Restore checkpoint-copy throughput budget (bytes/sec; 0 = unlimited).
+                copyThrottleBytesPerSec: configuration.BackupRestoreThrottleBytesPerSec);
 
             // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
             // retention (when configured), including a startup sweep on its first tick. Disabled when
@@ -293,7 +295,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // Coverage validation (Zero → natural end, fail closed on out-of-range / unknown lower bound)
         // is centralized in BootstrapHelper.BootstrapNode so it happens before any backend/WAL mutation.
         await FlushPersistenceAsync();
-        BootstrapHelper.BootstrapNode(chain, backupDir, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
+        await BootstrapHelper.BootstrapNodeAsync(chain, backupDir, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
     }
 
     /// <summary>
@@ -1740,7 +1742,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
     }
 
-    public Task<KahunaRestoreResponse> RestoreToAsync(
+    public async Task<KahunaRestoreResponse> RestoreToAsync(
         Guid leafBackupId,
         string targetDir,
         long targetTimeMs,
@@ -1755,7 +1757,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         HLCTimestamp targetTime = targetTimeMs > 0
             ? new HLCTimestamp(0, targetTimeMs, uint.MaxValue)
             : HLCTimestamp.Zero;
-        try { return Task.FromResult(svc.RestoreTo(leafBackupId, targetDir, targetTime, ct: ct)); }
+        try { return await svc.RestoreToAsync(leafBackupId, targetDir, targetTime, ct: ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
     }
 

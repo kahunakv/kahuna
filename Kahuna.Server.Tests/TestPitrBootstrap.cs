@@ -120,8 +120,8 @@ public sealed class TestPitrBootstrap : IDisposable
         TimeSpan window = TimeSpan.FromHours(1);
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            Task.FromResult(BootstrapHelper.BootstrapNode(
-                chain, artifacts, T(100), dst, dstWal, window, NowUtc(nowMs))));
+            BootstrapHelper.BootstrapNodeAsync(
+                chain, artifacts, T(100), dst, dstWal, window, NowUtc(nowMs)));
 
         Assert.Contains("compacted past", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -144,7 +144,7 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL dstWal = new(Log);
 
         // now = 200 ms, window = 1 h → floor ≈ −3,599,800 ms (very early) → T(100) is inside.
-        BootstrapHelper.BootstrapNode(chain, artifacts, T(100), dst, dstWal,
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(100), dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(200));
     }
 
@@ -170,7 +170,7 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL dstWal = new(Log);
 
         // T exactly at floor — must not throw.
-        BootstrapHelper.BootstrapNode(chain, artifacts, T(floorMs), dst, dstWal,
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(floorMs), dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(nowMs));
     }
 
@@ -193,7 +193,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        BootstrapHelper.BootstrapNode(chain, artifacts, T(200), dst, dstWal,
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(200), dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(400));
 
         RaftLog? cp = FindCheckpoint(dstWal, partitionId: 1);
@@ -224,7 +224,7 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL dstWal = new(Log);
 
         // Zero → the chain's natural end (max captured HLC).
-        BootstrapHelper.BootstrapNode(chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         RaftLog? cp1 = FindCheckpoint(dstWal, 1);
@@ -265,7 +265,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        BootstrapHelper.BootstrapNode(chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         RaftLog? cp = FindCheckpoint(dstWal, 1);
@@ -306,7 +306,7 @@ public sealed class TestPitrBootstrap : IDisposable
 
         // T = 150 — the incremental's ToHlc (t=300) > 150, so it straddles T.
         // The bootstrap must fall back to the Full's safe ToIndex = 3.
-        BootstrapHelper.BootstrapNode(chain, artifacts, T(150), dst, dstWal,
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(150), dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
         RaftLog? cp = FindCheckpoint(dstWal, 1);
@@ -347,7 +347,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        RestoreResult result = BootstrapHelper.BootstrapNode(
+        RestoreResult result = await BootstrapHelper.BootstrapNodeAsync(
             chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
@@ -381,7 +381,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        RestoreResult result = BootstrapHelper.BootstrapNode(
+        RestoreResult result = await BootstrapHelper.BootstrapNodeAsync(
             chain, artifacts, HLCTimestamp.Zero, dst, dstWal,
             TimeSpan.FromHours(1), NowUtc(500));
 
@@ -408,8 +408,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            BootstrapHelper.BootstrapNode(chain, artifacts, T(50), dst, dstWal, TimeSpan.FromHours(1), NowUtc(200)));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(50), dst, dstWal, TimeSpan.FromHours(1), NowUtc(200)));
 
         Assert.True(ex.TargetOutsideCoverage);
         // Validation ran before any mutation: no synthetic checkpoint was seeded.
@@ -430,8 +429,7 @@ public sealed class TestPitrBootstrap : IDisposable
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
         InMemoryWAL dstWal = new(Log);
 
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            BootstrapHelper.BootstrapNode(chain, artifacts, T(150), dst, dstWal, TimeSpan.FromHours(1), NowUtc(200)));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(150), dst, dstWal, TimeSpan.FromHours(1), NowUtc(200)));
 
         Assert.True(ex.TargetOutsideCoverage);
         Assert.Null(FindCheckpoint(dstWal, 1));
@@ -456,7 +454,7 @@ public sealed class TestPitrBootstrap : IDisposable
         InMemoryWAL dstWal = new(Log);
 
         // Zero → validated natural end (500); window is large enough (now = 600 ms) to pass the guard.
-        BootstrapHelper.BootstrapNode(chain, artifacts, HLCTimestamp.Zero, dst, dstWal, TimeSpan.FromHours(1), NowUtc(600));
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, HLCTimestamp.Zero, dst, dstWal, TimeSpan.FromHours(1), NowUtc(600));
 
         // Both partitions seeded at their captured high-water marks.
         Assert.NotNull(FindCheckpoint(dstWal, 1));

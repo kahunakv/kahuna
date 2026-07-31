@@ -72,7 +72,7 @@ internal static class RestoreEngine
     /// <exception cref="BackupDriverException">
     /// Thrown when <paramref name="targetTime"/> is outside the recoverable window.
     /// </exception>
-    internal static RestoreResult Restore(
+    internal static async Task<RestoreResult> RestoreAsync(
         IReadOnlyList<BackupManifest> chain,
         string artifactsDir,
         HLCTimestamp targetTime,
@@ -121,15 +121,12 @@ internal static class RestoreEngine
                         $"Backup {manifest.BackupId:N}: declared segment for partition {partitionId} " +
                         $"is missing ({walFile}).");
 
-                List<WalSegmentEntry>? entries = JsonSerializer.Deserialize<List<WalSegmentEntry>>(
-                    File.ReadAllText(walFile), JsonOptions);
-
-                if (entries is null || entries.Count == 0)
-                    continue;
-
                 List<PersistenceRequestItem> batch = new(ApplyBatchSize);
 
-                foreach (WalSegmentEntry entry in entries)
+                // Stream the segment one record at a time (async I/O) so peak memory is a single entry
+                // plus one write batch, not the whole (potentially multi-GB) segment, and disk reads
+                // do not block the calling thread.
+                await foreach (WalSegmentEntry entry in WalSegmentEntry.ReadSegmentAsync(walFile, ct).ConfigureAwait(false))
                 {
                     ct.ThrowIfCancellationRequested();
 

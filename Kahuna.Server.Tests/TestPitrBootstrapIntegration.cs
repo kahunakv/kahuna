@@ -84,13 +84,22 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
 
         try
         {
+            // Bound every cluster-formation wait below so a cluster that never stabilizes fails fast with
+            // a clear message instead of hanging the whole suite indefinitely (Kommander's
+            // WaitForLeaderStableAsync/JoinCluster have no internal timeout). The underlying leadership-
+            // stability root cause is tracked separately.
+            using CancellationTokenSource opCts =
+                CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            opCts.CancelAfter(TimeSpan.FromSeconds(60));
+            CancellationToken opCt = opCts.Token;
+
             // Write a persistent KV entry that must survive on the joined node.
             string key = "pitr-int-" + Guid.NewGuid().ToString("N");
             byte[] value = "pitr-value"u8.ToArray();
 
             (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, value, null, -1, KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                KeyValueDurability.Persistent, opCt);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
             // Flush so the persistence backend contains the written data before checkpoint.
@@ -117,7 +126,7 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
             IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(fullManifest.BackupId);
 
             // 24-hour window ensures the just-taken backup is always within the guard-rail.
-            BootstrapHelper.BootstrapNode(
+            await BootstrapHelper.BootstrapNodeAsync(
                 chain, artifactsDir, targetTime, seededBackend, seededWal,
                 TimeSpan.FromHours(24), DateTime.UtcNow);
 
@@ -144,12 +153,23 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
                 { "localhost:8003", kahuna3 }, { "localhost:8004", kahuna4 }
             });
 
-            // Settle P0 leader before joining to avoid promotion stalls from election churn.
-            await raft1.WaitForLeaderStableAsync(0, TimeSpan.FromMilliseconds(500),
-                TestContext.Current.CancellationToken);
+            // Settle P0 leader before joining to avoid promotion stalls from election churn, then join.
+            // Both waits are unbounded in Kommander; the 60 s budget above turns a stuck cluster into a
+            // fast, explicit failure rather than an indefinite hang.
+            try
+            {
+                await raft1.WaitForLeaderStableAsync(0, TimeSpan.FromMilliseconds(500), opCt);
 
-            // JoinCluster blocks until node 4 is promoted to Voter.
-            await raft4.JoinCluster(["localhost:8001"], TestContext.Current.CancellationToken);
+                // JoinCluster blocks until node 4 is promoted to Voter.
+                await raft4.JoinCluster(["localhost:8001"], opCt);
+            }
+            catch (OperationCanceledException) when (opCts.IsCancellationRequested &&
+                                                     !TestContext.Current.CancellationToken.IsCancellationRequested)
+            {
+                Assert.Fail("Cluster did not reach a stable partition-0 leader / promote the seeded node " +
+                            "within 60 s. See the Kommander diagnosis: WaitForLeaderStableAsync has no " +
+                            "overall timeout and P0 leadership does not stabilize in this harness.");
+            }
             Assert.Equal(ClusterMemberRole.Voter, raft4.LocalRole);
 
             // The seeded WAL checkpoint carries the correct index + term, so the leader found
@@ -162,7 +182,7 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) =
                 await kahuna4.LocateAndTryGetValue(
                     HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+                    KeyValueDurability.Persistent, opCt);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry);
             Assert.Equal(value, entry.Value);

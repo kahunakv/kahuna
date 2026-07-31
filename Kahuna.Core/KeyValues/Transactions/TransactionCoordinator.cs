@@ -83,7 +83,12 @@ internal sealed class TransactionCoordinator : IDisposable
     private readonly object terminalOutcomesLock = new();
 
     /// <summary>A finalized outcome held in the idempotency window, stamped with the HLC at retention time.</summary>
-    private readonly record struct RetainedOutcome(FinalizeOutcome Outcome, HLCTimestamp RetainedAt);
+    private readonly record struct RetainedOutcome(FinalizeOutcome Outcome, HLCTimestamp RetainedAt, long Sequence);
+
+    // Monotonic insertion counter, bumped under terminalOutcomesLock on each retention. Breaks ties when
+    // several outcomes share the same retention HLC (fast back-to-back commits) so size-cap eviction is a
+    // deterministic FIFO on the true insertion order, not the non-deterministic dictionary enumeration order.
+    private long terminalOutcomeSequence;
 
     /// <summary>
     /// Admission gate for interactive sessions. Deliberately a different instance from the script executor's:
@@ -698,22 +703,27 @@ internal sealed class TransactionCoordinator : IDisposable
 
         lock (terminalOutcomesLock)
         {
-            terminalOutcomes[transactionId] = new RetainedOutcome(outcome, now);
+            terminalOutcomes[transactionId] = new RetainedOutcome(outcome, now, ++terminalOutcomeSequence);
 
             // Serialized eviction: with a single writer, TryRemove always succeeds and the loop drives Count
             // back to the cap before the lock is released, so the window never exceeds max at rest.
             while (terminalOutcomes.Count > max)
             {
                 HLCTimestamp oldestKey = default;
-                HLCTimestamp oldestAt = HLCTimestamp.Zero;
+                HLCTimestamp oldestAt = default;
+                long oldestSeq = long.MaxValue;
                 bool found = false;
 
                 foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
                 {
-                    if (!found || entry.Value.RetainedAt - oldestAt < TimeSpan.Zero)
+                    // Oldest = smallest retention HLC, ties broken by the smaller insertion sequence, so the
+                    // truly first-inserted outcome is evicted even when several share a retention HLC.
+                    int cmp = found ? entry.Value.RetainedAt.CompareTo(oldestAt) : -1;
+                    if (!found || cmp < 0 || (cmp == 0 && entry.Value.Sequence < oldestSeq))
                     {
                         oldestKey = entry.Key;
                         oldestAt = entry.Value.RetainedAt;
+                        oldestSeq = entry.Value.Sequence;
                         found = true;
                     }
                 }

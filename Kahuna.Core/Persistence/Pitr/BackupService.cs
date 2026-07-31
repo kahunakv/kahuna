@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Diagnostics;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.Communication.Rest;
 using Kommander;
@@ -27,6 +29,10 @@ internal sealed class BackupService
     private readonly Func<Task<HLCTimestamp>> _queryMinInFlight;
     private readonly BackupRetentionPolicy _retentionPolicy;
 
+    // Restore checkpoint-copy throughput budget in bytes/second; 0 = unlimited. Caps the bulk copy so a
+    // restore does not saturate the disk and starve foreground traffic.
+    private readonly long _copyThrottleBytesPerSec;
+
     // Serializes backup creation with garbage collection so a sweep never observes — and never
     // reclaims — an artifact directory that a backup is midway through writing. Backups are heavy and
     // infrequent, so serializing them (and GC) against each other is cheap and removes the race
@@ -50,7 +56,8 @@ internal sealed class BackupService
         BackupDriver.RenewSnapshotHoldDelegate? renewSnapshotHold = null,
         int snapshotHoldLeaseMs = BackupDriver.DefaultSnapshotHoldLeaseMs,
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
-        BackupRetentionPolicy retentionPolicy = default)
+        BackupRetentionPolicy retentionPolicy = default,
+        long copyThrottleBytesPerSec = 0)
     {
         _raft = raft;
         _backupDir = backupDir;
@@ -65,18 +72,22 @@ internal sealed class BackupService
         _catalog = new BackupCatalog(new LocalDirectoryStorageTarget(backupDir));
         _queryMinInFlight = queryMinInFlight;
         _retentionPolicy = retentionPolicy;
+        _copyThrottleBytesPerSec = copyThrottleBytesPerSec;
     }
 
     public async Task<KahunaBackupInfo> TakeFullAsync(HLCTimestamp? snapshotT = null, CancellationToken ct = default)
     {
         await _gcGate.WaitAsync(ct).ConfigureAwait(false);
+        long start = Stopwatch.GetTimestamp();
         try
         {
             BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+            RecordBackupSuccess(manifest, start);
             KahunaBackupInfo dto = ToDto(manifest);
             TryRunGcLocked(ct);
             return dto;
         }
+        catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
         finally { _gcGate.Release(); }
     }
 
@@ -84,6 +95,7 @@ internal sealed class BackupService
         Guid parentBackupId, HLCTimestamp? snapshotT = null, CancellationToken ct = default)
     {
         await _gcGate.WaitAsync(ct).ConfigureAwait(false);
+        long start = Stopwatch.GetTimestamp();
         try
         {
             KahunaBackupInfo dto;
@@ -91,6 +103,7 @@ internal sealed class BackupService
             {
                 BackupManifest manifest = _driver.TakeIncrementalBackup(
                     parentBackupId, _backupDir, _catalog, snapshotT, ct, _acquireRetentionHold);
+                RecordBackupSuccess(manifest, start);
                 dto = ToDto(manifest);
                 dto.RequestedKind = BackupType.Incremental.ToString();
             }
@@ -102,6 +115,7 @@ internal sealed class BackupService
                     parentBackupId, ex.Message);
 
                 BackupManifest full = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+                RecordBackupSuccess(full, start);
                 dto = ToDto(full);
                 // Make the substitution observable: the caller asked for an incremental and got a full.
                 dto.RequestedKind = BackupType.Incremental.ToString();
@@ -113,22 +127,36 @@ internal sealed class BackupService
             TryRunGcLocked(ct);
             return dto;
         }
+        catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
         finally { _gcGate.Release(); }
     }
 
     public async Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default)
     {
         await _gcGate.WaitAsync(ct).ConfigureAwait(false);
+        long start = Stopwatch.GetTimestamp();
         try
         {
             HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
                 _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
             BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+            RecordBackupSuccess(manifest, start);
             KahunaBackupInfo dto = ToDto(manifest);
             TryRunGcLocked(ct);
             return dto;
         }
+        catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
         finally { _gcGate.Release(); }
+    }
+
+    private static void RecordBackupSuccess(BackupManifest manifest, long startTimestamp)
+    {
+        long bytes = 0;
+        foreach (long size in manifest.Sizes.Values)
+            bytes += size;
+        BackupIoMetrics.BackupOperations.Add(1);
+        BackupIoMetrics.BackupBytes.Add(bytes);
+        BackupIoMetrics.BackupDurationMs.Record(Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds);
     }
 
     public async Task<HLCTimestamp> ComputeSafeSnapshotTimeAsync(CancellationToken ct = default) =>
@@ -303,13 +331,16 @@ internal sealed class BackupService
     /// <c>--storage-path=targetDir --storage-revision={revision}</c> (omit revision for memory).
     /// No WAL seeding is performed; reads fall back to the persistence backend for durability=Persistent keys.
     /// </summary>
-    public KahunaRestoreResponse RestoreTo(
+    public async Task<KahunaRestoreResponse> RestoreToAsync(
         Guid leafBackupId,
         string targetDir,
         HLCTimestamp targetTime,
         TimeSpan? pitrWindow = null,
         CancellationToken ct = default)
     {
+        long start = Stopwatch.GetTimestamp();
+        try
+        {
         ct.ThrowIfCancellationRequested();
 
         IReadOnlyList<BackupManifest> chain = _catalog.ResolveAndValidate(leafBackupId, ct);
@@ -361,7 +392,7 @@ internal sealed class BackupService
                 : staging;
 
             Directory.CreateDirectory(checkpointDest);
-            CopyDirectory(checkpointSrc, checkpointDest, ct);
+            await CopyDirectoryAsync(checkpointSrc, checkpointDest, _copyThrottleBytesPerSec, ct).ConfigureAwait(false);
 
             // Verify the bytes actually staged (and about to be opened) against the manifest — closes
             // the verify-then-use gap for the base image even if the source changed after the check.
@@ -373,8 +404,8 @@ internal sealed class BackupService
                 // alreadyVerified:false → RestoreEngine re-verifies each incremental immediately
                 // before replaying it (point-of-use), minimizing the verify-then-use window on WAL
                 // segments read from the source artifacts.
-                result = RestoreEngine.Restore(
-                    chain, _backupDir, targetTime, targetBackend, pitrWindow, nowUtc: null, ct, alreadyVerified: false);
+                result = await RestoreEngine.RestoreAsync(
+                    chain, _backupDir, targetTime, targetBackend, pitrWindow, nowUtc: null, ct, alreadyVerified: false).ConfigureAwait(false);
 
                 // For memory backends, StoreKeyValues only updates the in-memory object; the files in
                 // staging are still the Full backup's state. Flush the merged result back to disk so a
@@ -412,6 +443,15 @@ internal sealed class BackupService
             throw;
         }
 
+        long restoredBytes = 0;
+        foreach (BackupManifest m in chain)
+            foreach (long size in m.Sizes.Values)
+                restoredBytes += size;
+        BackupIoMetrics.RestoreOperations.Add(1);
+        BackupIoMetrics.RestoreBytes.Add(restoredBytes);
+        BackupIoMetrics.RestoreEntriesApplied.Add(result.EntriesApplied);
+        BackupIoMetrics.RestoreDurationMs.Record(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+
         return new KahunaRestoreResponse
         {
             TargetDir = finalDir,
@@ -423,6 +463,12 @@ internal sealed class BackupService
             MinRecoverablePhysicalMs = min.L,
             MaxRecoverablePhysicalMs = maxCover.L
         };
+        }
+        catch
+        {
+            BackupIoMetrics.RestoreFailures.Add(1);
+            throw;
+        }
     }
 
     /// <summary>
@@ -577,7 +623,10 @@ internal sealed class BackupService
         _         => MemoryPersistenceBackend.OpenCheckpoint(path)
     };
 
-    private static void CopyDirectory(string source, string destination, CancellationToken ct = default)
+    private const int CopyBufferSize = 1 << 20; // 1 MiB streamed copy chunks — bounded memory per file
+
+    private static async Task CopyDirectoryAsync(
+        string source, string destination, long throttleBytesPerSec, CancellationToken ct = default)
     {
         Directory.CreateDirectory(destination);
         foreach (string file in Directory.GetFiles(source))
@@ -587,14 +636,67 @@ internal sealed class BackupService
             // read to arbitrary bytes outside the verified artifact.
             if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
                 throw new BackupArtifactException($"Backup artifact contains a symlink/reparse point: '{file}'.");
-            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
+            await CopyFileAsync(file, Path.Combine(destination, Path.GetFileName(file)), throttleBytesPerSec, ct).ConfigureAwait(false);
         }
         foreach (string subDir in Directory.GetDirectories(source))
         {
             if ((File.GetAttributes(subDir) & FileAttributes.ReparsePoint) != 0)
                 throw new BackupArtifactException($"Backup artifact contains a symlinked directory: '{subDir}'.");
-            CopyDirectory(subDir, Path.Combine(destination, Path.GetFileName(subDir)), ct);
+            await CopyDirectoryAsync(subDir, Path.Combine(destination, Path.GetFileName(subDir)), throttleBytesPerSec, ct).ConfigureAwait(false);
         }
+    }
+
+    // Streamed async file copy — the checkpoint copy is the largest single I/O of a restore; streaming
+    // it asynchronously keeps a fixed 1 MiB buffer resident and does not block the calling thread. When
+    // a throughput budget is set, the copy is paced to stay at or under it so it does not saturate the
+    // disk and starve foreground traffic.
+    private static async Task CopyFileAsync(string source, string destination, long throttleBytesPerSec, CancellationToken ct)
+    {
+        await using FileStream src = new(
+            source, FileMode.Open, FileAccess.Read, FileShare.Read, CopyBufferSize, useAsync: true);
+        await using FileStream dst = new(
+            destination, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, useAsync: true);
+
+        if (throttleBytesPerSec <= 0)
+        {
+            await src.CopyToAsync(dst, CopyBufferSize, ct).ConfigureAwait(false);
+            return;
+        }
+
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(CopyBufferSize);
+        try
+        {
+            long copied = 0;
+            long start = Stopwatch.GetTimestamp();
+            int n;
+            while ((n = await src.ReadAsync(buffer.AsMemory(0, CopyBufferSize), ct).ConfigureAwait(false)) > 0)
+            {
+                await dst.WriteAsync(buffer.AsMemory(0, n), ct).ConfigureAwait(false);
+                copied += n;
+                double sleep = ThrottleDelaySeconds(copied, throttleBytesPerSec, Stopwatch.GetElapsedTime(start).TotalSeconds);
+                if (sleep > 0.001)
+                    await Task.Delay(TimeSpan.FromSeconds(sleep), ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// How long (seconds) to pause so that <paramref name="bytesCopied"/> bytes over the copy so far have
+    /// taken at least <c>bytesCopied / throttleBytesPerSec</c> seconds — i.e. throughput stays at or under
+    /// the budget. Returns 0 when the copy is at or behind the target rate (no pause needed) or when the
+    /// budget is non-positive (unlimited). Pure — no clock access — so it is unit-testable.
+    /// </summary>
+    internal static double ThrottleDelaySeconds(long bytesCopied, long throttleBytesPerSec, double elapsedSeconds)
+    {
+        if (throttleBytesPerSec <= 0)
+            return 0;
+        double targetSeconds = (double)bytesCopied / throttleBytesPerSec;
+        double delay = targetSeconds - elapsedSeconds;
+        return delay > 0 ? delay : 0;
     }
 
     private static KahunaBackupInfo ToDto(BackupManifest m) => new()

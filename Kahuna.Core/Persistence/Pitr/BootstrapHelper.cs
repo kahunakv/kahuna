@@ -61,7 +61,7 @@ internal static class BootstrapHelper
     /// <exception cref="BackupDriverException">
     /// Thrown when <paramref name="targetTime"/> is outside the PITR window or the chain is invalid.
     /// </exception>
-    internal static RestoreResult BootstrapNode(
+    internal static async Task<RestoreResult> BootstrapNodeAsync(
         IReadOnlyList<BackupManifest> chain,
         string artifactsDir,
         HLCTimestamp targetTime,
@@ -95,7 +95,7 @@ internal static class BootstrapHelper
                 "bootstrap directly from the leader snapshot.");
 
         // Replay incremental WAL segments into the backend up to T.
-        RestoreResult restoreResult = RestoreEngine.Restore(chain, artifactsDir, targetTime, backend);
+        RestoreResult restoreResult = await RestoreEngine.RestoreAsync(chain, artifactsDir, targetTime, backend).ConfigureAwait(false);
 
         // Pin the WAL adapter at the per-partition applied high-water mark so the Raft
         // layer presents this node at the correct index when it joins.

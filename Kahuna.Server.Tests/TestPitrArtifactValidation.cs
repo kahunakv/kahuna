@@ -217,8 +217,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         File.Delete(ArtifactFile(artifacts, inc, "partition_1.wal"));
 
         MemoryPersistenceBackend target = new();
-        Assert.Throws<BackupArtifactException>(() =>
-            RestoreEngine.Restore(chain, artifacts, new HLCTimestamp(0, 1000, 0), target));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 1000, 0), target));
     }
 
     [Fact]
@@ -231,8 +230,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         File.AppendAllText(ArtifactFile(artifacts, inc, "partition_1.wal"), "garbage");
 
         MemoryPersistenceBackend target = new();
-        Assert.Throws<BackupArtifactException>(() =>
-            RestoreEngine.Restore(chain, artifacts, new HLCTimestamp(0, 1000, 0), target));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 1000, 0), target));
     }
 
     // ── cancellation ─────────────────────────────────────────────────────────────────────────
@@ -290,8 +288,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         await cts.CancelAsync();
 
         MemoryPersistenceBackend target = new();
-        Assert.ThrowsAny<OperationCanceledException>(() =>
-            RestoreEngine.Restore(chain, artifacts, new HLCTimestamp(0, 1000, 0), target, ct: cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 1000, 0), target, ct: cts.Token));
     }
 
     // ── chain semantic bounds ────────────────────────────────────────────────────────────────

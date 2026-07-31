@@ -821,10 +821,6 @@ internal sealed class BackupDriver
         return (entries, toId, toHlc, toTerm, fromHlc);
     }
 
-    private static void WriteSegmentFile(string path, List<WalSegmentEntry> entries)
-    {
-        string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
-        File.WriteAllText(tmp, JsonSerializer.Serialize(entries, JsonOptions));
-        File.Move(tmp, path, overwrite: true);
-    }
+    private static void WriteSegmentFile(string path, List<WalSegmentEntry> entries) =>
+        WalSegmentEntry.WriteSegment(path, entries);
 }

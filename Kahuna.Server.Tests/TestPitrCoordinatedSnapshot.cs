@@ -235,7 +235,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
-        RestoreResult result = RestoreEngine.Restore(chain, artifacts, snapshotT, restored);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored);
 
         // Transaction A: both shards fully committed before T → present.
         Assert.Equal("committed", GetValue(restored, "txA_p1"));
@@ -299,7 +299,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = RestoreEngine.Restore(chain, artifacts, snapshotT, restored);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored);
 
         Assert.Equal("v1", GetValue(restored, "k1"));
         Assert.Equal("v2", GetValue(restored, "k2"));
@@ -378,7 +378,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
 
         IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
-        RestoreResult result = RestoreEngine.Restore(chain, artifacts, snapshotT, restored);
+        RestoreResult result = await RestoreEngine.RestoreAsync(chain, artifacts, snapshotT, restored);
 
         // Pre-full entries: from checkpoint.
         Assert.Equal("a", GetValue(restored, "p1k1"));
@@ -435,7 +435,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        RestoreEngine.Restore(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
 
         Assert.Null(GetValue(restored, "txC_p1"));
         Assert.Null(GetValue(restored, "txC_p2"));   // both absent → consistent
@@ -464,7 +464,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        RestoreEngine.Restore(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
 
         Assert.Equal("c1", GetValue(restored, "txC_p1"));
         Assert.Equal("c2", GetValue(restored, "txC_p2"));   // both present → consistent
@@ -496,7 +496,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        RestoreEngine.Restore(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, snapshotT, restored);
 
         // Torn: shard 1 (t=240 ≤ 250) present, shard 2 (t=260 > 250) absent. This documents the
         // hazard a safe-T choice must avoid — it is NOT the desired production outcome.
@@ -697,7 +697,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);
-        RestoreEngine.Restore(catalog.ResolveAndValidate(full.BackupId), artifacts, safeT, restored);
+        await RestoreEngine.RestoreAsync(catalog.ResolveAndValidate(full.BackupId), artifacts, safeT, restored);
 
         Assert.Equal("a", GetValue(restored, "settled1"));
         Assert.Equal("b", GetValue(restored, "settled2"));
