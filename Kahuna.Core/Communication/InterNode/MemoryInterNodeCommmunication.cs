@@ -44,17 +44,23 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public int CompleteOperationCallCount => Volatile.Read(ref completeOperationCallCount);
 
     /// <summary>
-    /// Stores the mapping of node names to their respective `IKahuna` instances.
+    /// Routing table mapping node names to their <see cref="IKahuna"/> instances. Volatile, and
+    /// defensively copied in <see cref="SetNodes"/>: the request-dispatch methods below read it
+    /// concurrently from many executor threads, so a caller re-registering nodes mid-run (e.g. adding a
+    /// joiner to an already-running cluster) must atomically publish a <b>new</b> dictionary. Mutating a
+    /// shared instance during a resize silently drops or corrupts inter-node RPC delivery between
+    /// existing members, which manifests as spurious leadership churn and stalled promotions.
     /// </summary>
-    private Dictionary<string, IKahuna>? nodes;
+    private volatile Dictionary<string, IKahuna>? nodes;
 
     /// <summary>
-    /// Sets the nodes for inter-node communication.
+    /// Sets the nodes for inter-node communication. The map is copied so the published table is never
+    /// mutated by the caller after the fact and concurrent readers always observe a complete snapshot.
     /// </summary>
     /// <param name="nodes">A dictionary mapping node names to `IKahuna` instances.</param>
     public void SetNodes(Dictionary<string, IKahuna> nodes)
     {
-        this.nodes = nodes;
+        this.nodes = new(nodes);
     }
     
     /// <summary>
