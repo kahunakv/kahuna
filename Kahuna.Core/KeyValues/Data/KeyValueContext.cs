@@ -2,6 +2,7 @@
 using Nixie;
 using Kommander;
 using Kommander.Time;
+using Kommander.WAL.IO;
 using Kahuna.Utils;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
@@ -56,6 +57,13 @@ internal sealed class KeyValueContext
     public Writes.PartitionWriteAggregator WriteAggregator { get; }
 
     public IRaft Raft  { get; }
+
+    /// <summary>
+    /// Kahuna-owned scheduler for persistence-backend reads (point gets, scans, read-before-write). Every
+    /// disk read routes through this — never <c>Raft.ReadScheduler</c> — so data-plane reads run on Kahuna's
+    /// dedicated pool instead of Kommander's WAL read pool. Partition routing at each call site is unchanged.
+    /// </summary>
+    public IRaftReadScheduler BackendReadScheduler { get; }
 
     public KeySpaceRegistry KeySpaceRegistry { get; }
 
@@ -128,6 +136,11 @@ internal sealed class KeyValueContext
             ? Configuration.CollectBatchMax
             : Math.Max(Configuration.CacheEntriesToRemove, 1);
     
+    /// <summary>
+    /// Back-compat overload without an explicit backend read scheduler: falls back to
+    /// <c>raft.ReadScheduler</c>. Used only by unit tests that build a context directly; production always
+    /// goes through <see cref="KeyValueActor"/>, which supplies the Kahuna-owned backend read scheduler.
+    /// </summary>
     public KeyValueContext(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
         BTree<string, KeyValueEntry> store,
@@ -138,6 +151,31 @@ internal sealed class KeyValueContext
         Writes.PartitionWriteAggregator writeAggregator,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        KeySpaceRegistry keySpaceRegistry,
+        RangeMapStore rangeMapStore,
+        KahunaConfiguration configuration,
+        ILogger<IKahuna> logger,
+        SnapshotFloorStore? snapshotFloorStore = null,
+        CompletionReceiptStore? completionReceiptStore = null,
+        Transactions.PreparedIntentStore? preparedIntentStore = null,
+        Transactions.TransactionRecordStore? transactionRecordStore = null
+    ) : this(actorContext, store, locksByPrefix, locksByRange, proposals, backgroundWriter, writeAggregator,
+             persistenceBackend, raft, raft.ReadScheduler, keySpaceRegistry, rangeMapStore, configuration,
+             logger, snapshotFloorStore, completionReceiptStore, preparedIntentStore, transactionRecordStore)
+    {
+    }
+
+    public KeyValueContext(
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
+        BTree<string, KeyValueEntry> store,
+        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
+        Dictionary<string, List<KeyValueRangeLock>> locksByRange,
+        Dictionary<int, KeyValueProposal> proposals,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        Writes.PartitionWriteAggregator writeAggregator,
+        IPersistenceBackend persistenceBackend,
+        IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
         KeySpaceRegistry keySpaceRegistry,
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
@@ -157,6 +195,7 @@ internal sealed class KeyValueContext
         WriteAggregator = writeAggregator;
         PersistenceBackend = persistenceBackend;
         Raft = raft;
+        BackendReadScheduler = backendReadScheduler;
         KeySpaceRegistry = keySpaceRegistry;
         RangeMapStore = rangeMapStore;
         Configuration = configuration;

@@ -62,8 +62,9 @@ public sealed class TestCheckpointSnapshotGate : IDisposable
 
     private static BackgroundWriterActor SpawnWriter(ActorSystem actorSystem, string name, TransactionRecordStore records, PreparedIntentStore intents)
     {
+        IRaft raft = CreateRaft(name);
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bg = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
-            name, CreateRaft(name), new MemoryPersistenceBackend(),
+            name, raft, raft.ReadScheduler, new MemoryPersistenceBackend(),
             null!, null!, records, intents,
             Config(), NullLogger<IKahuna>.Instance, new FlushNotificationSink());
 

@@ -75,7 +75,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
             // Route the disk scan to the FairReadScheduler partition that owns this data range,
             // not message.PartitionId (=0 for scans), matching the point-read path. Enqueuing
             // scans under partition 0 collapses per-partition fairness/back-pressure and ordering.
-            readTask = context.Raft.ReadScheduler.EnqueueTask(
+            readTask = context.BackendReadScheduler.EnqueueTask(
                 ResolvePartition(message.Key),
                 () =>
                 {

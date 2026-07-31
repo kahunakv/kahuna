@@ -15,6 +15,28 @@ public sealed class KahunaConfiguration
     
     public int BackgroundWriterWorkers { get; set; }
 
+    /// <summary>
+    /// Number of dedicated worker threads serving Kahuna persistence-backend reads (point gets, scans,
+    /// read-before-write). Owned by Kahuna and separate from Kommander's WAL read pool, so data-plane
+    /// reads never contend with the WAL reads consensus/replication/recovery depend on. 0 or negative
+    /// auto-sizes to the processor count.
+    /// </summary>
+    public int BackendReadIOThreads { get; set; } = 8;
+
+    /// <summary>
+    /// Number of dedicated worker threads serving background batch writes (StoreKeyValues / StoreLocks
+    /// and revision pruning). Kept small (1–2) because these writes are fsync-heavy and serialize on the
+    /// backend anyway; isolating them keeps bulk flushes off both the WAL read pool and the backend read
+    /// pool. 0 or negative auto-sizes to the processor count.
+    /// </summary>
+    public int BackendWriteIOThreads { get; set; } = 2;
+
+    /// <summary>
+    /// Per-partition pending-queue depth for the backend read scheduler before new reads are rejected with
+    /// backpressure. Independent of Kommander's WAL read budget.
+    /// </summary>
+    public int BackendReadQueueDepth { get; set; } = 4096;
+
     public string Storage { get; set; } = "";
     
     public string StoragePath { get; set; } = "";

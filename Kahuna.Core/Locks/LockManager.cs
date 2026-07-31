@@ -4,6 +4,7 @@ using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
+using Kommander.WAL.IO;
 using Polly.Contrib.WaitAndRetry;
 
 using Kahuna.Shared.Locks;
@@ -29,6 +30,8 @@ internal sealed class LockManager
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
+
+    private readonly IRaftReadScheduler backendReadScheduler;
 
     private readonly ILogger<IKahuna> logger;
 
@@ -88,17 +91,19 @@ internal sealed class LockManager
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
     public LockManager(
-        ActorSystem actorSystem, 
-        IRaft raft, 
+        ActorSystem actorSystem,
+        IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
         IInterNodeCommunication interNodeCommunication,
-        IPersistenceBackend persistenceBackend, 
+        IPersistenceBackend persistenceBackend,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        KahunaConfiguration configuration, 
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
+        this.backendReadScheduler = backendReadScheduler;
         this.backgroundWriter = backgroundWriter;
         this.logger = logger;
         
@@ -128,11 +133,12 @@ internal sealed class LockManager
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
             ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
-                "ephemeral-lock-" + i, 
-                backgroundWriter, 
+                "ephemeral-lock-" + i,
+                backgroundWriter,
                 proposalRouter,
-                persistenceBackend,                 
+                persistenceBackend,
                 raft,
+                backendReadScheduler,
                 configuration,
                 logger
             ));
@@ -156,11 +162,12 @@ internal sealed class LockManager
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
             persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
-                "persistent-lock-" + i, 
-                backgroundWriter, 
+                "persistent-lock-" + i,
+                backgroundWriter,
                 proposalRouter,
-                persistenceBackend,                 
+                persistenceBackend,
                 raft,
+                backendReadScheduler,
                 configuration,
                 logger
             ));

@@ -5,6 +5,8 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 using Kommander.WAL;
+using Kommander.WAL.IO;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
@@ -61,6 +63,19 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
+    /// <summary>
+    /// Kahuna-owned scheduler for all persistence-backend reads (point gets, scans, read-before-write),
+    /// separate from Kommander's WAL read pool so data-plane reads never contend with consensus WAL reads.
+    /// </summary>
+    private readonly FairReadScheduler backendReadScheduler;
+
+    /// <summary>
+    /// Kahuna-owned scheduler dedicated to background batch writes (StoreKeyValues / StoreLocks / revision
+    /// pruning). A separate instance keeps fsync-heavy flushes off both the WAL read pool and the backend
+    /// read pool. Owned here and stopped/disposed in <see cref="Dispose"/> after the actor system drains.
+    /// </summary>
+    private readonly FairReadScheduler backendWriteScheduler;
+
     private readonly IPersistenceBackend persistenceBackend;
 
     private readonly BackupService? backupService;
@@ -88,8 +103,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="raft"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
-    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
-        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, null), logger)
+    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger, ILogger<IRaft>? raftLogger = null)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, null), logger, raftLogger)
     {
     }
 
@@ -101,8 +116,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// composition root disposes it after both databases are closed. A null bundle behaves exactly as the
     /// primary constructor.
     /// </summary>
-    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, RocksDbSharedResources? sharedResources, ILogger<IKahuna> logger)
-        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, sharedResources), logger)
+    public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, RocksDbSharedResources? sharedResources, ILogger<IKahuna> logger, ILogger<IRaft>? raftLogger = null)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, sharedResources), logger, raftLogger)
     {
     }
 
@@ -112,8 +127,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// write entry points. Scoped to this node — never a process-wide static — so a concurrent test cannot be
     /// accidentally wrapped. A null decorator behaves exactly as the public constructor.
     /// </summary>
-    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, RocksDbSharedResources? sharedResources, ILogger<IKahuna> logger, Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator)
-        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, sharedResources), logger, writeBatchExecutorDecorator)
+    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, RocksDbSharedResources? sharedResources, ILogger<IKahuna> logger, ILogger<IRaft> raftLogger, Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator)
+        : this(actorSystem, raft, configuration, interNodeCommunication, GetPersistence(configuration, logger, sharedResources), logger, raftLogger, writeBatchExecutorDecorator)
     {
     }
 
@@ -122,11 +137,24 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// instead of creating a fresh one from configuration.  The WAL for the Raft layer is also
     /// pre-seeded externally; only the persistence-backend injection is handled here.
     /// </summary>
-    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, IPersistenceBackend preSeededBackend, ILogger<IKahuna> logger, Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null)
+    internal KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, IPersistenceBackend preSeededBackend, ILogger<IKahuna> logger, ILogger<IRaft>? raftLogger = null, Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null)
     {
         this.actorSystem = actorSystem;
 
         persistenceBackend = preSeededBackend;
+
+        // The scheduler only logs its own defensive errors through this logger; production hosts pass a real
+        // ILogger<IRaft>, while test harnesses that omit it get a silent sink.
+        raftLogger ??= NullLogger<IRaft>.Instance;
+
+        // Kahuna-owned backend I/O schedulers, kept off Kommander's WAL read pool. Started here (they park
+        // and serve work submitted before Start, so early reads during warm-up are served, not rejected) and
+        // stopped/disposed in Dispose() — which runs after the actor system drains, so in-flight backend I/O
+        // completes rather than faulting on a scheduler that Raft teardown already stopped.
+        backendReadScheduler = new FairReadScheduler(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth);
+        backendWriteScheduler = new FairReadScheduler(raftLogger, configuration.BackendWriteIOThreads, configuration.BackendReadQueueDepth);
+        backendReadScheduler.Start();
+        backendWriteScheduler.Start();
 
         SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
@@ -150,6 +178,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
             raft,
+            backendWriteScheduler,
             persistenceBackend,
             snapshotFloorStore,
             completionReceiptStore,
@@ -160,8 +189,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
             flushNotificationSink
         );
 
-        this.locks = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator);
+        this.locks = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
+        this.keyValues = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
@@ -266,6 +295,15 @@ public sealed class KahunaManager : IKahuna, IDisposable
         keyValues.Dispose();
 
         backupService?.Dispose();
+
+        // Stop the backend schedulers before closing the backend they call into. Stop() drains every
+        // operation accepted before this point (or faults it) and joins the worker threads, so no
+        // in-flight read/write touches the backend after it is disposed. This runs after the actor
+        // system has drained (embedded/server shutdown order), so actors are no longer enqueuing work.
+        backendReadScheduler.Stop();
+        backendWriteScheduler.Stop();
+        backendReadScheduler.Dispose();
+        backendWriteScheduler.Dispose();
 
         if (persistenceBackend is IDisposable disposable)
             disposable.Dispose();

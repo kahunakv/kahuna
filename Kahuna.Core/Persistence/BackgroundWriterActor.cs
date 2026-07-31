@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using Nixie;
 using Kommander;
+using Kommander.WAL.IO;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Kahuna.Server.Configuration;
@@ -51,8 +52,20 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// Keys added beyond this limit are dropped; the periodic sweep covers them instead.
     /// </summary>
     private const int MaxPendingCleanupKeys = 10_000;
-    
+
+    /// <summary>
+    /// Fixed queue key for every batch submitted to the dedicated writer scheduler. Batches aggregate keys
+    /// across many partitions into one backend call, so there is no single "real" partition to key on; and
+    /// because the writer scheduler is its own instance, nothing else shares its queues — the old collision
+    /// with meta-partition WAL reads (from keying background writes onto Raft's shared read pool at partition
+    /// 0) is gone by construction. Read-your-flush correctness comes from the FlushedRevision ack, never from
+    /// queue ordering, so a single serialized writer queue is both correct and simplest.
+    /// </summary>
+    private const int WriterQueueKey = 0;
+
     private readonly IRaft raft;
+
+    private readonly IRaftReadScheduler backendWriteScheduler;
 
     private readonly IPersistenceBackend persistenceBackend;
 
@@ -164,6 +177,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
+        IRaftReadScheduler backendWriteScheduler,
         IPersistenceBackend persistenceBackend,
         SnapshotFloorStore? snapshotFloorStore,
         CompletionReceiptStore? completionReceiptStore,
@@ -175,6 +189,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     )
     {
         this.raft = raft;
+        this.backendWriteScheduler = backendWriteScheduler;
         this.persistenceBackend = persistenceBackend;
         this.snapshotFloorStore = snapshotFloorStore;
         this.completionReceiptStore = completionReceiptStore;
@@ -414,7 +429,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             bool success = false;
             foreach (TimeSpan timeSpan in backoffDelays)
             {
-                success = await raft.ReadScheduler.EnqueueTask(0, () => persistenceBackend.StoreLocks(items));
+                try
+                {
+                    success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreLocks(items));
+                }
+                catch (ReadBackpressureExceededException)
+                {
+                    // Writer queue at its depth limit — treat as a failed attempt so the backoff loop retries,
+                    // and the post-loop failure path keeps the batch in pendingLockItems. Never dropped.
+                    success = false;
+                }
                 if (success)
                     break;
 
@@ -529,7 +553,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             bool success = false;
             foreach (TimeSpan timeSpan in backoffDelays)
             {
-                success = await raft.ReadScheduler.EnqueueTask(0, () => persistenceBackend.StoreKeyValues(items));
+                try
+                {
+                    success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreKeyValues(items));
+                }
+                catch (ReadBackpressureExceededException)
+                {
+                    // Writer queue at its depth limit — treat as a failed attempt so the backoff loop retries,
+                    // and the post-loop failure path keeps the batch in pendingKeyValuesItems. Never dropped.
+                    success = false;
+                }
                 if (success)
                     break;
 
@@ -604,7 +637,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         {
             Action? capturedHook = BeforePruneSampleHook;
             Action? capturedAfterHook = AfterPruneSampleHook;
-            bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
+            bool success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () =>
             {
                 capturedHook?.Invoke();
                 // Open a prune-delete window: the floor is sampled under the store's commit lock so
@@ -732,7 +765,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         Action? capturedSweepAfterHook = AfterPruneSampleHook;
         try
         {
-            bool success = await raft.ReadScheduler.EnqueueTask(0, () =>
+            bool success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () =>
             {
                 capturedSweepHook?.Invoke();
                 // Open a prune-delete window: the floor is sampled under the store's commit lock so

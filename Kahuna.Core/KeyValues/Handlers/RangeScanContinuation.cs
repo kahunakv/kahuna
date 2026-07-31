@@ -275,7 +275,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 HLCTimestamp capturedSnapshotTs = snapshotTs;
                 HLCTimestamp capturedCurrentTime = currentTime;
                 int capturedLimit = limit;
-                nextTask = context.Raft.ReadScheduler.EnqueueTask(
+                nextTask = context.BackendReadScheduler.EnqueueTask(
                     partitionId,
                     () => TryGetByRangeHandler.ProjectSnapshotPage(
                         context.PersistenceBackend.GetKeyValueByRange(prefix, capturedCursor, capturedLimit + 1),

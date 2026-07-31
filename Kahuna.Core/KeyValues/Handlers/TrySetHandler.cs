@@ -109,7 +109,7 @@ internal sealed class TrySetHandler : BaseHandler
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                newEntry = await context.Raft.ReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValue(message.Key));
+                newEntry = await context.BackendReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValue(message.Key));
                 if (newEntry is not null)
                 {
                     newEntry.FlushedRevision = newEntry.Revision; // already persisted

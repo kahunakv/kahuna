@@ -10,6 +10,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.System;
 using Kommander.Time;
+using Kommander.WAL.IO;
 using Kommander.Support.Parallelization;
 
 using Kahuna.Server.Configuration;
@@ -47,6 +48,8 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly ActorSystem actorSystem;
 
     private readonly IRaft raft;
+
+    private readonly IRaftReadScheduler backendReadScheduler;
 
     private readonly IInterNodeCommunication interNodeCommunication;
 
@@ -538,6 +541,7 @@ internal sealed class KeyValuesManager : IDisposable
     public KeyValuesManager(
         ActorSystem actorSystem,
         IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
         IInterNodeCommunication interNodeCommunication,
         IPersistenceBackend persistenceBackend,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
@@ -552,6 +556,7 @@ internal sealed class KeyValuesManager : IDisposable
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
+        this.backendReadScheduler = backendReadScheduler;
         this.interNodeCommunication = interNodeCommunication;
         this.backgroundWriter = backgroundWriter;
         this.logger = logger;
@@ -1237,6 +1242,7 @@ internal sealed class KeyValuesManager : IDisposable
                 writeAggregator,
                 persistenceBackend,
                 raft,
+                backendReadScheduler,
                 keySpaceRegistry,
                 rangeMapStore,
                 configuration,
@@ -1273,6 +1279,7 @@ internal sealed class KeyValuesManager : IDisposable
                 writeAggregator,
                 persistenceBackend,
                 raft,
+                backendReadScheduler,
                 keySpaceRegistry,
                 rangeMapStore,
                 configuration,

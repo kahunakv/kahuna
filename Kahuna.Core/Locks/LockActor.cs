@@ -4,6 +4,7 @@ using Nixie.Routers;
 
 using Kommander;
 using Kommander.Time;
+using Kommander.WAL.IO;
 
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
@@ -41,6 +42,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
     private readonly IRaft raft;
 
+    private readonly IRaftReadScheduler backendReadScheduler;
+
     private readonly DataPartitionRouter dataPartitionRouter;
 
     private readonly KahunaConfiguration configuration;
@@ -71,7 +74,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter,
         IPersistenceBackend persistenceBackend,
-        IRaft raft, 
+        IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
     )
@@ -81,6 +85,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         this.proposalRouter = proposalRouter;
         this.persistenceBackend = persistenceBackend;
         this.raft = raft;
+        this.backendReadScheduler = backendReadScheduler;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.configuration = configuration;
         this.logger = logger;
@@ -124,6 +129,16 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
                 _ => LockStaticResponses.ErroredResponse
             };
         }
+        catch (ReadBackpressureExceededException ex)
+        {
+            // The backend read scheduler's per-partition queue is at its depth limit while loading a
+            // persistent lock from disk. Transient: surface MustRetry so the caller retries rather than
+            // faulting the actor. A stop-time InvalidOperationException falls through to the generic handler,
+            // which faults the request deterministically instead of hanging its awaiter.
+            logger.LogWarning("LockActor: backend read scheduler rejected {Type} for '{Resource}' (partition {Partition} depth {Depth}); returning MustRetry.",
+                message.Type, message.Resource, ex.PartitionId, ex.CurrentDepth);
+            return LockStaticResponses.MustRetryResponse;
+        }
         catch (Exception ex)
         {
             logger.LogError("LockActor: Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
@@ -155,7 +170,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
             /// Try to retrieve lock context from persistence
             if (message.Durability == LockDurability.Persistent)
-                newEntry = await raft.ReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
+                newEntry = await backendReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
 
             newEntry ??= new() { FencingToken = -1 };
             
@@ -328,7 +343,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             if (durability == LockDurability.Persistent)
             {
-                entry = await raft.ReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource));
+                entry = await backendReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource));
                 if (entry is not null)
                 {
                     entry.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());

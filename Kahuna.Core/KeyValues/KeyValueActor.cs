@@ -1,6 +1,7 @@
 
 using Nixie;
 using Kommander;
+using Kommander.WAL.IO;
 using System.Diagnostics;
 using Google.Protobuf;
 using Kahuna.Server.Configuration;
@@ -271,7 +272,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft,
+    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft, raft.ReadScheduler,
              keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null, null)
     {
     }
@@ -282,6 +283,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         Writes.PartitionWriteAggregator writeAggregator,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
         KeySpaceRegistry keySpaceRegistry,
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
@@ -305,6 +307,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             writeAggregator,
             persistenceBackend,
             raft,
+            backendReadScheduler,
             keySpaceRegistry,
             rangeMapStore,
             configuration,
@@ -432,6 +435,18 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             };
 
             return response;
+        }
+        catch (ReadBackpressureExceededException ex)
+        {
+            // The backend read scheduler's per-partition queue is at its depth limit. This is transient from
+            // the caller's view: surface MustRetry so the request is retried rather than faulting the actor.
+            // Point reads (TryGet/TryExists/TrySet read-before-write, exclusive-lock acquisition) reach here
+            // unguarded; scans catch enqueue rejection locally and never propagate to this boundary. A stop-time
+            // InvalidOperationException is left to the generic handler below, which faults the request
+            // deterministically (the awaiter completes with an error rather than hanging).
+            logger.LogWarning("Backend read scheduler rejected {Type} for '{Key}' (partition {Partition} depth {Depth}); returning MustRetry.",
+                message.Type, message.Key, ex.PartitionId, ex.CurrentDepth);
+            return KeyValueStaticResponses.MustRetryResponse;
         }
         catch (Exception ex)
         {

@@ -72,6 +72,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
@@ -138,6 +142,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
@@ -204,6 +212,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
@@ -353,6 +365,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
@@ -426,6 +442,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
@@ -529,6 +549,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),
@@ -633,6 +657,10 @@ public abstract class BaseCluster
             LocksWorkers = 4,
             KeyValueWorkers = 4,
             BackgroundWriterWorkers = 1,
+            // Keep the dedicated backend I/O pools tiny in tests: parallel embedded clusters multiply
+            // per-node threads, and the scan/flush volume here does not need concurrency.
+            BackendReadIOThreads = 1,
+            BackendWriteIOThreads = 1,
             Storage = "memory",
             StoragePath = "/tmp",
             StorageRevision = Guid.NewGuid().ToString(),

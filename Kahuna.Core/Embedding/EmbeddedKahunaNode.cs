@@ -80,6 +80,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             LocksWorkers = options.LocksWorkers,
             KeyValueWorkers = options.KeyValueWorkers,
             BackgroundWriterWorkers = options.BackgroundWriterWorkers,
+            BackendReadIOThreads = options.BackendReadIOThreads,
+            BackendWriteIOThreads = options.BackendWriteIOThreads,
+            BackendReadQueueDepth = options.BackendReadQueueDepth,
             Storage = options.Storage,
             StoragePath = options.StoragePath,
             StorageRevision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision,
@@ -142,7 +145,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         }, options.WalPath);
 
         this.standaloneComm = new();
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger, options.WriteBatchExecutorDecorator);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
     }
 
     /// <summary>
@@ -192,6 +195,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             LocksWorkers = options.LocksWorkers,
             KeyValueWorkers = options.KeyValueWorkers,
             BackgroundWriterWorkers = options.BackgroundWriterWorkers,
+            BackendReadIOThreads = options.BackendReadIOThreads,
+            BackendWriteIOThreads = options.BackendWriteIOThreads,
+            BackendReadQueueDepth = options.BackendReadQueueDepth,
             Storage = options.Storage,
             StoragePath = options.StoragePath,
             StorageRevision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision,
@@ -254,7 +260,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         }, options.WalPath);
 
         this.standaloneComm = null;
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger, options.WriteBatchExecutorDecorator);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)

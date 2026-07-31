@@ -187,7 +187,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         Task<RangeDiskPage> readTask;
         try
         {
-            readTask = context.Raft.ReadScheduler.EnqueueTask(
+            readTask = context.BackendReadScheduler.EnqueueTask(
                 scanPartition,
                 () => ProjectSnapshotPage(
                     context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1),

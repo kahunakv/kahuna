@@ -185,7 +185,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             // scan under partition 0 would collapse per-partition fairness/back-pressure and the
             // read-after-write FIFO ordering onto a single scheduler queue. Point reads resolve
             // the partition the same way.
-            readTask = context.Raft.ReadScheduler.EnqueueTask(
+            readTask = context.BackendReadScheduler.EnqueueTask(
                 ResolvePartition(message.Key),
                 () => ProjectBucketPage(context.PersistenceBackend.GetKeyValueByPrefix(message.Key),
                     isSnapshotScan, capturedReadTs, currentTime, context.PersistenceBackend));

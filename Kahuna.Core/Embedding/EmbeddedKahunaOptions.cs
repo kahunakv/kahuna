@@ -201,6 +201,17 @@ public sealed class EmbeddedKahunaOptions
 
     public int WriteIOThreads { get; set; } = 8;
 
+    /// <summary>Dedicated Kahuna backend read pool size (point gets, scans). Separate from the Kommander
+    /// WAL read pool sized by <see cref="ReadIOThreads"/>. Defaulted modestly for a single in-process node
+    /// (matching <see cref="ReadIOThreads"/>) — a cluster server sizes this higher via KahunaConfiguration.</summary>
+    public int BackendReadIOThreads { get; set; } = 4;
+
+    /// <summary>Dedicated Kahuna background-writer pool size. Small; backend writes are fsync-heavy.</summary>
+    public int BackendWriteIOThreads { get; set; } = 1;
+
+    /// <summary>Per-partition pending-queue depth for the Kahuna backend read scheduler.</summary>
+    public int BackendReadQueueDepth { get; set; } = 4096;
+
     public bool EnableSharedExecutorPool { get; set; } = true;
 
     public int PartitionExecutorPoolSize { get; set; }

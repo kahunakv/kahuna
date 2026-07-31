@@ -111,7 +111,7 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (!inCache && message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueEntry? diskEntry = await context.Raft.ReadScheduler.EnqueueTask(
+                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueTask(
                     ResolvePartition(message.Key),
                     () => context.PersistenceBackend.GetKeyValue(message.Key));
 
@@ -165,7 +165,7 @@ internal sealed class TryExistsHandler : BaseHandler
         if (!inCache && message.Durability == KeyValueDurability.Persistent
             && !message.ReadTimestamp.IsNull())
         {
-            KeyValueEntry? diskEntry = await context.Raft.ReadScheduler.EnqueueTask(
+            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueTask(
                 ResolvePartition(message.Key),
                 () => context.PersistenceBackend.GetKeyValue(message.Key));
 
@@ -240,7 +240,7 @@ internal sealed class TryExistsHandler : BaseHandler
             Task<KeyValueEntry?> readTask;
             try
             {
-                readTask = context.Raft.ReadScheduler.EnqueueTask(
+                readTask = context.BackendReadScheduler.EnqueueTask(
                     partitionId,
                     () => context.PersistenceBackend.GetKeyValue(message.Key));
             }
@@ -353,7 +353,7 @@ internal sealed class TryExistsHandler : BaseHandler
         Task<KeyValueEntry?> readTask;
         try
         {
-            readTask = context.Raft.ReadScheduler.EnqueueTask(
+            readTask = context.BackendReadScheduler.EnqueueTask(
                 partitionId,
                 () => context.PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
         }

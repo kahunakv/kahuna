@@ -113,7 +113,8 @@ else
         services.GetRequiredService<KahunaConfiguration>(),
         services.GetRequiredService<IInterNodeCommunication>(),
         services.GetService<RocksDbSharedResources>(),
-        services.GetRequiredService<ILogger<IKahuna>>()));
+        services.GetRequiredService<ILogger<IKahuna>>(),
+        services.GetRequiredService<ILogger<IRaft>>()));
     builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
     builder.Services.AddSingleton(opts);
     builder.Services.AddHostedService<ReplicationService>();
@@ -170,6 +171,9 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     LocksWorkers = opts.LocksWorkers,
     KeyValueWorkers = opts.KeyValueWorkers,
     BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
+    BackendReadIOThreads = opts.BackendReadIOThreads,
+    BackendWriteIOThreads = opts.BackendWriteIOThreads,
+    BackendReadQueueDepth = opts.BackendReadQueueDepth,
     Storage = opts.Storage,
     StoragePath = opts.StoragePath,
     StorageRevision = opts.StorageRevision,
@@ -289,6 +293,9 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     LocksWorkers = opts.LocksWorkers,
     KeyValueWorkers = opts.KeyValueWorkers,
     BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
+    BackendReadIOThreads = opts.BackendReadIOThreads,
+    BackendWriteIOThreads = opts.BackendWriteIOThreads,
+    BackendReadQueueDepth = opts.BackendReadQueueDepth,
     DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
     MaxConcurrentTransactions = opts.MaxConcurrentTransactions,
     MaxConcurrentSessions = opts.MaxConcurrentSessions,
