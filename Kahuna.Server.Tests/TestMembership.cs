@@ -22,7 +22,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
-[Collection("ClusterTests")]
 public sealed class TestMembership : BaseCluster
 {
     private static readonly string[] ThreeNodePeers = ["localhost:8001", "localhost:8002", "localhost:8003"];
