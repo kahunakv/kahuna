@@ -98,6 +98,25 @@ internal sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
         return corrupt;
     }
 
+    public IReadOnlyList<Guid> ListManifestIds(CancellationToken ct = default)
+    {
+        List<Guid> ids = [];
+
+        // Filename-only scan: the id is recovered from {id:N}.manifest without opening the file, so a
+        // corrupt, partially-written, or transiently unreadable manifest still yields its owning id and
+        // its artifact directory stays protected from the orphan sweep. Non-id filenames (e.g. stray
+        // *.manifest with a non-GUID name) are skipped — they own no {id:N} artifact directory.
+        foreach (string file in Directory.GetFiles(_directory, "*" + Extension))
+        {
+            ct.ThrowIfCancellationRequested();
+            Guid id = ParseId(file);
+            if (id != Guid.Empty)
+                ids.Add(id);
+        }
+
+        return ids;
+    }
+
     /// <summary>
     /// Recovers the backup id from a manifest filename ({id:N}.manifest). Returns
     /// <see cref="Guid.Empty"/> when the filename is not a recognizable id.

@@ -1749,14 +1749,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
         CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
-        // A wall-clock millisecond target means "restore to the inclusive END of that millisecond":
-        // every commit stamped within millisecond targetTimeMs is included. Commit HLCs order by
-        // physical ms, then counter, then node, so the inclusive upper bound for a millisecond is its
-        // maximum counter — otherwise a same-millisecond commit with counter > 0 would sort after a
-        // bare (·, ms, 0) target and be dropped. Zero (targetTimeMs <= 0) means "chain max".
-        HLCTimestamp targetTime = targetTimeMs > 0
-            ? new HLCTimestamp(0, targetTimeMs, uint.MaxValue)
-            : HLCTimestamp.Zero;
+        // Shared resolver (identical to the bootstrap path): a millisecond target restores to the
+        // inclusive END of that millisecond, so a same-millisecond commit with counter > 0 is included
+        // rather than dropped. Zero (targetTimeMs <= 0) means "chain max".
+        HLCTimestamp targetTime = PitrTargetResolver.FromUnixMilliseconds(targetTimeMs);
         try { return await svc.RestoreToAsync(leafBackupId, targetDir, targetTime, ct: ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
     }

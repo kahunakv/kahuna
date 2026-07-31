@@ -3,6 +3,7 @@ using Kommander;
 using Kommander.System;
 using Kommander.Time;
 using Kahuna.Server.Diagnostics;
+using Kahuna.Server.Persistence.Pitr;
 
 namespace Kahuna.Services;
 
@@ -57,9 +58,9 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
                     "--pitr-bootstrap-from requires --pitr-backup-dir pointing to the backup catalog/artifacts directory.");
 
             Guid leafId = options.PitrBootstrapFrom.Value;
-            HLCTimestamp targetTime = options.PitrTargetTimeMs > 0
-                ? new HLCTimestamp(0, options.PitrTargetTimeMs, 0)
-                : HLCTimestamp.Zero;
+            // Shared resolver: bootstrap and the regular restore API (RestoreToAsync) map a millisecond
+            // target to the same inclusive end-of-millisecond HLC, so they can never diverge.
+            HLCTimestamp targetTime = PitrTargetResolver.FromUnixMilliseconds(options.PitrTargetTimeMs);
             TimeSpan pitrWindow = TimeSpan.FromSeconds(options.PitrWindowSeconds);
             TimeSpan baseSnapshotInterval = TimeSpan.FromSeconds(options.BaseSnapshotIntervalSeconds);
 

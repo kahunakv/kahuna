@@ -174,6 +174,37 @@ public sealed class TestBackupRetention : IDisposable
         Assert.DoesNotContain("not-a-backup-dir", names);                  // not ours → untouched
     }
 
+    [Fact]
+    public void OrphanSweep_CorruptManifest_ArtifactDirectoryIsProtected()
+    {
+        Directory.CreateDirectory(_tempRoot);
+        BackupCatalog catalog = new(new LocalDirectoryStorageTarget(_tempRoot));
+
+        Guid id = G(7);
+        catalog.Put(Full(id, Base));                                              // writes {id}.manifest
+        Directory.CreateDirectory(Path.Combine(_tempRoot, id.ToString("N")));     // its artifact directory
+
+        // Corrupt the manifest file so the parsed listing can no longer read it.
+        File.WriteAllText(Path.Combine(_tempRoot, id.ToString("N") + ".manifest"), "{ broken ");
+
+        // The parsed listing loses the id, but the filename-only scan still owns it.
+        Assert.DoesNotContain(id, catalog.List().Select(m => m.BackupId));
+        Assert.Contains(id, catalog.ListManifestIds());
+
+        HashSet<Guid> valid = catalog.List().Select(m => m.BackupId).ToHashSet();
+        HashSet<Guid> protectedIds = catalog.ListManifestIds().ToHashSet();
+
+        // Protected by manifest presence → the directory is NOT swept.
+        IReadOnlyList<OrphanSweepCandidate> plan =
+            BackupRetention.PlanOrphanSweep(_tempRoot, valid, protectedIds);
+        Assert.DoesNotContain(id.ToString("N"), plan.Select(c => Path.GetFileName(c.Path)));
+
+        // Without that protection (the pre-fix behavior) the same directory WOULD have been destroyed.
+        IReadOnlyList<OrphanSweepCandidate> unprotected =
+            BackupRetention.PlanOrphanSweep(_tempRoot, valid, new HashSet<Guid>());
+        Assert.Contains(id.ToString("N"), unprotected.Select(c => Path.GetFileName(c.Path)));
+    }
+
     // ── delete primitives (on disk) ──────────────────────────────────────────────────────────
 
     [Fact]

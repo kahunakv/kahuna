@@ -178,8 +178,10 @@ internal static class BackupRetention
     /// Lists leftover directories/files under <paramref name="backupDir"/> that no valid manifest
     /// accounts for: artifact directories named for a backup id with no manifest (orphaned by a failed
     /// or interrupted backup), and staging/tmp/quarantine remnants of an interrupted publish, delete,
-    /// or restore. Directories reserved by an in-flight job (<paramref name="reservedIds"/>) are left
-    /// alone. A top-level entry that is a symlink/reparse point is reported for unlinking but never
+    /// or restore. Directories whose id is <paramref name="reservedIds"/> — every backup that has a
+    /// manifest file, including corrupt/unreadable ones, plus any in-flight reservation — are left
+    /// alone, so a directory backed by a manifest that merely failed to parse is never destroyed as an
+    /// orphan. A top-level entry that is a symlink/reparse point is reported for unlinking but never
     /// recursed into. Entries whose name is neither a backup id nor a marked remnant are left untouched
     /// (they are not ours to remove).
     /// </summary>

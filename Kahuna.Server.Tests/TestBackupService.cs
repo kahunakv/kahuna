@@ -214,6 +214,34 @@ public sealed class TestBackupService : IDisposable
         Assert.Contains(inventory.OrphanReclamations, o => Path.GetFileName(o.Path) == Path.GetFileName(orphan));
     }
 
+    [Fact]
+    public async Task GarbageCollection_CorruptManifest_ProtectsItsArtifactDirectory()
+    {
+        // A corrupt {id}.manifest drops the backup from the parsed listing, but its id is still recovered
+        // from the filename — so its artifact directory must be protected, never swept as an orphan.
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+        BackupService svc = MakeService("gc_corrupt", wal, backend);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync();
+        string root = BackupDirPath("gc_corrupt");
+        string manifestPath = Path.Combine(root, full.BackupId.ToString("N") + ".manifest");
+        string artifactDir = Path.Combine(root, full.BackupId.ToString("N"));
+        Assert.True(File.Exists(manifestPath));
+        Assert.True(Directory.Exists(artifactDir));
+
+        // Corrupt the manifest so the parsed catalog listing can no longer see this backup.
+        File.WriteAllText(manifestPath, "{ this is not valid json ");
+
+        BackupGcInventory inventory = await svc.RunGarbageCollectionAsync();
+
+        Assert.True(Directory.Exists(artifactDir),
+            "artifact directory of a corrupt-manifest backup must survive GC");
+        Assert.DoesNotContain(inventory.OrphanReclamations,
+            o => Path.GetFileName(o.Path) == full.BackupId.ToString("N"));
+    }
+
     private static void Put(MemoryPersistenceBackend b, string key, byte[] value, long rev) =>
         b.StoreKeyValues([new(key, value, rev, 0, 0, 0, 0, rev, 0, 0, rev, 0, 1)]);
 

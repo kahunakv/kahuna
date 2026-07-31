@@ -56,6 +56,9 @@ internal sealed class BackupCatalog
     public IReadOnlyList<(Guid backupId, string reason)> ListCorrupt(CancellationToken ct = default) =>
         _target.ListCorrupt(ct);
 
+    public IReadOnlyList<Guid> ListManifestIds(CancellationToken ct = default) =>
+        _target.ListManifestIds(ct);
+
     /// <summary>
     /// Resolves the backup chain ending at <paramref name="leafBackupId"/> by walking
     /// <see cref="BackupManifest.ParentBackupId"/> links back to the root Full backup.

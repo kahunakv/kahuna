@@ -30,4 +30,13 @@ internal interface IBackupStorageTarget
     /// silently omitted from <see cref="List"/>.
     /// </summary>
     IReadOnlyList<(Guid backupId, string reason)> ListCorrupt(CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the id of <b>every</b> manifest entry present in the target — parseable or not,
+    /// readable or not — derived from the entry's identity alone without reading its contents. This is
+    /// the authoritative set of "a backup exists with this id" and must be used to protect artifact
+    /// directories from orphan reclamation: a directory whose manifest is corrupt or transiently
+    /// unreadable is still owned and must never be swept as an orphan.
+    /// </summary>
+    IReadOnlyList<Guid> ListManifestIds(CancellationToken ct = default);
 }

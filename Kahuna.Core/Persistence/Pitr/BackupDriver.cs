@@ -607,22 +607,27 @@ internal sealed class BackupDriver
                         };
                 }
 
-                // Capture the full contiguous committed range; the coordinated cut (snapshotT), when
-                // present, is recorded in the manifest and applied at restore on the commit HLC, not by
-                // truncating the segment here (which would tear straddling multi-partition transactions).
-                (List<WalSegmentEntry> segment, long toIndex, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc) =
-                    ReadSegment(wal, partitionId, fromIndex, ct);
-
-                if (toIndex == 0)
-                    continue;
-
+                // Capture the full contiguous committed range by streaming WAL pages straight to the
+                // segment file — one record resident at a time, never the whole range in memory — while
+                // the writer hashes the bytes and records the endpoint metadata. The coordinated cut
+                // (snapshotT), when present, is recorded in the manifest and applied at restore on the
+                // commit HLC, not by truncating the segment here (which would tear straddling
+                // multi-partition transactions).
                 string relPath = $"partition_{partitionId}.wal";
                 string walFile = Path.Combine(artifactPath, relPath);
-                WriteSegmentFile(walFile, segment);
-                checksums[relPath] = BackupArtifactVerifier.ComputeSha256(walFile);
-                sizes[relPath] = new FileInfo(walFile).Length;
 
-                ranges.Add(PartitionBackupRange.Create(partitionId, fromIndex, fromHlc, toIndex, toHlc, toTerm));
+                WalSegmentEntry.SegmentWriteResult seg = WalSegmentEntry.WriteSegmentStreaming(
+                    walFile, StreamSegmentEntries(wal, partitionId, fromIndex, ct), ct);
+
+                // No committed entries in this partition's range — nothing was published; skip it.
+                if (seg.EntryCount == 0)
+                    continue;
+
+                checksums[relPath] = seg.Sha256Hex;
+                sizes[relPath] = seg.ByteLength;
+
+                ranges.Add(PartitionBackupRange.Create(
+                    partitionId, fromIndex, seg.FromHlc, seg.ToId, seg.ToHlc, seg.ToTerm));
             }
 
             BackupManifest manifest = BackupManifest.CreateIncremental(parentBackupId, ranges);
@@ -776,15 +781,15 @@ internal sealed class BackupDriver
     /// </para>
     /// Returns the segment entries, the final log id/hlc/term, and the HLC of the first entry.
     /// </summary>
-    private static (List<WalSegmentEntry> entries, long toId, HLCTimestamp toHlc, long toTerm, HLCTimestamp fromHlc)
-        ReadSegment(IWAL wal, int partitionId, long fromIndex, CancellationToken ct = default)
+    /// <summary>
+    /// Lazily pages the committed WAL entries at or after <paramref name="fromIndex"/> for a partition,
+    /// yielding one <see cref="WalSegmentEntry"/> at a time. Only committed / committed-checkpoint entries
+    /// are emitted. Nothing is accumulated across pages, so an arbitrarily large range is streamed with
+    /// bounded memory; the consumer (the segment writer) records endpoint metadata as entries flow.
+    /// </summary>
+    private static IEnumerable<WalSegmentEntry> StreamSegmentEntries(
+        IWAL wal, int partitionId, long fromIndex, CancellationToken ct)
     {
-        List<WalSegmentEntry> entries = [];
-        long toId = 0;
-        HLCTimestamp toHlc = default;
-        long toTerm = 0;
-        HLCTimestamp fromHlc = default;
-        bool first = true;
         long cursor = fromIndex;
 
         while (true)
@@ -792,35 +797,21 @@ internal sealed class BackupDriver
             ct.ThrowIfCancellationRequested();
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, cursor, PageSize);
             if (batch.Count == 0)
-                break;
+                yield break;
 
             foreach (RaftLog log in batch)
             {
                 if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
                     continue;
 
-                if (first)
-                {
-                    fromHlc = log.Time;
-                    first = false;
-                }
-
-                entries.Add(WalSegmentEntry.From(log));
-                toId = log.Id;
-                toHlc = log.Time;
-                toTerm = log.Term;
+                yield return WalSegmentEntry.From(log);
             }
 
             long lastInBatch = batch[^1].Id;
             if (batch.Count < PageSize)
-                break;
+                yield break;
 
             cursor = lastInBatch + 1;
         }
-
-        return (entries, toId, toHlc, toTerm, fromHlc);
     }
-
-    private static void WriteSegmentFile(string path, List<WalSegmentEntry> entries) =>
-        WalSegmentEntry.WriteSegment(path, entries);
 }

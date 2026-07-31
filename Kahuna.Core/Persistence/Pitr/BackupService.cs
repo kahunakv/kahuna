@@ -163,8 +163,17 @@ internal sealed class BackupService
         await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
             _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
 
-    // GC serializes with backup creation via _gcGate, so no backup is ever mid-creation during a sweep.
-    private static readonly HashSet<Guid> NoReservedIds = [];
+    /// <summary>
+    /// The set of ids the orphan sweep must never reclaim: every backup that has a manifest file,
+    /// including ones whose manifest is corrupt, structurally invalid, or transiently unreadable. GC
+    /// serializes with backup creation via <c>_gcGate</c>, so no in-flight backup needs separate
+    /// reservation — the danger is the reverse: a directory whose manifest failed to parse is absent
+    /// from the valid-id set and would otherwise be swept as an orphan, destroying the very artifacts an
+    /// operator needs to diagnose or repair. Deriving protection from manifest <i>presence</i> (a
+    /// filename scan that never reads contents) fails closed regardless of manifest health.
+    /// </summary>
+    private HashSet<Guid> ProtectedManifestIds(CancellationToken ct) =>
+        _catalog.ListManifestIds(ct).ToHashSet();
 
     /// <summary>
     /// Dry-run inventory: what a garbage-collection pass would reclaim right now — orphaned/leftover
@@ -176,7 +185,7 @@ internal sealed class BackupService
         IReadOnlyList<BackupManifest> manifests = _catalog.List(ct);
         HashSet<Guid> validIds = manifests.Select(m => m.BackupId).ToHashSet();
         IReadOnlyList<OrphanSweepCandidate> orphans =
-            BackupRetention.PlanOrphanSweep(_backupDir, validIds, NoReservedIds, ct);
+            BackupRetention.PlanOrphanSweep(_backupDir, validIds, ProtectedManifestIds(ct), ct);
         IReadOnlyList<BackupGcCandidate> retention = _retentionPolicy.IsEnabled
             ? BackupRetention.PlanRetention(manifests, _retentionPolicy, DateTime.UtcNow)
             : [];
@@ -202,7 +211,7 @@ internal sealed class BackupService
         HashSet<Guid> validIds = manifests.Select(m => m.BackupId).ToHashSet();
 
         IReadOnlyList<OrphanSweepCandidate> orphans =
-            BackupRetention.PlanOrphanSweep(_backupDir, validIds, NoReservedIds, ct);
+            BackupRetention.PlanOrphanSweep(_backupDir, validIds, ProtectedManifestIds(ct), ct);
         BackupRetention.ApplyOrphanSweep(orphans, ct);
 
         IReadOnlyList<BackupGcCandidate> retention = _retentionPolicy.IsEnabled
