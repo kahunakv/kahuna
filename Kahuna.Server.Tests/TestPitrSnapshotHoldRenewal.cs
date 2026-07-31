@@ -136,19 +136,19 @@ public sealed class TestPitrSnapshotHoldRenewal : IDisposable
         // so the test thread must stay free to release the gate.
         Task<BackupManifest> run = Task.Run(() => BackupDriver.RunFullAsync(
             wal, [Part(1)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: null, ct: default,
+            flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken,
             acquireSnapshotHold: acquire, releaseSnapshotHold: release,
             renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs));
 
-        Assert.True(backend.Entered.Wait(TimeSpan.FromSeconds(10)), "checkpoint must be reached");
+        Assert.True(backend.Entered.Wait(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken), "checkpoint must be reached");
         // While the checkpoint is blocked, the lease must be renewed more than once.
-        Assert.True(renewedTwice.Wait(TimeSpan.FromSeconds(10)), "hold must be renewed at least twice during the checkpoint");
+        Assert.True(renewedTwice.Wait(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken), "hold must be renewed at least twice during the checkpoint");
 
         backend.Release.Set();
         BackupManifest manifest = await run;
 
         Assert.NotNull(manifest);
-        Assert.Single(catalog.List());          // published
+        Assert.Single(catalog.List(TestContext.Current.CancellationToken));          // published
         Assert.Equal("hold-1", releasedId);      // released after publish
         Assert.True(renewCount >= 2);
     }
@@ -170,14 +170,10 @@ public sealed class TestPitrSnapshotHoldRenewal : IDisposable
         BackupDriver.ReleaseSnapshotHoldDelegate release = (id, _) => { releasedId = id; return Task.CompletedTask; };
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(
-                wal, [Part(1)], backend, artifacts, catalog,
-                flushBeforeCheckpoint: null, snapshotT: null, ct: default,
-                acquireSnapshotHold: acquire, releaseSnapshotHold: release,
-                renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release, renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(catalog.List());                 // never published
+        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));                 // never published
         Assert.Equal("hold-1", releasedId);           // hold still released
         if (Directory.Exists(artifacts))
             Assert.Empty(Directory.GetDirectories(artifacts)); // artifacts cleaned up
@@ -200,14 +196,10 @@ public sealed class TestPitrSnapshotHoldRenewal : IDisposable
         BackupDriver.ReleaseSnapshotHoldDelegate release = (_, _) => { released = true; return Task.CompletedTask; };
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(
-                wal, [Part(1)], backend, artifacts, catalog,
-                flushBeforeCheckpoint: null, snapshotT: null, ct: default,
-                acquireSnapshotHold: acquire, releaseSnapshotHold: release,
-                renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release, renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(catalog.List());
+        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
         Assert.True(released);
     }
 
@@ -235,13 +227,13 @@ public sealed class TestPitrSnapshotHoldRenewal : IDisposable
             acquireSnapshotHold: acquire, releaseSnapshotHold: release,
             renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs));
 
-        Assert.True(backend.Entered.Wait(TimeSpan.FromSeconds(10)), "checkpoint must be reached");
+        Assert.True(backend.Entered.Wait(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken), "checkpoint must be reached");
         cts.Cancel();
 
         // Caller cancellation surfaces as a bare cancellation, distinct from a renewal-loss failure.
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
 
-        Assert.Empty(catalog.List());
+        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
         Assert.Equal("hold-1", releasedId); // hold released on the cancel path
     }
 
@@ -259,13 +251,9 @@ public sealed class TestPitrSnapshotHoldRenewal : IDisposable
         // Release throws after the manifest is already published — must not become a backup failure.
         BackupDriver.ReleaseSnapshotHoldDelegate release = (_, _) => throw new InvalidOperationException("release transport down");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], backend, artifacts, catalog,
-            flushBeforeCheckpoint: null, snapshotT: null, ct: default,
-            acquireSnapshotHold: acquire, releaseSnapshotHold: release,
-            renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release, renewSnapshotHold: renew, snapshotHoldLeaseMs: ShortLeaseMs);
 
         Assert.NotNull(manifest);
-        Assert.Single(catalog.List()); // published despite the release failure
+        Assert.Single(catalog.List(TestContext.Current.CancellationToken)); // published despite the release failure
     }
 }
