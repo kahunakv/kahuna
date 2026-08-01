@@ -44,7 +44,14 @@ public sealed class KahunaConfiguration
     public string StoragePath { get; set; } = "";
     
     public string StorageRevision { get; set; } = "";
-    
+
+    /// <summary>
+    /// When true (default), the RocksDB KV/locks backend reads SSTs with direct I/O, bypassing the OS
+    /// page cache so the block cache is the sole in-RAM read cache. Disable to use buffered reads
+    /// backed by the page cache. Only affects the "rocksdb" storage backend.
+    /// </summary>
+    public bool RocksDbDirectReads { get; set; } = true;
+
     public TimeSpan ScriptCacheExpiration { get; set; }
 
     /// <summary>

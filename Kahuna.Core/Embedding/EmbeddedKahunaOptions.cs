@@ -64,6 +64,13 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int RocksDbSharedMemtableBudgetMb { get; set; } = 128;
 
+    /// <summary>
+    /// When true (default), the RocksDB KV/locks backend reads SSTs with direct I/O, bypassing the OS
+    /// page cache so the block cache is the sole in-RAM read cache. Only used when <see cref="Storage"/>
+    /// is "rocksdb".
+    /// </summary>
+    public bool RocksDbDirectReads { get; set; } = true;
+
     public int LocksWorkers { get; set; } = Environment.ProcessorCount;
 
     public int KeyValueWorkers { get; set; } = Environment.ProcessorCount;
