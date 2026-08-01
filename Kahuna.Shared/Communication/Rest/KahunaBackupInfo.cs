@@ -18,6 +18,22 @@ public sealed class KahunaBackupInfo
     public DateTime CreatedAtUtc { get; set; }
     public Guid? ParentBackupId { get; set; }
     public int PartitionCount { get; set; }
+
+    /// <summary>
+    /// The operator-assigned cluster identity stamped into this backup's manifest, or null when no
+    /// cluster id was configured (or on a legacy manifest). Surfaced so an operator listing backups
+    /// from any node can see which cluster produced each entry — a catalog mixing cluster ids, or one
+    /// showing only some of the cluster's backups, signals a non-shared (per-node, partial) catalog.
+    /// </summary>
+    public string? ClusterId { get; set; }
+
+    /// <summary>
+    /// The node that produced this backup (the coordinator for a coordinated backup), or null on a
+    /// legacy manifest. With a shared backup directory every node's listing shows the same entries and
+    /// their producing nodes; if a listing shows only backups produced by the local node, the catalog
+    /// is node-local and therefore only a partial view of the cluster's backups.
+    /// </summary>
+    public string? CoordinatorNode { get; set; }
     public int? ClusterSnapshotNode { get; set; }
     public long? ClusterSnapshotPhysical { get; set; }
     public uint? ClusterSnapshotCounter { get; set; }

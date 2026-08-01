@@ -102,11 +102,14 @@ internal sealed class BackupDriver
     /// cluster-wide consistent-cut timestamp.
     /// </summary>
     public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog,
-        HLCTimestamp? snapshotT = null, CancellationToken ct = default) =>
+        HLCTimestamp? snapshotT = null, BackupOwnerIdentity identity = default,
+        Func<CancellationToken, Task<bool>>? verifyCoordinator = null, Action<BackupManifest>? signManifest = null,
+        CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
             artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT,
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
-            ct: ct);
+            identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
+            verifyCoordinator: verifyCoordinator, signManifest: signManifest, ct: ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -120,8 +123,54 @@ internal sealed class BackupDriver
     /// </summary>
     public BackupManifest TakeIncrementalBackup(Guid parentBackupId, string artifactsDir,
         BackupCatalog catalog, HLCTimestamp? snapshotT = null,
-        Func<int, long, IDisposable>? acquireRetentionHold = null, CancellationToken ct = default) =>
-        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT, acquireRetentionHold, ct);
+        Func<int, long, IDisposable>? acquireRetentionHold = null, BackupOwnerIdentity identity = default,
+        Action<BackupManifest>? signManifest = null, CancellationToken ct = default) =>
+        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT,
+            acquireRetentionHold, identity, ComposeTopologyGeneration, signManifest, ct);
+
+    /// <summary>
+    /// Composes the current cluster topology generation from this node's live view: each partition's
+    /// committed generation plus the membership version. See the static overload for the encoding.
+    /// </summary>
+    private long ComposeTopologyGeneration() =>
+        ComposeTopologyGeneration(_raft.GetPartitionMap(), _raft.GetPartitionGeneration, _raft.GetMembership().MembershipVersion);
+
+    /// <summary>
+    /// Composes a single deterministic topology-generation value from the partition range map (each
+    /// partition's committed generation) and the cluster membership version. The value changes iff a
+    /// partition splits/merges (a generation bump, or a partition id appearing/disappearing) or the
+    /// membership roster advances (join/leave/promotion/eviction). It is a stable FNV-1a hash over an
+    /// id-sorted canonical encoding, so it is deterministic across processes for an identical topology —
+    /// letting a base full and its later incrementals be compared even when produced by different
+    /// leaders. Order-independent (partitions are sorted by id first).
+    /// </summary>
+    internal static long ComposeTopologyGeneration(
+        IReadOnlyList<RaftPartitionRange> partitions, Func<int, long> partitionGeneration, long membershipVersion)
+    {
+        int[] ids = partitions.Select(p => p.PartitionId).OrderBy(id => id).ToArray();
+
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        ulong hash = offset;
+        foreach (int id in ids)
+        {
+            hash = FnvMix(hash, prime, (uint)id);
+            hash = FnvMix(hash, prime, (ulong)partitionGeneration(id));
+        }
+        hash = FnvMix(hash, prime, (ulong)membershipVersion);
+        return unchecked((long)hash);
+    }
+
+    private static ulong FnvMix(ulong hash, ulong prime, ulong value)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            hash ^= value & 0xFF;
+            hash *= prime;
+            value >>= 8;
+        }
+        return hash;
+    }
 
     // ── core logic (internal so tests can exercise without an IRaft) ─────────────────────
 
@@ -150,13 +199,21 @@ internal sealed class BackupDriver
         int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
         int applyBarrierTimeoutMs = DefaultApplyBarrierTimeoutMs,
+        BackupOwnerIdentity identity = default,
+        Func<long>? topologyGenerationProbe = null,
+        Func<CancellationToken, Task<bool>>? verifyCoordinator = null,
+        Action<BackupManifest>? signManifest = null,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
+        // Snapshot the cluster topology generation at the start. If it moves before publish the captured
+        // partition set is not a single consistent snapshot, so the backup is failed closed below.
+        long? capturedTopologyGeneration = topologyGenerationProbe?.Invoke();
+
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
-        Directory.CreateDirectory(artifactPath);
+        BackupFilePermissions.CreateDirectory(artifactPath);
 
         string? snapshotHoldId = null;
 
@@ -298,11 +355,18 @@ internal sealed class BackupDriver
             (Dictionary<string, string> checksums, Dictionary<string, long> sizes) =
                 BackupArtifactVerifier.HashDirectory(checkpointPath, "checkpoint/", workCt);
 
+            // The backend created the checkpoint files at the process umask; lock the whole tree down to
+            // owner-only (0600 files / 0700 dirs) before it is verified and published.
+            BackupFilePermissions.RestrictTree(artifactPath);
+
             BackupManifest manifest = BackupManifest.CreateFull(ranges);
             manifest.BackupId = backupId;
             manifest.Checksums = checksums;
             manifest.Sizes = sizes;
             manifest.SetBaseCut(cut);
+            manifest.ApplyOwnerIdentity(identity);
+            if (capturedTopologyGeneration.HasValue)
+                manifest.TopologyGeneration = capturedTopologyGeneration.Value;
             if (snapshotT.HasValue)
                 manifest.SetClusterSnapshotTime(snapshotT.Value);
 
@@ -319,6 +383,32 @@ internal sealed class BackupDriver
                 {
                     ExactCheckpointUnavailable = true
                 };
+
+            // Fail closed if the cluster topology (partition map or membership) moved during the backup:
+            // the captured partition set is then not a single consistent snapshot. Nothing is published;
+            // the catch below sweeps the half-written artifact directory.
+            if (topologyGenerationProbe is not null && topologyGenerationProbe() != capturedTopologyGeneration!.Value)
+                throw new BackupDriverException(
+                    "The cluster topology (partition map or membership) changed during the full backup; the " +
+                    "captured partition set is not a consistent snapshot, so the backup was not published.")
+                {
+                    TopologyChanged = true
+                };
+
+            // Coordinator fence: for a coordinated (cluster) backup, confirm this node still leads the
+            // meta partition and its term has not advanced since the backup began. If leadership was lost
+            // mid-backup a stale coordinator must not publish; fail closed so nothing is committed.
+            if (verifyCoordinator is not null && !await verifyCoordinator(workCt).ConfigureAwait(false))
+                throw new BackupDriverException(
+                    "Meta-partition leadership was lost during the coordinated backup; this node is no longer " +
+                    "the backup coordinator, so the backup was not published.")
+                {
+                    RetryableLeadershipLoss = true
+                };
+
+            // Authenticate the manifest (identity + coverage + digest map) with the server-held key as the
+            // final step before publish, so the tag covers everything recorded above.
+            signManifest?.Invoke(manifest);
 
             catalog.Put(manifest);
             return manifest;
@@ -528,9 +618,14 @@ internal sealed class BackupDriver
         BackupCatalog catalog,
         HLCTimestamp? snapshotT = null,
         Func<int, long, IDisposable>? acquireRetentionHold = null,
+        BackupOwnerIdentity identity = default,
+        Func<long>? topologyGenerationProbe = null,
+        Action<BackupManifest>? signManifest = null,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+
+        long? capturedTopologyGeneration = topologyGenerationProbe?.Invoke();
 
         BackupManifest? parentManifest = catalog.Get(parentBackupId);
         if (parentManifest is null)
@@ -539,7 +634,7 @@ internal sealed class BackupDriver
 
         Guid backupId = Guid.NewGuid();
         string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
-        Directory.CreateDirectory(artifactPath);
+        BackupFilePermissions.CreateDirectory(artifactPath);
 
         // Retention holds keep the WAL prefix each partition starts at from being compacted while we
         // page the log and until the manifest is published. Released in the finally.
@@ -635,12 +730,32 @@ internal sealed class BackupDriver
             manifest.BackupId = backupId;
             manifest.Checksums = checksums;
             manifest.Sizes = sizes;
+            manifest.ApplyOwnerIdentity(identity);
+            if (capturedTopologyGeneration.HasValue)
+                manifest.TopologyGeneration = capturedTopologyGeneration.Value;
             if (snapshotT.HasValue)
                 manifest.SetClusterSnapshotTime(snapshotT.Value);
+
+            // Lock the segment tree down to owner-only before verify/publish.
+            BackupFilePermissions.RestrictTree(artifactPath);
 
             // Fail closed: never publish a manifest whose artifacts don't verify. The verifier
             // treats a genuinely empty incremental (no ranges, no segments) as valid.
             BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
+
+            // Fail closed if the cluster topology moved while capturing this incremental: the segment set
+            // would not correspond to one partition layout. Stamping the current generation also lets the
+            // chain validator reject linking this incremental onto a base taken at a different topology.
+            if (topologyGenerationProbe is not null && topologyGenerationProbe() != capturedTopologyGeneration!.Value)
+                throw new BackupDriverException(
+                    "The cluster topology (partition map or membership) changed during the incremental " +
+                    "backup; the captured segments are not a consistent snapshot, so nothing was published.")
+                {
+                    TopologyChanged = true
+                };
+
+            // Authenticate the manifest with the server-held key as the final step before publish.
+            signManifest?.Invoke(manifest);
 
             catalog.Put(manifest);
             return manifest;

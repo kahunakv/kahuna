@@ -63,7 +63,9 @@ public sealed class TestBackupService : IDisposable
         Func<Task<HLCTimestamp>>? queryMinInFlight = null,
         StubRaft? raft = null,
         string? restoreRoot = null,
-        BackupRetentionPolicy retentionPolicy = default)
+        BackupRetentionPolicy retentionPolicy = default,
+        string? clusterId = null,
+        string? macKeyFile = null)
     {
         raft ??= MakeRaft(wal, 1);
         return new BackupService(
@@ -74,6 +76,8 @@ public sealed class TestBackupService : IDisposable
             storageRevision: "",
             flushBeforeCheckpoint: flush ?? (() => Task.CompletedTask),
             queryMinInFlight: queryMinInFlight ?? (() => Task.FromResult(HLCTimestamp.Zero)),
+            clusterId: clusterId,
+            macKeyFile: macKeyFile,
             restoreRoot: restoreRoot,
             acquireRetentionHold: raft.AcquireRetentionHold,
             retentionPolicy: retentionPolicy);
@@ -300,6 +304,216 @@ public sealed class TestBackupService : IDisposable
 
         Assert.Equal("Incremental", inc.Type);
         Assert.Equal(full.BackupId, inc.ParentBackupId);
+    }
+
+    // ── coordinated backup: coordinator fence + identity stamping ─────────────────────────────
+
+    private BackupManifest? ReadManifest(string tag, Guid backupId) =>
+        new BackupCatalog(new LocalDirectoryStorageTarget(BackupDir(tag))).Get(backupId);
+
+    [Fact]
+    public async Task TakeCoordinated_OnFollower_ThrowsNotBackupCoordinator()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        StubRaft raft = MakeRaft(wal, 1); // IsLeader defaults to false → a follower
+        BackupService svc = MakeService("coord_follower", wal, new MemoryPersistenceBackend(), raft: raft);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupException ex =
+            await Assert.ThrowsAsync<Kahuna.Shared.Communication.Rest.KahunaBackupException>(() =>
+                svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(Kahuna.Shared.Communication.Rest.KahunaBackupOutcome.NotBackupCoordinator, ex.Outcome);
+        // Nothing was published.
+        Assert.Empty(svc.ListBackups(ct: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task TakeCoordinated_OnLeader_StampsCoordinatorIdentity()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        StubRaft raft = MakeRaft(wal, 1);
+        raft.IsLeader = true; // this node is the backup coordinator
+        BackupService svc = MakeService("coord_leader", wal, new MemoryPersistenceBackend(),
+            raft: raft, clusterId: "cluster-x");
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto =
+            await svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken);
+
+        BackupManifest? m = ReadManifest("coord_leader", dto.BackupId);
+        Assert.NotNull(m);
+        Assert.Equal("cluster-x", m!.ClusterId);
+        Assert.Equal("stub", m.CoordinatorNode);
+        Assert.NotNull(m.CoordinatorTerm);
+    }
+
+    [Fact]
+    public async Task TakeFull_WithConfiguredClusterId_StampsClusterId()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("cluster_stamp", wal, new MemoryPersistenceBackend(), clusterId: "cluster-y");
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        BackupManifest? m = ReadManifest("cluster_stamp", dto.BackupId);
+        Assert.NotNull(m);
+        Assert.Equal("cluster-y", m!.ClusterId);
+    }
+
+    [Fact]
+    public async Task ListBackups_SurfacesCoordinatorAndClusterIdentity()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("list_identity", wal, new MemoryPersistenceBackend(), clusterId: "cluster-z");
+        await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo info =
+            Assert.Single(svc.ListBackups(ct: TestContext.Current.CancellationToken));
+        Assert.Equal("cluster-z", info.ClusterId);
+        Assert.Equal("stub", info.CoordinatorNode);
+    }
+
+    [Fact]
+    public async Task TakeFull_NoConfiguredClusterId_LeavesClusterIdNull()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("cluster_unset", wal, new MemoryPersistenceBackend()); // no clusterId
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        BackupManifest? m = ReadManifest("cluster_unset", dto.BackupId);
+        Assert.NotNull(m);
+        Assert.Null(m!.ClusterId);
+    }
+
+    // ── confidentiality: restrictive permissions + unsafe-root refusal ────────────────────────
+
+    [Fact]
+    public async Task Backup_ArtifactsAndManifest_AreOwnerOnly_OnPosix()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // POSIX file modes only
+
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("perms", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        string dir = BackupDir("perms");
+        string manifest = Path.Combine(dir, dto.BackupId.ToString("N") + ".manifest");
+        string artifactDir = Path.Combine(dir, dto.BackupId.ToString("N"));
+
+        // Manifest: 0600, artifact dir: 0700, every checkpoint file: 0600 — no group/other bits.
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(manifest));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            File.GetUnixFileMode(artifactDir));
+        foreach (string f in Directory.GetFiles(Path.Combine(artifactDir, "checkpoint")))
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(f));
+    }
+
+    [Fact]
+    public void MakeService_WorldWritableBackupDir_RefusedBeforeAnyWrite_OnPosix()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string dir = BackupDir("insecure");
+        Directory.CreateDirectory(dir);
+        // 0707: world-writable — another user could tamper with artifacts and their recorded digests.
+        File.SetUnixFileMode(dir,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
+
+        Assert.Throws<BackupInsecureRootException>(() =>
+            MakeService("insecure", new InMemoryWAL(Log), new MemoryPersistenceBackend()));
+    }
+
+    [Fact]
+    public void MakeService_SymlinkedBackupDir_Refused_OnPosix()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string real = BackupDir("insecure_target");
+        Directory.CreateDirectory(real);
+        File.SetUnixFileMode(real, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string link = BackupDir("insecure_link");
+        Directory.CreateSymbolicLink(link, real);
+
+        Assert.Throws<BackupInsecureRootException>(() =>
+            MakeService("insecure_link", new InMemoryWAL(Log), new MemoryPersistenceBackend()));
+    }
+
+    // ── authenticity: keyed MAC over the manifest ─────────────────────────────────────────────
+
+    private string WriteKeyFile(string tag)
+    {
+        Directory.CreateDirectory(_tempRoot);
+        string path = Path.Combine(_tempRoot, "mackey_" + tag + ".bin");
+        File.WriteAllBytes(path, Encoding.UTF8.GetBytes("super-secret-backup-key-0123456789"));
+        return path;
+    }
+
+    [Fact]
+    public async Task Backup_NoMacKey_ManifestUnsigned()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("mac_none", wal, new MemoryPersistenceBackend());
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Null(ReadManifest("mac_none", full.BackupId)!.Mac);
+    }
+
+    [Fact]
+    public async Task Backup_WithMacKey_SignsManifest_AndRestoreVerifies()
+    {
+        string key = WriteKeyFile("ok");
+        MemoryPersistenceBackend backend = new();
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        Task Flush() { Put(backend, "k", Encoding.UTF8.GetBytes("v"), 1); return Task.CompletedTask; }
+
+        BackupService svc = MakeService("mac_ok", wal, backend, flush: Flush, macKeyFile: key);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.False(string.IsNullOrEmpty(ReadManifest("mac_ok", full.BackupId)!.Mac));
+
+        // A signed manifest restores cleanly (the MAC verifies against the same key).
+        string target = Path.Combine(_tempRoot, "mac_ok_restore");
+        Kahuna.Shared.Communication.Rest.KahunaRestoreResponse res =
+            await svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero, ct: TestContext.Current.CancellationToken);
+        Assert.Single(res.Chain);
+    }
+
+    [Fact]
+    public async Task Restore_TamperedSignedManifest_FailsAuthentication()
+    {
+        string key = WriteKeyFile("tamper");
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("mac_tamper", wal, new MemoryPersistenceBackend(), macKeyFile: key);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        // Tamper an authenticated field WITHOUT re-signing (an attacker has no key): the MAC no longer
+        // matches. This field is not checked by artifact verification, so only the MAC catches it.
+        MutateManifest(BackupDir("mac_tamper"), full.BackupId, m => m.CoordinatorNode = "attacker-node");
+
+        string target = Path.Combine(_tempRoot, "mac_tamper_restore");
+        BackupArtifactException ex = await Assert.ThrowsAsync<BackupArtifactException>(() =>
+            svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero, ct: TestContext.Current.CancellationToken));
+        Assert.Contains("authentication", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Restore_StrippedMac_WithKeyConfigured_FailsClosed()
+    {
+        string key = WriteKeyFile("strip");
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("mac_strip", wal, new MemoryPersistenceBackend(), macKeyFile: key);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        // Removing the tag (or restoring an unsigned/legacy backup) must fail when a key is configured.
+        MutateManifest(BackupDir("mac_strip"), full.BackupId, m => m.Mac = null);
+
+        string target = Path.Combine(_tempRoot, "mac_strip_restore");
+        await Assert.ThrowsAsync<BackupArtifactException>(() =>
+            svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero, ct: TestContext.Current.CancellationToken));
     }
 
     // ── B3: catalog list / chain ────────────────────────────────────────────────────────────
@@ -970,8 +1184,11 @@ public sealed class TestBackupService : IDisposable
         public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
         public long GetPartitionGeneration(int partitionId) => 0;
         public ValueTask<long?> GetFollowerLagAsync(int partitionId, string followerEndpoint) => ValueTask.FromResult<long?>(null);
-        public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(false);
-        public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
+        // Settable so a test can stand this stub up as the meta-partition leader (backup coordinator).
+        // Defaults to false to preserve the behavior every other StubRaft-based test relies on.
+        public bool IsLeader { get; set; }
+        public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(IsLeader);
+        public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(IsLeader);
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, TimeSpan timeout, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);

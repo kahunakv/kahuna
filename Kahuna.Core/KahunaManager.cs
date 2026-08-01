@@ -231,8 +231,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 FlushPersistenceAsync,
                 keyValues.GetSafeTimestampAsync,
                 logger,
-                configuration.StoragePath,
-                configuration.RestoreRoot,
+                clusterId: configuration.BackupClusterId,
+                macKeyFile: configuration.BackupMacKeyFile,
+                liveStoragePath: configuration.StoragePath,
+                restoreRoot: configuration.RestoreRoot,
                 // Composable WAL retention hold (Kommander) — keeps a captured incremental prefix from
                 // being compacted mid-read; composes with the periodic horizon floor via minimum.
                 acquireRetentionHold: raft.AcquireRetentionHold,
@@ -1774,21 +1776,21 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         BackupService svc = RequireBackupService();
         try { return await svc.TakeFullAsync(ct: ct); }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     public async Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
         try { return await svc.TakeIncrementalAsync(parentBackupId, ct: ct); }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     public async Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
         try { return await svc.TakeCoordinatedBackupAsync(ct); }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default)
@@ -1797,14 +1799,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // Public listing runs the cheap structural check only; full artifact verification (hashing
         // every file of every backup) is opt-in at the service layer, not on the default network path.
         try { return Task.FromResult(svc.ListBackups(verifyArtifacts: false, ct)); }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
         try { return Task.FromResult(svc.ResolveAndValidate(leafBackupId, ct)); }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     public async Task<KahunaRestoreResponse> RestoreToAsync(
@@ -1819,7 +1821,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // rather than dropped. Zero (targetTimeMs <= 0) means "chain max".
         HLCTimestamp targetTime = PitrTargetResolver.FromUnixMilliseconds(targetTimeMs);
         try { return await svc.RestoreToAsync(leafBackupId, targetDir, targetTime, ct: ct); }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     public async Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun, CancellationToken ct = default)
@@ -1856,7 +1858,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
             result.BytesReclaimed = bytes;
             return result;
         }
-        catch (Exception ex) when (ShouldMap(ex)) { throw MapBackupException(ex); }
+        catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     private BackupService RequireBackupService() =>
@@ -1876,6 +1878,19 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// so callers classify failures by <see cref="KahunaBackupOutcome"/> rather than by internal
     /// exception type or message. Messages intentionally omit absolute paths and raw backend text.
     /// </summary>
+    /// <summary>
+    /// Logs the full failure detail against a fresh correlation id and returns the sanitized, typed
+    /// outcome with that id appended, so a caller sees only "&lt;stable message&gt; (operation abc123…)" while
+    /// an operator can grep the server log for the same id to see the paths/exception behind it.
+    /// </summary>
+    private static KahunaBackupException MapAndLog(BackupService svc, Exception ex)
+    {
+        string operationId = Guid.NewGuid().ToString("N")[..12];
+        svc.LogOperationFailure(operationId, ex);
+        KahunaBackupException mapped = MapBackupException(ex);
+        return new KahunaBackupException(mapped.Outcome, $"{mapped.Message} (operation {operationId})");
+    }
+
     private static KahunaBackupException MapBackupException(Exception ex) => ex switch
     {
         BackupDriverException d when d.NeedsFullBackup =>
@@ -1893,6 +1908,16 @@ public sealed class KahunaManager : IKahuna, IDisposable
         BackupDriverException d when d.ExactCheckpointUnavailable =>
             new(KahunaBackupOutcome.ExactCheckpointUnavailable,
                 "This node's storage backend cannot produce an exact as-of backup image."),
+        BackupDriverException d when d.TopologyChanged =>
+            new(KahunaBackupOutcome.TopologyChanged,
+                "The cluster topology changed during the backup; nothing was published. Retry once stable."),
+        BackupDriverException d when d.RetryableLeadershipLoss =>
+            new(KahunaBackupOutcome.RetryableLeadershipLoss,
+                "Meta-partition leadership was lost during the backup; nothing was published. Retry against the leader."),
+        BackupInsecureRootException =>
+            new(KahunaBackupOutcome.InsecureRoot,
+                "The configured backup or restore directory is unsafe (a symlink, or group/world-writable). " +
+                "Restrict it to the server's user and retry."),
         ExactCheckpointUnavailableException =>
             new(KahunaBackupOutcome.ExactCheckpointUnavailable,
                 "An exact as-of backup image cannot be produced because a historyless (SetNoRevision) " +

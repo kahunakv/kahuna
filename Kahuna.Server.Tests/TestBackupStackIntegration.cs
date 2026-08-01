@@ -90,6 +90,31 @@ public sealed class TestBackupStackIntegration : IDisposable
         Assert.True(allowed.Kahuna.IsRemoteRestoreAllowed); // enabled by configuring a server-owned root
     }
 
+    // ── error responses carry an operation id for log correlation ─────────────────────────────
+
+    [Fact]
+    public async Task BackupError_SanitizedMessageCarriesOperationId()
+    {
+        await using EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            BackupDir = BakDir("opid")
+        }, loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+
+        // Resolving a chain for an unknown backup id fails; the caller gets a sanitized, typed message
+        // that carries an "(operation <id>)" tag it can quote to correlate with the server log.
+        KahunaBackupException ex = await Assert.ThrowsAsync<KahunaBackupException>(
+            async () => await node.Kahuna.GetBackupChainAsync(Guid.NewGuid(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(KahunaBackupOutcome.CorruptChain, ex.Outcome);
+        Assert.Contains("(operation ", ex.Message);
+        // No absolute paths or raw backend text leaked.
+        Assert.DoesNotContain(tempRoot, ex.Message);
+    }
+
     // ── C2: TakeFullBackupAsync flushes dirty data, returns Full DTO ────────────────────────
 
     [Fact]

@@ -21,7 +21,9 @@ internal sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
     public LocalDirectoryStorageTarget(string directory)
     {
         _directory = directory;
-        Directory.CreateDirectory(directory);
+        // Owner-only (0700 on POSIX): a manifest names every artifact and its digest, so it must not be
+        // readable or writable by other users on the host.
+        BackupFilePermissions.CreateDirectory(directory);
     }
 
     public void Put(BackupManifest manifest)
@@ -29,6 +31,9 @@ internal sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
         string path = ManifestPath(manifest.BackupId);
         string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
         File.WriteAllText(tmp, JsonSerializer.Serialize(manifest, JsonOptions));
+        // Restrict before the atomic rename so the published manifest is owner-only (0600) from the
+        // instant it appears at its final path — never briefly world-readable.
+        BackupFilePermissions.RestrictFile(tmp);
         File.Move(tmp, path, overwrite: true);
     }
 

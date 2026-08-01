@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.Communication.Rest;
 using Kommander;
@@ -22,6 +23,8 @@ internal sealed class BackupService : IDisposable
     private readonly string _backupDir;
     private readonly string _storageType;
     private readonly string _storageRevision;
+    private readonly string? _clusterId;
+    private readonly byte[]? _macKey;
     private readonly string? _liveStoragePath;
     private readonly string? _restoreRoot;
     private readonly Func<int, long, IDisposable>? _acquireRetentionHold;
@@ -48,6 +51,8 @@ internal sealed class BackupService : IDisposable
         Func<Task> flushBeforeCheckpoint,
         Func<Task<HLCTimestamp>> queryMinInFlight,
         ILogger? logger = null,
+        string? clusterId = null,
+        string? macKeyFile = null,
         string? liveStoragePath = null,
         string? restoreRoot = null,
         Func<int, long, IDisposable>? acquireRetentionHold = null,
@@ -59,10 +64,17 @@ internal sealed class BackupService : IDisposable
         BackupRetentionPolicy retentionPolicy = default,
         long copyThrottleBytesPerSec = 0)
     {
+        // Refuse an unsafe backup root before writing anything: a symlinked or group/world-writable
+        // directory would let another user on the host read tenant data or tamper with artifacts and
+        // their recorded digests. A missing directory is fine — the catalog creates it owner-only below.
+        BackupFilePermissions.EnsureRootSecure(backupDir);
+
         _raft = raft;
         _backupDir = backupDir;
         _storageType = storageType;
         _storageRevision = storageRevision;
+        _clusterId = string.IsNullOrWhiteSpace(clusterId) ? null : clusterId;
+        _macKey = LoadMacKey(macKeyFile);
         _liveStoragePath = liveStoragePath;
         _restoreRoot = string.IsNullOrWhiteSpace(restoreRoot) ? null : Path.GetFullPath(restoreRoot);
         _acquireRetentionHold = acquireRetentionHold;
@@ -80,13 +92,43 @@ internal sealed class BackupService : IDisposable
         _gcGate.Dispose();
     }
 
+    /// <summary>
+    /// Logs the full, unsanitized detail of a failed backup/restore operation (the exception, including
+    /// any absolute paths and backend text) against a short correlation id, so a caller who receives only
+    /// a sanitized message + that id can be tied to this server-side line. The sanitized message returned
+    /// to the caller deliberately omits everything logged here.
+    /// </summary>
+    public void LogOperationFailure(string operationId, Exception ex) =>
+        _logger?.LogError(ex, "Backup operation {OperationId} failed", operationId);
+
+    /// <summary>
+    /// Loads the manifest-authentication key from <paramref name="macKeyFile"/>, or null when none is
+    /// configured. Fails closed: a configured-but-missing/empty key file throws at startup rather than
+    /// silently leaving backups unauthenticated.
+    /// </summary>
+    private static byte[]? LoadMacKey(string? macKeyFile)
+    {
+        if (string.IsNullOrWhiteSpace(macKeyFile))
+            return null;
+
+        byte[] key = File.ReadAllBytes(macKeyFile); // throws if the configured file is missing
+        if (key.Length == 0)
+            throw new InvalidOperationException("The configured backup authentication key file is empty.");
+        return key;
+    }
+
+    /// <summary>Signer applied to a manifest just before publish, or null when no MAC key is configured.</summary>
+    private Action<BackupManifest>? ManifestSigner =>
+        _macKey is null ? null : m => BackupManifestMac.Sign(m, _macKey);
+
     public async Task<KahunaBackupInfo> TakeFullAsync(HLCTimestamp? snapshotT = null, CancellationToken ct = default)
     {
         await _gcGate.WaitAsync(ct).ConfigureAwait(false);
         long start = Stopwatch.GetTimestamp();
         try
         {
-            BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+            BackupManifest manifest = await _driver.TakeFullBackupAsync(
+                _backupDir, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
             RecordBackupSuccess(manifest, start);
             KahunaBackupInfo dto = ToDto(manifest);
             TryRunGcLocked(ct);
@@ -94,6 +136,28 @@ internal sealed class BackupService : IDisposable
         }
         catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
         finally { _gcGate.Release(); }
+    }
+
+    /// <summary>
+    /// Builds the owner/topology identity stamped onto a manifest at write time. The cluster id (when
+    /// configured), the producing node, its meta-partition Raft term, and the storage engine type/revision
+    /// are known now; the topology generation is filled by the driver's topology-capture probe. Chain
+    /// resolution skips any null (unknown) field, so partially-known identities never falsely reject a
+    /// chain. Gathering identity must never fail a backup, so the (informational) term read is best-effort.
+    /// </summary>
+    private BackupOwnerIdentity BuildOwnerIdentity()
+    {
+        long? term = null;
+        try { term = _raft.WalAdapter.GetCurrentTerm(RangeMapStore.MetaPartitionId); }
+        catch { /* term is informational; never fail a backup gathering it */ }
+
+        return new BackupOwnerIdentity(
+            ClusterId: _clusterId,
+            CoordinatorNode: _raft.GetLocalNodeName(),
+            CoordinatorTerm: term,
+            StorageType: _storageType,
+            StorageRevision: _storageRevision,
+            TopologyGeneration: null);
     }
 
     public async Task<KahunaBackupInfo> TakeIncrementalAsync(
@@ -107,7 +171,8 @@ internal sealed class BackupService : IDisposable
             try
             {
                 BackupManifest manifest = _driver.TakeIncrementalBackup(
-                    parentBackupId, _backupDir, _catalog, snapshotT, _acquireRetentionHold, ct);
+                    parentBackupId, _backupDir, _catalog, snapshotT, _acquireRetentionHold, BuildOwnerIdentity(),
+                    signManifest: ManifestSigner, ct: ct);
                 RecordBackupSuccess(manifest, start);
                 dto = ToDto(manifest);
                 dto.RequestedKind = BackupType.Incremental.ToString();
@@ -119,7 +184,8 @@ internal sealed class BackupService : IDisposable
                     "parent range. Falling back to full backup. Reason: {Message}",
                     parentBackupId, ex.Message);
 
-                BackupManifest full = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+                BackupManifest full = await _driver.TakeFullBackupAsync(
+                    _backupDir, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
                 RecordBackupSuccess(full, start);
                 dto = ToDto(full);
                 // Make the substitution observable: the caller asked for an incremental and got a full.
@@ -142,9 +208,27 @@ internal sealed class BackupService : IDisposable
         long start = Stopwatch.GetTimestamp();
         try
         {
+            // A cluster-wide coordinated backup may only be taken by the meta-partition leader (the backup
+            // coordinator). Fail fast on a follower so the caller retries against the leader.
+            const int metaPartition = RangeMapStore.MetaPartitionId;
+            if (!await _raft.AmILeader(metaPartition, ct).ConfigureAwait(false))
+                throw new KahunaBackupException(KahunaBackupOutcome.NotBackupCoordinator,
+                    "This node is not the backup coordinator (it does not lead the meta partition); " +
+                    "retry the coordinated backup against the current leader.");
+
+            // Capture the coordinator's term now. The driver re-checks — still leader AND same term —
+            // just before publish, so a leadership change mid-backup fails closed rather than publishing
+            // a cut this node no longer has authority over.
+            long coordinatorTerm = _raft.WalAdapter.GetCurrentTerm(metaPartition);
+            async Task<bool> StillCoordinator(CancellationToken fenceCt) =>
+                await _raft.AmILeader(metaPartition, fenceCt).ConfigureAwait(false)
+                && _raft.WalAdapter.GetCurrentTerm(metaPartition) == coordinatorTerm;
+
             HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
                 _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
-            BackupManifest manifest = await _driver.TakeFullBackupAsync(_backupDir, _catalog, snapshotT, ct);
+            BackupManifest manifest = await _driver.TakeFullBackupAsync(
+                _backupDir, _catalog, snapshotT, BuildOwnerIdentity(), StillCoordinator,
+                signManifest: ManifestSigner, ct: ct);
             RecordBackupSuccess(manifest, start);
             KahunaBackupInfo dto = ToDto(manifest);
             TryRunGcLocked(ct);
@@ -284,6 +368,8 @@ internal sealed class BackupService : IDisposable
                 {
                     try
                     {
+                        // Authenticate first when a MAC key is configured, then verify artifacts.
+                        BackupManifestMac.Verify(manifest, _macKey);
                         BackupArtifactVerifier.Verify(manifest, _backupDir, ct);
                     }
                     catch (Exception ex) when (ex is BackupArtifactException or BackupUnsupportedFormatException)
@@ -366,6 +452,9 @@ internal sealed class BackupService : IDisposable
         foreach (BackupManifest m in chain)
         {
             ct.ThrowIfCancellationRequested();
+            // Authenticate the manifest first (when a MAC key is configured): a tampered digest map,
+            // coverage bound, or identity — or a stripped tag — fails here before any bytes are read.
+            BackupManifestMac.Verify(m, _macKey);
             BackupArtifactVerifier.Verify(m, _backupDir, ct);
         }
 
@@ -724,6 +813,8 @@ internal sealed class BackupService : IDisposable
         ClusterSnapshotNode = m.ClusterSnapshotNode,
         ClusterSnapshotPhysical = m.ClusterSnapshotPhysical,
         ClusterSnapshotCounter = m.ClusterSnapshotCounter,
+        ClusterId = m.ClusterId,
+        CoordinatorNode = m.CoordinatorNode,
         RequestedKind = m.Type.ToString(),
         ActualKind = m.Type.ToString()
     };

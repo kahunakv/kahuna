@@ -2330,7 +2330,9 @@ public class GrpcCommunication : IKahunaCommunication
         IsInvalid = r.IsInvalid,
         InvalidReason = string.IsNullOrEmpty(r.InvalidReason) ? null : r.InvalidReason,
         MinRecoverablePhysicalMs = r.HasCoverage ? r.MinRecoverablePhysicalMs : null,
-        MaxRecoverablePhysicalMs = r.HasCoverage ? r.MaxRecoverablePhysicalMs : null
+        MaxRecoverablePhysicalMs = r.HasCoverage ? r.MaxRecoverablePhysicalMs : null,
+        ClusterId = string.IsNullOrEmpty(r.ClusterId) ? null : r.ClusterId,
+        CoordinatorNode = string.IsNullOrEmpty(r.CoordinatorNode) ? null : r.CoordinatorNode
     };
 
     /// <summary>

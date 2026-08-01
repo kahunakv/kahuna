@@ -161,6 +161,8 @@ public sealed class BackupsService : Backups.BackupsBase
     {
         KahunaBackupOutcome.NotConfigured => StatusCode.Unavailable,
         KahunaBackupOutcome.RetryableLeadershipLoss => StatusCode.Unavailable,
+        KahunaBackupOutcome.NotBackupCoordinator => StatusCode.Unavailable,
+        KahunaBackupOutcome.InsecureRoot => StatusCode.Unavailable,
         KahunaBackupOutcome.Cancelled => StatusCode.Cancelled,
         KahunaBackupOutcome.IoError => StatusCode.Internal,
         KahunaBackupOutcome.ParentMissing => StatusCode.NotFound,
@@ -194,6 +196,8 @@ public sealed class BackupsService : Backups.BackupsBase
         InvalidReason = b.InvalidReason ?? "",
         HasCoverage = b.MinRecoverablePhysicalMs.HasValue,
         MinRecoverablePhysicalMs = b.MinRecoverablePhysicalMs ?? 0,
-        MaxRecoverablePhysicalMs = b.MaxRecoverablePhysicalMs ?? 0
+        MaxRecoverablePhysicalMs = b.MaxRecoverablePhysicalMs ?? 0,
+        ClusterId = b.ClusterId ?? "",
+        CoordinatorNode = b.CoordinatorNode ?? ""
     };
 }

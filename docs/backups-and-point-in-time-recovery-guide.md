@@ -527,6 +527,63 @@ to underscores):
 Add `--pitr-backup-dir <path>` to the server command line (or set `BackupDir` in the JSON config) to
 enable backups.  The same directory is used for catalog manifests and artifact subdirectories.
 
+Set `--pitr-backup-cluster-id <id>` (JSON `BackupClusterId`) to the **same value on every node** of a
+cluster. It is stamped into every manifest and gates chain resolution: a chain may not span manifests
+carrying different cluster ids, so a foreign cluster's artifacts can never be chained or restored here.
+Leaving it empty disables that guard (a null id is treated as "unknown" and skipped).
+
+### 11a-i. Cluster backups and catalog placement
+
+A **coordinated** backup (`/v1/backups/coordinated`) is the cluster-wide product: it is accepted only
+on the node that leads the meta partition (the *backup coordinator*). A request to any other node is
+rejected with outcome `NotBackupCoordinator` (HTTP 503 / gRPC `Unavailable`) — retry against the
+current leader. Because leadership can move, **the coordinator changes over time**, so a coordinated
+backup is written to whichever node was coordinator at the time.
+
+> **The catalog is whatever is at `BackupDir`.** `ListBackups`, chain resolution, and parent lookup
+> read the local `BackupDir` directly. For these to be **node-independent** — the same answer no matter
+> which node you ask — every node's `BackupDir` must point at **shared storage** (the same directory on
+> a shared/replicated filesystem or object store). With shared storage the catalog is one logical
+> catalog by construction. With **node-local** directories each node holds only the backups it wrote
+> while it was coordinator, so any single node's listing is a *partial* view of the cluster's backups —
+> there is no server-side routing that reconstructs a whole-cluster catalog from scattered local disks.
+
+To make a partial catalog visible, every listing entry now carries the identity of the backup it
+describes: `clusterId` (the configured cluster id) and `coordinatorNode` (the node that produced it).
+On a shared catalog every node returns the same set with a mix of `coordinatorNode` values; if a
+node's listing shows only its own `coordinatorNode`, its `BackupDir` is node-local and the view is
+partial. (The plain `/v1/backups/full` and `/v1/backups/incremental` endpoints remain per-node,
+node-local operations intended for single-node or diagnostic use.)
+
+### 11a-ii. Confidentiality and authenticity
+
+A node-wide backup contains **all** tenant data — including anything an application stored as a secret
+(e.g. password hashes) — as cleartext, because it is a physical image of the storage engine plus WAL
+segments. Protect it accordingly.
+
+- **Restrictive permissions (automatic).** Backup directories are created `0700` and every manifest and
+  artifact file `0600` on POSIX, so other users on the host cannot read the data. On startup the server
+  **refuses** a `BackupDir` that is a symlink or group/world-writable (outcome `InsecureRoot`) rather than
+  writing tenant data somewhere another user could read or tamper with it. On Windows, NTFS ACL
+  inheritance from an access-controlled parent is relied upon.
+- **Authenticated manifests (opt-in).** By default a manifest's per-file digests are plain SHA-256 stored
+  in the (plaintext) manifest — good against accidental corruption, but anyone who can write `BackupDir`
+  could rewrite a file *and* its recorded digest. Set `--pitr-backup-mac-key-file <path>` (JSON
+  `BackupMacKeyFile`) to a file holding a secret key, **identical on every node and kept outside the
+  backup directory**, readable only by the server user. Manifests are then signed with HMAC-SHA-256 over
+  their identity, coverage, and digest map, and the tag is verified before restore — so a tampered
+  digest/coverage/identity, a swapped file, or a stripped tag fails authentication. Note: enabling the key
+  means backups taken **before** it was configured are unsigned and can no longer be restored until
+  re-taken; a configured-but-missing/empty key file fails startup rather than silently disabling
+  authentication.
+- **Encryption at rest (not provided — your responsibility).** Kahuna does not yet encrypt backup
+  artifacts. Store `BackupDir` on an **encrypted, access-controlled volume** (or an object store with
+  server-side encryption). Transport the artifacts only over secure channels. A dedicated backup-cipher
+  seam is planned as future work.
+- **Sanitized errors with correlation.** Backup/restore failures return a stable, path-free message with
+  an `(operation <id>)` tag; the full detail (paths, backend exception) is logged server-side under the
+  same id. Quote the id when diagnosing — no absolute paths or raw backend text are leaked to callers.
+
 ### 11b. REST API
 
 All endpoints return or consume JSON.  Responses use camelCase field names.

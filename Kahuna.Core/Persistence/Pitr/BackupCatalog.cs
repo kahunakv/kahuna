@@ -125,6 +125,16 @@ internal sealed class BackupCatalog
             throw new BackupChainException(
                 $"Chain must start with a Full backup; found {chain[0].Type} ({chain[0].BackupId:N}).");
 
+        // Identity consistency: a chain must not span different clusters, storage format revisions, or
+        // topology generations. These fields are optional — null on legacy manifests and on backups taken
+        // before the cluster-ownership/topology paths assign them — so only distinct NON-null values
+        // conflict. A legacy or partially-stamped chain is therefore never rejected on identity grounds,
+        // but two concretely different values are, so a foreign cluster's artifact, a mismatched storage
+        // revision, or a stale topology generation can never be chained onto this base.
+        EnsureConsistentIdentity(chain, m => m.ClusterId, "cluster id");
+        EnsureConsistentIdentity(chain, m => m.StorageRevision, "storage revision");
+        EnsureConsistentIdentity(chain, m => m.TopologyGeneration, "topology generation");
+
         // Every range's HLC bounds must be ordered (FromHlc ≤ ToHlc). A range whose start sorts
         // after its end is a corrupt manifest, independent of the index-continuity checks below.
         foreach (BackupManifest manifest in chain)
@@ -182,6 +192,38 @@ internal sealed class BackupCatalog
                     currRange.ToIndex > cur.ToIndex)
                     highWater[currRange.PartitionId] = currRange;
             }
+        }
+    }
+
+    /// <summary>
+    /// Throws when <paramref name="chain"/> carries more than one distinct non-null value for the
+    /// identity field returned by <paramref name="selector"/>. Null (unknown) values are skipped so a
+    /// legacy or partially-stamped chain passes; two concretely different values fail closed.
+    /// </summary>
+    private static void EnsureConsistentIdentity(
+        IReadOnlyList<BackupManifest> chain, Func<BackupManifest, object?> selector, string label)
+    {
+        object? reference = null;
+        Guid referenceBackup = default;
+
+        foreach (BackupManifest manifest in chain)
+        {
+            object? value = selector(manifest);
+            if (value is null)
+                continue;
+
+            if (reference is null)
+            {
+                reference = value;
+                referenceBackup = manifest.BackupId;
+                continue;
+            }
+
+            if (!reference.Equals(value))
+                throw new BackupChainException(
+                    $"Backup chain spans multiple {label} values: {manifest.BackupId:N} has '{value}' but an " +
+                    $"earlier manifest ({referenceBackup:N}) has '{reference}'. A chain must not cross " +
+                    $"{label} boundaries; a new full backup is required across such a change.");
         }
     }
 }

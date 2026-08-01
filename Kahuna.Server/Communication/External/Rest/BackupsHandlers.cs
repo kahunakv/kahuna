@@ -88,6 +88,8 @@ public static class BackupsHandlers
     {
         KahunaBackupOutcome.NotConfigured => 503,
         KahunaBackupOutcome.RetryableLeadershipLoss => 503,
+        KahunaBackupOutcome.NotBackupCoordinator => 503,
+        KahunaBackupOutcome.InsecureRoot => 503,
         KahunaBackupOutcome.ParentMissing => 404,
         KahunaBackupOutcome.TargetConflict => 409,
         KahunaBackupOutcome.Cancelled => 499,

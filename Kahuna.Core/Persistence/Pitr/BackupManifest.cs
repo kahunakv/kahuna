@@ -84,6 +84,75 @@ internal sealed class BackupManifest
         BaseCutCounter = t.C;
     }
 
+    /// <summary>
+    /// Operator-assigned identity of the cluster this backup belongs to (the configured cluster id/name).
+    /// Null on legacy manifests and when no cluster id is configured. Chain resolution rejects linking
+    /// manifests that carry different (non-null) cluster ids, so a foreign cluster's artifact can never be
+    /// chained onto this one. A null value is "unknown", not a wildcard match — it is skipped, never forced equal.
+    /// </summary>
+    public string? ClusterId { get; set; }
+
+    /// <summary>
+    /// The node (endpoint or name) that produced this backup. Informational — recorded for operator
+    /// traceability; it is deliberately NOT a chain-gating field, since successive backups in one chain
+    /// may legitimately be produced by different coordinators after a leadership change.
+    /// </summary>
+    public string? CoordinatorNode { get; set; }
+
+    /// <summary>
+    /// The meta-partition Raft term observed when this backup was produced. Informational, like
+    /// <see cref="CoordinatorNode"/>; not chain-gating.
+    /// </summary>
+    public long? CoordinatorTerm { get; set; }
+
+    /// <summary>
+    /// The persistence-backend storage-engine type this backup was produced from (e.g. "sqlite",
+    /// "rocksdb", "memory"). Informational; the storage *revision* below is the chain-gating field.
+    /// </summary>
+    public string? StorageType { get; set; }
+
+    /// <summary>
+    /// The storage format revision the artifacts were written with. Chain resolution rejects linking
+    /// manifests with different (non-null) revisions: a revision change can alter the on-disk checkpoint
+    /// format, so an incremental written under one revision must not be replayed onto a base written
+    /// under another. Null is "unknown" and skipped.
+    /// </summary>
+    public string? StorageRevision { get; set; }
+
+    /// <summary>
+    /// The cluster topology generation captured at backup time (composed from per-partition range
+    /// generations and the membership version). Null until the topology-capture path populates it.
+    /// Chain resolution rejects linking manifests with different (non-null) generations: a range
+    /// split/merge or membership change alters the partition set, so a new full is required rather than
+    /// chaining across the boundary. Null is "unknown" and skipped.
+    /// </summary>
+    public long? TopologyGeneration { get; set; }
+
+    /// <summary>
+    /// Stamps the owner/topology identity onto this manifest at write time. Only non-null fields on
+    /// <paramref name="identity"/> are applied, so a partially-known identity (e.g. before the cluster
+    /// coordinator assigns a cluster id) leaves the unknown fields null rather than overwriting them
+    /// with a placeholder.
+    /// </summary>
+    internal void ApplyOwnerIdentity(BackupOwnerIdentity identity)
+    {
+        if (identity.ClusterId is not null) ClusterId = identity.ClusterId;
+        if (identity.CoordinatorNode is not null) CoordinatorNode = identity.CoordinatorNode;
+        if (identity.CoordinatorTerm.HasValue) CoordinatorTerm = identity.CoordinatorTerm;
+        if (identity.StorageType is not null) StorageType = identity.StorageType;
+        if (identity.StorageRevision is not null) StorageRevision = identity.StorageRevision;
+        if (identity.TopologyGeneration.HasValue) TopologyGeneration = identity.TopologyGeneration;
+    }
+
+    /// <summary>
+    /// Optional keyed authentication tag (HMAC-SHA-256, hex) over the manifest's identity, coverage, and
+    /// the per-file digest map, computed with a server-held key that is never stored beside the artifacts.
+    /// Null when no backup MAC key is configured. When a key IS configured, verification requires this to
+    /// be present and to match — so an attacker who can write the backup directory cannot rewrite a file
+    /// and its recorded digest, nor strip the tag, without detection. Excluded from its own computation.
+    /// </summary>
+    public string? Mac { get; set; }
+
     /// <summary>SHA-256 hex digests keyed by artifact-relative file path.</summary>
     public Dictionary<string, string> Checksums { get; set; } = [];
 

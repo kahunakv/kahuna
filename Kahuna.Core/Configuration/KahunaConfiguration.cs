@@ -481,6 +481,25 @@ public sealed class KahunaConfiguration
     public string BackupDir { get; set; } = "";
 
     /// <summary>
+    /// Operator-assigned identity of this cluster, stamped into every backup manifest. Set the SAME
+    /// value on every node of a cluster. It gates backup-chain resolution: a chain must not span
+    /// manifests carrying different cluster ids, so a foreign cluster's artifacts can never be chained
+    /// or restored here. Empty (the default) leaves it unset — the cross-cluster guard is then dormant
+    /// (a null id is treated as "unknown", never forced to match).
+    /// </summary>
+    public string BackupClusterId { get; set; } = "";
+
+    /// <summary>
+    /// Path to a file holding the secret key used to authenticate backup manifests (HMAC-SHA-256). Set the
+    /// SAME key file (contents) on every node. When set, each manifest is signed on write and its tag is
+    /// verified before restore, so tampering with an artifact and its recorded digest — or stripping the
+    /// tag — is detected. Keep the file readable only by the server user and OUTSIDE the backup directory.
+    /// Empty disables authentication. Enabling it means backups taken before it was configured are
+    /// unsigned and can no longer be restored until re-taken.
+    /// </summary>
+    public string BackupMacKeyFile { get; set; } = "";
+
+    /// <summary>
     /// Server-owned root directory that restore destinations must be canonically contained within.
     /// When set, a restore <c>targetDir</c> (from any caller, including remote REST/gRPC requests) is
     /// confined under this root after resolving symlinks on every ancestor. When empty, no root

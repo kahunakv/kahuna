@@ -400,6 +400,12 @@ public sealed class KahunaCommandLineOptions
     [Option("pitr-backup-dir", Required = false, HelpText = "Root directory for PITR backup artifacts and catalog manifests. Required when --pitr-bootstrap-from is set; also used by the backup service to store new backups.", Default = "")]
     public string PitrBackupDir { get; set; } = "";
 
+    [Option("pitr-backup-cluster-id", Required = false, HelpText = "Operator-assigned cluster identity stamped into every backup manifest; set the SAME value on every node. Gates backup-chain resolution so a foreign cluster's artifacts cannot be chained or restored here. Empty = unset (guard dormant).", Default = "")]
+    public string PitrBackupClusterId { get; set; } = "";
+
+    [Option("pitr-backup-mac-key-file", Required = false, HelpText = "Path to a file holding the secret key that authenticates backup manifests (HMAC-SHA-256); set the same key file on every node and keep it outside the backup directory, readable only by the server user. When set, manifests are signed on write and verified before restore. Empty disables authentication. Enabling it means backups taken earlier are unsigned and cannot be restored until re-taken.", Default = "")]
+    public string PitrBackupMacKeyFile { get; set; } = "";
+
     [Option("backup-retention-max-chains", Required = false, HelpText = "Backup retention: keep at most this many most-recent backup chains, deleting older chains whole. 0 = unbounded. Retention is off unless at least one backup-retention-* bound is set.", Default = 0)]
     public int BackupRetentionMaxChains { get; set; }
 

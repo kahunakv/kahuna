@@ -254,4 +254,128 @@ public sealed class TestPitrCatalog : IDisposable
             BackupCatalog.Validate([full, inc]));
         Assert.Contains("partition 2", ex.Message);
     }
+
+    // ── owner / topology identity ──────────────────────────────────────────────────
+
+    private static BackupManifest FullWithRange(long from, long to) => BackupManifest.CreateFull([Range(1, from, to)]);
+
+    private static BackupManifest IncWithRange(Guid parent, long from, long to) =>
+        BackupManifest.CreateIncremental(parent, [Range(1, from, to)]);
+
+    [Fact]
+    public void Manifest_Identity_RoundtripViaStorageTarget()
+    {
+        BackupCatalog cat = NewCatalog();
+        BackupManifest m = FullWithRange(1, 10);
+        const string cluster = "cluster-a";
+        m.ApplyOwnerIdentity(new BackupOwnerIdentity(cluster, "node-a:8001", 7, "sqlite", "rev-3", 42));
+        cat.Put(m);
+
+        BackupManifest? got = cat.Get(m.BackupId);
+        Assert.NotNull(got);
+        Assert.Equal(cluster, got!.ClusterId);
+        Assert.Equal("node-a:8001", got.CoordinatorNode);
+        Assert.Equal(7, got.CoordinatorTerm);
+        Assert.Equal("sqlite", got.StorageType);
+        Assert.Equal("rev-3", got.StorageRevision);
+        Assert.Equal(42, got.TopologyGeneration);
+    }
+
+    [Fact]
+    public void ApplyOwnerIdentity_LeavesUnknownFieldsUntouched()
+    {
+        BackupManifest m = FullWithRange(1, 10);
+        m.ApplyOwnerIdentity(new BackupOwnerIdentity(null, "node-a", null, "sqlite", "rev-1", null));
+
+        // Only the supplied (non-null) fields are stamped; unknown ones stay null rather than a placeholder.
+        Assert.Null(m.ClusterId);
+        Assert.Null(m.CoordinatorTerm);
+        Assert.Null(m.TopologyGeneration);
+        Assert.Equal("node-a", m.CoordinatorNode);
+        Assert.Equal("rev-1", m.StorageRevision);
+    }
+
+    [Fact]
+    public void Validate_ConsistentIdentityChain_Passes()
+    {
+        const string cluster = "cluster-a";
+        var id = new BackupOwnerIdentity(cluster, "node-a", 1, "sqlite", "rev-1", 5);
+
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        full.ApplyOwnerIdentity(id);
+        inc.ApplyOwnerIdentity(id);
+
+        // Same cluster / revision / topology across the chain: no throw.
+        BackupCatalog.Validate([full, inc]);
+    }
+
+    [Fact]
+    public void Validate_LegacyChainWithNoIdentity_Passes()
+    {
+        // Neither manifest carries any identity (legacy / pre-stamping) — identity guards must skip them.
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        BackupCatalog.Validate([full, inc]);
+    }
+
+    [Fact]
+    public void Validate_MixedNullIdentity_SkipsUnknownAndPasses()
+    {
+        // The full carries a cluster id but the incremental's is unknown (null): unknown is skipped, not
+        // forced to match, so the chain is accepted.
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        full.ApplyOwnerIdentity(new BackupOwnerIdentity("cluster-a", null, null, null, "rev-1", null));
+        BackupCatalog.Validate([full, inc]);
+    }
+
+    [Fact]
+    public void Validate_MismatchedClusterId_Throws()
+    {
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        full.ApplyOwnerIdentity(new BackupOwnerIdentity("cluster-a", null, null, null, null, null));
+        inc.ApplyOwnerIdentity(new BackupOwnerIdentity("cluster-b", null, null, null, null, null));
+
+        BackupChainException ex = Assert.Throws<BackupChainException>(() => BackupCatalog.Validate([full, inc]));
+        Assert.Contains("cluster id", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_MismatchedStorageRevision_Throws()
+    {
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        full.ApplyOwnerIdentity(new BackupOwnerIdentity(null, null, null, "sqlite", "rev-1", null));
+        inc.ApplyOwnerIdentity(new BackupOwnerIdentity(null, null, null, "sqlite", "rev-2", null));
+
+        BackupChainException ex = Assert.Throws<BackupChainException>(() => BackupCatalog.Validate([full, inc]));
+        Assert.Contains("storage revision", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_MismatchedTopologyGeneration_Throws()
+    {
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        full.ApplyOwnerIdentity(new BackupOwnerIdentity(null, null, null, null, null, 5));
+        inc.ApplyOwnerIdentity(new BackupOwnerIdentity(null, null, null, null, null, 6));
+
+        BackupChainException ex = Assert.Throws<BackupChainException>(() => BackupCatalog.Validate([full, inc]));
+        Assert.Contains("topology generation", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_DifferingCoordinatorNodeOrTerm_IsNotChainGating()
+    {
+        // Successive backups may be produced by different coordinators after a leadership change; the
+        // node and term are informational and must NOT reject the chain.
+        BackupManifest full = FullWithRange(1, 10);
+        BackupManifest inc = IncWithRange(full.BackupId, 11, 20);
+        full.ApplyOwnerIdentity(new BackupOwnerIdentity(null, "node-a", 1, null, "rev-1", null));
+        inc.ApplyOwnerIdentity(new BackupOwnerIdentity(null, "node-b", 2, null, "rev-1", null));
+
+        BackupCatalog.Validate([full, inc]); // no throw
+    }
 }

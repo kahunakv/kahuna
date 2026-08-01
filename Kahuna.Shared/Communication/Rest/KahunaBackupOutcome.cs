@@ -50,4 +50,24 @@ public enum KahunaBackupOutcome
 
     /// <summary>The backup artifact/manifest is in a legacy or unsupported format and was not upgraded.</summary>
     UnsupportedFormat = 12,
+
+    /// <summary>
+    /// The cluster topology (partition range map or membership) changed during the backup, so the
+    /// captured partition set is not a single consistent snapshot. The backup was aborted and nothing
+    /// was published; retry once the topology is stable.
+    /// </summary>
+    TopologyChanged = 13,
+
+    /// <summary>
+    /// This node is not the backup coordinator (it does not lead the meta partition), so it cannot take
+    /// a cluster-wide coordinated backup. Retry the request against the current meta-partition leader.
+    /// </summary>
+    NotBackupCoordinator = 14,
+
+    /// <summary>
+    /// The configured backup (or restore) root is unsafe — a symlink/reparse point, or group/world-writable
+    /// on POSIX — so backups are refused before anything is written. Restrict the directory to the server's
+    /// user and retry.
+    /// </summary>
+    InsecureRoot = 15,
 }

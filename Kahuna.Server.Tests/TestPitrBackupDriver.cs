@@ -452,6 +452,144 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog.Validate([full, inc1, inc2]);
     }
 
+    // ── topology-generation capture / re-check ──────────────────────────────────────────────
+
+    private static long Topo(IReadOnlyList<RaftPartitionRange> parts, Dictionary<int, long> gens, long membership) =>
+        BackupDriver.ComposeTopologyGeneration(parts, id => gens.GetValueOrDefault(id), membership);
+
+    [Fact]
+    public void ComposeTopologyGeneration_SameInputs_Deterministic()
+    {
+        Dictionary<int, long> gens = new() { [1] = 5, [2] = 3 };
+        Assert.Equal(Topo([Part(1), Part(2)], gens, 7), Topo([Part(1), Part(2)], gens, 7));
+    }
+
+    [Fact]
+    public void ComposeTopologyGeneration_OrderIndependent()
+    {
+        Dictionary<int, long> gens = new() { [1] = 5, [2] = 3 };
+        Assert.Equal(Topo([Part(1), Part(2)], gens, 7), Topo([Part(2), Part(1)], gens, 7));
+    }
+
+    [Fact]
+    public void ComposeTopologyGeneration_ChangesOnPartitionGenerationBump()
+    {
+        long before = Topo([Part(1), Part(2)], new() { [1] = 5, [2] = 3 }, 7);
+        long after = Topo([Part(1), Part(2)], new() { [1] = 6, [2] = 3 }, 7); // P1 split/merge
+        Assert.NotEqual(before, after);
+    }
+
+    [Fact]
+    public void ComposeTopologyGeneration_ChangesWhenPartitionAdded()
+    {
+        Dictionary<int, long> gens = new() { [1] = 5, [2] = 3 };
+        Assert.NotEqual(Topo([Part(1)], gens, 7), Topo([Part(1), Part(2)], gens, 7));
+    }
+
+    [Fact]
+    public void ComposeTopologyGeneration_ChangesOnMembershipVersion()
+    {
+        Dictionary<int, long> gens = new() { [1] = 5 };
+        Assert.NotEqual(Topo([Part(1)], gens, 7), Topo([Part(1)], gens, 8));
+    }
+
+    [Fact]
+    public async Task TakeFullBackup_StableTopology_StampsGenerationAndPublishes()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("topo_stable");
+        string artifacts = ArtifactsDir("topo_stable");
+
+        BackupManifest manifest = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            topologyGenerationProbe: () => 12345L, ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(12345L, manifest.TopologyGeneration);
+        Assert.NotNull(catalog.Get(manifest.BackupId));
+    }
+
+    [Fact]
+    public async Task TakeFullBackup_TopologyChangesMidBackup_AbortsAndPublishesNothing()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("topo_moved");
+        string artifacts = ArtifactsDir("topo_moved");
+
+        // Probe returns one value at capture and a different value at the pre-publish re-check.
+        int calls = 0;
+        long Probe() => calls++ == 0 ? 111L : 222L;
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+                topologyGenerationProbe: Probe, ct: TestContext.Current.CancellationToken));
+
+        Assert.True(ex.TopologyChanged);
+        // Nothing published and the half-written artifact directory was swept.
+        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.True(!Directory.Exists(artifacts) || Directory.GetDirectories(artifacts).Length == 0);
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_TopologyChangesMidBackup_AbortsAndPublishesNothing()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("topo_moved_inc");
+        string artifacts = ArtifactsDir("topo_moved_inc");
+
+        // Full backup at a stable topology.
+        BackupManifest full = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            topologyGenerationProbe: () => 999L, ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+
+        int calls = 0;
+        long Probe() => calls++ == 0 ? 111L : 222L;
+
+        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
+            BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog,
+                snapshotT: null, acquireRetentionHold: null, identity: default,
+                topologyGenerationProbe: Probe, ct: TestContext.Current.CancellationToken));
+
+        Assert.True(ex.TopologyChanged);
+        // Only the full remains; the incremental was not published and its directory was swept.
+        Assert.Single(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Single(Directory.GetDirectories(artifacts)); // only the full's artifact dir
+    }
+
+    // ── coordinator fence (leadership loss) ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task TakeFullBackup_CoordinatorLostMidBackup_AbortsWithLeadershipLoss()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("coord_lost");
+        string artifacts = ArtifactsDir("coord_lost");
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+                verifyCoordinator: _ => Task.FromResult(false), ct: TestContext.Current.CancellationToken));
+
+        Assert.True(ex.RetryableLeadershipLoss);
+        // Nothing published; the half-written artifact directory was swept.
+        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.True(!Directory.Exists(artifacts) || Directory.GetDirectories(artifacts).Length == 0);
+    }
+
+    [Fact]
+    public async Task TakeFullBackup_CoordinatorStillValid_Publishes()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("coord_ok");
+        string artifacts = ArtifactsDir("coord_ok");
+
+        BackupManifest m = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            verifyCoordinator: _ => Task.FromResult(true), ct: TestContext.Current.CancellationToken);
+
+        Assert.NotNull(catalog.Get(m.BackupId));
+    }
+
     // ── test helpers ────────────────────────────────────────────────────────────────────────
 
     /// <summary>

@@ -35,5 +35,19 @@ internal sealed class BackupDriverException : Exception
     /// </summary>
     public bool ExactCheckpointUnavailable { get; init; }
 
+    /// <summary>
+    /// True when the cluster topology (partition range map or membership) changed between the start of
+    /// the backup and publish, so the captured partition set is not a single consistent snapshot. The
+    /// backup is aborted with nothing published; the caller may retry once the topology is stable.
+    /// </summary>
+    public bool TopologyChanged { get; init; }
+
+    /// <summary>
+    /// True when meta-partition leadership was lost (or its term advanced) between the start of a
+    /// coordinated backup and publish, so this node can no longer stand as the backup coordinator. The
+    /// backup is aborted with nothing published; the caller may retry against the current leader.
+    /// </summary>
+    public bool RetryableLeadershipLoss { get; init; }
+
     public BackupDriverException(string message) : base(message) { }
 }

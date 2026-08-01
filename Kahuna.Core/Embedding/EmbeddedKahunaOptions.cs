@@ -318,6 +318,19 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public string BackupDir { get; set; } = "";
 
+    /// <summary>
+    /// Operator-assigned cluster identity stamped into every backup manifest; set the same value on
+    /// every node. Gates backup-chain resolution so a foreign cluster's artifacts cannot be chained here.
+    /// Empty leaves it unset (the guard is dormant).
+    /// </summary>
+    public string BackupClusterId { get; set; } = "";
+
+    /// <summary>
+    /// Path to a file holding the HMAC-SHA-256 key that authenticates backup manifests. Same key file on
+    /// every node; keep it outside the backup directory. Empty disables authentication.
+    /// </summary>
+    public string BackupMacKeyFile { get; set; } = "";
+
     /// <summary>Server-owned root that restore destinations must be contained within. Enables remote restore.</summary>
     public string RestoreRoot { get; set; } = "";
 

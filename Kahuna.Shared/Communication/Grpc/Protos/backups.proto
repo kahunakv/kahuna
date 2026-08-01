@@ -54,6 +54,10 @@ message GrpcBackupInfoResponse {
   bool   HasCoverage        = 16;
   int64  MinRecoverablePhysicalMs = 17;
   int64  MaxRecoverablePhysicalMs = 18;
+  // Cluster/coordinator identity (empty string = null). Lets a listing from any node reveal which
+  // cluster and which node produced each backup, so a per-node (partial) catalog is visible.
+  string ClusterId          = 19;
+  string CoordinatorNode    = 20;
 }
 
 message GrpcListBackupsResponse {

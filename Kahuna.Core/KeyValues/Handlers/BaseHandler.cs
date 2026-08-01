@@ -422,7 +422,12 @@ internal abstract class BaseHandler
         if (entry.Revisions is not null)
             RemoveExpiredRevisions(entry, proposal.Revision);
 
-        if (!proposal.NoRevision)
+        // Only archive a *real* prior committed revision. A freshly-materialized cache-miss stub has
+        // Revision == -1 (State Undefined, LastModified zero); archiving it would insert a phantom
+        // Revisions[-1] whose zero timestamp is at-or-before every snapshot, shadowing the true value
+        // on disk and making snapshot reads spuriously return DoesNotExist. There is no prior committed
+        // value to preserve in that case, so skip archival and just install the head below.
+        if (!proposal.NoRevision && entry.Revision >= 0)
         {
             bool revisionsCreated = entry.Revisions is null || entry.Revisions.Count == 0;
             entry.Revisions ??= new();
