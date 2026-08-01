@@ -147,14 +147,27 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // ILogger<IRaft>, while test harnesses that omit it get a silent sink.
         raftLogger ??= NullLogger<IRaft>.Instance;
 
-        // Kahuna-owned backend I/O schedulers, kept off Kommander's WAL read pool. Started here (they park
-        // and serve work submitted before Start, so early reads during warm-up are served, not rejected) and
-        // stopped/disposed in Dispose() — which runs after the actor system drains, so in-flight backend I/O
-        // completes rather than faulting on a scheduler that Raft teardown already stopped.
+        // Reject scheduler configs that would silently break the data plane rather than discovering it at
+        // runtime: a non-positive queue depth makes every enqueue fail back-pressure (all backend I/O
+        // disabled), and a non-positive thread count would auto-expand the pool to the processor count —
+        // fine for the read pool but a surprise for the writer pool, which must stay small and explicit.
+        if (configuration.BackendReadQueueDepth <= 0)
+            throw new KahunaServerException(
+                $"BackendReadQueueDepth must be positive; {configuration.BackendReadQueueDepth} would reject all backend I/O.");
+        if (configuration.BackendReadIOThreads <= 0)
+            throw new KahunaServerException(
+                $"BackendReadIOThreads must be positive; got {configuration.BackendReadIOThreads}.");
+        if (configuration.BackendWriteIOThreads <= 0)
+            throw new KahunaServerException(
+                $"BackendWriteIOThreads must be positive; got {configuration.BackendWriteIOThreads} (0/negative would auto-expand the writer pool to the processor count).");
+
+        // Kahuna-owned backend I/O schedulers, kept off Kommander's WAL read pool. Created here but Started
+        // only at the very end of construction: if any later step throws, the schedulers were never started,
+        // so no worker threads leak (the FairReadScheduler allocates threads on Start, not construction).
+        // They are stopped/disposed in Dispose() — which runs after the actor system drains, so in-flight
+        // backend I/O completes rather than faulting on a scheduler that Raft teardown already stopped.
         backendReadScheduler = new FairReadScheduler(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth);
         backendWriteScheduler = new FairReadScheduler(raftLogger, configuration.BackendWriteIOThreads, configuration.BackendReadQueueDepth);
-        backendReadScheduler.Start();
-        backendWriteScheduler.Start();
 
         SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
@@ -275,6 +288,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // confines destinations, or an explicit unconfined opt-in is set.
         remoteRestoreAllowed = !string.IsNullOrWhiteSpace(configuration.RestoreRoot)
             || configuration.AllowUnconfinedRemoteRestore;
+
+        // Construction succeeded — start the backend I/O worker threads last, so a failure above never
+        // leaks scheduler threads.
+        backendReadScheduler.Start();
+        backendWriteScheduler.Start();
     }
 
     /// <summary>Drains the key/value write aggregator (releases queued writes retryably and awaits in-flight
@@ -288,9 +306,16 @@ public sealed class KahunaManager : IKahuna, IDisposable
     public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         keyValues.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
 
+    private int disposed;
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);
+
+        // Idempotent: the composition roots dispose explicitly in a controlled order (after draining the
+        // actor system), and the DI container also disposes this singleton at teardown. Only the first wins.
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
 
         keyValues.Dispose();
 

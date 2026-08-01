@@ -38,7 +38,7 @@ namespace Kahuna.Server.Tests;
 /// This closes the former sample→delete residual window, for both targeted cleanup and full
 /// sweep, which share the identical <c>BeginPrune</c>/<c>EndPrune</c> protocol.</para>
 /// </summary>
-public sealed class TestSnapshotFloorPruneAcquireRace
+public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
 {
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
@@ -166,9 +166,11 @@ public sealed class TestSnapshotFloorPruneAcquireRace
                 Host                 = "localhost",
                 Port                 = 0,
                 InitialPartitions    = 1,
+                HeartbeatInterval = TimeSpan.FromMilliseconds(10),
+                CheckLeaderInterval = TimeSpan.FromMilliseconds(25),
                 StartElectionTimeout = 50,
                 EndElectionTimeout   = 150,
-                EnableQuiescence     = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
             new InMemoryWAL(raftLogger),
@@ -201,7 +203,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace
         PruningBackend backend = new();
 
         MemoryInterNodeCommmunication interNode = new();
-        KahunaManager kahuna = new(actorSystem, raft, config, interNode, backend, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), config, interNode, backend, kahunaLogger);
         raft.OnLogRestored         += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError    += kahuna.OnReplicationError;

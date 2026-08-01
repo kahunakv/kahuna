@@ -268,7 +268,23 @@ if (standalone)
 }
 else
 {
-    app.Run();
+    await app.StartAsync();
+    await app.WaitForShutdownAsync();
+
+    // Ordered teardown mirroring EmbeddedKahunaNode: drain the key/value write aggregator and the actor
+    // system while Raft and the actors are still alive, THEN dispose KahunaManager (which stops the backend
+    // I/O schedulers) so no actor enqueues backend work onto an already-stopped scheduler, THEN dispose Raft.
+    // KahunaManager.Dispose is idempotent, so the later DI container teardown is a no-op.
+    IKahuna kahuna = app.Services.GetRequiredService<IKahuna>();
+    ActorSystem actorSystem = app.Services.GetRequiredService<ActorSystem>();
+
+    if (kahuna is KahunaManager kahunaManager)
+        await kahunaManager.DrainKeyValueWritesAsync(TimeSpan.FromSeconds(5));
+
+    await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5));
+
+    (kahuna as IDisposable)?.Dispose();
+    (app.Services.GetRequiredService<IRaft>() as IDisposable)?.Dispose();
 }
 
 static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts) => new()

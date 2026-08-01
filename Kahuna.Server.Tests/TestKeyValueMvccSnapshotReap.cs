@@ -30,7 +30,7 @@ namespace Kahuna.Server.Tests;
 /// which mirrors real-world cadence: a new writer on the same key triggers cleanup of any stale
 /// read snapshots left by a previous reader.
 /// </summary>
-public sealed class TestKeyValueMvccSnapshotReap
+public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
 {
     // ── committed-session path ───────────────────────────────────────────────────────────
 
@@ -722,7 +722,7 @@ public sealed class TestKeyValueMvccSnapshotReap
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
-    private static (TryReleaseExclusiveLockHandler, KeyValueContext, RaftManager) CreateHandler(
+    private (TryReleaseExclusiveLockHandler, KeyValueContext, RaftManager) CreateHandler(
         KahunaConfiguration? config = null)
     {
         config ??= CreateConfiguration();
@@ -739,7 +739,7 @@ public sealed class TestKeyValueMvccSnapshotReap
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -758,8 +758,9 @@ public sealed class TestKeyValueMvccSnapshotReap
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );
@@ -767,7 +768,7 @@ public sealed class TestKeyValueMvccSnapshotReap
         return (new TryReleaseExclusiveLockHandler(context), context, raft);
     }
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateCollectHandler(
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateCollectHandler(
         KahunaConfiguration? config = null)
     {
         config ??= CreateConfiguration();
@@ -784,7 +785,7 @@ public sealed class TestKeyValueMvccSnapshotReap
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -803,8 +804,9 @@ public sealed class TestKeyValueMvccSnapshotReap
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

@@ -27,7 +27,7 @@ namespace Kahuna.Server.Tests;
 /// detach-from-actor-mailbox path. Stage 1 is the in-memory scan; stage 2 runs
 /// GetKeyValueByPrefix off-actor; stage 3 merges the disk page against the current store.
 /// </summary>
-public sealed class TestTryGetByBucketHandler
+public sealed class TestTryGetByBucketHandler : RaftTrackingTest
 {
     // ── Stage-1 shortcut: all matches resident in memory, no disk needed ────────────────
 
@@ -48,7 +48,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-mem-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Pre-populate two in-memory ephemeral keys under the "usr" bucket.
             await actorRef.Ask(MakeSet("usr/alice", Encoding.UTF8.GetBytes("alice-val"), 1), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -87,7 +87,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-disk-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -127,7 +127,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-merge-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Start the scan (will block in stage 2 until gate opens).
             Task<KeyValueResponse?> scanTask = actorRef.Ask(MakeBucketScan("cfg"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -176,7 +176,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-deleted-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("data"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -224,7 +224,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-snap-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Dispatch both scans before either completes; they will race to start their disk reads.
             Task<KeyValueResponse?> latestTask = actorRef.Ask(MakeBucketScan("ord"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -279,7 +279,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-txn-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Plain scan (coalesceable) then transactional scan (not coalesceable — must stay private).
             Task<KeyValueResponse?> plainTask = actorRef.Ask(MakeBucketScan("inv"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -350,7 +350,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-snap-disk-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeSnapshotBucketScan("db", readTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -402,7 +402,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-mailbox-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Dispatch the snapshot scan — stage 2 will block in GetKeyValueByPrefix.
             Task<KeyValueResponse?> scanTask = actorRef.Ask(
@@ -469,7 +469,7 @@ public sealed class TestTryGetByBucketHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "bucket-backpressure-actor", null!, null!, backend, decoratedRaft,
-                    new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
+                    decoratedRaft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakeBucketScan("doc"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -546,7 +546,7 @@ public sealed class TestTryGetByBucketHandler
         );
     }
 
-    private static (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
+    private (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
         CreateRaftAndConfig(string nodeName)
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
@@ -574,7 +574,7 @@ public sealed class TestTryGetByBucketHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -583,7 +583,7 @@ public sealed class TestTryGetByBucketHandler
             raftLogger
         );
 
-        return (raft, (FairReadScheduler)raft.ReadScheduler, config, logger);
+        return (raft, (FairReadScheduler)Track(raft).ReadScheduler, config, logger);
     }
 
     // ── inner backends ───────────────────────────────────────────────────────────────────

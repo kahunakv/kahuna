@@ -27,7 +27,7 @@ namespace Kahuna.Server.Tests;
 /// revision-based (Revision &gt; FlushedRevision) — a dirty entry stays pinned until the background
 /// writer acknowledges its flush, with no time-based override.
 /// </summary>
-public sealed class TestKeyValueDirtyEvictionGuard
+public sealed class TestKeyValueDirtyEvictionGuard : RaftTrackingTest
 {
     private readonly ILoggerFactory loggerFactory;
 
@@ -306,7 +306,7 @@ public sealed class TestKeyValueDirtyEvictionGuard
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration? config = null)
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration? config = null)
     {
         config ??= CreateConfiguration();
 
@@ -322,7 +322,7 @@ public sealed class TestKeyValueDirtyEvictionGuard
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -341,8 +341,9 @@ public sealed class TestKeyValueDirtyEvictionGuard
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

@@ -15,7 +15,7 @@ namespace Kahuna.Server.Tests;
 /// Tests for <c>RemoveKeyRangeAsync</c> (T1), registry-as-projection reconcile (T2), and
 /// quiesce-window safety (T3).
 /// </summary>
-public sealed class TestRemoveKeyRange
+public sealed class TestRemoveKeyRange : RaftTrackingTest
 {
     private readonly ILogger<IRaft> raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
@@ -55,12 +55,14 @@ public sealed class TestRemoveKeyRange
             Host = "localhost",
             Port = port,
             InitialPartitions = 2,
+            HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(50 * TimingScale),
             EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50,
-            EnableQuiescence = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -85,7 +87,7 @@ public sealed class TestRemoveKeyRange
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;

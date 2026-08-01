@@ -30,7 +30,7 @@ namespace Kahuna.Server.Tests;
 /// <c>ReplicateLogs</c> are exercised by a 3-node in-memory cluster, mirroring the pattern in
 /// <see cref="TestRangeMapReplication"/>.</para>
 /// </summary>
-public sealed class TestSnapshotFloorStore
+public sealed class TestSnapshotFloorStore : RaftTrackingTest
 {
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
     private readonly ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
@@ -58,7 +58,7 @@ public sealed class TestSnapshotFloorStore
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -364,12 +364,14 @@ public sealed class TestSnapshotFloorStore
             Host = "localhost",
             Port = port,
             InitialPartitions = 2,
+            HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(50 * TimingScale),
             EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50,
-            EnableQuiescence = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -394,7 +396,7 @@ public sealed class TestSnapshotFloorStore
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;

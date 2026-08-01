@@ -31,7 +31,7 @@ namespace Kahuna.Server.Tests;
 /// Uses a pre-configured backend (no full cluster, no background-writer timing dependency) to
 /// exercise the fallback directly.
 /// </summary>
-public class TestSnapshotPointReadFromDiskHistory
+public class TestSnapshotPointReadFromDiskHistory : RaftTrackingTest
 {
     private static byte[] B(string s) => Encoding.UTF8.GetBytes(s);
 
@@ -70,7 +70,7 @@ public class TestSnapshotPointReadFromDiskHistory
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-get-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Snapshot get at T — in-memory misses, disk fallback must return as-of revision.
             KeyValueResponse? resp = await actorRef.Ask(
@@ -122,7 +122,7 @@ public class TestSnapshotPointReadFromDiskHistory
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-exists-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Snapshot exists at T — disk fallback must report Exists with the as-of revision.
             KeyValueResponse? resp = await actorRef.Ask(
@@ -171,7 +171,7 @@ public class TestSnapshotPointReadFromDiskHistory
         return req;
     }
 
-    private static (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
+    private (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
         CreateRaftAndConfig()
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
@@ -199,7 +199,7 @@ public class TestSnapshotPointReadFromDiskHistory
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -208,7 +208,7 @@ public class TestSnapshotPointReadFromDiskHistory
             raftLogger
         );
 
-        return (raft, (FairReadScheduler)raft.ReadScheduler, config, logger);
+        return (raft, (FairReadScheduler)Track(raft).ReadScheduler, config, logger);
     }
 
     // ── inner backend ────────────────────────────────────────────────────────────────────

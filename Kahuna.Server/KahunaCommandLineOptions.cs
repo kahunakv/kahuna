@@ -118,8 +118,8 @@ public sealed class KahunaCommandLineOptions
     [Option("backend-read-io-threads", Required = false, HelpText = "Dedicated Kahuna backend read pool threads (point gets, scans), separate from the Kommander WAL read pool", Default = 8)]
     public int BackendReadIOThreads { get; set; } = 8;
 
-    [Option("backend-write-io-threads", Required = false, HelpText = "Dedicated Kahuna background-writer pool threads (batch writes / pruning); keep small", Default = 2)]
-    public int BackendWriteIOThreads { get; set; } = 2;
+    [Option("backend-write-io-threads", Required = false, HelpText = "Dedicated Kahuna background-writer pool threads; the writer uses a single queue so >1 only adds idle threads", Default = 1)]
+    public int BackendWriteIOThreads { get; set; } = 1;
 
     [Option("backend-read-queue-depth", Required = false, HelpText = "Per-partition pending-queue depth for the Kahuna backend read scheduler", Default = 4096)]
     public int BackendReadQueueDepth { get; set; } = 4096;

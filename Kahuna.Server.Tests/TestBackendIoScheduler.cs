@@ -33,7 +33,7 @@ namespace Kahuna.Server.Tests;
 ///     without hanging (the schedulers stop after the actor system drains).</item>
 /// </list>
 /// </summary>
-public sealed class TestBackendIoScheduler
+public sealed class TestBackendIoScheduler : RaftTrackingTest
 {
     /// <summary>
     /// A persistence backend that blocks the first <see cref="GetKeyValue"/> call until released, so a
@@ -102,7 +102,7 @@ public sealed class TestBackendIoScheduler
         ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
 
         RaftManager raft = new(
-            new RaftConfiguration { NodeName = "backend-io-bp", NodeId = 1, Host = "localhost", Port = 0, InitialPartitions = 1, EnableQuiescence = false },
+            new RaftConfiguration { NodeName = "backend-io-bp", NodeId = 1, Host = "localhost", Port = 0, InitialPartitions = 1, EnableQuiescence = false, PartitionExecutorPoolSize = 1 },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
             new InMemoryCommunication(),
@@ -141,7 +141,7 @@ public sealed class TestBackendIoScheduler
                     raft,
                     backendReadScheduler,
                     new KeySpaceRegistry(),
-                    new RangeMapStore(raft, null, null, logger),
+                    new RangeMapStore(Track(raft), null, null, logger),
                     config,
                     logger,
                     null!, null!, null!, null!);
@@ -224,6 +224,63 @@ public sealed class TestBackendIoScheduler
         Assert.True(await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)) == dispose,
             "node dispose hung — backend scheduler shutdown did not drain");
         await dispose;
+    }
+
+    [Fact]
+    public async Task SaturatingOneScheduler_DoesNotRejectOrDelayAnother()
+    {
+        // The whole point of a dedicated backend pool is isolation from Kommander's WAL read pool: driving
+        // one FairReadScheduler to its per-partition depth limit must not affect a second instance. Model the
+        // two pools as two instances; saturate the "backend" one and prove the "WAL" one still serves reads.
+        ILogger<IRaft> logger = NullLoggerFactory.Instance.CreateLogger<IRaft>();
+
+        using ManualResetEventSlim gate = new(false);
+        FairReadScheduler backend = new(logger, workerCount: 1, maxQueueDepthPerPartition: 2);
+        FairReadScheduler wal = new(logger, workerCount: 1, maxQueueDepthPerPartition: 2);
+        backend.Start();
+        wal.Start();
+        try
+        {
+            // Occupy the backend worker and fill its single partition queue so the next enqueue is rejected.
+            Task blocked = backend.EnqueueTask(1, () => { gate.Wait(); return 0; });
+            _ = backend.EnqueueTask(1, () => 0); // queued (depth now at the limit)
+            Assert.Throws<ReadBackpressureExceededException>(() => { _ = backend.EnqueueTask(1, () => 0); });
+
+            // The unrelated (WAL) scheduler is completely unaffected — it accepts and completes immediately.
+            Assert.Equal(42, await wal.EnqueueTask(0, () => 42));
+
+            gate.Set();
+            await blocked;
+        }
+        finally
+        {
+            gate.Set();
+            backend.Stop(); backend.Dispose();
+            wal.Stop(); wal.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task StopDrainsAcceptedInFlightWork()
+    {
+        // KahunaManager.Dispose relies on FairReadScheduler.Stop() draining every accepted operation before
+        // its threads exit — otherwise an in-flight backend read at shutdown would be silently dropped (its
+        // awaiter left hanging) instead of completing or faulting deterministically. Assert the contract.
+        ILogger<IRaft> logger = NullLoggerFactory.Instance.CreateLogger<IRaft>();
+        FairReadScheduler scheduler = new(logger, workerCount: 1, maxQueueDepthPerPartition: 64);
+        scheduler.Start();
+
+        int ran = 0;
+        // Accept work, then immediately stop: the accepted operation must still run to completion.
+        Task<int> slow = scheduler.EnqueueTask(1, () => { Thread.Sleep(200); Interlocked.Increment(ref ran); return 7; });
+        Task<int> queued = scheduler.EnqueueTask(1, () => { Interlocked.Increment(ref ran); return 8; });
+
+        scheduler.Stop();
+
+        Assert.Equal(7, await slow);
+        Assert.Equal(8, await queued);
+        Assert.Equal(2, ran);
+        scheduler.Dispose();
     }
 
     private static KeyValueRequest MakeGet(string key) => new(

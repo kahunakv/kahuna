@@ -23,7 +23,7 @@ namespace Kahuna.Server.Tests;
 /// Tests for Phase A.3 — expiry-heap and tombstone-queue driven reclamation.
 /// Verifies that collect cycles are O(reclaimed) rather than O(store-size).
 /// </summary>
-public sealed class TestKeyValueReclamation
+public sealed class TestKeyValueReclamation : RaftTrackingTest
 {
     private readonly ILoggerFactory loggerFactory;
 
@@ -362,7 +362,7 @@ public sealed class TestKeyValueReclamation
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration? config = null)
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration? config = null)
     {
         config ??= CreateConfiguration();
 
@@ -378,7 +378,7 @@ public sealed class TestKeyValueReclamation
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -397,8 +397,9 @@ public sealed class TestKeyValueReclamation
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

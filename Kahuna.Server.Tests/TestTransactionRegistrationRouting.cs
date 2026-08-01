@@ -22,7 +22,7 @@ namespace Kahuna.Server.Tests;
 /// instead of applying the mutation a second time, and a reused id with a different declaration is
 /// rejected.
 /// </summary>
-public sealed class TestTransactionRegistrationRouting
+public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 {
     private readonly ILogger<IRaft> raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
@@ -2114,12 +2114,13 @@ public sealed class TestTransactionRegistrationRouting
             // keeps followers fed between operations, and scaling the election window by the test timing scale
             // gives loaded CI runners the same slack the shared cluster harness relies on.
             HeartbeatInterval = TimeSpan.FromMilliseconds(30),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(300 * TimingScale),
             ElectionTimeoutSeed = 94000 + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50,
-            EnableQuiescence = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -2141,7 +2142,7 @@ public sealed class TestTransactionRegistrationRouting
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;

@@ -22,7 +22,7 @@ namespace Kahuna.Server.Tests;
 /// Unit tests for the resumable-read infrastructure: the ResumeReadHandler and the
 /// ReadContinuation abstraction it delegates to.
 /// </summary>
-public sealed class TestResumeReadHandler
+public sealed class TestResumeReadHandler : RaftTrackingTest
 {
     // ── (a) Disk result, no concurrent write — disk value served and cached ───────────────
 
@@ -502,7 +502,7 @@ public sealed class TestResumeReadHandler
     private static KeyValueRequest MakeResumeMsg(ReadContinuation cont) =>
         new(KeyValueRequestType.ResumeRead) { Continuation = cont };
 
-    private static (ResumeReadHandler, KeyValueContext, RaftManager) CreateHandler()
+    private (ResumeReadHandler, KeyValueContext, RaftManager) CreateHandler()
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
         {
@@ -530,7 +530,7 @@ public sealed class TestResumeReadHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -549,8 +549,9 @@ public sealed class TestResumeReadHandler
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

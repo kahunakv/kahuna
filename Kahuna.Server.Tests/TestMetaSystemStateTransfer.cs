@@ -45,7 +45,7 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
     // An unjoined RaftManager never elects; the transfer + apply seams never touch Raft, so no
     // cluster is needed to exercise serialization and disk fidelity.
     private RaftManager UnjoinedRaft(int port) => new(
-        new RaftConfiguration { NodeName = "t", NodeId = 1, Host = "localhost", Port = port, InitialPartitions = 2, EnableQuiescence = false },
+        new RaftConfiguration { NodeName = "t", NodeId = 1, Host = "localhost", Port = port, InitialPartitions = 2, EnableQuiescence = false, PartitionExecutorPoolSize = 1 },
         new StaticDiscovery([]),
         new InMemoryWAL(raftLogger),
         new InMemoryCommunication(),

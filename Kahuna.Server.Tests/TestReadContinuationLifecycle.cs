@@ -24,7 +24,7 @@ namespace Kahuna.Server.Tests;
 ///     MustRetry — and a completion that arrives afterwards is dropped;
 ///   • a continuation admits at most its waiter cap.
 /// </summary>
-public sealed class TestReadContinuationLifecycle
+public sealed class TestReadContinuationLifecycle : RaftTrackingTest
 {
     [Fact]
     public void RangeScanContinuation_KeyEvictedBetweenPages_NoAccountingDriftNoLostOcc()
@@ -130,13 +130,13 @@ public sealed class TestReadContinuationLifecycle
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateCollectHandler(KahunaConfiguration config)
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateCollectHandler(KahunaConfiguration config)
     {
         (KeyValueContext context, RaftManager raft) = CreateContext(config);
         return (new TryCollectHandler(context), context, raft);
     }
 
-    private static (KeyValueContext, RaftManager) CreateContext(KahunaConfiguration config)
+    private (KeyValueContext, RaftManager) CreateContext(KahunaConfiguration config)
     {
         BTree<string, KeyValueEntry> store = new(32);
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
@@ -150,7 +150,7 @@ public sealed class TestReadContinuationLifecycle
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -169,8 +169,9 @@ public sealed class TestReadContinuationLifecycle
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

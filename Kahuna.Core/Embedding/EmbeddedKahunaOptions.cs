@@ -224,7 +224,9 @@ public sealed class EmbeddedKahunaOptions
 
     public string HttpVersion { get; set; } = "2.0";
 
-    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromMilliseconds(500);
+    // Must stay below StartElectionTimeout (Kommander validates HeartbeatInterval < StartElectionTimeout);
+    // the embedded default StartElectionTimeout is 500 ms.
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromMilliseconds(100);
 
     public TimeSpan RecentHeartbeat { get; set; } = TimeSpan.FromMilliseconds(100);
 

@@ -22,7 +22,7 @@ namespace Kahuna.Server.Tests;
 /// <summary>
 /// Tests for Phase B — intrusive O(1) LRU eviction replacing the approximate sampler.
 /// </summary>
-public sealed class TestKeyValueLruEviction
+public sealed class TestKeyValueLruEviction : RaftTrackingTest
 {
     // ── B.1: LRU list maintenance ────────────────────────────────────────────────────────
 
@@ -298,7 +298,7 @@ public sealed class TestKeyValueLruEviction
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration? config = null)
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration? config = null)
     {
         config ??= CreateConfiguration();
 
@@ -314,7 +314,7 @@ public sealed class TestKeyValueLruEviction
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -333,8 +333,9 @@ public sealed class TestKeyValueLruEviction
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

@@ -31,7 +31,7 @@ namespace Kahuna.Server.Tests;
 /// backend here returns 1 to simulate the regression and verify the counter fires.
 /// </summary>
 [Collection("SnapshotFloorMetrics")]
-public sealed class TestSnapshotFloorDiskSentinel
+public sealed class TestSnapshotFloorDiskSentinel : RaftTrackingTest
 {
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
@@ -165,9 +165,11 @@ public sealed class TestSnapshotFloorDiskSentinel
                 Host                 = "localhost",
                 Port                 = 0,
                 InitialPartitions    = 1,
+                HeartbeatInterval = TimeSpan.FromMilliseconds(10),
+                CheckLeaderInterval = TimeSpan.FromMilliseconds(25),
                 StartElectionTimeout = 50,
                 EndElectionTimeout   = 150,
-                EnableQuiescence     = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
             new InMemoryWAL(raftLogger),
@@ -198,7 +200,7 @@ public sealed class TestSnapshotFloorDiskSentinel
         DefectivePruningBackend backend = new();
 
         MemoryInterNodeCommmunication interNode = new();
-        KahunaManager kahuna = new(actorSystem, raft, config, interNode, backend, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), config, interNode, backend, kahunaLogger);
         raft.OnLogRestored         += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError    += kahuna.OnReplicationError;

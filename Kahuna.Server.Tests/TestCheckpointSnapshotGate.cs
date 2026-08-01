@@ -38,7 +38,7 @@ public sealed class TestCheckpointSnapshotGate : IDisposable
     private static HLCTimestamp Ts(long l) => new(0, l, 0);
 
     private static RaftManager CreateRaft(string name) => new(
-        new RaftConfiguration { NodeName = name, NodeId = 1, Host = "localhost", Port = 0, InitialPartitions = 1, EnableQuiescence = false },
+        new RaftConfiguration { NodeName = name, NodeId = 1, Host = "localhost", Port = 0, InitialPartitions = 1, EnableQuiescence = false, PartitionExecutorPoolSize = 1 },
         new StaticDiscovery([]), new InMemoryWAL(NullLogger<IRaft>.Instance), new InMemoryCommunication(),
         new HybridLogicalClock(), NullLogger<IRaft>.Instance);
 

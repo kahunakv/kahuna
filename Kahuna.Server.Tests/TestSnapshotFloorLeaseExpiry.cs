@@ -20,7 +20,7 @@ namespace Kahuna.Server.Tests;
 /// have lapsed. These tests exercise the background-reaper code path by invoking
 /// <c>PurgeExpiredHoldsAsync</c> directly (rather than waiting for the periodic timer).
 /// </summary>
-public sealed class TestSnapshotFloorLeaseExpiry
+public sealed class TestSnapshotFloorLeaseExpiry : RaftTrackingTest
 {
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
     private readonly ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
@@ -50,12 +50,14 @@ public sealed class TestSnapshotFloorLeaseExpiry
             Host        = "localhost",
             Port        = port,
             InitialPartitions     = 2,
+            HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout  = (int)(50 * TimingScale),
             EndElectionTimeout    = (int)(150 * TimingScale),
             ElectionTimeoutSeed   = ElectionTimeoutSeedBase + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries   = 50,
-            EnableQuiescence       = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -80,7 +82,7 @@ public sealed class TestSnapshotFloorLeaseExpiry
             ScriptCacheExpiration    = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
         raft.OnLogRestored          += kahuna.OnLogRestored;
         raft.OnReplicationReceived  += kahuna.OnReplicationReceived;
         raft.OnReplicationError     += kahuna.OnReplicationError;

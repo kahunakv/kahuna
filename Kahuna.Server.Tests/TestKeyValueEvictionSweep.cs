@@ -24,7 +24,7 @@ namespace Kahuna.Server.Tests;
 /// Phase E test sweep: no-full-scan invariant (E.1), latency bound (E.2),
 /// correctness under intents (E.3), and metadata bound under sustained writes (E.4).
 /// </summary>
-public sealed class TestKeyValueEvictionSweep
+public sealed class TestKeyValueEvictionSweep : RaftTrackingTest
 {
     // ── E.1: large-store no-full-scan invariant ───────────────────────────────────────
 
@@ -526,7 +526,7 @@ public sealed class TestKeyValueEvictionSweep
 
     // ── helpers ──────────────────────────────────────────────────────────────────────
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(
         KahunaConfiguration? config = null,
         IPersistenceBackend? persistenceBackend = null)
     {
@@ -544,7 +544,7 @@ public sealed class TestKeyValueEvictionSweep
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -563,8 +563,9 @@ public sealed class TestKeyValueEvictionSweep
             null!,
             persistenceBackend!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

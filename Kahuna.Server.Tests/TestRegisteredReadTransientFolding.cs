@@ -22,7 +22,7 @@ namespace Kahuna.Server.Tests;
 /// otherwise conflict-free optimistic commit. Also pins the point-read and range-read transient-cancel
 /// behavior and documents the re-execute/first-observation-authoritative contract for duplicate-id reads.
 /// </summary>
-public sealed class TestRegisteredReadTransientFolding
+public sealed class TestRegisteredReadTransientFolding : RaftTrackingTest
 {
     private readonly ILogger<IRaft> raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
@@ -496,12 +496,13 @@ public sealed class TestRegisteredReadTransientFolding
             Port = port,
             InitialPartitions = 2,
             HeartbeatInterval = TimeSpan.FromMilliseconds(30),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(300 * TimingScale),
             ElectionTimeoutSeed = 95000 + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries = 50,
-            EnableQuiescence = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -523,7 +524,7 @@ public sealed class TestRegisteredReadTransientFolding
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;

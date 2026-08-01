@@ -27,7 +27,7 @@ namespace Kahuna.Server.Tests;
 /// The entire GetKeyValueByPrefix (plus optional per-key snapshot projection)
 /// runs off-actor in stage 2; stage 3 filters deleted/expired entries and resolves.
 /// </summary>
-public sealed class TestTryScanByPrefixFromDiskHandler
+public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
 {
     // ── Disk returns entries → resolved as Get after detach ───────────────────────────────
 
@@ -49,7 +49,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-hit-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("svc/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -78,7 +78,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-empty-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("nothing/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -110,7 +110,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-deleted-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("ns/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -141,7 +141,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-fault-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(MakePrefixScan("err/"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
@@ -172,7 +172,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-coalesce-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             const int n = 5;
             Task<KeyValueResponse?>[] asks = Enumerable.Range(0, n)
@@ -250,7 +250,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "pfx-snapshot-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueRequest scan = MakePrefixScan("p/");
             scan.ReadTimestamp = readTs;
@@ -305,7 +305,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             KeyValueDurability.Persistent, 0, 0, null);
     }
 
-    private static (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
+    private (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
         CreateRaftAndConfig(string nodeName)
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
@@ -333,7 +333,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -342,7 +342,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler
             raftLogger
         );
 
-        return (raft, (FairReadScheduler)raft.ReadScheduler, config, logger);
+        return (raft, (FairReadScheduler)Track(raft).ReadScheduler, config, logger);
     }
 
     // ── inner backends ───────────────────────────────────────────────────────────────────

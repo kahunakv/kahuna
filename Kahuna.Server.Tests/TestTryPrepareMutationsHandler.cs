@@ -25,7 +25,7 @@ namespace Kahuna.Server.Tests;
 /// Ephemeral durability is used so preparation stops at write-intent creation and never touches the
 /// Raft proposal path.
 /// </summary>
-public sealed class TestTryPrepareMutationsHandler
+public sealed class TestTryPrepareMutationsHandler : RaftTrackingTest
 {
     [Fact]
     public async Task Prepare_CreatesWriteIntent_StampsRecordAnchorKey()
@@ -145,7 +145,7 @@ public sealed class TestTryPrepareMutationsHandler
         ) { RecordAnchorKey = recordAnchorKey };
     }
 
-    private static (TryPrepareMutationsHandler, KeyValueContext, RaftManager) CreateHandler()
+    private (TryPrepareMutationsHandler, KeyValueContext, RaftManager) CreateHandler()
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
         {
@@ -173,7 +173,7 @@ public sealed class TestTryPrepareMutationsHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -194,8 +194,9 @@ public sealed class TestTryPrepareMutationsHandler
             null!,   // proposalRouter
             backend,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

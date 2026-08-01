@@ -21,7 +21,7 @@ namespace Kahuna.Server.Tests;
 /// the owning actor's in-memory cache must be updated to the new revision so that a node promoted
 /// to leader immediately serves the latest value without a disk round-trip.
 /// </summary>
-public sealed class TestKeyValueFailoverCoherence
+public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
 {
     private readonly ILogger<IRaft>    raftLogger    = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna>  kahunaLogger  = NullLogger<IKahuna>.Instance;
@@ -50,12 +50,14 @@ public sealed class TestKeyValueFailoverCoherence
             Host                  = "localhost",
             Port                  = port,
             InitialPartitions     = 2,
+            HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout  = (int)(50  * TimingScale),
             EndElectionTimeout    = (int)(150 * TimingScale),
             ElectionTimeoutSeed   = ElectionTimeoutSeedBase + nodeId,
             CompactEveryOperations = 1000,
             CompactNumberEntries   = 50,
-            EnableQuiescence       = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -80,7 +82,7 @@ public sealed class TestKeyValueFailoverCoherence
             ScriptCacheExpiration     = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
         raft.OnLogRestored         += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError    += kahuna.OnReplicationError;

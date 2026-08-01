@@ -30,7 +30,7 @@ namespace Kahuna.Server.Tests;
 /// and <see cref="PersistentCacheMiss_BackendReadFaults_ResolvesMustRetry"/> covers a faulting read
 /// (which must surface as MustRetry, never a false-negative DoesNotExist).
 /// </summary>
-public sealed class TestTryGetHandler
+public sealed class TestTryGetHandler : RaftTrackingTest
 {
     // ── Resident cache hit — no disk load, no detour ──────────────────────────────────────
 
@@ -240,7 +240,7 @@ public sealed class TestTryGetHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -251,7 +251,7 @@ public sealed class TestTryGetHandler
 
         // The FairReadScheduler must be started before EnqueueTask is called;
         // it starts background reader threads and must be stopped after the test.
-        FairReadScheduler scheduler = (FairReadScheduler)raft.ReadScheduler;
+        FairReadScheduler scheduler = (FairReadScheduler)Track(raft).ReadScheduler;
         scheduler.Start();
 
         try
@@ -280,6 +280,7 @@ public sealed class TestTryGetHandler
                     null!,  // proposalRouter
                     backend,
                     raft,
+                    raft.ReadScheduler,
                     new KeySpaceRegistry(),
                     new RangeMapStore(raft, null, null, logger),
                     config,
@@ -340,7 +341,7 @@ public sealed class TestTryGetHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -349,7 +350,7 @@ public sealed class TestTryGetHandler
             raftLogger
         );
 
-        FairReadScheduler scheduler = (FairReadScheduler)raft.ReadScheduler;
+        FairReadScheduler scheduler = (FairReadScheduler)Track(raft).ReadScheduler;
         scheduler.Start();
 
         try
@@ -367,6 +368,7 @@ public sealed class TestTryGetHandler
                     null!,  // proposalRouter
                     backend,
                     raft,
+                    raft.ReadScheduler,
                     new KeySpaceRegistry(),
                     new RangeMapStore(raft, null, null, logger),
                     config,
@@ -431,7 +433,7 @@ public sealed class TestTryGetHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -440,7 +442,7 @@ public sealed class TestTryGetHandler
             raftLogger
         );
 
-        FairReadScheduler scheduler = (FairReadScheduler)raft.ReadScheduler;
+        FairReadScheduler scheduler = (FairReadScheduler)Track(raft).ReadScheduler;
         scheduler.Start();
 
         try
@@ -469,6 +471,7 @@ public sealed class TestTryGetHandler
                     null!,
                     backend,
                     raft,
+                    raft.ReadScheduler,
                     new KeySpaceRegistry(),
                     new RangeMapStore(raft, null, null, logger),
                     config,
@@ -597,7 +600,7 @@ public sealed class TestTryGetHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "byrev-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Key is not in cache; revision 5 is only on disk.
             KeyValueResponse? resp = await actorRef.Ask(
@@ -628,7 +631,7 @@ public sealed class TestTryGetHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "byrev-notfound-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeGet("hist-key", KeyValueDurability.Persistent, compareRevision: 99),
@@ -666,7 +669,7 @@ public sealed class TestTryGetHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "cross-resolve-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Both Asks for the same key — one is a latest read, one is a by-revision read.
             Task<KeyValueResponse?> latestAsk = actorRef.Ask(
@@ -728,7 +731,7 @@ public sealed class TestTryGetHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "shape-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             Task<KeyValueResponse?> getAsk = actorRef.Ask(
                 MakeGet("shape-key", KeyValueDurability.Persistent, compareRevision: 3),
@@ -1009,7 +1012,7 @@ public sealed class TestTryGetHandler
         ) { ReadTimestamp = readTimestamp };
     }
 
-    private static (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
+    private (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
         CreateRaftAndConfig(string nodeName)
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
@@ -1037,7 +1040,7 @@ public sealed class TestTryGetHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -1046,10 +1049,10 @@ public sealed class TestTryGetHandler
             raftLogger
         );
 
-        return (raft, (FairReadScheduler)raft.ReadScheduler, config, logger);
+        return (raft, (FairReadScheduler)Track(raft).ReadScheduler, config, logger);
     }
 
-    private static (TryGetHandler, KeyValueContext, RaftManager) CreateHandler()
+    private (TryGetHandler, KeyValueContext, RaftManager) CreateHandler()
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
         {
@@ -1077,7 +1080,7 @@ public sealed class TestTryGetHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -1098,12 +1101,13 @@ public sealed class TestTryGetHandler
             null!,   // proposalRouter
             backend,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
             new RangeMapStore(raft, null, null, logger),
             config,
             logger
         );
 
-        return (new TryGetHandler(context), context, raft);
+        return (new TryGetHandler(context), context, Track(raft));
     }
 }

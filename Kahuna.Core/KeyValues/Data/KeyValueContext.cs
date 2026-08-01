@@ -135,35 +135,6 @@ internal sealed class KeyValueContext
         Configuration.CollectBatchMax > 0
             ? Configuration.CollectBatchMax
             : Math.Max(Configuration.CacheEntriesToRemove, 1);
-    
-    /// <summary>
-    /// Back-compat overload without an explicit backend read scheduler: falls back to
-    /// <c>raft.ReadScheduler</c>. Used only by unit tests that build a context directly; production always
-    /// goes through <see cref="KeyValueActor"/>, which supplies the Kahuna-owned backend read scheduler.
-    /// </summary>
-    public KeyValueContext(
-        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
-        BTree<string, KeyValueEntry> store,
-        Dictionary<string, KeyValueWriteIntent> locksByPrefix,
-        Dictionary<string, List<KeyValueRangeLock>> locksByRange,
-        Dictionary<int, KeyValueProposal> proposals,
-        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        Writes.PartitionWriteAggregator writeAggregator,
-        IPersistenceBackend persistenceBackend,
-        IRaft raft,
-        KeySpaceRegistry keySpaceRegistry,
-        RangeMapStore rangeMapStore,
-        KahunaConfiguration configuration,
-        ILogger<IKahuna> logger,
-        SnapshotFloorStore? snapshotFloorStore = null,
-        CompletionReceiptStore? completionReceiptStore = null,
-        Transactions.PreparedIntentStore? preparedIntentStore = null,
-        Transactions.TransactionRecordStore? transactionRecordStore = null
-    ) : this(actorContext, store, locksByPrefix, locksByRange, proposals, backgroundWriter, writeAggregator,
-             persistenceBackend, raft, raft.ReadScheduler, keySpaceRegistry, rangeMapStore, configuration,
-             logger, snapshotFloorStore, completionReceiptStore, preparedIntentStore, transactionRecordStore)
-    {
-    }
 
     public KeyValueContext(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,

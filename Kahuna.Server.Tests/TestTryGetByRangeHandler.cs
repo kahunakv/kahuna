@@ -30,7 +30,7 @@ namespace Kahuna.Server.Tests;
 /// Stage 2 (scheduler thread) — disk read.
 /// Stage 3 (actor thread, ResumeRead) — K-way merge; dispatch next page or resolve.
 /// </summary>
-public sealed class TestTryGetByRangeHandler
+public sealed class TestTryGetByRangeHandler : RaftTrackingTest
 {
     // ── Basic single-page scan ────────────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-single-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -96,7 +96,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-multi-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeRangeScan("doc/", limit: 2), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -132,7 +132,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-merge-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Seed two in-memory entries via ephemeral writes (no Raft proposal needed in tests).
             // Ephemeral and persistent keys share the same in-memory BTree, so the stage-1
@@ -197,7 +197,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-interleave-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Issue the scan; it will detach after stage 1 and block in stage 2.
             Task<KeyValueResponse?> scanTask = actorRef.Ask(
@@ -259,7 +259,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-shadow-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Write the in-memory version of kv/x via ephemeral TrySet (no Raft proposal).
             // Ephemeral and persistent keys share the same BTree, so the stage-1 snapshot
@@ -309,7 +309,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-acct-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // Drain one message so the actor is fully initialised before we snapshot bytes.
             await actorRef.Ask(MakeRangeScan("warmup/", limit: 1), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -377,7 +377,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-routing-actor", null!, null!, backend, decoratedRaft,
-                    new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
+                    decoratedRaft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
 
             // Point the request's PartitionId at a value that is deliberately NOT the owning data
             // partition. The pre-fix code enqueued on message.PartitionId, so every page would land
@@ -434,7 +434,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "range-backpressure-actor", null!, null!, backend, decoratedRaft,
-                    new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
+                    decoratedRaft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(decoratedRaft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -484,7 +484,7 @@ public sealed class TestTryGetByRangeHandler
 
     // ── Raft / config factory ─────────────────────────────────────────────────────────────
 
-    private static (RaftManager, FairReadScheduler, KahunaConfiguration, ILogger<IKahuna>) CreateRaftAndConfig(string nodeName)
+    private (RaftManager, FairReadScheduler, KahunaConfiguration, ILogger<IKahuna>) CreateRaftAndConfig(string nodeName)
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
         {
@@ -511,7 +511,7 @@ public sealed class TestTryGetByRangeHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -520,7 +520,7 @@ public sealed class TestTryGetByRangeHandler
             raftLogger
         );
 
-        return (raft, (FairReadScheduler)raft.ReadScheduler, config, logger);
+        return (raft, (FairReadScheduler)Track(raft).ReadScheduler, config, logger);
     }
 
     // ── Inner backends ────────────────────────────────────────────────────────────────────
@@ -617,7 +617,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-disk-proj-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueRequest scan = MakeSnapshotRangeScan("snap/", limit: 10, snapshotTs);
             KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -665,7 +665,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-disk-del-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueRequest scan = MakeSnapshotRangeScan("snap/", limit: 10, snapshotTs);
             KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -703,7 +703,7 @@ public sealed class TestTryGetByRangeHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "snap-pagination-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             // limit=10: first raw page has 11 entries (limit+1), all post-snapshot and projected
             // away. Without the fix diskHasMore=false (derived from projected.Count) and the scan

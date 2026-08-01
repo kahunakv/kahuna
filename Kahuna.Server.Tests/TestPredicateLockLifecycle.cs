@@ -24,7 +24,7 @@ namespace Kahuna.Server.Tests;
 ///   • expired range locks are pruned on acquire and before export, so an abandoned lock neither
 ///     blocks a fresh acquire nor is carried into a split/merge transfer set as if it were live.
 /// </summary>
-public sealed class TestPredicateLockLifecycle
+public sealed class TestPredicateLockLifecycle : RaftTrackingTest
 {
     /// <summary>
     /// A finite lease begins when the actor accepts the lock, not when the transaction started.
@@ -235,7 +235,7 @@ public sealed class TestPredicateLockLifecycle
         return request;
     }
 
-    private static (KeyValueContext, RaftManager) CreateContext(KahunaConfiguration config)
+    private (KeyValueContext, RaftManager) CreateContext(KahunaConfiguration config)
     {
         BTree<string, KeyValueEntry> store = new(32);
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
@@ -249,7 +249,7 @@ public sealed class TestPredicateLockLifecycle
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -268,8 +268,9 @@ public sealed class TestPredicateLockLifecycle
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

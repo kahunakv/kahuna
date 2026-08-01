@@ -23,7 +23,7 @@ namespace Kahuna.Server.Tests;
 /// receipt/leader-change resolution) are covered for the durable path in TestDurableOutcomeConsultation,
 /// TestDurableStateTransfer, and TestDurableReadRoutedResolution.
 /// </summary>
-public sealed class TestTwoPhaseCommitRecovery
+public sealed class TestTwoPhaseCommitRecovery : RaftTrackingTest
 {
     private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
@@ -58,6 +58,8 @@ public sealed class TestTwoPhaseCommitRecovery
             Host                   = "localhost",
             Port                   = port,
             InitialPartitions      = 2,
+            HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout   = (int)(50  * TimingScale),
             EndElectionTimeout     = (int)(150 * TimingScale),
             ElectionTimeoutSeed    = ElectionTimeoutSeedBase + nodeId,
@@ -89,7 +91,7 @@ public sealed class TestTwoPhaseCommitRecovery
             ScriptCacheExpiration     = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfig, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
         raft.OnLogRestored         += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError    += kahuna.OnReplicationError;

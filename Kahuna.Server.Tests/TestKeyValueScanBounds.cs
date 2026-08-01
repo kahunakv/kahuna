@@ -22,7 +22,7 @@ namespace Kahuna.Server.Tests;
 /// resident range. The non-paginated prefix scan truncates (documented contract); the paginated range
 /// scan resumes past the tombstone wall from its cursor, so no live entry is lost across pages.
 /// </summary>
-public sealed class TestKeyValueScanBounds
+public sealed class TestKeyValueScanBounds : RaftTrackingTest
 {
     private const int PrefixInspectionBudget =
         KeyValueScanLimits.MaxPrefixScanResults + KeyValueScanLimits.MaxScanInspectionSlack;
@@ -178,7 +178,7 @@ public sealed class TestKeyValueScanBounds
         return request;
     }
 
-    private static (KeyValueContext, RaftManager) CreateContext(KahunaConfiguration config)
+    private (KeyValueContext, RaftManager) CreateContext(KahunaConfiguration config)
     {
         BTree<string, KeyValueEntry> store = new(32);
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
@@ -192,7 +192,7 @@ public sealed class TestKeyValueScanBounds
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -211,8 +211,9 @@ public sealed class TestKeyValueScanBounds
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

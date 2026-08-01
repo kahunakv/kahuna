@@ -26,7 +26,7 @@ namespace Kahuna.Server.Tests;
 ///   • With the background flush stalled well past the old 10 s window, the only cached copy of a
 ///     committed persistent entry is never evicted, so a read still returns it.
 /// </summary>
-public sealed class TestDirtyEvictionFlushAck
+public sealed class TestDirtyEvictionFlushAck : RaftTrackingTest
 {
     private readonly ILoggerFactory loggerFactory;
 
@@ -209,7 +209,7 @@ public sealed class TestDirtyEvictionFlushAck
             entry.FlushedRevision = revision;
     }
 
-    private static (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration config)
+    private (TryCollectHandler, KeyValueContext, RaftManager) CreateHandler(KahunaConfiguration config)
     {
         BTree<string, KeyValueEntry> store = new(32);
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
@@ -223,7 +223,7 @@ public sealed class TestDirtyEvictionFlushAck
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -242,8 +242,9 @@ public sealed class TestDirtyEvictionFlushAck
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             config,
             logger
         );

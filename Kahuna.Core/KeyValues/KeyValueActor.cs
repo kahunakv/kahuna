@@ -268,11 +268,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         Writes.PartitionWriteAggregator writeAggregator,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
         KeySpaceRegistry keySpaceRegistry,
         RangeMapStore rangeMapStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger
-    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft, raft.ReadScheduler,
+    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft, backendReadScheduler,
              keySpaceRegistry, rangeMapStore, configuration, logger, null, null, null, null)
     {
     }

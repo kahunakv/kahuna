@@ -38,7 +38,7 @@ namespace Kahuna.Server.Tests;
 /// If the pin is working, the boundary is found in memory and the counter stays at 0.</para>
 /// </summary>
 [Collection("SnapshotFloorMetrics")]
-public sealed class TestSnapshotFloorPinEndToEnd
+public sealed class TestSnapshotFloorPinEndToEnd : RaftTrackingTest
 {
     private readonly ILogger<IRaft>    raftLogger   = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna>  kahunaLogger = NullLogger<IKahuna>.Instance;
@@ -91,9 +91,11 @@ public sealed class TestSnapshotFloorPinEndToEnd
                 Host              = "localhost",
                 Port              = 0,
                 InitialPartitions = 1,
+                HeartbeatInterval = TimeSpan.FromMilliseconds(10),
+                CheckLeaderInterval = TimeSpan.FromMilliseconds(25),
                 StartElectionTimeout = 50,
                 EndElectionTimeout   = 150,
-                EnableQuiescence  = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
             new InMemoryWAL(raftLogger),
@@ -121,7 +123,7 @@ public sealed class TestSnapshotFloorPinEndToEnd
         CountingBackend countingBackend = new(new MemoryPersistenceBackend());
 
         MemoryInterNodeCommmunication interNode = new();
-        KahunaManager kahuna = new(actorSystem, raft, config, interNode, countingBackend, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), config, interNode, countingBackend, kahunaLogger);
 
         raft.OnLogRestored          += kahuna.OnLogRestored;
         raft.OnReplicationReceived  += kahuna.OnReplicationReceived;

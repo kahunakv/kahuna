@@ -26,7 +26,7 @@ namespace Kahuna.Server.Tests;
 /// GetKeyValueRevision off the actor mailbox. The non-by-revision path (which still uses the
 /// blocking GetKeyValueEntry) is not exercised here.
 /// </summary>
-public sealed class TestTryExistsHandler
+public sealed class TestTryExistsHandler : RaftTrackingTest
 {
     // ── By-revision: stage-1 shortcuts (no disk, no detach) ──────────────────────────────
 
@@ -120,7 +120,7 @@ public sealed class TestTryExistsHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-latest-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("live-key", compareRevision: -1),
@@ -149,7 +149,7 @@ public sealed class TestTryExistsHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-notfound-actor2", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("absent-key", compareRevision: -1),
@@ -183,7 +183,7 @@ public sealed class TestTryExistsHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "latest-shape-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             Task<KeyValueResponse?> getAsk = actorRef.Ask(
                 MakeGet("shape-key"),
@@ -234,7 +234,7 @@ public sealed class TestTryExistsHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("hist-key", 4),
@@ -264,7 +264,7 @@ public sealed class TestTryExistsHandler
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
                 actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
                     "exists-notfound-actor", null!, null!, backend, raft,
-                    new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
 
             KeyValueResponse? resp = await actorRef.Ask(
                 MakeExists("hist-key", 99),
@@ -400,7 +400,7 @@ public sealed class TestTryExistsHandler
         );
     }
 
-    private static (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
+    private (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)
         CreateRaftAndConfig(string nodeName)
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
@@ -428,7 +428,7 @@ public sealed class TestTryExistsHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -437,10 +437,10 @@ public sealed class TestTryExistsHandler
             raftLogger
         );
 
-        return (raft, (FairReadScheduler)raft.ReadScheduler, config, logger);
+        return (raft, (FairReadScheduler)Track(raft).ReadScheduler, config, logger);
     }
 
-    private static (TryExistsHandler, KeyValueContext, RaftManager) CreateHandler()
+    private (TryExistsHandler, KeyValueContext, RaftManager) CreateHandler()
     {
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
         {
@@ -468,7 +468,7 @@ public sealed class TestTryExistsHandler
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -489,6 +489,7 @@ public sealed class TestTryExistsHandler
             null!,
             backend,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
             new RangeMapStore(raft, null, null, logger),
             config,

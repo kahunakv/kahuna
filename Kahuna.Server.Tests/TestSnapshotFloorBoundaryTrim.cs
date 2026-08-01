@@ -38,7 +38,7 @@ namespace Kahuna.Server.Tests;
 /// </list></para>
 /// </summary>
 [Collection("SnapshotFloorMetrics")]
-public sealed class TestSnapshotFloorBoundaryTrim
+public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
 {
     // ── thin subclass to expose RemoveExpiredRevisions for unit testing ──────────────────
     private sealed class TestableTrimHandler(KeyValueContext ctx) : BaseHandler(ctx)
@@ -49,9 +49,9 @@ public sealed class TestSnapshotFloorBoundaryTrim
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
-    private static RaftManager BuildRaft()
+    private RaftManager BuildRaft()
     {
-        return new RaftManager(
+        return Track(new RaftManager(
             new RaftConfiguration
             {
                 NodeName  = "floor-trim-test",
@@ -59,13 +59,13 @@ public sealed class TestSnapshotFloorBoundaryTrim
                 Host      = "localhost",
                 Port      = 0,
                 InitialPartitions = 1,
-                EnableQuiescence  = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(NullLogger<IRaft>.Instance),
             new InMemoryCommunication(),
             new HybridLogicalClock(),
-            NullLogger<IRaft>.Instance);
+            NullLogger<IRaft>.Instance));
     }
 
     private static KahunaConfiguration BuildConfig(int retentionCount = 3)
@@ -128,6 +128,7 @@ public sealed class TestSnapshotFloorBoundaryTrim
             writeAggregator:     null!,
             persistenceBackend:  null!,
             raft:                raft,
+            backendReadScheduler: raft.ReadScheduler,
             keySpaceRegistry:    null!,
             rangeMapStore:       null!,
             configuration:       config,

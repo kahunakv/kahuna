@@ -24,7 +24,7 @@ namespace Kahuna.Server.Tests;
 /// manager boundary), while priority control messages — completions, cache-coherence, maintenance —
 /// are exempt from the bound and always admitted, so an in-flight read completion is never stranded.
 /// </summary>
-public sealed class TestKeyValueInboxAdmission
+public sealed class TestKeyValueInboxAdmission : RaftTrackingTest
 {
     [Fact]
     public async Task HotKeyFlood_UserRequestsBackpressureToMustRetry_ControlCompletionsNeverRejected()
@@ -139,7 +139,7 @@ public sealed class TestKeyValueInboxAdmission
         KeyValueRequestType.TryExists, HLCTimestamp.Zero, HLCTimestamp.Zero, key,
         null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, null);
 
-    private static (ActorSystem, RaftManager, IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>) SpawnBoundedActor(int maxInboxSize)
+    private (ActorSystem, RaftManager, IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>) SpawnBoundedActor(int maxInboxSize)
     {
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
         ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
@@ -152,7 +152,7 @@ public sealed class TestKeyValueInboxAdmission
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -161,7 +161,7 @@ public sealed class TestKeyValueInboxAdmission
             raftLogger
         );
 
-        ((FairReadScheduler)raft.ReadScheduler).Start();
+        ((FairReadScheduler)Track(raft).ReadScheduler).Start();
 
         KahunaConfiguration config = ConfigurationValidator.Validate(new()
         {
@@ -190,6 +190,7 @@ public sealed class TestKeyValueInboxAdmission
                 null!,  // proposalRouter
                 new MemoryPersistenceBackend(),
                 raft,
+                raft.ReadScheduler,
                 new KeySpaceRegistry(),
                 new RangeMapStore(raft, null, null, logger),
                 config,

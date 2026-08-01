@@ -20,7 +20,7 @@ namespace Kahuna.Server.Tests;
 /// (<c>OnLogRestored</c>), follower replication + failover (<c>OnReplicationReceived</c>), and the
 /// single-writer serialization of <see cref="RangeMapStore.MutateAsync"/>.
 /// </summary>
-public sealed class TestRangeMapReplication
+public sealed class TestRangeMapReplication : RaftTrackingTest
 {
     private readonly ILogger<IRaft> raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
@@ -63,6 +63,8 @@ public sealed class TestRangeMapReplication
             Host = "localhost",
             Port = port,
             InitialPartitions = 2, // meta map on P0 (system); partitions 1, 2 = data
+            HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(50 * TimingScale),
             EndElectionTimeout = (int)(150 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId, // distinct per node, prevents election livelock
@@ -70,7 +72,7 @@ public sealed class TestRangeMapReplication
             CompactNumberEntries = 50,
             // Fast election timers sit below the default SWIM PingInterval; keep the classic
             // per-partition heartbeat model so RaftConfiguration.Validate() accepts them.
-            EnableQuiescence = false
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
         };
 
         RaftManager raft = new(
@@ -95,7 +97,7 @@ public sealed class TestRangeMapReplication
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
 
-        KahunaManager kahuna = new(actorSystem, raft, kahunaConfiguration, interNode, kahunaLogger);
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfiguration, interNode, kahunaLogger);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;

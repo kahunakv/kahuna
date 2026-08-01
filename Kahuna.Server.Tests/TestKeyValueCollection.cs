@@ -18,7 +18,7 @@ using Nixie;
 
 namespace Kahuna.Server.Tests;
 
-public sealed class TestKeyValueCollection
+public sealed class TestKeyValueCollection : RaftTrackingTest
 {
     private readonly ILoggerFactory loggerFactory;
 
@@ -483,7 +483,7 @@ public sealed class TestKeyValueCollection
         Assert.True(surviving < 100);
     }
 
-    private static (TryCollectHandler Handler, KeyValueContext Context, BTree<string, KeyValueEntry> Store, RaftManager Raft) CreateHandler(
+    private (TryCollectHandler Handler, KeyValueContext Context, BTree<string, KeyValueEntry> Store, RaftManager Raft) CreateHandler(
         KahunaConfiguration? configuration = null
     )
     {
@@ -501,7 +501,7 @@ public sealed class TestKeyValueCollection
                 Host = "localhost",
                 Port = 0,
                 InitialPartitions = 1,
-                EnableQuiescence = false // standalone test node: keep the pre-upgrade heartbeat model, no SWIM dependency
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1 // standalone test node: keep the pre-upgrade heartbeat model, no SWIM dependency
             },
             new StaticDiscovery([]),
             new InMemoryWAL(raftLogger),
@@ -520,8 +520,9 @@ public sealed class TestKeyValueCollection
             null!,
             null!,
             raft,
+            raft.ReadScheduler,
             new KeySpaceRegistry(),
-            new RangeMapStore(raft, null, null, logger),
+            new RangeMapStore(Track(raft), null, null, logger),
             configuration,
             logger
         );

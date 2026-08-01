@@ -243,15 +243,26 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             case BackgroundWriteType.FlushAndNotify:
                 // Explicit pre-backup/pre-close flush: drain fully (ignore the time budget) so the
-                // completion signal means every queued write has landed in storage.
-                await FlushLocks(drainFully: true);
-                bool keyValuesFlushed = await FlushKeyValues(drainFully: true);
-                await RunTargetedRevisionCleanup();
-                if (keyValuesFlushed)
-                    message.CompletionSource?.TrySetResult(true);
-                else
-                    message.CompletionSource?.TrySetException(new IOException(
-                        "The background writer could not durably persist all committed key-values; the flush did not complete."));
+                // completion signal means every queued write has landed in storage. The completion
+                // source MUST be completed on every path — success, partial persistence failure, or
+                // an exception thrown mid-flush (e.g. the writer scheduler rejecting an enqueue during
+                // shutdown). A flush that never signals would hang its awaiter (FlushPersistenceAsync)
+                // forever, which stalls backups and node close.
+                try
+                {
+                    bool locksFlushed = await FlushLocks(drainFully: true);
+                    bool keyValuesFlushed = await FlushKeyValues(drainFully: true);
+                    await RunTargetedRevisionCleanup();
+                    if (locksFlushed && keyValuesFlushed)
+                        message.CompletionSource?.TrySetResult(true);
+                    else
+                        message.CompletionSource?.TrySetException(new IOException(
+                            "The background writer could not durably persist all committed locks/key-values; the flush did not complete."));
+                }
+                catch (Exception ex)
+                {
+                    message.CompletionSource?.TrySetException(ex);
+                }
                 break;
 
             default:
@@ -350,10 +361,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// completely. Used by the explicit pre-backup/pre-close flush so its completion signal means
     /// every queued write has landed.</param>
     /// <returns>A task that represents the asynchronous operation of flushing locks.</returns>
-    private async ValueTask FlushLocks(bool drainFully = false)
+    private async ValueTask<bool> FlushLocks(bool drainFully = false)
     {
         if (dirtyLocks.Count == 0 && pendingLockItems == null)
-            return;
+            return true;
 
         long budgetMs = configuration.DirtyObjectsWriterDelay > 0
             ? configuration.DirtyObjectsWriterDelay
@@ -450,15 +461,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             {
                 pendingLockItems = items;
                 logger.LogError("Coundn't store batch of {Count} locks", items.Count);
-                return;
+                return false;
             }
 
             logger.LogSuccessfullyStoredLocks(items.Count, stopwatch.ElapsedMilliseconds);
             pendingCheckpoint = true;
 
             if (!drainFully && (Environment.TickCount64 - startTick) >= budgetMs)
-                return;
+                return true;
         }
+
+        return true;
     }
 
     /// <summary>

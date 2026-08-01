@@ -25,11 +25,13 @@ public sealed class KahunaConfiguration
 
     /// <summary>
     /// Number of dedicated worker threads serving background batch writes (StoreKeyValues / StoreLocks
-    /// and revision pruning). Kept small (1–2) because these writes are fsync-heavy and serialize on the
+    /// and revision pruning). The background writer submits every batch under a single queue key, and the
+    /// scheduler runs at most one worker per queue, so 1 is the effective maximum — a larger value only
+    /// creates permanently-idle threads. Kept at 1 because these writes are fsync-heavy and serialize on the
     /// backend anyway; isolating them keeps bulk flushes off both the WAL read pool and the backend read
-    /// pool. 0 or negative auto-sizes to the processor count.
+    /// pool. Rejected if 0 or negative (which would otherwise auto-expand the pool to the processor count).
     /// </summary>
-    public int BackendWriteIOThreads { get; set; } = 2;
+    public int BackendWriteIOThreads { get; set; } = 1;
 
     /// <summary>
     /// Per-partition pending-queue depth for the backend read scheduler before new reads are rejected with
