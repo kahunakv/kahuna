@@ -52,6 +52,13 @@ public sealed class KahunaConfiguration
     /// </summary>
     public bool RocksDbDirectReads { get; set; } = true;
 
+    /// <summary>
+    /// When true, enables RocksDB statistics collection for the KV/locks backend and periodic dumps to
+    /// its LOG file. Off by default because statistics add per-operation overhead; enable only for
+    /// tuning or diagnosis. Only affects the "rocksdb" storage backend.
+    /// </summary>
+    public bool RocksDbStatistics { get; set; }
+
     public TimeSpan ScriptCacheExpiration { get; set; }
 
     /// <summary>

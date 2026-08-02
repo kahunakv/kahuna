@@ -375,7 +375,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         return configuration.Storage switch
         {
-            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision, sharedResources, configuration.RocksDbDirectReads),
+            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision, sharedResources, configuration.RocksDbDirectReads, configuration.RocksDbStatistics),
             "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision, logger),
             "memory" => new MemoryPersistenceBackend(),
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)

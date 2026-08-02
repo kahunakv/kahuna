@@ -58,11 +58,11 @@ public sealed class KahunaCommandLineOptions
     [Option("rocksdb-shared-memtable-budget-mb", Required = false, HelpText = "Shared RocksDB memtable sub-budget in MiB, cost-charged into the shared cache (must be <= budget)", Default = 128)]
     public int RocksDbSharedMemtableBudgetMb { get; set; } = 128;
 
-    [Option("rocksdb-direct-reads", Required = false, HelpText = "Read RocksDB SSTs with direct I/O, bypassing the OS page cache so the block cache is the sole read cache (default: enabled)")]
-    public bool RocksDbDirectReads { get; set; }
-
-    [Option("disable-rocksdb-direct-reads", Required = false, HelpText = "Disable direct-I/O reads and use buffered reads backed by the OS page cache")]
+    [Option("disable-rocksdb-direct-reads", Required = false, HelpText = "Disable direct-I/O reads (default: enabled) and use buffered reads backed by the OS page cache")]
     public bool DisableRocksDbDirectReads { get; set; }
+
+    [Option("rocksdb-statistics", Required = false, HelpText = "Enable RocksDB statistics collection and periodic LOG dumps (adds per-operation overhead; for tuning/diagnosis). Default: disabled")]
+    public bool RocksDbStatistics { get; set; }
 
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }

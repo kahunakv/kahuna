@@ -71,6 +71,12 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool RocksDbDirectReads { get; set; } = true;
 
+    /// <summary>
+    /// When true, enables RocksDB statistics collection and periodic LOG dumps. Off by default (adds
+    /// per-operation overhead). Only used when <see cref="Storage"/> is "rocksdb".
+    /// </summary>
+    public bool RocksDbStatistics { get; set; }
+
     public int LocksWorkers { get; set; } = Environment.ProcessorCount;
 
     public int KeyValueWorkers { get; set; } = Environment.ProcessorCount;

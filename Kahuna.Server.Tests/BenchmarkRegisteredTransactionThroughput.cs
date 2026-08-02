@@ -115,7 +115,9 @@ public sealed class BenchmarkRegisteredTransactionThroughput
                     long proposals = counter.Calls - callsBefore;
                     long entries = counter.Entries - entriesBefore;
                     double[] sortedLatencies = commitLatenciesMs.Order().ToArray();
-                    double rowsPerSecond = transactionCount / workload.Elapsed.TotalSeconds;
+                    // Each transaction writes keyCount rows, so rows/s is txns × keys, not txns alone —
+                    // without the factor the column understates throughput for the 10- and 100-key rounds.
+                    double rowsPerSecond = (double)transactionCount * keyCount / workload.Elapsed.TotalSeconds;
 
                     output.WriteLine(
                         $"{keyCount,-6}{concurrency,-6}{transactionCount,-6}" +
