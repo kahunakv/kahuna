@@ -104,7 +104,26 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// protocol tests (no actor).</summary>
     public delegate Task<bool> ApplyRollbackLocally(int partitionId, PreparedIntent intent);
 
+    /// <summary>Settles foreign intents blocking <paramref name="intents"/>' keys on <paramref name="partitionId"/>
+    /// whose canonical record is already terminal (decided but not yet settled — settlement lag, not a live
+    /// conflict), returning how many were settled. Wired to
+    /// <see cref="DurableTransactionRecovery.TryResolveDecidedBlockersAsync"/>; null disables the helping pass and
+    /// keeps the pure backoff-retry behaviour (bare protocol tests, or a deployment that opts out).</summary>
+    public delegate Task<int> ResolveDecidedBlockersDelegate(
+        int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken);
+
+    /// <summary>Proposes [record init + anchor prepare + commit decision] as ONE atomic durable batch on the
+    /// anchor partition — the one-phase commit fast path. Returns <see langword="null"/> when the anchor is led
+    /// by a remote node (the bundle cannot cross the wire), in which case the caller falls back to standard 2PC.
+    /// Null delegate disables the fast path entirely.</summary>
+    public delegate Task<(bool BatchCommitted, bool PrepareAcknowledged)?> ReplicateOnePhaseBundleDelegate(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
     private readonly TransactionRecordStore recordStore;
+
+    // Consulted by the one-phase fast path's pre-flight check (foreign durable intent on any written key ⇒
+    // fall back to 2PC, whose prepare/retry/helping machinery owns that conflict).
+    private readonly PreparedIntentStore intentStore;
 
     private readonly ReplicateDelegate replicate;
 
@@ -120,6 +139,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     private readonly ApplyCommitLocally? applyCommitLocally;
 
     private readonly ApplyRollbackLocally? applyRollbackLocally;
+
+    // Null disables the prepare-conflict helping pass; the retry loop then always backs off blind.
+    private readonly ResolveDecidedBlockersDelegate? resolveDecidedBlockers;
+
+    // Null disables the one-phase commit fast path; every finalize then runs the standard 2PC flow.
+    private readonly ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle;
 
     // Mints a fresh HLC immediately before the terminal transition, used as the attempt's AttemptHlc so elapsed
     // prepare/validate time can actually trip the frozen decision deadline. Null keeps the deprecated behaviour of
@@ -137,8 +162,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
-        // The prepared-intent store is applied by the ordered scheduler-completion path (the single apply owner),
-        // not by the finalizer, so this parameter is retained only for call-site compatibility.
+        // Applied by the ordered scheduler-completion path (the single apply owner), never mutated by the
+        // finalizer; read here only by the one-phase fast path's pre-flight foreign-intent check.
         PreparedIntentStore intentStore,
         ReplicateDelegate replicate,
         ResolutionScheduler? resolutionScheduler = null,
@@ -149,9 +174,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ReplicateFencedDelegate? replicateFenced = null,
         ReplicateAnchorBundleDelegate? replicateAnchorBundle = null,
         int maxMaterializationBatchItems = 512,
-        long maxMaterializationBatchBytes = 4 * 1024 * 1024)
+        long maxMaterializationBatchBytes = 4 * 1024 * 1024,
+        ResolveDecidedBlockersDelegate? resolveDecidedBlockers = null,
+        ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle = null)
     {
         this.recordStore = recordStore;
+        this.intentStore = intentStore;
+        this.replicateOnePhaseBundle = replicateOnePhaseBundle;
         this.replicate = replicate;
         this.replicateFenced = replicateFenced;
         this.replicateAnchorBundle = replicateAnchorBundle;
@@ -161,6 +190,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         this.scheduleResolution = resolutionScheduler;
         this.attemptClock = attemptClock;
         this.recordDecisionLatencyMs = recordDecisionLatencyMs;
+        this.resolveDecidedBlockers = resolveDecidedBlockers;
         this.maxMaterializationBatchItems = Math.Max(1, maxMaterializationBatchItems);
         this.maxMaterializationBatchBytes = Math.Max(1, maxMaterializationBatchBytes);
     }
@@ -192,6 +222,29 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         byte[][] prepareDeltas = new byte[input.Partitions.Count][];
         for (int i = 0; i < input.Partitions.Count; i++)
             prepareDeltas[i] = SerializePrepare(input.Partitions[i]);
+
+        // ── One-phase commit fast path ──
+        // When the participant set collapses to the locally-led anchor partition, the whole transaction can
+        // decide in ONE durable barrier: validate the read set up front, then propose
+        // [record init + prepare + commit decision] as a single atomic batch. Any ineligibility (remote
+        // anchor leader, a foreign durable intent on a written key, failed validation, scheduler rejection
+        // outcome that is retryable-but-ambiguous) falls through to the standard 2PC flow below, unchanged.
+        if (replicateOnePhaseBundle is not null &&
+            input.Partitions.Count == 1 &&
+            input.Partitions[0].PartitionId == input.AnchorPartitionId)
+        {
+            DurableFinalizeOutcome? onePhase = await TryOnePhaseFinalizeAsync(
+                input, initDelta, prepareDeltas[0], validateReadSet, opId, cancellationToken).ConfigureAwait(false);
+
+            if (onePhase is { } fastOutcome)
+            {
+                recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+                await FinishResolutionAsync(input, fastOutcome, cancellationToken).ConfigureAwait(false);
+                return fastOutcome;
+            }
+
+            DurableTransactionMetrics.OnePhaseFallbacks.Add(1);
+        }
 
         int anchorIndex = -1;
         if (replicateAnchorBundle is not null)
@@ -271,8 +324,31 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // budget and falls through to the truthful abort below; the frozen decision deadline is the final ceiling. ──
         for (int attempt = 0; !allPrepared && attempt < MaxPrepareRetries && !cancellationToken.IsCancellationRequested; attempt++)
         {
-            try { await Task.Delay(Math.Min(2 * (attempt + 1), 20), cancellationToken).ConfigureAwait(false); }
-            catch (OperationCanceledException) { break; }
+            // Helping pass: a blocking intent whose record is already decided is pure settlement lag — settle it
+            // now and re-prepare immediately, instead of sleeping in the hope that the deferred-settlement task
+            // wins the race. Only when nothing could be helped (a live conflict, or helping unavailable) does the
+            // backoff apply; helping failures degrade to that same backoff, never to an escaped exception.
+            bool helped = false;
+            if (resolveDecidedBlockers is not null)
+            {
+                try
+                {
+                    for (int i = 0; i < input.Partitions.Count; i++)
+                    {
+                        DurablePartitionPrepare partition = input.Partitions[i];
+                        if (await resolveDecidedBlockers(partition.PartitionId, partition.Intents, input.TransactionId, input.Epoch, cancellationToken).ConfigureAwait(false) > 0)
+                            helped = true;
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch { helped = false; }
+            }
+
+            if (!helped)
+            {
+                try { await Task.Delay(Math.Min(2 * (attempt + 1), 20), cancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
+            }
 
             Task<bool>[] retryTasks = new Task<bool>[input.Partitions.Count];
             for (int i = 0; i < input.Partitions.Count; i++)
@@ -283,11 +359,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             allPrepared = (await Task.WhenAll(retryTasks).ConfigureAwait(false)).All(static prepared => prepared);
         }
 
+        DurableTransactionMetrics.FinalizePrepareMs.Record(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+
         // ── Post-prepare validation, only meaningful when everything is durable ──
+        long validateStart = Stopwatch.GetTimestamp();
         bool validated = allPrepared && await validateReadSet(cancellationToken).ConfigureAwait(false);
+        if (allPrepared)
+            DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
 
         // ── Decision barrier: a commit only when every prepare is durable and validation passed; otherwise a
         // conflict abort (validation failed) or a retryable abort (a prepare did not commit). ──
+        long decisionStart = Stopwatch.GetTimestamp();
         DurableFinalizeOutcome outcome;
         if (allPrepared && validated)
             outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken).ConfigureAwait(false);
@@ -296,21 +378,34 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             TransactionAbortClass abortClass = !allPrepared ? TransactionAbortClass.RetryableFailure : TransactionAbortClass.Conflict;
             outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken).ConfigureAwait(false);
         }
+        DurableTransactionMetrics.FinalizeDecisionMs.Record(Stopwatch.GetElapsedTime(decisionStart).TotalMilliseconds);
 
         // Record the latency up to the decision only — resolution below is excluded so it never inflates the
         // deadline window that a future finalize's prepare must fit inside.
         recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
 
-        // ── Resolution: apply the terminal decision to every prepared intent — on commit, materialize each intent
-        // into visible KV state, then settle (resolve + remove) the intent. With synchronous settlement (no
-        // scheduler) it is awaited here so the committed value is materialized before the caller returns — required
-        // for correct cross-node read-your-writes until the cross-node anchor decision lookup exists. A scheduler
-        // runs it in the background (deferred settlement); the decision is already durable and recovery finishes any
-        // lost run.
-        //
-        // Resolution is best-effort and MUST NOT change the returned outcome: the canonical decision is already
-        // durable, so an exception here (a materialization/apply/settle failure after the commit) is swallowed and
-        // left to the recovery sweep — never allowed to escape and be reported to the caller as a conflict abort. ──
+        await FinishResolutionAsync(input, outcome, cancellationToken).ConfigureAwait(false);
+
+        return outcome;
+    }
+
+    /// <summary>
+    /// Resolution: apply the terminal decision to every prepared intent — on commit, materialize each intent
+    /// into visible KV state, then settle (resolve + remove) the intent. With synchronous settlement (no
+    /// scheduler) it is awaited here so the committed value is materialized before the caller returns — required
+    /// for correct cross-node read-your-writes until the cross-node anchor decision lookup exists. A scheduler
+    /// runs it in the background (deferred settlement); the decision is already durable and recovery finishes any
+    /// lost run. A MustRetry outcome is skipped: nothing terminal is durable, so there is nothing to resolve.
+    ///
+    /// <para>Resolution is best-effort and MUST NOT change the returned outcome: the canonical decision is already
+    /// durable, so an exception here (a materialization/apply/settle failure after the commit) is swallowed and
+    /// left to the recovery sweep — never allowed to escape and be reported to the caller as a conflict abort.</para>
+    /// </summary>
+    private async Task FinishResolutionAsync(DurableFinalizeInput input, DurableFinalizeOutcome outcome, CancellationToken cancellationToken)
+    {
+        if (outcome.Result == DurableFinalizeResult.MustRetry)
+            return;
+
         if (scheduleResolution is null)
         {
             try
@@ -326,8 +421,116 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             scheduleResolution(ct => ResolveAsync(input, ct));
         }
+    }
 
-        return outcome;
+    /// <summary>
+    /// The one-phase commit fast path body. Returns the finalize outcome, or <see langword="null"/> when this
+    /// transaction must fall back to the standard 2PC flow (foreign durable intent on a written key, failed
+    /// up-front validation, or a remote anchor leader). Callable only when the participant set is exactly the
+    /// anchor partition and <see cref="replicateOnePhaseBundle"/> is wired.
+    /// </summary>
+    private async Task<DurableFinalizeOutcome?> TryOnePhaseFinalizeAsync(
+        DurableFinalizeInput input,
+        byte[] initDelta,
+        byte[] anchorPrepareDelta,
+        Func<CancellationToken, Task<bool>> validateReadSet,
+        HLCTimestamp opId,
+        CancellationToken cancellationToken)
+    {
+        DurablePartitionPrepare partition = input.Partitions[0];
+
+        // Pre-flight: a foreign durable intent on any written key would reject the bundled prepare — and the
+        // bundled decision, sharing the atomic batch, could not be withheld once proposed. Fall back to 2PC,
+        // whose prepare/retry/helping machinery owns that conflict. The check is race-free on the local
+        // leader: a NEW conflicting durable prepare cannot land behind it, because its producer would first
+        // need the in-memory write intents this transaction already holds (installed at PrepareMutations);
+        // the only foreign intents possible are decided-but-unsettled predecessors, which already existed
+        // when this transaction acquired its locks and are therefore visible to this check.
+        foreach (PreparedIntent intent in partition.Intents)
+        {
+            PreparedIntent? holder = intentStore.Get(intent.Key);
+            if (holder is not null && (holder.TransactionId != input.TransactionId || holder.Epoch != input.Epoch))
+                return null;
+        }
+
+        // Validation runs BEFORE anything durable — unlike 2PC's post-prepare validation. Safe for the same
+        // reason as the pre-flight: conflicting writers are excluded by the in-memory write intents, so the
+        // validated snapshot cannot be invalidated between here and the batch's ordered apply. A failed
+        // validation falls back to the standard flow, which re-validates and drives the durable conflict
+        // abort with its usual semantics.
+        long validateStart = Stopwatch.GetTimestamp();
+        bool validated = await validateReadSet(cancellationToken).ConfigureAwait(false);
+        DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
+        if (!validated)
+            return null;
+
+        // Mint the attempt HLC now: the deadline gate in the record state machine still evaluates it when the
+        // bundled decision applies, so a stalled proposal can never commit past the frozen deadline.
+        HLCTimestamp attemptHlc = attemptClock?.Invoke() ?? opId;
+        byte[] decisionDelta = TransactionRecordStore.SerializeDelta([
+            new CommitTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc)]);
+
+        (bool BatchCommitted, bool PrepareAcknowledged)? proposed = await replicateOnePhaseBundle!(
+            partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
+            input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+
+        // Remote anchor leader: the atomic bundle cannot cross the wire; standard 2PC handles it.
+        if (proposed is null)
+            return null;
+
+        // Nothing durable — a clean retry, exactly as a failed 2PC record init.
+        if (!proposed.Value.BatchCommitted)
+            return Retry();
+
+        // Invariant canary — see the metric's doc. The record read below still reports the truthful winner.
+        if (!proposed.Value.PrepareAcknowledged)
+            DurableTransactionMetrics.OnePhasePrepareRejections.Add(1);
+
+        // The winner is whatever the canonical record reflects after apply, exactly as in DecideAsync: the
+        // deadline gate may have kept the record Undecided (late commit → presumed-abort recovery owns it),
+        // and a concurrent recovery abort may have won the race in the log.
+        TransactionRecord? record = recordStore.Get(input.TransactionId, input.Epoch);
+        if (record is null)
+            return Retry();
+
+        if (record.Decision == TransactionDecision.Undecided)
+        {
+            DurableTransactionMetrics.LateCommitRejections.Add(1);
+            return Retry();
+        }
+
+        if (record.Decision == TransactionDecision.Commit)
+        {
+            DurableTransactionMetrics.OnePhaseCommits.Add(1);
+
+            // Apply the committed values to the leader's live state BEFORE returning, so a back-to-back
+            // operation on the same keys sees them (and not the finished transaction's leftover in-memory
+            // write intents). The 2PC path gets the same effective visibility because its extra decision
+            // barrier gives the deferred resolution task time to win this race; with a single barrier the
+            // race would be routinely lost. Only the in-memory apply runs inline — the durable materialize
+            // + settle still ride the deferred resolution (idempotent re-apply) or the recovery sweep.
+            if (applyCommitLocally is not null)
+            {
+                foreach (PreparedIntent intent in partition.Intents)
+                {
+                    try
+                    {
+                        await applyCommitLocally(partition.PartitionId, intent).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Best-effort: the decision is durable; deferred resolution/recovery re-applies.
+                    }
+                }
+            }
+        }
+
+        return record.Decision switch
+        {
+            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
+            _ => Retry()
+        };
     }
 
     private async Task<DurableFinalizeOutcome> DecideAsync(

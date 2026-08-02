@@ -1345,7 +1345,14 @@ internal sealed class TransactionCoordinator : IDisposable
             configuration.KeyValueWriteMaxQueuedItemsPerPartition),
         maxMaterializationBatchBytes: Math.Min(
             configuration.KeyValueWriteMaxBatchBytes,
-            configuration.KeyValueWriteMaxQueuedBytesPerPartition));
+            configuration.KeyValueWriteMaxQueuedBytesPerPartition),
+        // Prepare-conflict helping: a prepare blocked by a decided-but-unsettled foreign intent settles that
+        // intent inline (through the recovery path's idempotent resolution) and re-prepares immediately, instead
+        // of backing off while deferred settlement catches up. Breaks the settlement-lag convoy under load.
+        resolveDecidedBlockers: manager.TryResolveDecidedDurableBlockersAsync,
+        // One-phase commit: a single-participant transaction whose anchor partition is led locally decides in
+        // one durable barrier ([init + prepare + decision] in one atomic batch) instead of two.
+        replicateOnePhaseBundle: manager.ReplicateDurableOnePhaseBundleThroughSchedulerFenced);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
@@ -1519,8 +1526,12 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             outcome = await DurableFinalizer.FinalizeAsync(
                 input,
-                validateReadSet: async ct => await CheckReadSetForConflicts(context, ct).ConfigureAwait(false)
-                    && await ValidateReadSet(context, ct).ConfigureAwait(false),
+                validateReadSet: async ct =>
+                {
+                    DurableTransactionMetrics.FinalizeReadSetKeys.Record(context.ReadKeys?.Count ?? 0);
+                    return await CheckReadSetForConflicts(context, ct).ConfigureAwait(false)
+                        && await ValidateReadSet(context, ct).ConfigureAwait(false);
+                },
                 opId,
                 cancellationToken).ConfigureAwait(false);
         }

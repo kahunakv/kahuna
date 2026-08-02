@@ -308,6 +308,56 @@ internal sealed class KeyValuesManager : IDisposable
         return await ReplicateDurableBundleLocal(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// One-phase commit bundle: proposes the transaction's record init, its single (anchor-partition) prepare,
+    /// and its commit decision as ONE atomic durable batch — a single barrier instead of the 2PC's
+    /// init+prepare barrier followed by the decision barrier. Local-leader only: returns <see langword="null"/>
+    /// when the anchor partition is led by another node, and the caller falls back to the standard 2PC flow
+    /// (the durable-operation wire carries one delta per call, so the atomic bundle cannot cross nodes).
+    /// The safety argument for deciding in the same batch as the prepare lives at the call site
+    /// (<see cref="Transactions.DurableTransactionFinalizer"/>): the caller pre-checks that no foreign durable
+    /// intent holds any of the transaction's keys, and in-memory write intents exclude new conflicting
+    /// prepares from being proposed behind it.
+    /// </summary>
+    internal async Task<(bool BatchCommitted, bool PrepareAcknowledged)?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is not null)
+            return null;
+
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        bool batchCommitted = false;
+
+        Writes.DurableProposalSubmission submission = new(
+            partitionId,
+            [
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0),
+                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0),
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0)
+            ],
+            completion,
+            // Ordinary admission, matching the 2PC record-init/prepare stage: nothing is prepared yet, so a
+            // capacity rejection here is a clean retry — the Terminal reserve stays dedicated to finishing
+            // transactions that already hold durable intents.
+            Writes.WriteAdmissionClass.Ordinary,
+            (batchPartitionId, entries, entryLogIndices) =>
+            {
+                batchCommitted = true;
+                return ApplyDurableEntriesOnCommit(batchPartitionId, entries, entryLogIndices);
+            },
+            fenceKey,
+            fenceGeneration);
+
+        if (!writeAggregator.TryEnqueue(submission))
+            return (false, false);
+
+        using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
+        bool prepareAcknowledged = await submission.Committed.ConfigureAwait(false);
+        return (batchCommitted, prepareAcknowledged);
+    }
+
     private async Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
@@ -5276,6 +5326,26 @@ internal sealed class KeyValuesManager : IDisposable
                 receiptsByPartition[partitionId] = receipts = [];
             receipts.Add(new CompletionReceiptRecord(record.TransactionId, participant.Key, record.RecordAnchorKey, KeyValueDurability.Persistent));
         }
+    }
+
+    // One cached instance serves both the periodic sweep and the finalizer's helping pass: the recovery object
+    // holds only immutable delegates, so sharing it across concurrent callers is safe.
+    private DurableTransactionRecovery? durableBlockerRecovery;
+
+    /// <summary>
+    /// Finalizer seam for the prepare-conflict helping pass: settles foreign intents blocking the given keys on
+    /// <paramref name="partitionId"/> when their canonical record is already terminal (settlement lag). Gated on
+    /// partition leadership exactly like the recovery sweep — a non-leader's local intent store is not
+    /// authoritative, and its replicate seam could not apply the settle delta anyway.
+    /// </summary>
+    internal async Task<int> TryResolveDecidedDurableBlockersAsync(
+        int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
+    {
+        if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return 0;
+
+        DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+        return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
     }
 
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(

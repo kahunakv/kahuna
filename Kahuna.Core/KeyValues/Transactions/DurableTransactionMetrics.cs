@@ -28,6 +28,91 @@ internal static class DurableTransactionMetrics
             description: "Durable commits rejected because the attempt passed the frozen decision deadline.");
 
     /// <summary>
+    /// Transactions committed through the one-phase fast path: a single durable batch carrying
+    /// [record init + anchor prepare + commit decision], taken when the participant set collapses to the
+    /// locally-led anchor partition, no foreign durable intent holds any written key, and read-set
+    /// validation passes up front. Compare with <see cref="OnePhaseFallbacks"/> for the hit rate.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseCommits =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_commits",
+            description: "Durable transactions committed via the single-batch one-phase fast path.");
+
+    /// <summary>
+    /// One-phase-eligible transactions that fell back to the standard 2PC flow (remote anchor leader, a
+    /// foreign durable intent on a written key, failed up-front validation, or a scheduler rejection).
+    /// A high rate relative to <see cref="OnePhaseCommits"/> means the fast path's gate rarely opens and
+    /// the workload still pays both barriers.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseFallbacks =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_fallbacks",
+            description: "One-phase-eligible finalizes that fell back to the standard 2PC flow.");
+
+    /// <summary>
+    /// Invariant canary — must stay at zero. A one-phase bundle whose prepare was rejected even though the
+    /// pre-flight foreign-intent check passed: the commit decision is durable but the intent never installed.
+    /// The safety argument (in-memory write-intent exclusivity makes a post-check conflicting prepare
+    /// unreachable) would be broken. Alert on any non-zero value.
+    /// </summary>
+    internal static readonly Counter<long> OnePhasePrepareRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_prepare_rejections",
+            description: "One-phase bundles whose prepare was rejected after the decision was already proposed (invariant violation).");
+
+    /// <summary>
+    /// Wall time of the finalize's prepare stage: record init + every participant prepare (anchor-bundled when
+    /// available), including the bounded conflict-retry loop. Ends when the prepare barrier resolves, before
+    /// read-set validation. Compare against <see cref="FinalizeValidateMs"/>/<see cref="FinalizeDecisionMs"/> to
+    /// localize where a slow finalize spends its time under load.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizePrepareMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_prepare_ms", unit: "ms",
+            description: "Finalize prepare-stage wall time (record init + all prepares + conflict retries).");
+
+    /// <summary>
+    /// Wall time of the finalize's optimistic read-set validation: re-probing every tracked read to confirm no
+    /// committed writer invalidated it. Runs only when every prepare was durable. Scales with read-set size (see
+    /// <see cref="FinalizeReadSetKeys"/>) and with key-actor load, since each probe is an actor ask.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeValidateMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_validate_ms", unit: "ms",
+            description: "Finalize read-set validation wall time.");
+
+    /// <summary>
+    /// Wall time of the finalize's decision stage: replicating the terminal commit/abort transition at the anchor
+    /// and reading back the winner. One durable round trip plus the record read.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeDecisionMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_decision_ms", unit: "ms",
+            description: "Finalize decision-stage wall time (terminal transition + winner read-back).");
+
+    /// <summary>
+    /// Number of tracked read-set keys a finalize validated. Interpreted together with
+    /// <see cref="FinalizeValidateMs"/>: a large set explains a slow validation; a small set with slow validation
+    /// points at key-actor queueing instead.
+    /// </summary>
+    internal static readonly Histogram<long> FinalizeReadSetKeys =
+        Meter.CreateHistogram<long>(
+            "kahuna.durable_tx.finalize_read_set_keys", unit: "{key}",
+            description: "Read-set keys validated per finalize.");
+
+    /// <summary>
+    /// Blocking prepared intents settled inline by a finalize's prepare-conflict "helping" pass: the blocker's
+    /// canonical record was already terminal (committed or aborted) but its deferred settlement had not run yet,
+    /// so the blocked finalize resolved it directly instead of backing off and re-preparing. A high rate means
+    /// deferred settlement is lagging the commit rate — the convoy this pass exists to break — and is worth
+    /// correlating with prepare-retry counts and commit latency.
+    /// </summary>
+    internal static readonly Counter<long> PrepareConflictBlockersSettled =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.prepare_conflict_blockers_settled",
+            description: "Decided-but-unsettled blocking intents settled inline by a blocked finalize's helping pass.");
+
+    /// <summary>
     /// Recovery aborts attributed to decision-deadline expiry: a canonical record still <c>Undecided</c> past its
     /// deadline that recovery drove to a presumed abort. Distinguishes deadline-expiry aborts from orphan-prepare
     /// aborts (a remote prepare that outlived a failed anchor initialization). A rising rate corroborates

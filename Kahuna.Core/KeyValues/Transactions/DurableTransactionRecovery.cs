@@ -72,6 +72,85 @@ internal sealed class DurableTransactionRecovery
         return resolved;
     }
 
+    /// <summary>
+    /// Targeted "helping" resolution for a blocked finalize: given the intents a transaction failed to prepare on
+    /// <paramref name="partitionId"/>, finds the foreign intents currently holding those keys whose canonical
+    /// record is already terminal — committed- or aborted-but-unsettled, i.e. only waiting on deferred settlement —
+    /// and settles them now. Returns how many blocking intents were settled; the caller re-prepares immediately
+    /// when the count is positive instead of sleeping through a backoff.
+    ///
+    /// <para>A blocker whose record is still <c>Undecided</c> is never touched: helping must not presume-abort a
+    /// live coordinator inside its decision window. That case stays with the caller's bounded retry (and, past the
+    /// deadline, with the periodic recovery sweep, which owns the presumed-abort protocol). Settlement reuses the
+    /// sweep's resolution path, so it is idempotent under races with the deferred-settlement task, the sweep, or
+    /// another helper — whoever loses applies no-ops in Raft order.</para>
+    /// </summary>
+    public async Task<int> TryResolveDecidedBlockersAsync(
+        int partitionId,
+        IReadOnlyList<PreparedIntent> blockedIntents,
+        HLCTimestamp requestingTransactionId,
+        long requestingEpoch,
+        CancellationToken cancellationToken)
+    {
+        // Group the live foreign holders of our keys by owning transaction, so one record lookup and one settle
+        // delta covers every key a given blocker holds. The store read is leader-local and in-memory; when nothing
+        // foreign holds our keys this whole pass costs no I/O.
+        Dictionary<(HLCTimestamp TransactionId, long Epoch), List<PreparedIntent>>? byBlocker = null;
+
+        foreach (PreparedIntent blocked in blockedIntents)
+        {
+            PreparedIntent? holder = intentStore.Get(blocked.Key);
+            if (holder is null)
+                continue;
+
+            if (holder.TransactionId == requestingTransactionId && holder.Epoch == requestingEpoch)
+                continue;
+
+            byBlocker ??= [];
+            (HLCTimestamp, long) identity = (holder.TransactionId, holder.Epoch);
+            if (!byBlocker.TryGetValue(identity, out List<PreparedIntent>? group))
+                byBlocker[identity] = group = [];
+
+            // The same holder instance can appear once per blocked key it owns; Get returns the live intent per
+            // key, so duplicates cannot arise for a single key and each entry here is a distinct blocked key.
+            group.Add(holder);
+        }
+
+        if (byBlocker is null)
+            return 0;
+
+        int settled = 0;
+
+        foreach (List<PreparedIntent> group in byBlocker.Values)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            PreparedIntent representative = group[0];
+            TransactionRecord? record = await lookupRecord(
+                representative.TransactionId, representative.Epoch, representative.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+
+            bool? commit = record?.Decision switch
+            {
+                TransactionDecision.Commit => true,
+                TransactionDecision.Abort => false,
+                _ => null,
+            };
+
+            // Undecided (or no record yet): a live conflict, not settlement lag — leave it alone.
+            if (commit is null)
+                continue;
+
+            await ResolveGroupAsync(partitionId, group, commit.Value, cancellationToken).ConfigureAwait(false);
+            settled += group.Count;
+        }
+
+        if (settled > 0)
+            DurableTransactionMetrics.PrepareConflictBlockersSettled.Add(settled);
+
+        return settled;
+    }
+
     private async Task<bool?> DecideAsync(PreparedIntent intent, HLCTimestamp now, CancellationToken cancellationToken)
     {
         TransactionRecord? record = await lookupRecord(intent.TransactionId, intent.Epoch, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
