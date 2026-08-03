@@ -65,6 +65,18 @@ internal sealed class KeyValueContext
     /// </summary>
     public IRaftReadScheduler BackendReadScheduler { get; }
 
+    /// <summary>
+    /// Batch executor for current-revision point reads submitted through
+    /// <see cref="BackendReadScheduler"/>. Shared across all actors that use the same
+    /// <see cref="PersistenceBackend"/> (see <see cref="KeyValuePointReadExecutor.For"/>) —
+    /// the scheduler coalesces by executor reference identity, so a per-context instance
+    /// would silently disable cross-actor batching.
+    /// Null only in bare test contexts constructed without a persistence backend — the same
+    /// contexts in which <see cref="PersistenceBackend"/> itself is null and no disk read can
+    /// ever be scheduled.
+    /// </summary>
+    public KeyValuePointReadExecutor PointReadExecutor { get; }
+
     public KeySpaceRegistry KeySpaceRegistry { get; }
 
     public RangeMapStore RangeMapStore { get; }
@@ -165,6 +177,7 @@ internal sealed class KeyValueContext
         BackgroundWriter = backgroundWriter;
         WriteAggregator = writeAggregator;
         PersistenceBackend = persistenceBackend;
+        PointReadExecutor = persistenceBackend is null ? null! : KeyValuePointReadExecutor.For(persistenceBackend);
         Raft = raft;
         BackendReadScheduler = backendReadScheduler;
         KeySpaceRegistry = keySpaceRegistry;

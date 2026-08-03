@@ -116,9 +116,10 @@ internal sealed class TryGetHandler : BaseHandler
             {
                 // Transactional reads must never detach: load synchronously so the MVCC
                 // snapshot always reflects the committed state of the key.
-                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueTask(
+                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
                     ResolvePartition(message.Key),
-                    () => context.PersistenceBackend.GetKeyValue(message.Key));
+                    message.Key,
+                    context.PointReadExecutor);
 
                 if (diskEntry is not null)
                 {
@@ -174,9 +175,10 @@ internal sealed class TryGetHandler : BaseHandler
         if (!inCache && message.Durability == KeyValueDurability.Persistent
             && !message.ReadTimestamp.IsNull())
         {
-            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueTask(
+            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
                 ResolvePartition(message.Key),
-                () => context.PersistenceBackend.GetKeyValue(message.Key));
+                message.Key,
+                context.PointReadExecutor);
 
             if (diskEntry is not null)
             {
@@ -256,9 +258,10 @@ internal sealed class TryGetHandler : BaseHandler
             Task<KeyValueEntry?> readTask;
             try
             {
-                readTask = context.BackendReadScheduler.EnqueueTask(
+                readTask = context.BackendReadScheduler.EnqueueBatchableTask(
                     partitionId,
-                    () => context.PersistenceBackend.GetKeyValue(message.Key));
+                    message.Key,
+                    context.PointReadExecutor);
             }
             catch (Exception ex)
             {

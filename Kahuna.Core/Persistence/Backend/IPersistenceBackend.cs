@@ -20,7 +20,26 @@ internal interface IPersistenceBackend
     public LockEntry? GetLock(string resource);
     
     public KeyValueEntry? GetKeyValue(string keyName);
-    
+
+    /// <summary>
+    /// Batched point lookup: returns one current-revision entry (or <c>null</c>) per key,
+    /// index-aligned with <paramref name="keyNames"/>. Semantically equivalent to calling
+    /// <see cref="GetKeyValue"/> once per key — the default implementation does exactly that —
+    /// but backends with a native multi-key read (RocksDB <c>MultiGet</c>) override it to serve
+    /// the whole batch in one storage call. Used by the backend read scheduler to compress a
+    /// drained burst of independent point reads into a single backend call.
+    /// </summary>
+    public KeyValueEntry?[] GetKeyValues(string[] keyNames)
+    {
+        KeyValueEntry?[] results = new KeyValueEntry?[keyNames.Length];
+
+        for (int i = 0; i < keyNames.Length; i++)
+            results[i] = GetKeyValue(keyNames[i]);
+
+        return results;
+    }
+
+
     public KeyValueEntry? GetKeyValueRevision(string keyName, long revision);
 
     /// <summary>

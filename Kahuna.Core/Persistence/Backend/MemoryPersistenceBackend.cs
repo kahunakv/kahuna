@@ -33,7 +33,8 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     //     serialized through ReadScheduler.EnqueueTask anyway, so contention is bounded; in
     //     a true in-memory production deployment this would be a read-scalability narrowing.
     private readonly SortedList<string, KeyValueEntry> keyValues = new(StringComparer.Ordinal);
-    private readonly object kvLock = new();
+    
+    private readonly Lock kvLock = new();
 
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> keyValueRevisions = new();
 

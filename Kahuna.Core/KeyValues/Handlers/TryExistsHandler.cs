@@ -111,9 +111,10 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (!inCache && message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueTask(
+                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
                     ResolvePartition(message.Key),
-                    () => context.PersistenceBackend.GetKeyValue(message.Key));
+                    message.Key,
+                    context.PointReadExecutor);
 
                 if (diskEntry is not null)
                 {
@@ -165,9 +166,10 @@ internal sealed class TryExistsHandler : BaseHandler
         if (!inCache && message.Durability == KeyValueDurability.Persistent
             && !message.ReadTimestamp.IsNull())
         {
-            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueTask(
+            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
                 ResolvePartition(message.Key),
-                () => context.PersistenceBackend.GetKeyValue(message.Key));
+                message.Key,
+                context.PointReadExecutor);
 
             if (diskEntry is not null)
             {
@@ -240,9 +242,10 @@ internal sealed class TryExistsHandler : BaseHandler
             Task<KeyValueEntry?> readTask;
             try
             {
-                readTask = context.BackendReadScheduler.EnqueueTask(
+                readTask = context.BackendReadScheduler.EnqueueBatchableTask(
                     partitionId,
-                    () => context.PersistenceBackend.GetKeyValue(message.Key));
+                    message.Key,
+                    context.PointReadExecutor);
             }
             catch (Exception ex)
             {

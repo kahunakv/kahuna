@@ -35,7 +35,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
 
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
-                newEntry = await context.BackendReadScheduler.EnqueueTask(message.PartitionId, () => context.PersistenceBackend.GetKeyValue(message.Key));
+                newEntry = await context.BackendReadScheduler.EnqueueBatchableTask(message.PartitionId, message.Key, context.PointReadExecutor);
 
             newEntry ??= new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
 

@@ -62,8 +62,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     // deleted history. A corrupt/unreadable floor for a store that may have pruned yields
     // FailClosedFloor so backups refuse every cut until repaired.
     private static readonly HLCTimestamp FailClosedFloor = new(int.MaxValue, long.MaxValue, uint.MaxValue);
-    private readonly object _floorLock = new();
+    
+    private readonly Lock _floorLock = new();
+    
     private HLCTimestamp? _prunedFloorCache; // null until first loaded from the shards
+    
     private bool _prunedFloorCorrupt;
 
     /// <summary>
@@ -97,8 +100,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         {
             if (_prunedFloorCorrupt)
                 return FailClosedFloor;
+            
             if (_prunedFloorCache is null)
                 LoadPrunedFloorLocked();
+            
             return _prunedFloorCorrupt ? FailClosedFloor : _prunedFloorCache!.Value;
         }
     }
@@ -109,6 +114,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     private void LoadPrunedFloorLocked()
     {
         HLCTimestamp max = HLCTimestamp.Zero;
+        
         try
         {
             for (int shard = 0; shard < MaxShards; shard++)
@@ -131,8 +137,12 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             max = v;
                     }
                 }
-                finally { rwLock.ReleaseReaderLock(); }
+                finally
+                {
+                    rwLock.ReleaseReaderLock();
+                }
             }
+            
             _prunedFloorCache = max;
         }
         catch
