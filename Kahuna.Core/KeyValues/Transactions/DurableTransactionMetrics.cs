@@ -17,6 +17,18 @@ internal static class DurableTransactionMetrics
     internal static readonly Meter Meter = new("Kahuna", "1.0");
 
     /// <summary>
+    /// One count per backoff sleep in a KeyValuesManager retry loop, tagged by call site (method + line).
+    /// Diagnostic instrument for localizing latency tails: a statement path that never sleeps shows zero;
+    /// whichever site dominates during a stall names the loop responsible.
+    /// </summary>
+    internal static readonly Counter<long> KvRetryWaits =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.retry_waits",
+            description: "Backoff sleeps in key/value manager retry loops, by site.");
+
+    internal static void AddKvRetryWait(string site) => KvRetryWaits.Add(1, new KeyValuePair<string, object?>("site", site));
+
+    /// <summary>
     /// Commits rejected because the attempt's HLC passed the transaction's frozen decision deadline, so the
     /// canonical record stayed <c>Undecided</c> and the transaction yields to presumed-abort recovery. A rising
     /// rate is the signal that the deadline is too tight for the current finalize latency — healthy transactions

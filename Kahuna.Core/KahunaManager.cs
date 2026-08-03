@@ -166,7 +166,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // so no worker threads leak (the FairReadScheduler allocates threads on Start, not construction).
         // They are stopped/disposed in Dispose() — which runs after the actor system drains, so in-flight
         // backend I/O completes rather than faulting on a scheduler that Raft teardown already stopped.
-        backendReadScheduler = new FairReadScheduler(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth);
+        // Concurrent per-partition dispatch: KV persistence reads are mutually independent (a dirty
+        // in-memory entry is never served from disk, so disk is only read when it is authoritative),
+        // and with the standalone default of one Raft partition the scheduler's single-flight
+        // invariant otherwise serializes every backend read in the node onto one thread at a time.
+        backendReadScheduler = new FairReadScheduler(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth, concurrentPerPartition: true);
         backendWriteScheduler = new FairReadScheduler(raftLogger, configuration.BackendWriteIOThreads, configuration.BackendReadQueueDepth);
 
         SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);

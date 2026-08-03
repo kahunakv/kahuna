@@ -1002,6 +1002,7 @@ internal sealed class KeyValuesManager : IDisposable
                 {
                     long deadline = Environment.TickCount64 + 10_000;
                     while (Environment.TickCount64 < deadline && rangeMapStore.Current.FindAll(keySpace).Count == 0)
+                        Transactions.DurableTransactionMetrics.AddKvRetryWait("EnsureKeyRangeSeededAsync_1005");
                         await Task.Delay(25, cancellationToken).ConfigureAwait(false);
                 }
                 return forwarded;
@@ -1071,6 +1072,7 @@ internal sealed class KeyValuesManager : IDisposable
                 bool forwarded = await interNodeCommunication.EnsureKeyRangeRemoved(leader, keySpace, cancellationToken).ConfigureAwait(false);
                 long deadline = Environment.TickCount64 + 10_000;
                 while (Environment.TickCount64 < deadline && rangeMapStore.Current.FindAll(keySpace).Count > 0)
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("RemoveKeyRangeAsync_1074");
                     await Task.Delay(25, cancellationToken).ConfigureAwait(false);
                 return forwarded;
             }
@@ -3198,6 +3200,7 @@ internal sealed class KeyValuesManager : IDisposable
                 // acceptable: MustRetry/WaitingForReplication means the leader wasn't ready yet,
                 // so there is no meaningful earlier snapshot to preserve.  Pages 1+ always carry
                 // the snapshotTs latched from the first successful page-0 cursor.
+                Transactions.DurableTransactionMetrics.AddKvRetryWait("LocateAndScanRange_3201");
                 await Task.Delay(backoffMs, ct);
                 backoffMs = Math.Min(backoffMs * 2, 1000);
                 continue;
@@ -3606,6 +3609,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TrySetKeyValue_3609");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -3757,6 +3761,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                     if (response.Type == KeyValueResponseType.WaitingForReplication)
                     {
+                        Transactions.DurableTransactionMetrics.AddKvRetryWait("DeleteManyNodeKeyValue_3760");
                         await Task.Delay(delay);
                         continue;
                     }
@@ -3837,6 +3842,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryExtendKeyValue_3840");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -3911,6 +3917,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryDeleteKeyValue_3914");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -4015,6 +4022,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (Environment.TickCount64 >= deadline)
                     return (KeyValueResponseType.MustRetry, null);
 
+                Transactions.DurableTransactionMetrics.AddKvRetryWait("TryGetValue_4018");
                 await Task.Delay(backoffMs);
                 backoffMs = Math.Min(backoffMs * 2, 1000);
             }
@@ -4155,6 +4163,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (Environment.TickCount64 >= deadline)
                     return (KeyValueResponseType.MustRetry, null);
 
+                Transactions.DurableTransactionMetrics.AddKvRetryWait("TryExistsValue_4158");
                 await Task.Delay(backoffMs);
                 backoffMs = Math.Min(backoffMs * 2, 1000);
             }
@@ -4386,6 +4395,7 @@ internal sealed class KeyValuesManager : IDisposable
             if (Environment.TickCount64 >= deadline)
                 return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
+            Transactions.DurableTransactionMetrics.AddKvRetryWait("AcquireExclusiveLockWithWait_4389");
             await Task.Delay(backoffMs);
             backoffMs = Math.Min(backoffMs * 2, 100);
         }
@@ -4439,6 +4449,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryAcquireExclusivePrefixLock_4442");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -4553,6 +4564,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryReleaseExclusiveLock_4556");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -4610,6 +4622,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryReleaseExclusivePrefixLock_4613");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -4683,6 +4696,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryAcquireRangeLock_4686");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -4744,6 +4758,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryReleaseExclusiveRangeLock_4747");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -5518,6 +5533,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryPrepareMutations_5521");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -5663,6 +5679,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryCommitMutations_5666");
                     await Task.Delay(delay);
                     continue;
                 }
@@ -6077,6 +6094,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (Environment.TickCount64 >= deadline)
                     return new(KeyValueResponseType.MustRetry, []);
 
+                Transactions.DurableTransactionMetrics.AddKvRetryWait("GetByBucket_6080");
                 await Task.Delay(backoffMs);
                 backoffMs = Math.Min(backoffMs * 2, 1000);
             }
@@ -6132,6 +6150,7 @@ internal sealed class KeyValuesManager : IDisposable
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    Transactions.DurableTransactionMetrics.AddKvRetryWait("GetByRange_6135");
                     await Task.Delay(delay);
                     continue;
                 }
