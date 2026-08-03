@@ -72,23 +72,10 @@ internal sealed class TransactionCoordinator : IDisposable
     /// (Committed/RolledBack/expired) instead of an unknown result. Bounded by size and HLC age (configuration
     /// <c>TransactionOutcomeRetentionMax</c> / <c>TransactionOutcomeRetentionTtl</c>); after eviction a
     /// duplicate receives an unknown <see cref="KeyValueResponseType.Errored"/>, never a conflict Aborted.
+    /// Lookups are lock-free; inserts and eviction are O(1) — see <see cref="TerminalOutcomeWindow"/> for the
+    /// structure and why a scanning implementation is not acceptable on this path.
     /// </summary>
-    private readonly ConcurrentDictionary<HLCTimestamp, RetainedOutcome> terminalOutcomes = new();
-
-    /// <summary>
-    /// Serializes retention writes (insert + size eviction, TTL prune) so the size cap is a strict upper bound
-    /// under concurrency — without it two finalizers can insert past the cap or pick the same eviction victim.
-    /// Reads (<c>TryGetValue</c> from commit/rollback) stay lock-free on the concurrent dictionary.
-    /// </summary>
-    private readonly object terminalOutcomesLock = new();
-
-    /// <summary>A finalized outcome held in the idempotency window, stamped with the HLC at retention time.</summary>
-    private readonly record struct RetainedOutcome(FinalizeOutcome Outcome, HLCTimestamp RetainedAt, long Sequence);
-
-    // Monotonic insertion counter, bumped under terminalOutcomesLock on each retention. Breaks ties when
-    // several outcomes share the same retention HLC (fast back-to-back commits) so size-cap eviction is a
-    // deterministic FIFO on the true insertion order, not the non-deterministic dictionary enumeration order.
-    private long terminalOutcomeSequence;
+    private readonly TerminalOutcomeWindow terminalOutcomes = new();
 
     /// <summary>
     /// Admission gate for interactive sessions. Deliberately a different instance from the script executor's:
@@ -288,7 +275,7 @@ internal sealed class TransactionCoordinator : IDisposable
             // The session is gone. If its outcome is still within the idempotency window, a duplicate commit
             // replays the recorded terminal answer; otherwise it is unknown (evicted or never existed) and
             // reported as Errored — never a conflict Aborted.
-            if (terminalOutcomes.TryGetValue(transactionId, out RetainedOutcome retained))
+            if (terminalOutcomes.TryGet(transactionId, out TerminalOutcomeWindow.RetainedOutcome retained))
                 return (retained.Outcome.Type, retained.Outcome.RecordAnchorKey);
 
             // The in-memory session is gone (evicted, restarted, or it lived on a node that failed), but an
@@ -438,7 +425,7 @@ internal sealed class TransactionCoordinator : IDisposable
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
             // Replay a retained terminal outcome within the idempotency window; otherwise unknown → Errored.
-            if (terminalOutcomes.TryGetValue(transactionId, out RetainedOutcome retained))
+            if (terminalOutcomes.TryGet(transactionId, out TerminalOutcomeWindow.RetainedOutcome retained))
                 return retained.Outcome.Type;
 
             // A rollback cannot override a durably decided commit: if the canonical transaction record exists for
@@ -686,10 +673,10 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>
     /// Records a finalized outcome so a duplicate finalize arriving after the session is removed replays the
     /// same answer. Only terminal outcomes are retained — a non-terminal MustRetry leaves the session live, so
-    /// there is nothing to replay. The insert and size eviction run under <see cref="terminalOutcomesLock"/> so
-    /// <c>TransactionOutcomeRetentionMax</c> is a <b>strict</b> upper bound: once the window would exceed it the
-    /// oldest entries (by retention HLC) are evicted before the write is observable. A non-positive max
-    /// <b>disables retention entirely</b> — nothing is retained, so a duplicate after removal reports an unknown
+    /// there is nothing to replay. <c>TransactionOutcomeRetentionMax</c> is a <b>strict</b> upper bound: the
+    /// window evicts oldest-retained-first before the insert is observable above the cap (see
+    /// <see cref="TerminalOutcomeWindow.Retain"/>). A non-positive max <b>disables retention entirely</b> —
+    /// nothing is retained, so a duplicate after removal reports an unknown
     /// <see cref="KeyValueResponseType.Errored"/> (never a conflict Aborted).
     /// </summary>
     private void RetainTerminalOutcome(HLCTimestamp transactionId, FinalizeOutcome outcome, HLCTimestamp now)
@@ -701,44 +688,14 @@ internal sealed class TransactionCoordinator : IDisposable
         if (max <= 0)
             return;
 
-        lock (terminalOutcomesLock)
-        {
-            terminalOutcomes[transactionId] = new RetainedOutcome(outcome, now, ++terminalOutcomeSequence);
-
-            // Serialized eviction: with a single writer, TryRemove always succeeds and the loop drives Count
-            // back to the cap before the lock is released, so the window never exceeds max at rest.
-            while (terminalOutcomes.Count > max)
-            {
-                HLCTimestamp oldestKey = default;
-                HLCTimestamp oldestAt = default;
-                long oldestSeq = long.MaxValue;
-                bool found = false;
-
-                foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
-                {
-                    // Oldest = smallest retention HLC, ties broken by the smaller insertion sequence, so the
-                    // truly first-inserted outcome is evicted even when several share a retention HLC.
-                    int cmp = found ? entry.Value.RetainedAt.CompareTo(oldestAt) : -1;
-                    if (!found || cmp < 0 || (cmp == 0 && entry.Value.Sequence < oldestSeq))
-                    {
-                        oldestKey = entry.Key;
-                        oldestAt = entry.Value.RetainedAt;
-                        oldestSeq = entry.Value.Sequence;
-                        found = true;
-                    }
-                }
-
-                if (!found || !terminalOutcomes.TryRemove(oldestKey, out _))
-                    break;
-            }
-        }
+        terminalOutcomes.Retain(transactionId, outcome, now, max);
     }
 
     /// <summary>
     /// Prunes retained outcomes older than the configured idempotency window. Called on each reaper sweep so
     /// the window is bounded by age in addition to size. A non-positive TTL disables age pruning (size alone
-    /// bounds the window). Runs under <see cref="terminalOutcomesLock"/> so it does not race a concurrent
-    /// retention insert/eviction.
+    /// bounds the window). Serialized against retention inserts/evictions inside
+    /// <see cref="TerminalOutcomeWindow.PruneExpired"/>.
     /// </summary>
     private void PruneRetainedOutcomes(HLCTimestamp now)
     {
@@ -746,14 +703,7 @@ internal sealed class TransactionCoordinator : IDisposable
         if (ttl <= TimeSpan.Zero || terminalOutcomes.IsEmpty)
             return;
 
-        lock (terminalOutcomesLock)
-        {
-            foreach (KeyValuePair<HLCTimestamp, RetainedOutcome> entry in terminalOutcomes)
-            {
-                if (now - entry.Value.RetainedAt >= ttl)
-                    terminalOutcomes.TryRemove(entry.Key, out _);
-            }
-        }
+        terminalOutcomes.PruneExpired(now, ttl);
     }
 
     // ---- session range-lock renewal ----
