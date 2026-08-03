@@ -306,6 +306,12 @@ internal sealed class TryCollectHandler : BaseHandler
         }
 
         lastCycleStats = new(tombstoneEvicted, expiryEvicted, expiryInspected, lruEvicted, lruVisited, idleEvicted, evicted + idleEvicted, backlog, stopwatch.ElapsedMilliseconds);
+
+        // Publish the same numbers the log line above emits only when something was evicted. A cycle
+        // that reclaimed nothing but took a long time is exactly the case an operator needs to see, and
+        // it never reaches the log.
+        CollectMetrics.RecordCycle(lastCycleStats);
+
         keysToEvict.Clear();
 
         if (backlog)
