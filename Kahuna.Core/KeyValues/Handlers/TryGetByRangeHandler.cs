@@ -184,13 +184,17 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         HLCTimestamp capturedSnapshotTs = snapshotTs;
         HLCTimestamp capturedCurrentTime = currentTime;
 
+        // An unbounded scan arrives as limit == int.MaxValue; a naive limit + 1 overflows negative,
+        // which the backends treat as "no rows" — silently emptying every disk page of the scan.
+        int diskPageSize = SaturatingPageSize(limit);
+
         Task<RangeDiskPage> readTask;
         try
         {
             readTask = context.BackendReadScheduler.EnqueueTask(
                 scanPartition,
                 () => ProjectSnapshotPage(
-                    context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, limit + 1),
+                    context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, diskPageSize),
                     limit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
                     context.PersistenceBackend));
         }
@@ -206,7 +210,14 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         _ = readTask.ContinueWith(t =>
         {
-            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            if (!t.IsCompletedSuccessfully)
+            {
+                // Surface the fault: SetFaulted resolves the caller with a retryable MustRetry, and a
+                // silently swallowed exception here turns a deterministic bug into an undiagnosable
+                // retry-exhaustion at the client.
+                context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: disk page read faulted for prefix {Prefix}", prefix);
+                cont.SetFaulted();
+            }
             else cont.RangeScanPage = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
@@ -275,6 +286,12 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         }
         return new RangeDiskPage(projected, rawHasMore, rawNextCursor);
     }
+
+    /// <summary>
+    /// The limit+1 pagination sentinel, saturated so an unbounded scan (limit == int.MaxValue) does not
+    /// overflow negative — backends treat a negative limit as "no rows", silently emptying the disk page.
+    /// </summary>
+    internal static int SaturatingPageSize(int limit) => limit == int.MaxValue ? int.MaxValue : limit + 1;
 
     /// <summary>Computes the effective BTree bounds, substituting the prefix upper bound when EndKey is null.</summary>
     internal static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message)

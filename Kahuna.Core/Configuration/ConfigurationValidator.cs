@@ -54,6 +54,9 @@ public static class ConfigurationValidator
         if (configuration.SequencerIdempotencyRetentionTtl < TimeSpan.Zero)
             configuration.SequencerIdempotencyRetentionTtl = TimeSpan.Zero;
 
+        if (configuration.SequencerBlockLease < TimeSpan.Zero)
+            configuration.SequencerBlockLease = TimeSpan.Zero;
+
         if (configuration.CollectionInterval <= TimeSpan.Zero)
             configuration.CollectionInterval = TimeSpan.FromSeconds(60);
 

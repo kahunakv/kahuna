@@ -1497,6 +1497,10 @@ public class GrpcCommunication : IKahunaCommunication
                 throw new KahunaException($"Failed to get by range for '{prefix}'.", KeyValueResponseType.Errored);
 
             logger?.LogDebug("Server asked to retry get by range");
+
+            // MustRetry is a transient answer (leadership transition, pending settlement); retrying
+            // without a delay burns every attempt within the same transient window.
+            await WaitBeforeMustRetry(retries, cancellationToken).ConfigureAwait(false);
         }
 
         throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
@@ -2334,6 +2338,26 @@ public class GrpcCommunication : IKahunaCommunication
         ClusterId = string.IsNullOrEmpty(r.ClusterId) ? null : r.ClusterId,
         CoordinatorNode = string.IsNullOrEmpty(r.CoordinatorNode) ? null : r.CoordinatorNode
     };
+
+    /// <summary>
+    /// Escalating base delays for the retry loops that re-issue a request the server answered with
+    /// MustRetry. Mirrors the REST transport's policy.
+    /// </summary>
+    private static readonly int[] MustRetryDelaysMs = [1, 2, 3, 4, 6, 8, 10];
+
+    /// <summary>
+    /// Waits before re-issuing a request the server answered with MustRetry. The delay carries ±25% jitter
+    /// so a fleet of clients that all saw the same leader flip does not retry in lockstep and re-create the
+    /// contention they are waiting out. Allocation-free and stateless, so every retry loop in this transport
+    /// can share one policy.
+    /// </summary>
+    private static Task WaitBeforeMustRetry(int attempt, CancellationToken cancellationToken)
+    {
+        int baseMs = MustRetryDelaysMs[Math.Min(attempt, MustRetryDelaysMs.Length - 1)];
+        double jittered = baseMs * (0.75 + Random.Shared.NextDouble() * 0.5);
+
+        return Task.Delay(TimeSpan.FromMilliseconds(jittered), cancellationToken);
+    }
 
     /// <summary>
     /// Runs a backup gRPC call, reconstructing a typed <see cref="KahunaBackupException"/> from the

@@ -40,6 +40,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
     private readonly IPersistenceBackend persistenceBackend;
 
+    private readonly UnflushedLockWritesIndex? unflushedLockWrites;
+
     private readonly IRaft raft;
 
     private readonly IRaftReadScheduler backendReadScheduler;
@@ -84,6 +86,10 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         this.backgroundWriter = backgroundWriter;
         this.proposalRouter = proposalRouter;
         this.persistenceBackend = persistenceBackend;
+        // Overlay of committed-but-unflushed lock mutations, carried by the decorated backend; the
+        // commit path records into it so reads observe the mutation before the flush lands. Null for
+        // ephemeral actors (no backend) and for tests constructed over a raw backend.
+        this.unflushedLockWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedLockWrites;
         this.raft = raft;
         this.backendReadScheduler = backendReadScheduler;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
@@ -475,6 +481,11 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;
         entry.State = proposal.State;
+
+        // Record before enqueueing so a read that misses the actor table (e.g. on a later promoted
+        // leader) observes this committed mutation even before the background flush lands it.
+        unflushedLockWrites?.Record(proposal.Resource, proposal.Owner, proposal.FencingToken,
+            proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State);
 
         backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,

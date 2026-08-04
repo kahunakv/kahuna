@@ -116,6 +116,14 @@ public sealed class EmbeddedKahunaOptions
     public int SequencerMaxSequencesPerActor { get; set; } = 10_000;
 
     /// <summary>
+    /// How long a reserved sequence block may be served purely from memory before it is revalidated
+    /// against the durable record, bounding how long a node that silently lost partition leadership
+    /// could serve a block whose sequence was deleted and recreated elsewhere. A value &lt;= 0
+    /// disables revalidation.
+    /// </summary>
+    public TimeSpan SequencerBlockLease { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Default session timeout (milliseconds) applied when a caller supplies a non-positive <c>Timeout</c>.
     /// A non-positive requested timeout resolves to this value — there is no "unbounded" mode; every session
     /// must have a finite deadline so the coordinator can reclaim abandoned sessions and their MVCC snapshots.

@@ -278,7 +278,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 nextTask = context.BackendReadScheduler.EnqueueTask(
                     partitionId,
                     () => TryGetByRangeHandler.ProjectSnapshotPage(
-                        context.PersistenceBackend.GetKeyValueByRange(prefix, capturedCursor, capturedLimit + 1),
+                        context.PersistenceBackend.GetKeyValueByRange(
+                            prefix, capturedCursor, TryGetByRangeHandler.SaturatingPageSize(capturedLimit)),
                         capturedLimit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
                         context.PersistenceBackend));
             }
@@ -294,7 +295,13 @@ internal sealed class RangeScanContinuation : ReadContinuation
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> self = context.ActorContext.Self;
             _ = nextTask.ContinueWith(t =>
             {
-                if (!t.IsCompletedSuccessfully) SetFaulted();
+                if (!t.IsCompletedSuccessfully)
+                {
+                    // Surface the fault — a swallowed exception here becomes an undiagnosable
+                    // retry-exhaustion at the client.
+                    context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: next disk page read faulted for prefix {Prefix}", prefix);
+                    SetFaulted();
+                }
                 else RangeScanPage = t.Result;
                 self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
             }, TaskScheduler.Default);

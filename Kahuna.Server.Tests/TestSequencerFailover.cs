@@ -1,5 +1,7 @@
 using Kahuna.Shared.Sequences;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.Sequencer;
 using Kommander;
 using Microsoft.Extensions.Logging;
 
@@ -222,6 +224,63 @@ public sealed class TestSequencerFailover : BaseCluster
         {
             TryDeleteDir(storagePath);
             TryDeleteDir(walPath);
+        }
+    }
+
+    /// <summary>
+    /// The owner-direct entry points — the ones a forwarded request lands on — re-check leadership
+    /// themselves: on a node that does not lead the sequence's partition they answer
+    /// <c>MustRetry</c> instead of serving, so a stale forward can neither put a second actor behind
+    /// the sequence nor be forwarded onward into a routing loop.
+    /// </summary>
+    [Fact]
+    public async Task OwnerDirectCallsOnANonLeaderAnswerMustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft raft1, IRaft raft2, IRaft raft3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", DataPartitions, raftLogger, kahunaLogger, c => c.SequencerBlockSize = 16);
+
+        IRaft[] rafts = [raft1, raft2, raft3];
+        IKahuna[] nodes = [kahuna1, kahuna2, kahuna3];
+
+        try
+        {
+            string name = "guard/" + Guid.NewGuid().ToString("N");
+
+            Assert.Equal(SequenceResponseType.Success, await Create(kahuna1, name));
+
+            int partitionId = new DataPartitionRouter(raft1).Locate(SequenceActor.GetStorageKey(name));
+            await WaitForAnyLeader(partitionId, rafts);
+
+            bool sawLeader = false, sawFollower = false;
+
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                bool isLeader = await rafts[i].AmILeader(partitionId, ct);
+
+                (SequenceResponseType response, SequenceAllocation allocation) = await nodes[i].ReserveSequenceRange(
+                    name, 1, null, SequenceDurability.Persistent, ct);
+
+                if (isLeader)
+                {
+                    sawLeader = true;
+                    Assert.Equal(SequenceResponseType.Success, response);
+                    Assert.True(allocation.Start >= 1);
+                }
+                else
+                {
+                    sawFollower = true;
+                    Assert.Equal(SequenceResponseType.MustRetry, response);
+                }
+            }
+
+            Assert.True(sawLeader, "no node considered itself leader for the sequence's partition");
+            Assert.True(sawFollower, "every node considered itself leader; the guard was never exercised");
+        }
+        finally
+        {
+            await LeaveCluster(raft1, raft2, raft3);
         }
     }
 

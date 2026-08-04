@@ -22,6 +22,8 @@ internal sealed class LockReplicator
 
     private readonly IRaft raft;
 
+    private readonly UnflushedLockWritesIndex? unflushedLockWrites;
+
     private readonly ILogger<IKahuna> logger;
 
     /// <summary>
@@ -30,11 +32,13 @@ internal sealed class LockReplicator
     /// <param name="backgroundWriter"></param>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
-    public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
+    /// <param name="unflushedLockWrites"></param>
+    public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger, UnflushedLockWritesIndex? unflushedLockWrites = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.logger = logger;
+        this.unflushedLockWrites = unflushedLockWrites;
     }
 
     /// <summary>
@@ -91,6 +95,14 @@ internal sealed class LockReplicator
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Record before enqueueing so a lock read that misses the actor table observes this
+                    // committed mutation even before the background flush lands it in the backend.
+                    unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Locked);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
@@ -134,6 +146,14 @@ internal sealed class LockReplicator
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Record before enqueueing so a lock read that misses the actor table observes this
+                    // committed mutation even before the background flush lands it in the backend.
+                    unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Unlocked);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
@@ -177,6 +197,14 @@ internal sealed class LockReplicator
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Record before enqueueing so a lock read that misses the actor table observes this
+                    // committed mutation even before the background flush lands it in the backend.
+                    unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Locked);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,

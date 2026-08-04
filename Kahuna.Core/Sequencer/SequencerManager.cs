@@ -2,11 +2,11 @@ using System.Text;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Sequencer.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
 using Kommander;
-using Kommander.Time;
 using Nixie;
 using Nixie.Routers;
 
@@ -36,6 +36,10 @@ internal sealed class SequencerManager
 
     private readonly KeyValuesManager keyValues;
 
+    private readonly IRaft raft;
+
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     private readonly List<IActorRef<SequenceActor, SequenceRequest, SequenceResponse>> instances;
 
     private readonly IActorRef<ConsistentHashActor<SequenceActor, SequenceRequest, SequenceResponse>, SequenceRequest, SequenceResponse> router;
@@ -52,6 +56,8 @@ internal sealed class SequencerManager
     )
     {
         this.keyValues = keyValues;
+        this.raft = raft;
+        this.dataPartitionRouter = new(raft);
 
         // At least one actor: a consistent-hash router over an empty pool has nothing to hash against.
         int workers = Math.Max(1, configuration.SequencerWorkers);
@@ -145,7 +151,23 @@ internal sealed class SequencerManager
 
     // ── owning-node entry points ────────────────────────────────────────────────────────────────
     // Reached once this node is established as the leader for the sequence's partition, either by the
-    // locator above or by another node forwarding here.
+    // locator above or by another node forwarding here. Each re-checks leadership itself: a forward
+    // races the very leader change that made it stale, and serving on a non-leader would put two
+    // actors in the cluster behind one sequence. A stale forward gets MustRetry — never re-forwarded,
+    // so disagreeing leadership views cannot bounce a request between nodes.
+
+    /// <summary>
+    /// Confirms this node leads the partition owning <paramref name="normalizedName"/>'s record.
+    /// </summary>
+    private async ValueTask<bool> IsLocalOwner(string normalizedName, CancellationToken cancellationToken)
+    {
+        if (!raft.Joined)
+            return false;
+
+        int partitionId = dataPartitionRouter.Locate(SequenceActor.GetStorageKey(normalizedName));
+
+        return await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Reads the durable record. Deliberately off the actor path: it reports the reserved high-water
@@ -161,12 +183,11 @@ internal sealed class SequencerManager
         if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
             return (error, null);
 
-        (KeyValueResponseType response, ReadOnlyKeyValueEntry? entry) = await keyValues.LocateAndTryGetValue(
-            HLCTimestamp.Zero,
+        if (!await IsLocalOwner(normalizedName, cancellationToken).ConfigureAwait(false))
+            return (SequenceResponseType.MustRetry, null);
+
+        (KeyValueResponseType response, ReadOnlyKeyValueEntry? entry) = await keyValues.SystemGetKeyValue(
             SequenceActor.GetStorageKey(normalizedName),
-            -1,
-            HLCTimestamp.Zero,
-            ToKeyValueDurability(durability),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -197,6 +218,9 @@ internal sealed class SequencerManager
 
         if (increment <= 0 || maxValue.HasValue && maxValue.Value < initialValue)
             return (SequenceResponseType.InvalidInput, -1);
+
+        if (!await IsLocalOwner(normalizedName, cancellationToken).ConfigureAwait(false))
+            return (SequenceResponseType.MustRetry, -1);
 
         SequenceResponse? response = await router.Ask(new SequenceRequest(
             SequenceRequestType.Create,
@@ -234,6 +258,9 @@ internal sealed class SequencerManager
         if (!TryValidateReserve(count, idempotencyKey, out string? normalizedIdempotencyKey))
             return (SequenceResponseType.InvalidInput, default);
 
+        if (!await IsLocalOwner(normalizedName, cancellationToken).ConfigureAwait(false))
+            return (SequenceResponseType.MustRetry, default);
+
         SequenceResponse? response = await router.Ask(new SequenceRequest(
             SequenceRequestType.Reserve,
             normalizedName,
@@ -254,6 +281,9 @@ internal sealed class SequencerManager
         if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
             return error;
 
+        if (!await IsLocalOwner(normalizedName, cancellationToken).ConfigureAwait(false))
+            return SequenceResponseType.MustRetry;
+
         SequenceResponse? response = await router.Ask(new SequenceRequest(
             SequenceRequestType.Delete,
             normalizedName,
@@ -264,13 +294,15 @@ internal sealed class SequencerManager
     }
 
     /// <summary>
-    /// Discards every reserved block on this node when partition leadership moves. A block is per-node
+    /// Discards the reserved blocks tied to a partition whose leadership moved. A block is per-node
     /// state a new leader cannot reconstruct, so it is surrendered rather than drained once the revision
-    /// chain it was won against has changed hands. The abandoned values become gaps.
+    /// chain it was won against has changed hands. The abandoned values become gaps. Scoped to the one
+    /// partition: blocks on partitions this node still leads are untouched, so an unrelated election
+    /// does not burn their tails or stampede the store with reloads.
     /// </summary>
-    public void OnLeaderChanged()
+    public void OnLeaderChanged(int partitionId)
     {
-        SequenceRequest invalidate = new(SequenceRequestType.Invalidate, "");
+        SequenceRequest invalidate = new(SequenceRequestType.Invalidate, "", partitionId: partitionId);
 
         foreach (IActorRef<SequenceActor, SequenceRequest, SequenceResponse> instance in instances)
             instance.Send(invalidate);
@@ -304,15 +336,6 @@ internal sealed class SequencerManager
 
         // Reject idempotency keys whose UTF-8 encoding would overflow the record's 2-byte length prefix.
         return normalizedIdempotencyKey is null || Encoding.UTF8.GetByteCount(normalizedIdempotencyKey) <= MaxIdempotencyKeyBytes;
-    }
-
-    private static KeyValueDurability ToKeyValueDurability(SequenceDurability durability)
-    {
-        return durability switch
-        {
-            SequenceDurability.Persistent => KeyValueDurability.Persistent,
-            _ => KeyValueDurability.Persistent
-        };
     }
 
     private static ReadOnlySequenceEntry ToReadOnlyEntry(SequenceState state, long revision, SequenceDurability durability)

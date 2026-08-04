@@ -2041,7 +2041,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             request.MaxValue = maxValue.Value;
 
         GrpcSequenceResponse response = await GetSequencerClient(node)
-            .CreateSequenceAsync(request, cancellationToken: cancellationToken);
+            .CreateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
 
         return ((SequenceResponseType)response.Type, response.Revision);
     }
@@ -2061,7 +2061,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         };
 
         GrpcSequenceResponse response = await GetSequencerClient(node)
-            .GetSequenceAsync(request, cancellationToken: cancellationToken);
+            .GetSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
 
         SequenceResponseType type = (SequenceResponseType)response.Type;
 
@@ -2102,7 +2102,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             request.IdempotencyKey = idempotencyKey;
 
         GrpcSequenceAllocationResponse response = await GetSequencerClient(node)
-            .NextSequenceValueAsync(request, cancellationToken: cancellationToken);
+            .NextSequenceValueAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
 
         return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
     }
@@ -2128,7 +2128,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             request.IdempotencyKey = idempotencyKey;
 
         GrpcSequenceAllocationResponse response = await GetSequencerClient(node)
-            .ReserveSequenceRangeAsync(request, cancellationToken: cancellationToken);
+            .ReserveSequenceRangeAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
 
         return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
     }
@@ -2148,7 +2148,7 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         };
 
         GrpcSequenceResponse response = await GetSequencerClient(node)
-            .DeleteSequenceAsync(request, cancellationToken: cancellationToken);
+            .DeleteSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
 
         return (SequenceResponseType)response.Type;
     }

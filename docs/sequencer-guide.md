@@ -7,10 +7,14 @@ restarts, failovers, and retries.
 
 ## The model
 
-A sequence is a durable record stored as an ordinary key-value entry under
-`__kahuna:sequences:{name}`. The sequence is *owned* by the node leading that key's partition: a request
-arriving anywhere else is redirected there, exactly as a lock request is. Because the owner also leads
-the partition holding the record, the writes below are local.
+A sequence is a durable record stored as a key-value entry under `__kahuna:sequences:{name}`. The
+whole `__kahuna:` namespace is reserved: the public key-value API rejects reads, writes, deletes,
+expiry extensions, and locks on keys under it with `InvalidInput`, so a client cannot corrupt a
+sequence record out from under its owner. The sequence is *owned* by the node leading that key's
+partition: a request arriving anywhere else is redirected there, exactly as a lock request is — and
+redirected at most once: the receiving node re-checks leadership itself and answers `MustRetry` if
+the forward went stale, rather than forwarding again. Because the owner also leads the partition
+holding the record, the writes below are local.
 
 The owner keeps an in-memory *block*: a window of values it reserved by compare-and-swapping the
 record's high-water mark upwards in a single write. Values are handed out of that window with no storage
@@ -50,6 +54,9 @@ the same value.
 - **Ordering across an ownership change.** A former owner that has not yet learned it lost the partition
   can still drain its window while the new owner issues higher values, so during that window a value
   handed out later may be numerically lower. The values are still unique — only their order is not.
+  That stale-drain window is bounded by `SequencerBlockLease` (default 5 s): a block that has not
+  touched the durable record within the lease is revalidated — a routed read answered by the real
+  leader — before anything more is served from it.
 
 If your application needs gap-free numbering (a legally sequential invoice register, for example), set
 `SequencerBlockSize = 1`, which reserves each value durably before handing it out — one commit per value,
@@ -74,6 +81,10 @@ Idempotent requests pay for that guarantee. The allocation is written to the dur
 caller is answered, so a retry that lands on a different node — or on the same node after it has
 forgotten everything — still replays. A plain reserve inside a block writes nothing.
 
+An idempotency key must always describe the same request: replaying a recorded allocation under a
+different `count` is rejected with `InvalidInput` rather than silently returning a range of the wrong
+size.
+
 The retention window is bounded, because the record is rewritten on every reservation and an unbounded
 map would make every write more expensive than the last:
 
@@ -89,8 +100,11 @@ retry for, not against how long you keep their records.
 
 A delete is routed to the sequence's owner, which discards its block before removing the record, so the
 recreated sequence starts clean. The one residual window is a former owner that has not yet learned it
-lost the partition: it can still drain values from the deleted incarnation until it discovers the
-change, and its next reservation then fails the compare-and-swap and forces a re-read.
+lost the partition: it can drain values from the deleted incarnation until it discovers the change —
+its next reservation fails the compare-and-swap and forces a re-read, and even a block served purely
+from memory is revalidated once its `SequencerBlockLease` (default 5 s) expires, which detects the new
+incarnation and voids the stale window. Recreated-name collisions are therefore possible only inside
+that lease, on a node that is simultaneously stale about leadership.
 
 If you recreate a name and need the new incarnation to be authoritative everywhere immediately, use a
 fresh name — the simplest and safest option — or run that sequence with `SequencerBlockSize = 1`, where
@@ -105,6 +119,7 @@ no block is ever held to drain.
 | `SequencerIdempotencyRetentionMax` | `--sequencer-idempotency-retention-max` | 256 | Retained idempotency entries per sequence. `0` disables the cap. |
 | `SequencerIdempotencyRetentionTtl` | `--sequencer-idempotency-retention-ttl` | 600 s | Age at which an idempotency entry is dropped. `0` disables age pruning. |
 | `SequencerMaxSequencesPerActor` | `--sequencer-max-sequences-per-actor` | 10000 | Resident sequences per actor before the least recently used are evicted (abandoning their blocks). |
+| `SequencerBlockLease` | `--sequencer-block-lease` | 5 s | How long a block may be served purely from memory before it is revalidated against the durable record. `0` disables revalidation. |
 
 The same names exist on `EmbeddedKahunaOptions` for in-process hosts.
 
@@ -127,7 +142,8 @@ at most `blockSize - 1` skipped values, because only the owning node holds a win
 - `AlreadyExists` — create raced another create.
 - `MustRetry` — transient; the attempt consumed nothing durable and can be retried as-is.
 - `InvalidInput` — a non-positive count or increment, a maximum below the initial value, an empty or
-  reserved-prefix name, or an idempotency key longer than 1 KB.
+  reserved-prefix name, an idempotency key longer than 1 KB, or an idempotency key replayed with a
+  different count than it was recorded with.
 
 ## Record compatibility
 

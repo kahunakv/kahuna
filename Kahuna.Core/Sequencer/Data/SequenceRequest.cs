@@ -27,6 +27,12 @@ internal sealed class SequenceRequest : IConsistentHashable
 
     public long? MaxValue { get; }
 
+    /// <summary>
+    /// Partition whose reserved blocks an <see cref="SequenceRequestType.Invalidate"/> surrenders.
+    /// Negative means every partition. Ignored by other request types.
+    /// </summary>
+    public int PartitionId { get; }
+
     /// <summary>Caller's token, carried through so a cancelled request stops waiting on store round trips.</summary>
     public CancellationToken CancellationToken { get; }
 
@@ -38,6 +44,7 @@ internal sealed class SequenceRequest : IConsistentHashable
         long initialValue = 0,
         long increment = 0,
         long? maxValue = null,
+        int partitionId = -1,
         CancellationToken cancellationToken = default
     )
     {
@@ -48,6 +55,7 @@ internal sealed class SequenceRequest : IConsistentHashable
         InitialValue = initialValue;
         Increment = increment;
         MaxValue = maxValue;
+        PartitionId = partitionId;
         CancellationToken = cancellationToken;
     }
 

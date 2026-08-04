@@ -3,6 +3,7 @@ using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
+using Kahuna.Server.Sequencer.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
 using Kommander.Data;
@@ -509,12 +510,8 @@ public sealed class TestSequences
         for (int i = 0; i < 40; i++)
             Assert.Equal(SequenceResponseType.Success, (await Next(node, name, "key-" + i)).Item1);
 
-        (KeyValueResponseType getResponse, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType getResponse, ReadOnlyKeyValueEntry? entry) = await SystemKeyValues(node).SystemGetKeyValue(
             "__kahuna:sequences:" + name,
-            -1,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken
         );
 
@@ -552,15 +549,11 @@ public sealed class TestSequences
             {"name":"NAME","currentValue":10,"initialValue":0,"increment":1,"maxValue":null,"createdAt":{"n":0,"l":0,"c":0},"updatedAt":{"n":0,"l":0,"c":0},"idempotency":{"reserve:legacy-key":{"name":"NAME","start":5,"end":5,"count":1,"revision":0}}}
             """.Replace("NAME", name);
 
-        (KeyValueResponseType setResponse, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType setResponse, _, _) = await SystemKeyValues(node).SystemSetKeyValue(
             "__kahuna:sequences:" + name,
             Encoding.UTF8.GetBytes(legacyJson),
-            null,
             -1,
             KeyValueFlags.Set,
-            0,
-            KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken
         );
 
@@ -614,15 +607,11 @@ public sealed class TestSequences
         await using EmbeddedKahunaNode node = await StartNode();
         string name = "binaryv1/" + Guid.NewGuid().ToString("N");
 
-        (KeyValueResponseType setResponse, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType setResponse, _, _) = await SystemKeyValues(node).SystemSetKeyValue(
             "__kahuna:sequences:" + name,
             BinaryRecordWithoutEntryTimestamps(name, currentValue: 20, idempotencyKey: "reserve:v1-key", allocated: 7),
-            null,
             -1,
             KeyValueFlags.Set,
-            0,
-            KeyValueDurability.Persistent,
             TestContext.Current.CancellationToken
         );
 
@@ -642,6 +631,133 @@ public sealed class TestSequences
         (SequenceResponseType nextResponse, SequenceAllocation allocated) = await Next(node, name);
         Assert.Equal(SequenceResponseType.Success, nextResponse);
         Assert.Equal(21, allocated.Start);
+    }
+
+    // ── protection of the reserved keyspace ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The <c>__kahuna:</c> namespace holds system records (the sequence records live under it), so
+    /// the public key-value entry points must refuse it: a client write, delete, expiry extension, or
+    /// lock there could corrupt a sequence out from under its owning actor.
+    /// </summary>
+    [Fact]
+    public async Task TestReservedKeySpaceIsRejectedByTheKeyValueApi()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string name = "protected/" + Guid.NewGuid().ToString("N");
+        string storageKey = "__kahuna:sequences:" + name;
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        (KeyValueResponseType setResponse, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, storageKey, [1, 2, 3], null, -1, KeyValueFlags.Set, 0,
+            KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.InvalidInput, setResponse);
+
+        (KeyValueResponseType deleteResponse, _, _) = await node.Kahuna.LocateAndTryDeleteKeyValue(
+            HLCTimestamp.Zero, storageKey, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.InvalidInput, deleteResponse);
+
+        (KeyValueResponseType extendResponse, _, _) = await node.Kahuna.LocateAndTryExtendKeyValue(
+            HLCTimestamp.Zero, storageKey, 10, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.InvalidInput, extendResponse);
+
+        (KeyValueResponseType getResponse, _) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, storageKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.InvalidInput, getResponse);
+
+        (KeyValueResponseType lockResponse, _, _, _) = await node.Kahuna.LocateAndTryAcquireExclusiveLock(
+            HLCTimestamp.Zero, storageKey, 1000, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.InvalidInput, lockResponse);
+
+        // The record itself was untouched by any of the rejected calls.
+        (SequenceResponseType next, SequenceAllocation allocation) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.Success, next);
+        Assert.Equal(1, allocation.Start);
+    }
+
+    /// <summary>
+    /// An idempotency key must always describe the same request. Replaying a recorded allocation under
+    /// a different count would silently hand the caller a range of the wrong size, so it is rejected.
+    /// </summary>
+    [Fact]
+    public async Task TestIdempotentReplayWithDifferentCountIsRejected()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "countcheck/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        (SequenceResponseType first, SequenceAllocation original) = await node.Kahuna.LocateAndReserveSequenceRange(
+            name, 3, "batch-1", SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SequenceResponseType.Success, first);
+        Assert.Equal(3, original.Count);
+
+        // Same key, same count: the identical allocation replays.
+        (SequenceResponseType replay, SequenceAllocation replayed) = await node.Kahuna.LocateAndReserveSequenceRange(
+            name, 3, "batch-1", SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SequenceResponseType.Success, replay);
+        Assert.Equal(original, replayed);
+
+        // Same key, different count: rejected rather than silently mis-sized.
+        (SequenceResponseType mismatched, _) = await node.Kahuna.LocateAndReserveSequenceRange(
+            name, 1, "batch-1", SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SequenceResponseType.InvalidInput, mismatched);
+    }
+
+    /// <summary>
+    /// A reserved block is normally served from memory with no storage traffic, so a node serving a
+    /// block could miss that its sequence was deleted and recreated by another owner. The block lease
+    /// bounds that: once it expires, the next allocation revalidates against the durable record,
+    /// detects the new incarnation, voids the stale window, and serves from the new record — instead
+    /// of handing out old-incarnation values that would collide with the new one's.
+    /// </summary>
+    [Fact]
+    public async Task TestExpiredLeaseDetectsARecreatedSequence()
+    {
+        // A one-tick lease makes every allocation after the first revalidate.
+        await using EmbeddedKahunaNode node = await StartNode(blockLease: TimeSpan.FromTicks(1));
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string name = "lease/" + Guid.NewGuid().ToString("N");
+        string storageKey = "__kahuna:sequences:" + name;
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        (SequenceResponseType first, SequenceAllocation allocation) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.Success, first);
+        Assert.Equal(1, allocation.Start);
+
+        // Simulate a different owner deleting and recreating the sequence behind this node's resident
+        // block, writing the record directly through the same system accessors another node would use.
+        (KeyValueResponseType deleted, _, _) = await SystemKeyValues(node).SystemDeleteKeyValue(storageKey, ct);
+        Assert.Equal(KeyValueResponseType.Deleted, deleted);
+
+        SequenceState recreated = new()
+        {
+            Name = name,
+            CurrentValue = 5_000,
+            InitialValue = 5_000,
+            Increment = 1,
+            CreatedAt = new HLCTimestamp(0, 123, 0),
+            UpdatedAt = new HLCTimestamp(0, 123, 0)
+        };
+
+        (KeyValueResponseType reseeded, _, _) = await SystemKeyValues(node).SystemSetKeyValue(
+            storageKey, SequenceStateCodec.Serialize(recreated), -1, KeyValueFlags.Set, ct);
+        Assert.Equal(KeyValueResponseType.Set, reseeded);
+
+        // The resident block still held 999 old-incarnation values; the expired lease forces a
+        // revalidation that voids them and allocates from the recreated record instead.
+        (SequenceResponseType next, SequenceAllocation fresh) = await Next(node, name);
+
+        Assert.Equal(SequenceResponseType.Success, next);
+        Assert.Equal(5_001, fresh.Start);
     }
 
     // ── harness ─────────────────────────────────────────────────────────────────────────────────
@@ -687,7 +803,8 @@ public sealed class TestSequences
     private async Task<EmbeddedKahunaNode> StartNode(
         int blockSize = DefaultBlockSize,
         int idempotencyRetentionMax = 256,
-        SequenceWriteRecorder? recorder = null
+        SequenceWriteRecorder? recorder = null,
+        TimeSpan? blockLease = null
     )
     {
         EmbeddedKahunaOptions options = new()
@@ -696,7 +813,8 @@ public sealed class TestSequences
             WalStorage = "memory",
             InitialPartitions = 1,
             SequencerBlockSize = blockSize,
-            SequencerIdempotencyRetentionMax = idempotencyRetentionMax
+            SequencerIdempotencyRetentionMax = idempotencyRetentionMax,
+            SequencerBlockLease = blockLease ?? TimeSpan.FromSeconds(5)
         };
 
         if (recorder is not null)
@@ -707,6 +825,9 @@ public sealed class TestSequences
         await node.StartAsync(TestContext.Current.CancellationToken);
         return node;
     }
+
+    private static KeyValuesManager SystemKeyValues(EmbeddedKahunaNode node) =>
+        ((KahunaManager)node.Kahuna).KeyValues;
 
     private static Task<(SequenceResponseType, long)> Create(
         EmbeddedKahunaNode node,

@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Sequencer.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
@@ -26,6 +28,13 @@ namespace Kahuna.Server.Sequencer;
 /// ownership change — is a gap, never a duplicate, the same trade sequence caches make in conventional
 /// databases.</para>
 ///
+/// <para>That guarantee is per incarnation of the record. Allocations served from the reserved window
+/// touch no storage, so a stale leader could keep draining a window whose sequence has since been
+/// deleted and recreated elsewhere — values that would collide with the new incarnation's. To bound
+/// that exposure, a block older than <c>SequencerBlockLease</c> is revalidated against the durable
+/// record (a routed read, answered by the real leader) before anything more is served from it; a
+/// record that turns out to be a different incarnation voids the window.</para>
+///
 /// <para>Requests are processed one at a time, which is what makes the block safe to hold without any
 /// lock, and replaces the per-name semaphore the previous read-modify-write loop needed.</para>
 /// </summary>
@@ -33,7 +42,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 {
     private const int MaxRetries = 16;
 
-    internal const string ReservedPrefix = "__kahuna:sequences:";
+    internal const string ReservedPrefix = ReservedKeys.SystemPrefix + "sequences:";
 
     private const string IdempotencyKeyPrefix = "reserve:";
 
@@ -49,6 +58,8 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
     private readonly KeyValuesManager keyValues;
 
     private readonly IRaft raft;
+
+    private readonly DataPartitionRouter dataPartitionRouter;
 
     private readonly KahunaConfiguration configuration;
 
@@ -70,6 +81,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
         this.actorContext = actorContext;
         this.keyValues = keyValues;
         this.raft = raft;
+        this.dataPartitionRouter = new(raft);
         this.configuration = configuration;
         this.logger = logger;
     }
@@ -83,13 +95,17 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
                 SequenceRequestType.Reserve => await Reserve(message).ConfigureAwait(false),
                 SequenceRequestType.Create => await Create(message).ConfigureAwait(false),
                 SequenceRequestType.Delete => await Delete(message).ConfigureAwait(false),
-                SequenceRequestType.Invalidate => Invalidate(),
+                SequenceRequestType.Invalidate => Invalidate(message),
                 _ => SequenceStaticResponses.Error
             };
         }
         catch (OperationCanceledException)
         {
-            // The caller went away mid-round-trip. Anything already taken from the block is a gap.
+            // The caller went away mid-round-trip. The block may have been mutated ahead of a write
+            // that never confirmed (a planned bump, an idempotency entry), so it cannot be trusted for
+            // further memory-only serves — drop it and let the next request reload the durable record.
+            // Anything the abandoned window had left is a gap.
+            blocks.Remove(message.Name);
             return SequenceStaticResponses.MustRetry;
         }
         catch (Exception ex)
@@ -110,12 +126,10 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
         CancellationToken cancellationToken = message.CancellationToken;
 
-        // True once this call has read the record from the store, so a keyed request does not pay a
-        // second read after loading the block, and a compare-and-swap failure forces exactly one refresh.
-        bool snapshotIsFresh = false;
-
         for (int attempt = 0; attempt < RetryDelays.Length; attempt++)
         {
+            bool verifiedThisAttempt = false;
+
             if (!blocks.TryGetValue(message.Name, out SequenceBlock? block))
             {
                 (SequenceResponseType loadError, SequenceState? state, long revision) =
@@ -126,10 +140,19 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
                 block = new(GetStorageKey(message.Name), state, revision);
                 Admit(message.Name, block);
-                snapshotIsFresh = true;
+                verifiedThisAttempt = true;
             }
 
             block.LastUsed = ++useStamp;
+
+            // A block that has not touched the durable record within the lease is revalidated before
+            // anything more is served from it, so a stale leader cannot drain a window whose sequence
+            // has been deleted and recreated elsewhere for longer than the lease.
+            if (!verifiedThisAttempt && LeaseExpired(block))
+            {
+                if (await Refresh(message.Name, block, cancellationToken).ConfigureAwait(false) is { } leaseError)
+                    return leaseError;
+            }
 
             if (block.State.Increment <= 0)
             {
@@ -140,31 +163,19 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
                 return SequenceStaticResponses.Error;
             }
 
-            if (idempotencyKey is not null)
+            if (idempotencyKey is not null &&
+                block.State.Idempotency.TryGetValue(idempotencyKey, out SequenceIdempotencyEntry recorded))
             {
-                // A replay this actor already served or read is authoritative: the entry is durable.
-                if (block.State.Idempotency.TryGetValue(idempotencyKey, out SequenceIdempotencyEntry recorded))
-                    return new(SequenceResponseType.Success, recorded.Allocation);
+                // A key must always describe the same request: replaying a recorded allocation with a
+                // different count would silently hand the caller fewer (or more) values than asked for.
+                if (recorded.Allocation.Count != message.Count)
+                    return SequenceStaticResponses.InvalidInput;
 
-                // Otherwise the allocation may have been recorded elsewhere, so consult the record
-                // before issuing a new one. This is the cost idempotent requests pay for replayability.
-                if (!snapshotIsFresh)
-                {
-                    (SequenceResponseType refreshError, SequenceState? refreshed, long refreshedRevision) =
-                        await Read(message.Name, cancellationToken).ConfigureAwait(false);
-
-                    if (refreshed is null)
-                    {
-                        blocks.Remove(message.Name);
-                        return Static(refreshError);
-                    }
-
-                    Adopt(block, refreshed, refreshedRevision);
-                    snapshotIsFresh = true;
-
-                    if (block.State.Idempotency.TryGetValue(idempotencyKey, out recorded))
-                        return new(SequenceResponseType.Success, recorded.Allocation);
-                }
+                // The replay is authoritative: this actor is the record's only writer while it holds
+                // the block, so an entry in memory is an entry that was durably written. If the record
+                // was ever written behind this actor's back, the write below loses its compare-and-swap
+                // and the refreshed record is consulted before anything new is issued.
+                return new(SequenceResponseType.Success, recorded.Allocation);
             }
 
             // Plan the allocation without committing it, so a failed write can be retried against a
@@ -205,6 +216,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             if (writeType == KeyValueResponseType.Set)
             {
                 block.Revision = writtenRevision;
+                block.Verified = Stopwatch.GetTimestamp();
 
                 if (!fromBlock)
                 {
@@ -229,24 +241,14 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
             // Lost the compare-and-swap (or the partition asked us to retry): re-read and replan. The
             // in-memory block is untouched — it was reserved by an earlier, successful bump and is
-            // still exclusively ours.
-            snapshotIsFresh = false;
-
+            // still exclusively ours — while the refresh discards the unconfirmed mutations above and
+            // surfaces any idempotency entry another writer recorded.
             await Task.Delay(RetryDelays[attempt], cancellationToken).ConfigureAwait(false);
 
             if (blocks.TryGetValue(message.Name, out SequenceBlock? retained))
             {
-                (SequenceResponseType refreshError, SequenceState? refreshed, long refreshedRevision) =
-                    await Read(message.Name, cancellationToken).ConfigureAwait(false);
-
-                if (refreshed is null)
-                {
-                    blocks.Remove(message.Name);
-                    return Static(refreshError);
-                }
-
-                Adopt(retained, refreshed, refreshedRevision);
-                snapshotIsFresh = true;
+                if (await Refresh(message.Name, retained, cancellationToken).ConfigureAwait(false) is { } refreshFailure)
+                    return refreshFailure;
             }
         }
 
@@ -254,6 +256,32 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
         blocks.Remove(message.Name);
         return SequenceStaticResponses.MustRetry;
+    }
+
+    /// <summary>
+    /// Re-reads the durable record into <paramref name="block"/>. Returns the response to surface on
+    /// failure (dropping the block), or null when the block now reflects the durable record.
+    /// </summary>
+    private async Task<SequenceResponse?> Refresh(string name, SequenceBlock block, CancellationToken cancellationToken)
+    {
+        (SequenceResponseType error, SequenceState? refreshed, long revision) =
+            await Read(name, cancellationToken).ConfigureAwait(false);
+
+        if (refreshed is null)
+        {
+            blocks.Remove(name);
+            return Static(error);
+        }
+
+        Adopt(block, refreshed, revision);
+        block.Verified = Stopwatch.GetTimestamp();
+        return null;
+    }
+
+    private bool LeaseExpired(SequenceBlock block)
+    {
+        TimeSpan lease = configuration.SequencerBlockLease;
+        return lease > TimeSpan.Zero && Stopwatch.GetElapsedTime(block.Verified) > lease;
     }
 
     /// <summary>
@@ -327,15 +355,11 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             UpdatedAt = now
         };
 
-        (KeyValueResponseType response, long revision, _) = await keyValues.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType response, long revision, _) = await keyValues.SystemSetKeyValue(
             GetStorageKey(message.Name),
             SequenceStateCodec.Serialize(state),
-            null,
             -1,
             KeyValueFlags.SetIfNotExists,
-            0,
-            KeyValueDurability.Persistent,
             message.CancellationToken
         ).ConfigureAwait(false);
 
@@ -353,10 +377,8 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
     {
         blocks.Remove(message.Name);
 
-        (KeyValueResponseType response, _, _) = await keyValues.LocateAndTryDeleteKeyValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType response, _, _) = await keyValues.SystemDeleteKeyValue(
             GetStorageKey(message.Name),
-            KeyValueDurability.Persistent,
             message.CancellationToken
         ).ConfigureAwait(false);
 
@@ -372,9 +394,32 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
         };
     }
 
-    private SequenceResponse Invalidate()
+    /// <summary>
+    /// Surrenders reserved blocks after a leadership change. Scoped to the partition that changed
+    /// hands — blocks on unaffected partitions were reserved against records this node still leads,
+    /// and wiping them would burn their unissued tails (gaps) and stampede the store with re-reads.
+    /// A negative partition drops everything.
+    /// </summary>
+    private SequenceResponse Invalidate(SequenceRequest message)
     {
-        blocks.Clear();
+        if (message.PartitionId < 0)
+        {
+            blocks.Clear();
+            return SequenceStaticResponses.Success;
+        }
+
+        List<string>? surrendered = null;
+
+        foreach (KeyValuePair<string, SequenceBlock> kvp in blocks)
+        {
+            if (dataPartitionRouter.Locate(kvp.Value.StorageKey) == message.PartitionId)
+                (surrendered ??= []).Add(kvp.Key);
+        }
+
+        if (surrendered is not null)
+            foreach (string name in surrendered)
+                blocks.Remove(name);
+
         return SequenceStaticResponses.Success;
     }
 
@@ -382,12 +427,8 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
     private async Task<(SequenceResponseType, SequenceState?, long)> Read(string name, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType response, ReadOnlyKeyValueEntry? entry) = await keyValues.LocateAndTryGetValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType response, ReadOnlyKeyValueEntry? entry) = await keyValues.SystemGetKeyValue(
             GetStorageKey(name),
-            -1,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -414,15 +455,11 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             protectedKey
         );
 
-        (KeyValueResponseType response, long revision, _) = await keyValues.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero,
+        (KeyValueResponseType response, long revision, _) = await keyValues.SystemSetKeyValue(
             block.StorageKey,
             SequenceStateCodec.Serialize(block.State),
-            null,
             block.Revision,
             KeyValueFlags.SetIfEqualToRevision,
-            0,
-            KeyValueDurability.Persistent,
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -542,6 +579,13 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
         public long LastUsed { get; set; }
 
+        /// <summary>
+        /// Monotonic (<see cref="Stopwatch"/>) instant of the last successful durable round trip, from
+        /// which the revalidation lease is measured. Local elapsed time only — never used to order
+        /// events across nodes.
+        /// </summary>
+        public long Verified { get; set; }
+
         public SequenceBlock(string storageKey, SequenceState state, long revision)
         {
             StorageKey = storageKey;
@@ -549,6 +593,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             Revision = revision;
             Current = state.CurrentValue;
             Ceiling = state.CurrentValue;
+            Verified = Stopwatch.GetTimestamp();
         }
     }
 }

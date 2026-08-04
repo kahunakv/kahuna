@@ -1522,6 +1522,9 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
+        if (ReservedKeys.IsReserved(key))
+            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
@@ -1610,6 +1613,10 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
+        foreach (KahunaSetKeyValueRequestItem item in setManyItems)
+            if (item.Key is not null && ReservedKeys.IsReserved(item.Key))
+                return Task.FromResult(AllSetItemsResponse(setManyItems, KeyValueResponseType.InvalidInput));
+
         // The whole batch registers as a single coordinator operation so its confirmed persistent keys fold
         // in canonical request order and anchor the transaction record deterministically. Fall back to the
         // unregistered fan-out when the caller supplied no operation identity (non-transactional path).
@@ -1732,6 +1739,10 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
+        foreach (KahunaDeleteKeyValueRequestItem item in deleteManyItems)
+            if (item.Key is not null && ReservedKeys.IsReserved(item.Key))
+                return Task.FromResult(AllItemsResponse(deleteManyItems, KeyValueResponseType.InvalidInput));
+
         // The whole batch registers as a single coordinator operation so its confirmed persistent keys
         // fold in canonical request order and anchor the transaction record deterministically. Fall back to
         // the unregistered fan-out when the caller supplied no operation identity (non-transactional path).
@@ -1828,6 +1839,34 @@ internal sealed class KeyValuesManager : IDisposable
         return responses;
     }
 
+    // ── system-reserved keys ────────────────────────────────────────────────────────────────────
+    // Accessors for records under the reserved namespace (see ReservedKeys). The public entry points
+    // above reject those keys so clients cannot touch system state; the subsystems that own the
+    // records reach them through these instead. Always persistent, never transaction-scoped.
+
+    internal Task<(KeyValueResponseType, long, HLCTimestamp)> SystemSetKeyValue(
+        string key,
+        byte[]? value,
+        long compareRevision,
+        KeyValueFlags flags,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, key, value, null, compareRevision, flags, 0, KeyValueDurability.Persistent, cancellationToken);
+    }
+
+    internal Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> SystemGetKeyValue(string key, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken);
+    }
+
+    internal Task<(KeyValueResponseType, long, HLCTimestamp)> SystemDeleteKeyValue(string key, CancellationToken cancellationToken)
+    {
+        return locator.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, key, KeyValueDurability.Persistent, cancellationToken);
+    }
+
     private static List<KahunaDeleteKeyValueResponseItem> AllItemsResponse(
         List<KahunaDeleteKeyValueRequestItem> items, KeyValueResponseType type)
     {
@@ -1864,6 +1903,9 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
+        if (ReservedKeys.IsReserved(key))
+            return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
@@ -1954,6 +1996,9 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
+        if (ReservedKeys.IsReserved(key))
+            return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
@@ -2150,6 +2195,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
+        if (ReservedKeys.IsReserved(key))
+            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
@@ -2223,6 +2271,9 @@ internal sealed class KeyValuesManager : IDisposable
     /// <returns></returns>
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
+        if (ReservedKeys.IsReserved(key))
+            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
@@ -2315,6 +2366,9 @@ internal sealed class KeyValuesManager : IDisposable
         TransactionOperationId operationId = default
     )
     {
+        if (ReservedKeys.IsReserved(key))
+            return Task.FromResult((KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);

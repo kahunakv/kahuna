@@ -54,6 +54,16 @@ public sealed class KahunaConfiguration
     public int SequencerMaxSequencesPerActor { get; set; } = 10_000;
 
     /// <summary>
+    /// How long a reserved block may be served purely from memory before the actor revalidates it
+    /// against the durable record. Allocations inside the block normally touch no storage, so a node
+    /// that lost partition leadership without noticing could keep serving a block belonging to a
+    /// sequence that has since been deleted and recreated elsewhere — the revalidation read detects
+    /// the new incarnation (or the routed leader change) and voids the stale window, bounding that
+    /// exposure to this lease. A value &lt;= 0 disables revalidation.
+    /// </summary>
+    public TimeSpan SequencerBlockLease { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Number of dedicated worker threads serving Kahuna persistence-backend reads (point gets, scans,
     /// read-before-write). Owned by Kahuna and separate from Kommander's WAL read pool, so data-plane
     /// reads never contend with the WAL reads consensus/replication/recovery depend on. 0 or negative

@@ -113,8 +113,13 @@ internal sealed class LockManager
         ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
         persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
         
-        restorer = new(backgroundWriter, raft, logger);
-        replicator = new(backgroundWriter, raft, logger);                
+        // The unflushed-lock-writes overlay travels with the decorated backend; the replicator and
+        // restorer record queued mutations into it synchronously so lock reads observe them before
+        // the flush lands. A raw (undecorated) backend yields null and recording becomes a no-op.
+        UnflushedLockWritesIndex? unflushedLockWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedLockWrites;
+
+        restorer = new(backgroundWriter, raft, logger, unflushedLockWrites);
+        replicator = new(backgroundWriter, raft, logger, unflushedLockWrites);
     }
 
     /// <summary>

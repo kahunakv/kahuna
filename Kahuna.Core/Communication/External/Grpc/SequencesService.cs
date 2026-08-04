@@ -6,6 +6,7 @@
  */
 
 using Grpc.Core;
+using Kahuna.Server.Communication;
 using Kahuna.Shared.Sequences;
 using Kommander.Diagnostics;
 
@@ -13,6 +14,12 @@ namespace Kahuna.Communication.External.Grpc;
 
 /// <summary>
 /// Provides gRPC services for distributed sequence management.
+///
+/// <para>Serves two kinds of callers. A client request resolves the sequence's owner and follows it
+/// (the <c>LocateAnd*</c> path). A request another node already routed here carries the forwarded
+/// marker and is served directly against this node, whose entry points re-check leadership once and
+/// answer <c>MustRetry</c> when stale — it is never forwarded again, so nodes with disagreeing
+/// leadership views cannot bounce one request between each other.</para>
 /// </summary>
 public sealed class SequencesService : Sequencer.SequencerBase
 {
@@ -30,14 +37,21 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
-        (SequenceResponseType response, long revision) = await sequences.LocateAndCreateSequence(
-            request.Name,
-            request.InitialValue,
-            request.Increment,
-            request.HasMaxValue ? request.MaxValue : null,
-            (SequenceDurability)request.Durability,
-            context.CancellationToken
-        );
+        (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context)
+            ? sequences.CreateSequence(
+                request.Name,
+                request.InitialValue,
+                request.Increment,
+                request.HasMaxValue ? request.MaxValue : null,
+                (SequenceDurability)request.Durability,
+                context.CancellationToken)
+            : sequences.LocateAndCreateSequence(
+                request.Name,
+                request.InitialValue,
+                request.Increment,
+                request.HasMaxValue ? request.MaxValue : null,
+                (SequenceDurability)request.Durability,
+                context.CancellationToken));
 
         return new()
         {
@@ -54,11 +68,9 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
-        (SequenceResponseType response, ReadOnlySequenceEntry? sequence) = await sequences.LocateAndGetSequence(
-            request.Name,
-            (SequenceDurability)request.Durability,
-            context.CancellationToken
-        );
+        (SequenceResponseType response, ReadOnlySequenceEntry? sequence) = await (InterNodeHeaders.IsForwarded(context)
+            ? sequences.GetSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken)
+            : sequences.LocateAndGetSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken));
 
         GrpcSequenceResponse grpcResponse = new()
         {
@@ -80,12 +92,17 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
-        (SequenceResponseType response, SequenceAllocation allocation) = await sequences.LocateAndNextSequenceValue(
-            request.Name,
-            request.HasIdempotencyKey ? request.IdempotencyKey : null,
-            (SequenceDurability)request.Durability,
-            context.CancellationToken
-        );
+        (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context)
+            ? sequences.NextSequenceValue(
+                request.Name,
+                request.HasIdempotencyKey ? request.IdempotencyKey : null,
+                (SequenceDurability)request.Durability,
+                context.CancellationToken)
+            : sequences.LocateAndNextSequenceValue(
+                request.Name,
+                request.HasIdempotencyKey ? request.IdempotencyKey : null,
+                (SequenceDurability)request.Durability,
+                context.CancellationToken));
 
         return new()
         {
@@ -102,13 +119,19 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name) || request.Count <= 0)
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
-        (SequenceResponseType response, SequenceAllocation allocation) = await sequences.LocateAndReserveSequenceRange(
-            request.Name,
-            request.Count,
-            request.HasIdempotencyKey ? request.IdempotencyKey : null,
-            (SequenceDurability)request.Durability,
-            context.CancellationToken
-        );
+        (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context)
+            ? sequences.ReserveSequenceRange(
+                request.Name,
+                request.Count,
+                request.HasIdempotencyKey ? request.IdempotencyKey : null,
+                (SequenceDurability)request.Durability,
+                context.CancellationToken)
+            : sequences.LocateAndReserveSequenceRange(
+                request.Name,
+                request.Count,
+                request.HasIdempotencyKey ? request.IdempotencyKey : null,
+                (SequenceDurability)request.Durability,
+                context.CancellationToken));
 
         return new()
         {
@@ -125,11 +148,9 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
-        SequenceResponseType response = await sequences.LocateAndDeleteSequence(
-            request.Name,
-            (SequenceDurability)request.Durability,
-            context.CancellationToken
-        );
+        SequenceResponseType response = await (InterNodeHeaders.IsForwarded(context)
+            ? sequences.DeleteSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken)
+            : sequences.LocateAndDeleteSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken));
 
         return new()
         {

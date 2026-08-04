@@ -207,6 +207,14 @@ internal static class SequenceStateCodec
             HLCTimestamp updatedAt = ReadHlcTimestamp(span, ref pos);
 
             int idempotencyCount = BinaryPrimitives.ReadInt32LittleEndian(span[pos..]); pos += 4;
+
+            // The count steers the dictionary's initial capacity, so bound it by what the remaining
+            // bytes could structurally hold before trusting it — a corrupt record must fail the
+            // decode, not force a huge allocation first.
+            int minEntryBytes = hasEntryTimestamps ? 48 : 32;
+            if (idempotencyCount < 0 || idempotencyCount > (span.Length - pos) / minEntryBytes)
+                return null;
+
             Dictionary<string, SequenceIdempotencyEntry> idempotency = new(idempotencyCount);
 
             for (int i = 0; i < idempotencyCount; i++)

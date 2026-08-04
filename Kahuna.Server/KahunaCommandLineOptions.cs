@@ -111,6 +111,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("sequencer-max-sequences-per-actor", Required = false, HelpText = "Maximum sequences one actor keeps resident before evicting the least recently used (0 = unbounded)", Default = 10000)]
     public int SequencerMaxSequencesPerActor { get; set; } = 10000;
+
+    [Option("sequencer-block-lease", Required = false, HelpText = "Seconds a reserved sequence block may be served from memory before it is revalidated against the durable record (0 = never revalidate)", Default = 5)]
+    public int SequencerBlockLease { get; set; } = 5;
     
     [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout (in milliseconds)", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;

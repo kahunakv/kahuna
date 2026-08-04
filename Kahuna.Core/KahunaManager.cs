@@ -146,7 +146,8 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // read (most visibly on a freshly promoted partition leader) would answer DoesNotExist for a
         // durably committed key. Wrapping here puts every consumer — actors, scans, the background
         // writer, PITR — behind the overlay uniformly.
-        persistenceBackend = new UnflushedOverlayPersistenceBackend(preSeededBackend, new UnflushedKeyValueWritesIndex());
+        persistenceBackend = new UnflushedOverlayPersistenceBackend(
+            preSeededBackend, new UnflushedKeyValueWritesIndex(), new UnflushedLockWritesIndex());
 
         // The scheduler only logs its own defensive errors through this logger; production hosts pass a real
         // ILogger<IRaft>, while test harnesses that omit it get a silent sink.
@@ -1629,7 +1630,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         // Sequence blocks are reserved against a specific record revision on a specific partition.
         // Once that partition changes hands, surrender the blocks rather than keep draining them.
-        sequencer.OnLeaderChanged();
+        sequencer.OnLeaderChanged(partitionId);
 
         return keyValues.OnLeaderChanged(partitionId, node);
     }

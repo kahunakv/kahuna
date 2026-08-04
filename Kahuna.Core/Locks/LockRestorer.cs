@@ -23,6 +23,8 @@ internal sealed class LockRestorer
 
     private readonly IRaft raft;
 
+    private readonly UnflushedLockWritesIndex? unflushedLockWrites;
+
     private readonly ILogger<IKahuna> logger;
 
     /// <summary>
@@ -31,11 +33,13 @@ internal sealed class LockRestorer
     /// <param name="backgroundWriter"></param>
     /// <param name="raft"></param>
     /// <param name="logger"></param>
-    public LockRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger)
+    /// <param name="unflushedLockWrites"></param>
+    public LockRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger, UnflushedLockWritesIndex? unflushedLockWrites = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.logger = logger;
+        this.unflushedLockWrites = unflushedLockWrites;
     }
 
     /// <summary>
@@ -84,6 +88,14 @@ internal sealed class LockRestorer
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Record before enqueueing so a lock read that misses the actor table observes this
+                    // replayed committed mutation even before the background flush lands it.
+                    unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Locked);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
@@ -127,6 +139,14 @@ internal sealed class LockRestorer
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Record before enqueueing so a lock read that misses the actor table observes this
+                    // replayed committed mutation even before the background flush lands it.
+                    unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Unlocked);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
@@ -170,6 +190,14 @@ internal sealed class LockRestorer
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Record before enqueueing so a lock read that misses the actor table observes this
+                    // replayed committed mutation even before the background flush lands it.
+                    unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Locked);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
@@ -179,7 +207,7 @@ internal sealed class LockRestorer
                         new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
-                        (int)LockState.Unlocked
+                        (int)LockState.Locked
                     ));
 
                     return true;

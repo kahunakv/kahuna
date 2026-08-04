@@ -29,16 +29,39 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
     private readonly UnflushedKeyValueWritesIndex unflushedWrites;
 
-    public UnflushedOverlayPersistenceBackend(IPersistenceBackend inner, UnflushedKeyValueWritesIndex unflushedWrites)
+    private readonly UnflushedLockWritesIndex unflushedLockWrites;
+
+    public UnflushedOverlayPersistenceBackend(
+        IPersistenceBackend inner,
+        UnflushedKeyValueWritesIndex unflushedWrites,
+        UnflushedLockWritesIndex unflushedLockWrites)
     {
         this.inner = inner;
         this.unflushedWrites = unflushedWrites;
+        this.unflushedLockWrites = unflushedLockWrites;
     }
 
-    /// <summary>The overlay index producers record queued writes into.</summary>
+    /// <summary>The key-value overlay index producers record queued writes into.</summary>
     internal UnflushedKeyValueWritesIndex UnflushedWrites => unflushedWrites;
 
-    public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+    /// <summary>The lock overlay index producers record queued lock mutations into.</summary>
+    internal UnflushedLockWritesIndex UnflushedLockWrites => unflushedLockWrites;
+
+    public bool StoreLocks(List<PersistenceRequestItem> items)
+    {
+        bool stored = inner.StoreLocks(items);
+
+        if (stored)
+        {
+            foreach (PersistenceRequestItem item in items)
+                unflushedLockWrites.RemoveFlushed(
+                    item.Key,
+                    item.Revision,
+                    new HLCTimestamp(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter));
+        }
+
+        return stored;
+    }
 
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
@@ -58,7 +81,26 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return stored;
     }
 
-    public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+    public LockEntry? GetLock(string resource)
+    {
+        LockEntry? entry = inner.GetLock(resource);
+
+        if (unflushedLockWrites.TryGet(resource, out UnflushedLockWrite queued)
+            && (entry is null
+                || !(entry.FencingToken > queued.FencingToken
+                     || (entry.FencingToken == queued.FencingToken && entry.LastModified > queued.LastModified))))
+            return new()
+            {
+                Owner = queued.Owner,
+                FencingToken = queued.FencingToken,
+                Expires = queued.Expires,
+                LastUsed = queued.LastUsed,
+                LastModified = queued.LastModified,
+                State = queued.State
+            };
+
+        return entry;
+    }
 
     public KeyValueEntry? GetKeyValue(string keyName)
     {
@@ -189,6 +231,11 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
             merged[key] = new(queued.Value, queued.Revision, queued.Expires, queued.LastUsed, queued.LastModified, queued.State);
         }
+
+        // Defensive: a caller-side unbounded page size must never become a negative capacity or an
+        // instantly-exhausted page here.
+        if (limit < 0)
+            limit = int.MaxValue;
 
         List<(string, ReadOnlyKeyValueEntry)> result = new(Math.Min(merged.Count, limit));
         foreach (string key in merged.Keys.OrderBy(static k => k, StringComparer.Ordinal))
