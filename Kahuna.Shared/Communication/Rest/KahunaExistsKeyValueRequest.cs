@@ -15,7 +15,13 @@ public sealed class KahunaExistsKeyValueRequest
     
     [JsonPropertyName("revision")]
     public long Revision { get; set; }
-    
+
+    /// <summary>
+    /// Snapshot to read as of. Zero reads the latest committed value.
+    /// </summary>
+    [JsonPropertyName("readTimestamp")]
+    public HLCTimestamp ReadTimestamp { get; set; }
+
     [JsonPropertyName("value")]
     public KeyValueDurability Durability { get; set; }
 }

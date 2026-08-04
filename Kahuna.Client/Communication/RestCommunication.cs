@@ -277,7 +277,10 @@ public class RestCommunication : IKahunaCommunication
                 return false;
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
+
+            if (response.Type == LockResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == LockResponseType.MustRetry);
         
@@ -340,7 +343,10 @@ public class RestCommunication : IKahunaCommunication
                 return (true, response.FencingToken);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
+
+            if (response.Type == LockResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == LockResponseType.MustRetry);
         
@@ -399,8 +405,11 @@ public class RestCommunication : IKahunaCommunication
                 return new(response.Owner, response.Expires, response.FencingToken);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Errored);
-            
+                throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
+
+            if (response.Type == LockResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
+
         } while (response.Type == LockResponseType.MustRetry);
         
         throw new KahunaException("Failed to get lock information", response.Type);
@@ -482,7 +491,10 @@ public class RestCommunication : IKahunaCommunication
                 return (false, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -564,10 +576,35 @@ public class RestCommunication : IKahunaCommunication
     }
 
     public Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryGetManyKeyValues(string url, HLCTimestamp transactionId, IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems, CancellationToken cancellationToken)
-        => throw new NotSupportedException("GetManyKeyValues is not available over the REST transport; use the gRPC transport.");
+        => PostManyKeyValues(url, "try-get-many", transactionId, requestItems, cancellationToken);
 
     public Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> TryExistsManyKeyValues(string url, HLCTimestamp transactionId, IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems, CancellationToken cancellationToken)
-        => throw new NotSupportedException("ExistsManyKeyValues is not available over the REST transport; use the gRPC transport.");
+        => PostManyKeyValues(url, "try-exists-many", transactionId, requestItems, cancellationToken);
+
+    /// <summary>
+    /// Shared body of the two batched point-read calls: both carry the same request shape and differ
+    /// only in the endpoint they post to and whether the server fills in values.
+    /// </summary>
+    private async Task<(List<KahunaGetManyKeyValuesResponseItem>, int)> PostManyKeyValues(
+        string url,
+        string verb,
+        HLCTimestamp transactionId,
+        IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems,
+        CancellationToken cancellationToken
+    )
+    {
+        KahunaManyKeyValuesRequest request = new()
+        {
+            TransactionId = transactionId,
+            Items = requestItems as List<KahunaGetManyKeyValuesRequestItem> ?? [.. requestItems]
+        };
+
+        KahunaManyKeyValuesResponse response = await PostKeyValueRequest<KahunaManyKeyValuesRequest, KahunaManyKeyValuesResponse>(
+            url, verb, request, KahunaJsonContext.Default.KahunaManyKeyValuesRequest, cancellationToken
+        ).ConfigureAwait(false);
+
+        return (response.Items ?? [], response.TimeElapsedMs);
+    }
 
     /// <summary>
     /// Attempts to compare the specified value with an existing key's value and set a new value if they match.
@@ -644,7 +681,10 @@ public class RestCommunication : IKahunaCommunication
                 return (false, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -726,7 +766,10 @@ public class RestCommunication : IKahunaCommunication
                 return (false, response.Revision, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -766,6 +809,7 @@ public class RestCommunication : IKahunaCommunication
             TransactionId = transactionId,
             Key = key,
             Revision = revision,
+            ReadTimestamp = readTimestamp,
             Durability = durability
         };
         
@@ -796,13 +840,16 @@ public class RestCommunication : IKahunaCommunication
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
             if (response.Type == KeyValueResponseType.Get)
-                return (true, response.Value, response.Revision, HLCTimestamp.Zero, 0);
+                return (true, response.Value, response.Revision, response.LastModified, 0);
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 return (false, null, response.Revision, HLCTimestamp.Zero, 0);
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -844,6 +891,7 @@ public class RestCommunication : IKahunaCommunication
             TransactionId = transactionId,
             Key = key,
             Revision = revision,
+            ReadTimestamp = readTimestamp,
             Durability = durability
         };
         
@@ -851,6 +899,7 @@ public class RestCommunication : IKahunaCommunication
         
         KahunaExistsKeyValueResponse? response;
         
+        int retries = 0;
         do
         {
             if (cancellationToken.IsCancellationRequested)
@@ -877,6 +926,12 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 return (false, response.Revision, 0);
+
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -919,6 +974,7 @@ public class RestCommunication : IKahunaCommunication
         
         KahunaDeleteKeyValueResponse? response;
         
+        int retries = 0;
         do
         {
             if (cancellationToken.IsCancellationRequested)
@@ -945,6 +1001,12 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 return (false, response.Revision, 0);
+
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -989,6 +1051,7 @@ public class RestCommunication : IKahunaCommunication
         
         KahunaDeleteKeyValueResponse? response;
         
+        int retries = 0;
         do
         {
             if (cancellationToken.IsCancellationRequested)
@@ -1015,6 +1078,12 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == KeyValueResponseType.DoesNotExist)
                 return (false, response.Revision, 0);
+
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -1083,7 +1152,10 @@ public class RestCommunication : IKahunaCommunication
                 logger?.LogDebug("Server asked to retry transaction");
             
             if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
         } while (response.Type == KeyValueResponseType.MustRetry);
             
@@ -1098,41 +1170,317 @@ public class RestCommunication : IKahunaCommunication
         throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
     }
 
-    public Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
-        => throw new NotSupportedException("TryAcquireExclusiveKeyValueLock is not available over the REST transport; use the gRPC transport.");
+    public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        KahunaAcquireKeyValueLockRequest request = new()
+        {
+            TransactionId = transactionId,
+            Key = key,
+            ExpiresMs = expiresMs,
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
+        };
 
-    public Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
-        => throw new NotSupportedException("TryAcquireExclusivePrefixKeyValueLock is not available over the REST transport; use the gRPC transport.");
+        KahunaKeyValueLockResponse response = await PostWithMustRetry<KahunaAcquireKeyValueLockRequest, KahunaKeyValueLockResponse>(
+            url, "try-acquire-exclusive-lock", request, KahunaJsonContext.Default.KahunaAcquireKeyValueLockRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
 
-    public Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
-        => throw new NotSupportedException("TryReleaseExclusivePrefixKeyValueLock is not available over the REST transport; use the gRPC transport.");
+        if (response.Type == KeyValueResponseType.Locked)
+            return true;
 
-    public Task<bool> TryAcquireRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
-        => throw new NotSupportedException("TryAcquireRangeKeyValueLock is not available over the REST transport; use the gRPC transport.");
+        throw new KahunaException($"Failed to acquire key/value lock for '{key}': {response.Type}.", response.Type);
+    }
 
-    public Task TryReleaseExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken)
-        => throw new NotSupportedException("TryReleaseExclusiveRangeKeyValueLock is not available over the REST transport; use the gRPC transport.");
+    public async Task<bool> TryAcquireExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        KahunaAcquireKeyValueLockRequest request = new()
+        {
+            TransactionId = transactionId,
+            Key = prefixKey,
+            ExpiresMs = expiresMs,
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
+        };
 
-    public Task<KeyValueGetByRangePageResult> GetByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
-        => throw new NotSupportedException("GetByRange is not available over the REST transport; use the gRPC transport.");
+        KahunaKeyValueLockResponse response = await PostWithMustRetry<KahunaAcquireKeyValueLockRequest, KahunaKeyValueLockResponse>(
+            url, "try-acquire-prefix-lock", request, KahunaJsonContext.Default.KahunaAcquireKeyValueLockRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
 
-    public IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
-        => throw new NotSupportedException("ScanByRange is not available over the REST transport; use the gRPC transport.");
+        if (response.Type == KeyValueResponseType.Locked)
+            return true;
 
-    public Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, HLCTimestamp transactionId, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
-        => throw new NotSupportedException("GetByBucket is not available over the REST transport; use the gRPC transport.");
+        throw new KahunaException($"Failed to acquire exclusive prefix lock for '{prefixKey}': {response.Type}.", response.Type);
+    }
 
-    public Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
-        => throw new NotSupportedException("ScanAllByPrefix is not available over the REST transport; use the gRPC transport.");
+    public async Task TryReleaseExclusivePrefixKeyValueLock(string url, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        KahunaReleaseKeyValueLockRequest request = new()
+        {
+            TransactionId = transactionId,
+            Key = prefixKey,
+            Durability = durability
+        };
 
-    public Task<(string, HLCTimestamp transactionId)> StartTransactionSession(string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken)
-        => throw new NotSupportedException("StartTransactionSession is not available over the REST transport; use the gRPC transport.");
+        await PostKeyValueRequest<KahunaReleaseKeyValueLockRequest, KahunaKeyValueLockResponse>(
+            url, "try-release-prefix-lock", request, KahunaJsonContext.Default.KahunaReleaseKeyValueLockRequest, cancellationToken
+        ).ConfigureAwait(false);
+    }
 
-    public Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
-        => throw new NotSupportedException("CommitTransactionSession is not available over the REST transport; use the gRPC transport.");
+    public async Task<bool> TryAcquireRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        KahunaAcquireRangeLockRequest request = new()
+        {
+            TransactionId = transactionId,
+            Prefix = prefix,
+            StartKey = startKey,
+            StartInclusive = startInclusive,
+            EndKey = endKey,
+            EndInclusive = endInclusive,
+            ExpiresMs = expiresMs,
+            Durability = durability,
+            Mode = mode,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
+        };
 
-    public Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
-        => throw new NotSupportedException("RollbackTransactionSession is not available over the REST transport; use the gRPC transport.");
+        KahunaKeyValueLockResponse response = await PostWithMustRetry<KahunaAcquireRangeLockRequest, KahunaKeyValueLockResponse>(
+            url, "try-acquire-range-lock", request, KahunaJsonContext.Default.KahunaAcquireRangeLockRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response.Type == KeyValueResponseType.Locked)
+            return true;
+
+        throw new KahunaException($"Failed to acquire range lock for '{prefix}': {response.Type}.", response.Type);
+    }
+
+    public async Task TryReleaseExclusiveRangeKeyValueLock(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        KahunaReleaseRangeLockRequest request = new()
+        {
+            TransactionId = transactionId,
+            Prefix = prefix,
+            StartKey = startKey,
+            StartInclusive = startInclusive,
+            EndKey = endKey,
+            EndInclusive = endInclusive,
+            Durability = durability
+        };
+
+        await PostKeyValueRequest<KahunaReleaseRangeLockRequest, KahunaKeyValueLockResponse>(
+            url, "try-release-range-lock", request, KahunaJsonContext.Default.KahunaReleaseRangeLockRequest, cancellationToken
+        ).ConfigureAwait(false);
+    }
+
+    public async Task<KeyValueGetByRangePageResult> GetByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        KahunaGetByRangeRequest request = new()
+        {
+            TransactionId = transactionId,
+            Prefix = prefix,
+            StartKey = startKey,
+            StartInclusive = startInclusive,
+            EndKey = endKey,
+            EndInclusive = endInclusive,
+            Limit = limit,
+            ReadTimestamp = readTimestamp,
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
+        };
+
+        KahunaGetByRangeResponse response = await PostWithMustRetry<KahunaGetByRangeRequest, KahunaGetByRangeResponse>(
+            url, "get-by-range", request, KahunaJsonContext.Default.KahunaGetByRangeRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
+            throw new KahunaException($"Failed to get by range for '{prefix}': {response.Type}.", response.Type);
+
+        return new()
+        {
+            Items = response.Items ?? [],
+            NextCursor = response.NextCursor,
+            HasMore = response.HasMore
+        };
+    }
+
+    /// <summary>
+    /// REST has no server-push equivalent of the gRPC range-scan stream, so the stream is reconstructed
+    /// from the paged endpoint: each page's <c>nextCursor</c> is echoed back verbatim on the next request.
+    /// The cursor also carries the snapshot the first page fixed, so the whole scan observes one view
+    /// even though it spans several HTTP round-trips.
+    /// </summary>
+    public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        KahunaGetByRangeRequest request = new()
+        {
+            TransactionId = transactionId,
+            Prefix = prefix,
+            StartKey = startKey,
+            StartInclusive = startInclusive,
+            EndKey = endKey,
+            EndInclusive = endInclusive,
+            Limit = pageSize,
+            ReadTimestamp = readTimestamp,
+            Durability = durability
+        };
+
+        while (true)
+        {
+            KahunaGetByRangeResponse response = await PostWithMustRetry<KahunaGetByRangeRequest, KahunaGetByRangeResponse>(
+                url, "get-by-range", request, KahunaJsonContext.Default.KahunaGetByRangeRequest,
+                r => r.Type, cancellationToken
+            ).ConfigureAwait(false);
+
+            if (response.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
+                throw new KahunaException($"Failed to scan by range for '{prefix}': {response.Type}.", response.Type);
+
+            if (response.Items is not null)
+            {
+                foreach (KeyValueGetByBucketItem item in response.Items)
+                    yield return item;
+            }
+
+            if (!response.HasMore || string.IsNullOrEmpty(response.NextCursor))
+                break;
+
+            request.Cursor = response.NextCursor;
+        }
+    }
+
+    public async Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, HLCTimestamp transactionId, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    {
+        KahunaGetByBucketRequest request = new()
+        {
+            TransactionId = transactionId,
+            PrefixKey = prefixKey,
+            ReadTimestamp = readTimestamp,
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
+        };
+
+        KahunaGetByBucketResponse response = await PostWithMustRetry<KahunaGetByBucketRequest, KahunaGetByBucketResponse>(
+            url, "get-by-bucket", request, KahunaJsonContext.Default.KahunaGetByBucketRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
+
+        return ReadBucketItems(response, prefixKey);
+    }
+
+    public async Task<List<KeyValueGetByBucketItem>> ScanAllByPrefix(string url, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        KahunaScanAllByPrefixRequest request = new()
+        {
+            PrefixKey = prefixKey,
+            ReadTimestamp = readTimestamp,
+            Durability = durability
+        };
+
+        KahunaGetByBucketResponse response = await PostWithMustRetry<KahunaScanAllByPrefixRequest, KahunaGetByBucketResponse>(
+            url, "scan-all-by-prefix", request, KahunaJsonContext.Default.KahunaScanAllByPrefixRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
+
+        return ReadBucketItems(response, prefixKey);
+    }
+
+    private static List<KeyValueGetByBucketItem> ReadBucketItems(KahunaGetByBucketResponse response, string prefixKey)
+    {
+        if (response.Type == KeyValueResponseType.Get)
+            return response.Items ?? [];
+
+        // An empty bucket is an ordinary answer, not a failure.
+        if (response.Type == KeyValueResponseType.DoesNotExist)
+            return [];
+
+        throw new KahunaException($"Failed to scan key/values for '{prefixKey}': {response.Type}.", response.Type);
+    }
+
+    public async Task<(string, HLCTimestamp transactionId)> StartTransactionSession(string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken)
+    {
+        KahunaStartTransactionRequest request = new()
+        {
+            CoordinatorKey = uniqueId,
+            Timeout = txOptions.Timeout,
+            LockingType = txOptions.Locking,
+            AsyncRelease = txOptions.AsyncRelease,
+            AutoCommit = txOptions.AutoCommit,
+            ReadValidation = txOptions.ReadValidation,
+            DecisionDurability = txOptions.DecisionDurability,
+            Priority = txOptions.Priority,
+            ReadTimestamp = txOptions.ReadTimestamp
+        };
+
+        KahunaStartTransactionResponse response = await PostWithMustRetry<KahunaStartTransactionRequest, KahunaStartTransactionResponse>(
+            url, "start-tx-session", request, KahunaJsonContext.Default.KahunaStartTransactionRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response.Type == KeyValueResponseType.Set)
+            return (url, response.TransactionId);
+
+        throw new KahunaException("Failed to start key/value transaction: " + response.Type, response.Type);
+    }
+
+    public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
+    {
+        KahunaCommitTransactionRequest request = new()
+        {
+            CoordinatorKey = uniqueId,
+            TransactionId = transactionId,
+            // Send the known record anchor so a retry after coordinator loss reaches the durable decision.
+            RecordAnchorKey = recordAnchorKey
+        };
+
+        KahunaCommitTransactionResponse response = await PostWithMustRetry<KahunaCommitTransactionRequest, KahunaCommitTransactionResponse>(
+            url, "commit-tx-session", request, KahunaJsonContext.Default.KahunaCommitTransactionRequest,
+            r => r.Type, cancellationToken,
+            // Carry the coordinator's canonical anchor into the next attempt: a commit that lost its
+            // coordinating session still reaches the durable decision as long as the anchor travels with it.
+            (req, resp) =>
+            {
+                if (resp.RecordAnchorKey is not null)
+                    req.RecordAnchorKey = resp.RecordAnchorKey;
+            }
+        ).ConfigureAwait(false);
+
+        if (response.Type == KeyValueResponseType.Committed)
+            return (true, response.RecordAnchorKey);
+
+        throw new KahunaException("Failed to commit key/value transaction: " + response.Type, response.Type);
+    }
+
+    public async Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
+    {
+        KahunaCommitTransactionRequest request = new()
+        {
+            CoordinatorKey = uniqueId,
+            TransactionId = transactionId,
+            // The anchor lets a rollback retry consult the durable decision (a decided commit cannot be undone).
+            RecordAnchorKey = recordAnchorKey
+        };
+
+        KahunaCommitTransactionResponse response = await PostWithMustRetry<KahunaCommitTransactionRequest, KahunaCommitTransactionResponse>(
+            url, "rollback-tx-session", request, KahunaJsonContext.Default.KahunaCommitTransactionRequest,
+            r => r.Type, cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response.Type == KeyValueResponseType.RolledBack)
+            return true;
+
+        throw new KahunaException("Failed to rollback key/value transaction: " + response.Type, response.Type);
+    }
 
     public async Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken)
     {
@@ -1198,6 +1546,110 @@ public class RestCommunication : IKahunaCommunication
     public Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
     {
         throw new NotSupportedException("RegisterKeyRange is not available over the REST transport; use the gRPC transport.");
+    }
+
+    /// <summary>
+    /// How many times a call re-issues a request the server answered with MustRetry before handing the
+    /// retryable outcome back to the application.
+    /// </summary>
+    private const int MustRetryAttempts = 5;
+
+    /// <summary>
+    /// Backoff ladder in milliseconds, applied between MustRetry attempts. MustRetry signals a transient
+    /// condition — a leader flip, a write intent still settling, an in-doubt finalize a recovery sweep is
+    /// resolving — and none of those clear within the microseconds an immediate re-issue takes, so retrying
+    /// with no delay burns the whole retry budget inside the same instant that produced the first MustRetry
+    /// while hammering a server that is, by definition, already struggling. The ladder grows from ~1ms
+    /// toward ~10ms and then holds; past its end the last value is reused.
+    /// </summary>
+    private static readonly int[] MustRetryDelaysMs = [1, 2, 3, 4, 6, 8, 10];
+
+    /// <summary>
+    /// Waits before re-issuing a request the server answered with MustRetry. The delay carries ±25% jitter
+    /// so a fleet of clients that all saw the same leader flip does not retry in lockstep and re-create the
+    /// contention they are waiting out. Allocation-free and stateless, so every retry loop in this transport
+    /// can share one policy.
+    /// </summary>
+    private static Task WaitBeforeMustRetry(int attempt, CancellationToken cancellationToken)
+    {
+        int baseMs = MustRetryDelaysMs[Math.Min(attempt, MustRetryDelaysMs.Length - 1)];
+        double jittered = baseMs * (0.75 + Random.Shared.NextDouble() * 0.5);
+
+        return Task.Delay(TimeSpan.FromMilliseconds(jittered), cancellationToken);
+    }
+
+    /// <summary>
+    /// Posts a key-value request once and returns the deserialised response. Transport-level failures are
+    /// retried by the shared HTTP policy; a MustRetry answer is handed back to the caller untouched.
+    /// </summary>
+    private static async Task<TResponse> PostKeyValueRequest<TRequest, TResponse>(
+        string url,
+        string verb,
+        TRequest request,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<TRequest> jsonTypeInfo,
+        CancellationToken cancellationToken
+    ) where TResponse : class
+    {
+        if (cancellationToken.IsCancellationRequested)
+            throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+        string payload = JsonSerializer.Serialize(request, jsonTypeInfo);
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
+
+        TResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/kv/" + verb)
+                .WithHeader("Accept", "application/json")
+                .WithHeader("Content-Type", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .ReceiveJson<TResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Posts a key-value request, re-issuing it while the server answers MustRetry. Exhausting the budget
+    /// is reported as <see cref="KeyValueResponseType.MustRetry"/>, never as Aborted: the condition is still
+    /// transient, and telling the caller the transaction genuinely conflicted would be a lie that stops them
+    /// from re-driving a request that can still succeed.
+    /// </summary>
+    /// <param name="readType">Reads the outcome out of the response so this helper stays response-shape agnostic.</param>
+    /// <param name="carryForward">
+    /// Optional hook to fold state from a MustRetry response into the next attempt's request.
+    /// </param>
+    private async Task<TResponse> PostWithMustRetry<TRequest, TResponse>(
+        string url,
+        string verb,
+        TRequest request,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<TRequest> jsonTypeInfo,
+        Func<TResponse, KeyValueResponseType> readType,
+        CancellationToken cancellationToken,
+        Action<TRequest, TResponse>? carryForward = null
+    ) where TResponse : class
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            TResponse response = await PostKeyValueRequest<TRequest, TResponse>(
+                url, verb, request, jsonTypeInfo, cancellationToken
+            ).ConfigureAwait(false);
+
+            if (readType(response) != KeyValueResponseType.MustRetry)
+                return response;
+
+            logger?.LogDebug("Server asked to retry {Verb}", verb);
+
+            carryForward?.Invoke(request, response);
+
+            if (attempt + 1 >= MustRetryAttempts)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.MustRetry);
+
+            await WaitBeforeMustRetry(attempt, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken)

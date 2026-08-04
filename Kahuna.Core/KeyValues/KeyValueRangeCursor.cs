@@ -24,7 +24,7 @@ namespace Kahuna.Server.KeyValues;
 ///
 /// The entire buffer is Base64Url-encoded (no padding) to produce an opaque string.
 /// </summary>
-internal static class KeyValueRangeCursor
+public static class KeyValueRangeCursor
 {
     private const byte Version = 0x01;
     private const int FixedOverhead = 26; // 1 + 4 + 4 + 1 + 4 + 8 + 4

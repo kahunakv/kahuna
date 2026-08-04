@@ -239,7 +239,7 @@ public static class KeyValuesHandlers
                 request.TransactionId,
                 request.Key,
                 request.Revision,
-                HLCTimestamp.Zero,
+                request.ReadTimestamp,
                 request.Durability,
                 cancellationToken
             );
@@ -252,7 +252,8 @@ public static class KeyValuesHandlers
                     Type = type,
                     Value = keyValueContext.Value,
                     Revision = keyValueContext.Revision,
-                    Expires = keyValueContext.Expires
+                    Expires = keyValueContext.Expires,
+                    LastModified = keyValueContext.LastModified
                 };
                 
                 return response;
@@ -276,7 +277,7 @@ public static class KeyValuesHandlers
                 request.TransactionId,
                 request.Key,
                 request.Revision,
-                HLCTimestamp.Zero,
+                request.ReadTimestamp,
                 request.Durability,
                 cancellationToken
             );
@@ -288,7 +289,8 @@ public static class KeyValuesHandlers
                     ServedFrom = "",
                     Type = type,
                     Revision = keyValueContext.Revision,
-                    Expires = keyValueContext.Expires
+                    Expires = keyValueContext.Expires,
+                    LastModified = keyValueContext.LastModified
                 };
                 
                 return response;
@@ -319,6 +321,278 @@ public static class KeyValuesHandlers
                 //Expires = result.Expires,
                 Reason = result.Reason
             };
+        });
+
+        app.MapPost("/v1/kv/try-get-many", async (KahunaManyKeyValuesRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (request.Items is null)
+                return new KahunaManyKeyValuesResponse { Items = [], TimeElapsedMs = 0 };
+
+            ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
+                request.TransactionId,
+                request.ReadTimestamp,
+                GetManyRequestKeys(request.Items),
+                cancellationToken
+            );
+
+            return new KahunaManyKeyValuesResponse
+            {
+                Items = GetManyResponseItems(responses, includeValues: true),
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+            };
+        });
+
+        app.MapPost("/v1/kv/try-exists-many", async (KahunaManyKeyValuesRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (request.Items is null)
+                return new KahunaManyKeyValuesResponse { Items = [], TimeElapsedMs = 0 };
+
+            ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
+                request.TransactionId,
+                request.ReadTimestamp,
+                GetManyRequestKeys(request.Items),
+                cancellationToken
+            );
+
+            return new KahunaManyKeyValuesResponse
+            {
+                Items = GetManyResponseItems(responses, includeValues: false),
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+            };
+        });
+
+        app.MapPost("/v1/kv/get-by-range", async (KahunaGetByRangeRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.Prefix))
+                return new KahunaGetByRangeResponse { Type = KeyValueResponseType.InvalidInput };
+
+            string? startKey = request.StartKey;
+            bool startInclusive = startKey is null || request.StartInclusive;
+            HLCTimestamp readTimestamp = request.ReadTimestamp;
+
+            // A cursor supersedes the caller's start bound: it resumes exclusively past the last key
+            // already returned and restores the snapshot the first page fixed, so every page of one
+            // scan observes a single consistent view. Decoding stays server-side — the cursor is
+            // opaque to clients, which merely echo it back.
+            if (!string.IsNullOrEmpty(request.Cursor))
+            {
+                if (!KeyValueRangeCursor.TryDecode(request.Cursor, out string lastKey, out _, out _, out HLCTimestamp cursorTs))
+                    return new KahunaGetByRangeResponse { Type = KeyValueResponseType.InvalidInput };
+
+                startKey = lastKey;
+                startInclusive = false;
+                readTimestamp = cursorTs;
+            }
+
+            KeyValueGetByRangeResult result = await keyValues.LocateAndGetByRange(
+                request.TransactionId,
+                request.Prefix,
+                startKey,
+                startInclusive,
+                request.EndKey,
+                request.EndKey is not null && request.EndInclusive,
+                request.Limit,
+                readTimestamp,
+                request.Durability,
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+            );
+
+            return new KahunaGetByRangeResponse
+            {
+                Type = result.Type,
+                Items = GetBucketItems(result.Items),
+                NextCursor = result.NextCursor,
+                HasMore = result.HasMore
+            };
+        });
+
+        app.MapPost("/v1/kv/get-by-bucket", async (KahunaGetByBucketRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.PrefixKey))
+                return new KahunaGetByBucketResponse { Type = KeyValueResponseType.InvalidInput };
+
+            KeyValueGetByBucketResult result = await keyValues.LocateAndGetByBucket(
+                request.TransactionId,
+                request.PrefixKey,
+                request.ReadTimestamp,
+                request.Durability,
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+            );
+
+            return new KahunaGetByBucketResponse
+            {
+                Type = result.Type,
+                Items = GetBucketItems(result.Items)
+            };
+        });
+
+        app.MapPost("/v1/kv/scan-all-by-prefix", async (KahunaScanAllByPrefixRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.PrefixKey))
+                return new KahunaGetByBucketResponse { Type = KeyValueResponseType.InvalidInput };
+
+            KeyValueGetByBucketResult result = await keyValues.ScanAllByPrefix(
+                request.PrefixKey,
+                request.ReadTimestamp,
+                request.Durability,
+                cancellationToken
+            );
+
+            return new KahunaGetByBucketResponse
+            {
+                Type = result.Type,
+                Items = GetBucketItems(result.Items)
+            };
+        });
+
+        app.MapPost("/v1/kv/try-acquire-exclusive-lock", async (KahunaAcquireKeyValueLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.Key))
+                return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
+
+            (KeyValueResponseType type, string _, KeyValueDurability _, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireExclusiveLock(
+                request.TransactionId,
+                request.Key,
+                request.ExpiresMs,
+                request.Durability,
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+            );
+
+            return new KahunaKeyValueLockResponse { Type = type, HolderTransactionId = holder };
+        });
+
+        app.MapPost("/v1/kv/try-acquire-prefix-lock", async (KahunaAcquireKeyValueLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.Key))
+                return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
+
+            KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusivePrefixLock(
+                request.TransactionId,
+                request.Key,
+                request.ExpiresMs,
+                request.Durability,
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+            );
+
+            return new KahunaKeyValueLockResponse { Type = type };
+        });
+
+        app.MapPost("/v1/kv/try-release-prefix-lock", async (KahunaReleaseKeyValueLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.Key))
+                return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
+
+            KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusivePrefixLock(
+                request.TransactionId,
+                request.Key,
+                request.Durability,
+                cancellationToken
+            );
+
+            return new KahunaKeyValueLockResponse { Type = type };
+        });
+
+        app.MapPost("/v1/kv/try-acquire-range-lock", async (KahunaAcquireRangeLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.Prefix))
+                return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
+
+            (KeyValueResponseType type, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireRangeLock(
+                request.TransactionId,
+                request.Prefix,
+                request.StartKey,
+                request.StartInclusive,
+                request.EndKey,
+                request.EndInclusive,
+                request.ExpiresMs,
+                request.Durability,
+                request.Mode,
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+            );
+
+            return new KahunaKeyValueLockResponse { Type = type, HolderTransactionId = holder };
+        });
+
+        app.MapPost("/v1/kv/try-release-range-lock", async (KahunaReleaseRangeLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.Prefix))
+                return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
+
+            KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusiveRangeLock(
+                request.TransactionId,
+                request.Prefix,
+                request.StartKey,
+                request.StartInclusive,
+                request.EndKey,
+                request.EndInclusive,
+                request.Durability,
+                cancellationToken
+            );
+
+            return new KahunaKeyValueLockResponse { Type = type };
+        });
+
+        app.MapPost("/v1/kv/start-tx-session", async (KahunaStartTransactionRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.CoordinatorKey))
+                return new KahunaStartTransactionResponse { Type = KeyValueResponseType.InvalidInput };
+
+            (KeyValueResponseType type, TransactionHandle handle) = await keyValues.LocateAndStartTransaction(new()
+            {
+                CoordinatorKey = request.CoordinatorKey,
+                Locking = request.LockingType,
+                Timeout = request.Timeout,
+                AsyncRelease = request.AsyncRelease,
+                AutoCommit = request.AutoCommit,
+                ReadValidation = request.ReadValidation,
+                DecisionDurability = request.DecisionDurability,
+                Priority = request.Priority,
+                ReadTimestamp = request.ReadTimestamp
+            }, cancellationToken);
+
+            return new KahunaStartTransactionResponse { Type = type, TransactionId = handle.TransactionId };
+        });
+
+        app.MapPost("/v1/kv/commit-tx-session", async (KahunaCommitTransactionRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.CoordinatorKey))
+                return new KahunaCommitTransactionResponse { Type = KeyValueResponseType.InvalidInput };
+
+            // The caller's anchor is the only route to the durable decision once the coordinating
+            // session is gone, so a retry that supplies it resolves the outcome instead of erroring.
+            TransactionHandle handle = new(request.TransactionId, request.CoordinatorKey, request.RecordAnchorKey);
+
+            (KeyValueResponseType type, string? recordAnchorKey) = await keyValues.LocateAndCommitTransaction(handle, cancellationToken);
+
+            return new KahunaCommitTransactionResponse { Type = type, RecordAnchorKey = recordAnchorKey };
+        });
+
+        app.MapPost("/v1/kv/rollback-tx-session", async (KahunaCommitTransactionRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrEmpty(request.CoordinatorKey))
+                return new KahunaCommitTransactionResponse { Type = KeyValueResponseType.InvalidInput };
+
+            // Carrying the anchor lets a rollback retry consult the durable decision: a decided commit
+            // must not be undone by a late rollback.
+            TransactionHandle handle = new(request.TransactionId, request.CoordinatorKey, request.RecordAnchorKey);
+
+            KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(handle, cancellationToken);
+
+            return new KahunaCommitTransactionResponse { Type = type };
         });
 
         app.MapPost("/v1/kv/snapshot-hold/acquire", async (KahunaAcquireSnapshotHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
@@ -365,5 +639,60 @@ public static class KeyValuesHandlers
             (HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
             return new KahunaGetSnapshotFloorResponse { EffectiveFloor = floor, LiveHolds = liveHolds };
         });
+    }
+
+    private static List<(string key, long revision, KeyValueDurability durability)> GetManyRequestKeys(List<KahunaGetManyKeyValuesRequestItem> items)
+    {
+        List<(string, long, KeyValueDurability)> keys = new(items.Count);
+
+        foreach (KahunaGetManyKeyValuesRequestItem item in items)
+            keys.Add((item.Key ?? "", item.Revision, item.Durability));
+
+        return keys;
+    }
+
+    /// <summary>
+    /// Projects batched read results onto the wire items. Exists-many omits the payload: the caller
+    /// asked whether the key is there, and shipping the value back would make an existence probe cost
+    /// as much as a read.
+    /// </summary>
+    private static List<KahunaGetManyKeyValuesResponseItem> GetManyResponseItems(
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
+        bool includeValues)
+    {
+        List<KahunaGetManyKeyValuesResponseItem> items = new(responses.Count);
+
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
+        {
+            items.Add(new()
+            {
+                Key = key,
+                Type = type,
+                Value = includeValues ? entry?.Value : null,
+                Revision = entry?.Revision ?? 0,
+                LastModified = entry?.LastModified ?? HLCTimestamp.Zero,
+                Durability = durability
+            });
+        }
+
+        return items;
+    }
+
+    private static List<KeyValueGetByBucketItem> GetBucketItems(List<(string, ReadOnlyKeyValueEntry)> results)
+    {
+        List<KeyValueGetByBucketItem> items = new(results.Count);
+
+        foreach ((string key, ReadOnlyKeyValueEntry entry) in results)
+        {
+            items.Add(new()
+            {
+                Key = key,
+                Value = entry.Value,
+                Revision = entry.Revision,
+                LastModified = entry.LastModified
+            });
+        }
+
+        return items;
     }
 }

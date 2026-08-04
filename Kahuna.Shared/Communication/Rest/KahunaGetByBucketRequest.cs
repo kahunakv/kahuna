@@ -5,16 +5,13 @@ using Kommander.Time;
 
 namespace Kahuna.Shared.Communication.Rest;
 
-public sealed class KahunaGetKeyValueRequest
+public sealed class KahunaGetByBucketRequest
 {
     [JsonPropertyName("transactionId")]
     public HLCTimestamp TransactionId { get; set; }
-    
-    [JsonPropertyName("key")]
-    public string? Key { get; set; }
-    
-    [JsonPropertyName("revision")]
-    public long Revision { get; set; }
+
+    [JsonPropertyName("prefixKey")]
+    public string? PrefixKey { get; set; }
 
     /// <summary>
     /// Snapshot to read as of. Zero reads the latest committed value.
@@ -22,6 +19,15 @@ public sealed class KahunaGetKeyValueRequest
     [JsonPropertyName("readTimestamp")]
     public HLCTimestamp ReadTimestamp { get; set; }
 
-    [JsonPropertyName("value")]
+    [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
+
+    [JsonPropertyName("coordinatorKey")]
+    public string? CoordinatorKey { get; set; }
+
+    [JsonPropertyName("operationIdHigh")]
+    public ulong OperationIdHigh { get; set; }
+
+    [JsonPropertyName("operationIdLow")]
+    public ulong OperationIdLow { get; set; }
 }

@@ -18,4 +18,11 @@ public sealed class KahunaExistsKeyValueResponse
     
     [JsonPropertyName("timestamp")]
     public HLCTimestamp Expires { get; set; }
+
+    /// <summary>
+    /// When the entry was last written. Callers round-trip this into a later snapshot read, so it
+    /// must carry the real commit time rather than a placeholder.
+    /// </summary>
+    [JsonPropertyName("lastModified")]
+    public HLCTimestamp LastModified { get; set; }
 }
