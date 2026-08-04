@@ -32,7 +32,7 @@ public static class InteractiveConsole
         Assembly assembly = Assembly.GetExecutingAssembly();
         string version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 
-        AnsiConsole.MarkupLine("[green]Kahuna Shell {0} (beta)[/]\n", version);
+        AnsiConsole.MarkupLine("[green]Kahuna Shell {0}[/]\n", version);
 
         string historyPath = string.Concat(Path.GetTempPath(), Path.PathSeparator, "kahuna.history.json");
         List<string> history = await GetHistory(historyPath);

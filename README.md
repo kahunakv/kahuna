@@ -2,10 +2,6 @@
 
 <img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="250" alt="kahuna">
 
-> [!WARNING]
-> **BETA SOFTWARE**
-> Kahuna is under heavy development and some features may be unstable!
-
 Distributed systems can become highly complex due to the many reasons: execution may be non-deterministic, unexpected edge cases, and specific scenarios that make it difficult to reason about solid solutions that ensure system robustness.
 
 Kahuna is an open-source project aimed at providing out-of-the-box solutions for developers and applications that need to solve common problems related to distributed systems.
