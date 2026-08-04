@@ -26,14 +26,17 @@ internal sealed class KeyValueRestorer
 
     private readonly CompletionReceiptStore completionReceiptStore;
 
+    private readonly UnflushedKeyValueWritesIndex? unflushedWrites;
+
     private readonly ILogger<IKahuna> logger;
 
-    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger)
+    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.completionReceiptStore = completionReceiptStore;
         this.logger = logger;
+        this.unflushedWrites = unflushedWrites;
     }
 
     /// <summary>
@@ -63,15 +66,24 @@ internal sealed class KeyValueRestorer
                 return true;
             }
 
+            HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
+            HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
+            HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
+            // Record before enqueueing so reads observe the replayed committed write even before the
+            // background flush lands it in the backend.
+            unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                expires, lastUsed, lastModified, state, keyValueMessage.NoRevision);
+
             backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
                 partitionId,
                 keyValueMessage.Key,
                 messageValue,
                 keyValueMessage.Revision,
-                new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter),
-                new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter),
-                new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                expires,
+                lastUsed,
+                lastModified,
                 (int)state,
                 keyValueMessage.NoRevision
             ));

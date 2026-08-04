@@ -24,4 +24,13 @@ public sealed class KahunaExistsKeyValueRequest
 
     [JsonPropertyName("value")]
     public KeyValueDurability Durability { get; set; }
+
+    [JsonPropertyName("coordinatorKey")]
+    public string? CoordinatorKey { get; set; }
+
+    [JsonPropertyName("operationIdHigh")]
+    public ulong OperationIdHigh { get; set; }
+
+    [JsonPropertyName("operationIdLow")]
+    public ulong OperationIdLow { get; set; }
 }

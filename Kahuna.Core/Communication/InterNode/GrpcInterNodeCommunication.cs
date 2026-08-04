@@ -1539,6 +1539,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
+        GrpcCompleteOperationRequest request = ToGrpcCompleteOperationRequest(coordinatorKey, transactionId, operationId, payload);
+
+        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
+        KeyValueResponseType outcome = remoteResponse.Acknowledged ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry;
+        return (outcome, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
+    }
+
+    /// <summary>
+    /// Maps a completion payload onto the inter-node request. Every effect-bearing field of
+    /// <see cref="OperationCompletionPayload"/> must be carried here and restored on the receiving node —
+    /// a dropped field silently narrows the coordinator's working set (e.g. a missing held-lock set makes
+    /// commit skip its mutations entirely).
+    /// </summary>
+    internal static GrpcCompleteOperationRequest ToGrpcCompleteOperationRequest(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
+    {
         GrpcCompleteOperationRequest request = new()
         {
             CoordinatorKey = coordinatorKey,
@@ -1569,11 +1585,10 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             request.ModifiedKeys.AddRange(payload.ModifiedKeys.Select(m => new GrpcTransactionModifiedKey { Key = m.Key, Durability = (GrpcKeyValueDurability)m.Durability }));
         if (payload.StagedMutations is not null)
             request.StagedMutations.AddRange(payload.StagedMutations.Select(ToGrpcStagedMutation));
+        if (payload.AcquiredPointLocks is not null)
+            request.AcquiredPointLocks.AddRange(payload.AcquiredPointLocks.Select(l => new GrpcTransactionModifiedKey { Key = l.Key, Durability = (GrpcKeyValueDurability)l.Durability }));
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
-        GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
-        KeyValueResponseType outcome = remoteResponse.Acknowledged ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry;
-        return (outcome, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
+        return request;
     }
 
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)

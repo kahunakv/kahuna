@@ -41,6 +41,8 @@ internal sealed class KeyValueReplicator
 
     private readonly CompletionReceiptStore completionReceiptStore;
 
+    private readonly UnflushedKeyValueWritesIndex? unflushedWrites;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueReplicator(
@@ -50,7 +52,8 @@ internal sealed class KeyValueReplicator
         KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KeySpaceRegistry keySpaceRegistry,
         CompletionReceiptStore completionReceiptStore,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        UnflushedKeyValueWritesIndex? unflushedWrites = null)
     {
         this.backgroundWriter         = backgroundWriter;
         this.persistentRouter         = persistentRouter;
@@ -58,6 +61,7 @@ internal sealed class KeyValueReplicator
         this.writeFrequencyRegistry   = writeFrequencyRegistry;
         this.keySpaceRegistry         = keySpaceRegistry;
         this.completionReceiptStore   = completionReceiptStore;
+        this.unflushedWrites          = unflushedWrites;
         this.logger                   = logger;
     }
 
@@ -190,6 +194,11 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+                    // Record before enqueueing so a read that misses the actor cache observes this
+                    // committed write even before the background flush lands it in the backend.
+                    unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
@@ -235,6 +244,9 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+                    unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Deleted, keyValueMessage.NoRevision);
+
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
@@ -273,6 +285,9 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
+                    unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
+                        expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
 
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,

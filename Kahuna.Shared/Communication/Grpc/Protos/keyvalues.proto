@@ -942,6 +942,7 @@ message GrpcCompleteOperationRequest
   repeated GrpcTransactionReadKey ReadObservations = 15;
   repeated GrpcTransactionModifiedKey ModifiedKeys = 22;
   repeated GrpcStagedMutationEffect StagedMutations = 23;
+  repeated GrpcTransactionModifiedKey AcquiredPointLocks = 24;
   GrpcKeyValueDurability Durability = 16;
   GrpcKeyValueResponseType CachedType = 17;
   int64 CachedRevision = 18;

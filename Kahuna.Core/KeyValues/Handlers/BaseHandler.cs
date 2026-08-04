@@ -485,6 +485,11 @@ internal abstract class BaseHandler
 
         ApplyCommittedHead(entry, proposal, txId);
 
+        // Record before enqueueing so a read that misses the actor cache (e.g. on a later promoted
+        // leader) observes this committed write even before the background flush lands it.
+        context.UnflushedWrites?.Record(proposal.Key, proposal.Value, proposal.Revision,
+            proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State, proposal.NoRevision);
+
         context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
