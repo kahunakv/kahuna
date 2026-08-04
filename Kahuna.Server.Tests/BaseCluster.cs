@@ -285,14 +285,14 @@ public abstract class BaseCluster
     /// Variant that also returns the shared <see cref="MemoryInterNodeCommmunication"/> instance so
     /// tests can inspect transport-level counters (e.g. <see cref="MemoryInterNodeCommmunication.GetByRangeCallCount"/>).
     /// </summary>
-    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, MemoryInterNodeCommmunication)> AssembleThreNodeClusterWithTransport(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger)
+    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna, MemoryInterNodeCommmunication)> AssembleThreNodeClusterWithTransport(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
     {
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNodeCommmunication = new();
 
-        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
-        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
-        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger);
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
 
         await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
 

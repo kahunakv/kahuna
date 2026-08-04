@@ -37,7 +37,7 @@ Kahuna now owns **two** dedicated `FairReadScheduler` instances, and Kommander's
 | Pool | Serves | Knob (threads) | Default |
 |---|---|---|---|
 | **Backend read** | Every persistence-backend *read*: point gets, `TryExists`, the read-before-write of a set, exclusive-lock loads, and prefix/range/bucket scan pages. Partition routing (`ResolvePartition` / the data-partition router) is unchanged. | `BackendReadIOThreads` | 8 |
-| **Backend writer** | `BackgroundWriterActor` batch writes — `StoreKeyValues`, `StoreLocks`, and revision pruning. | `BackendWriteIOThreads` | 2 |
+| **Backend writer** | `BackgroundWriterActor` batch writes — `StoreKeyValues`, `StoreLocks`, and revision pruning. | `BackendWriteIOThreads` | 1 |
 
 Both pools share one back-pressure knob:
 
@@ -75,8 +75,9 @@ concurrency:
   backend reads moved off it.
 - **Backend read pool** (`BackendReadIOThreads`) carries the data-plane scan/point-read load; the
   default of **8** sizes it for scan concurrency.
-- **Backend writer pool** (`BackendWriteIOThreads`) stays small (**2**) — backend writes are
-  fsync-heavy and serialize on the backend anyway.
+- **Backend writer pool** (`BackendWriteIOThreads`) stays at **1** — the writer batches under one
+  stable queue key, and backend writes are fsync-heavy and serialize on the backend anyway, so more
+  than one thread only adds idle threads.
 - Kommander's WAL **write** pool (`WriteIOThreads`) and WAL group commit are unchanged by this
   feature.
 

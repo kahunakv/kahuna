@@ -96,6 +96,21 @@ public sealed class KahunaCommandLineOptions
     
     [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers", Default = 1)]
     public int BackgroundWritersWorkers { get; set; } = 1;
+
+    [Option("sequencer-workers", Required = false, HelpText = "Number of sequence workers", Default = 128)]
+    public int SequencerWorkers { get; set; } = 128;
+
+    [Option("sequencer-block-size", Required = false, HelpText = "Values reserved per sequence compare-and-swap; one Raft commit is amortized over this many values. 1 = gap-free (one commit per value)", Default = 1000)]
+    public int SequencerBlockSize { get; set; } = 1000;
+
+    [Option("sequencer-idempotency-retention-max", Required = false, HelpText = "Maximum idempotency entries retained per sequence record (0 = no cap)", Default = 256)]
+    public int SequencerIdempotencyRetentionMax { get; set; } = 256;
+
+    [Option("sequencer-idempotency-retention-ttl", Required = false, HelpText = "Window (in seconds) within which retrying a keyed sequence reserve replays the identical allocation (0 = no age pruning)", Default = 600)]
+    public int SequencerIdempotencyRetentionTtl { get; set; } = 600;
+
+    [Option("sequencer-max-sequences-per-actor", Required = false, HelpText = "Maximum sequences one actor keeps resident before evicting the least recently used (0 = unbounded)", Default = 10000)]
+    public int SequencerMaxSequencesPerActor { get; set; } = 10000;
     
     [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout (in milliseconds)", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;

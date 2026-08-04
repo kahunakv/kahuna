@@ -10,6 +10,7 @@ using System.Collections.Concurrent;
 using Google.Protobuf.Collections;
 
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Server.Configuration;
@@ -1995,6 +1996,159 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             new HLCTimestamp(r.EffectiveFloorNode, r.EffectiveFloorPhysical, r.EffectiveFloorCounter),
             r.LiveHolds
         );
+    }
+
+    // ── sequences ───────────────────────────────────────────────────────────────────────────────
+    // Forwarded as plain unary calls on the shared channel rather than through the batcher. Sequence
+    // traffic between nodes is sparse by construction — a node reserves a block of values with one
+    // write and then serves the rest from memory — so there is nothing for a batching lane to coalesce.
+
+    /// <summary>Forwards a sequence create to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, long)> CreateSequence(
+        string node,
+        string name,
+        long initialValue,
+        long increment,
+        long? maxValue,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcCreateSequenceRequest request = new()
+        {
+            Name = name,
+            InitialValue = initialValue,
+            Increment = increment,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (maxValue.HasValue)
+            request.MaxValue = maxValue.Value;
+
+        GrpcSequenceResponse response = await GetSequencerClient(node)
+            .CreateSequenceAsync(request, cancellationToken: cancellationToken);
+
+        return ((SequenceResponseType)response.Type, response.Revision);
+    }
+
+    /// <summary>Forwards a sequence read to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(
+        string node,
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcGetSequenceRequest request = new()
+        {
+            Name = name,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        GrpcSequenceResponse response = await GetSequencerClient(node)
+            .GetSequenceAsync(request, cancellationToken: cancellationToken);
+
+        SequenceResponseType type = (SequenceResponseType)response.Type;
+
+        if (type != SequenceResponseType.Success || response.Sequence is null)
+            return (type, null);
+
+        GrpcSequenceEntry entry = response.Sequence;
+
+        return (type, new ReadOnlySequenceEntry(
+            entry.Name,
+            entry.CurrentValue,
+            entry.InitialValue,
+            entry.Increment,
+            entry.HasMaxValue ? entry.MaxValue : null,
+            entry.Revision,
+            (SequenceDurability)entry.Durability,
+            new HLCTimestamp(entry.CreatedAtNode, entry.CreatedAtPhysical, entry.CreatedAtCounter),
+            new HLCTimestamp(entry.UpdatedAtNode, entry.UpdatedAtPhysical, entry.UpdatedAtCounter)
+        ));
+    }
+
+    /// <summary>Forwards a single-value allocation to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(
+        string node,
+        string name,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcNextSequenceRequest request = new()
+        {
+            Name = name,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (idempotencyKey is not null)
+            request.IdempotencyKey = idempotencyKey;
+
+        GrpcSequenceAllocationResponse response = await GetSequencerClient(node)
+            .NextSequenceValueAsync(request, cancellationToken: cancellationToken);
+
+        return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
+    }
+
+    /// <summary>Forwards a multi-value allocation to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(
+        string node,
+        string name,
+        int count,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcReserveSequenceRangeRequest request = new()
+        {
+            Name = name,
+            Count = count,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (idempotencyKey is not null)
+            request.IdempotencyKey = idempotencyKey;
+
+        GrpcSequenceAllocationResponse response = await GetSequencerClient(node)
+            .ReserveSequenceRangeAsync(request, cancellationToken: cancellationToken);
+
+        return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
+    }
+
+    /// <summary>Forwards a sequence delete to the node that owns the sequence's partition.</summary>
+    public async Task<SequenceResponseType> DeleteSequence(
+        string node,
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcDeleteSequenceRequest request = new()
+        {
+            Name = name,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        GrpcSequenceResponse response = await GetSequencerClient(node)
+            .DeleteSequenceAsync(request, cancellationToken: cancellationToken);
+
+        return (SequenceResponseType)response.Type;
+    }
+
+    private static SequenceAllocation ToAllocation(GrpcSequenceAllocation? allocation)
+    {
+        return allocation is null
+            ? default
+            : new SequenceAllocation(allocation.Name, allocation.Start, allocation.End, allocation.Count, allocation.Revision);
+    }
+
+    // Qualified: the Kahuna.Server.Sequencer namespace would otherwise shadow the generated client.
+    private static global::Sequencer.SequencerClient GetSequencerClient(string node)
+    {
+        return new(SharedChannels.GetChannel(node));
     }
 
     private GrpcServerBatcher GetSharedBatcher(string url)

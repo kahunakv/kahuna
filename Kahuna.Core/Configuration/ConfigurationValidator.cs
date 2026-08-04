@@ -43,6 +43,17 @@ public static class ConfigurationValidator
         if (configuration.BackgroundWriterWorkers <= 0)
             configuration.BackgroundWriterWorkers = 1;
 
+        if (configuration.SequencerWorkers <= 0)
+            configuration.SequencerWorkers = Math.Max(8, Environment.ProcessorCount);
+
+        // A block of one value is the gap-free mode (one commit per value); zero or negative would
+        // reserve nothing and never make progress.
+        if (configuration.SequencerBlockSize <= 0)
+            configuration.SequencerBlockSize = 1;
+
+        if (configuration.SequencerIdempotencyRetentionTtl < TimeSpan.Zero)
+            configuration.SequencerIdempotencyRetentionTtl = TimeSpan.Zero;
+
         if (configuration.CollectionInterval <= TimeSpan.Zero)
             configuration.CollectionInterval = TimeSpan.FromSeconds(60);
 

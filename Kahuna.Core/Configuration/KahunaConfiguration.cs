@@ -16,6 +16,44 @@ public sealed class KahunaConfiguration
     public int BackgroundWriterWorkers { get; set; }
 
     /// <summary>
+    /// Number of sequence actors. Each sequence name is consistent-hash routed to exactly one of them and
+    /// served single-threaded, so this bounds how many distinct sequences can be allocating concurrently.
+    /// A value &lt;= 0 auto-sizes.
+    /// </summary>
+    public int SequencerWorkers { get; set; } = 16;
+
+    /// <summary>
+    /// Values a sequence actor reserves from the durable record in a single compare-and-swap. Allocations
+    /// inside the block are served from memory with no storage traffic, so this is directly the
+    /// amortization factor: one Raft commit per this many values.
+    /// <para>The trade is gaps. Whatever is left in a block when the node restarts, loses partition
+    /// leadership, or evicts the sequence is never handed out — the same behaviour as a conventional
+    /// database sequence cache. Set to <c>1</c> for gap-free allocation at one commit per value.</para>
+    /// </summary>
+    public int SequencerBlockSize { get; set; } = 1_000;
+
+    /// <summary>
+    /// Maximum idempotency entries retained in one sequence's durable record. Entries beyond the cap are
+    /// dropped oldest-first whenever the record is written, which is what keeps the record — rewritten on
+    /// every ceiling bump — from growing without bound as clients use fresh keys. A value &lt;= 0 disables
+    /// the cap, leaving <see cref="SequencerIdempotencyRetentionTtl"/> as the only bound.
+    /// </summary>
+    public int SequencerIdempotencyRetentionMax { get; set; } = 256;
+
+    /// <summary>
+    /// Age after which an idempotency entry is dropped from a sequence's record. This is the window within
+    /// which retrying a keyed reserve is guaranteed to replay the identical allocation; a retry after it
+    /// has passed allocates fresh values. <see cref="TimeSpan.Zero"/> disables age pruning.
+    /// </summary>
+    public TimeSpan SequencerIdempotencyRetentionTtl { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Maximum sequences one actor keeps resident. Past the cap the least recently used are evicted,
+    /// abandoning their reserved blocks (a gap). A value &lt;= 0 leaves residency unbounded.
+    /// </summary>
+    public int SequencerMaxSequencesPerActor { get; set; } = 10_000;
+
+    /// <summary>
     /// Number of dedicated worker threads serving Kahuna persistence-backend reads (point gets, scans,
     /// read-before-write). Owned by Kahuna and separate from Kommander's WAL read pool, so data-plane
     /// reads never contend with the WAL reads consensus/replication/recovery depend on. 0 or negative

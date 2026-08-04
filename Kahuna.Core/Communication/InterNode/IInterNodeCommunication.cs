@@ -5,6 +5,7 @@ using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kommander.Time;
 
 namespace Kahuna.Server.Communication.Internode;
@@ -21,6 +22,16 @@ public interface IInterNodeCommunication
     public Task<LockResponseType> TryUnlock(string node, string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken);
 
     public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string node, string resource, LockDurability durability, CancellationToken cancellationToken);
+
+    public Task<(SequenceResponseType, long)> CreateSequence(string node, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken);
+
+    public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(string node, string name, SequenceDurability durability, CancellationToken cancellationToken);
+
+    public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(string node, string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken);
+
+    public Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(string node, string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken);
+
+    public Task<SequenceResponseType> DeleteSequence(string node, string name, SequenceDurability durability, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration, CancellationToken cancellationToken);
     

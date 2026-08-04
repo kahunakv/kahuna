@@ -5,6 +5,7 @@ using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using Kommander.Time;
 
 namespace Kahuna.Server.Communication.Internode;
@@ -21,6 +22,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     private int checkWriteIntentCallCount;
     private int checkManyWriteIntentsCallCount;
     private int existsManyCallCount;
+    private int sequenceForwardCallCount;
 
     /// <summary>Number of <c>GetByRange</c> RPCs dispatched to a remote node. Used by multi-range fan-out tests.</summary>
     public int GetByRangeCallCount => Volatile.Read(ref getByRangeCallCount);
@@ -36,6 +38,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <summary>Number of <c>TryExistsMany</c> RPCs dispatched to a remote node — one per remote node holding
     /// any of the requested keys, so it measures what the same key set costs when grouped by owner.</summary>
     public int ExistsManyCallCount => Volatile.Read(ref existsManyCallCount);
+
+    /// <summary>Sequence operations forwarded to another node, so a test can prove the redirect happened.</summary>
+    public int SequenceForwardCallCount => Volatile.Read(ref sequenceForwardCallCount);
 
     /// <summary>Number of register-remote <c>BeginOperation</c> RPCs dispatched to a remote coordinator node.</summary>
     public int BeginOperationCallCount => Volatile.Read(ref beginOperationCallCount);
@@ -158,6 +163,97 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
             return await kahunaNode.GetLock(resource, durability);
         
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Forwards a sequence create to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, long)> CreateSequence(
+        string node,
+        string name,
+        long initialValue,
+        long increment,
+        long? maxValue,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref sequenceForwardCallCount);
+            return await kahunaNode.CreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Forwards a sequence read to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(
+        string node,
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref sequenceForwardCallCount);
+            return await kahunaNode.GetSequence(name, durability, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Forwards a single-value allocation to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(
+        string node,
+        string name,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref sequenceForwardCallCount);
+            return await kahunaNode.NextSequenceValue(name, idempotencyKey, durability, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Forwards a multi-value allocation to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(
+        string node,
+        string name,
+        int count,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref sequenceForwardCallCount);
+            return await kahunaNode.ReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Forwards a sequence delete to the node that owns the sequence's partition.</summary>
+    public async Task<SequenceResponseType> DeleteSequence(
+        string node,
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref sequenceForwardCallCount);
+            return await kahunaNode.DeleteSequence(name, durability, cancellationToken);
+        }
+
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 

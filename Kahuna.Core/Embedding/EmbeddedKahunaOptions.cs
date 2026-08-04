@@ -84,6 +84,38 @@ public sealed class EmbeddedKahunaOptions
     public int BackgroundWriterWorkers { get; set; } = 1;
 
     /// <summary>
+    /// Number of sequence actors. Each sequence name is consistent-hash routed to one of them and served
+    /// single-threaded. A value &lt;= 0 auto-sizes.
+    /// </summary>
+    public int SequencerWorkers { get; set; } = Environment.ProcessorCount;
+
+    /// <summary>
+    /// Values reserved from a sequence's durable record per compare-and-swap. Allocations inside the
+    /// reserved block cost no storage traffic, so this is the number of values amortizing one Raft commit.
+    /// The trade is gaps: an abandoned block's tail is never issued. Set to <c>1</c> for gap-free
+    /// allocation at one commit per value.
+    /// </summary>
+    public int SequencerBlockSize { get; set; } = 1_000;
+
+    /// <summary>
+    /// Maximum idempotency entries retained per sequence record; older ones are dropped when the record is
+    /// written. A value &lt;= 0 disables the cap.
+    /// </summary>
+    public int SequencerIdempotencyRetentionMax { get; set; } = 256;
+
+    /// <summary>
+    /// Window within which retrying a keyed reserve replays the identical allocation. <see cref="TimeSpan.Zero"/>
+    /// disables age pruning.
+    /// </summary>
+    public TimeSpan SequencerIdempotencyRetentionTtl { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Maximum sequences one actor keeps resident before evicting the least recently used (abandoning
+    /// their blocks). A value &lt;= 0 leaves residency unbounded.
+    /// </summary>
+    public int SequencerMaxSequencesPerActor { get; set; } = 10_000;
+
+    /// <summary>
     /// Default session timeout (milliseconds) applied when a caller supplies a non-positive <c>Timeout</c>.
     /// A non-positive requested timeout resolves to this value — there is no "unbounded" mode; every session
     /// must have a finite deadline so the coordinator can reclaim abandoned sessions and their MVCC snapshots.

@@ -229,6 +229,11 @@ public class TestManyValuesReadTimestampGrpc
         public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<(SequenceResponseType, long)> CreateSequence(string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<SequenceResponseType> DeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<bool> OnLogRestored(int partitionId, RaftLog log) => throw new NotImplementedException();
         public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => throw new NotImplementedException();
         public void OnReplicationError(int partitionId, RaftLog log) => throw new NotImplementedException();

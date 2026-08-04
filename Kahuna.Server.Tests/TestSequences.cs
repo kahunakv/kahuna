@@ -1,11 +1,25 @@
+using System.Collections.Concurrent;
 using System.Text;
+using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Writes;
+using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
+using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
 
+/// <summary>
+/// Behaviour of the sequencer on a single embedded node: the semantics callers depend on (uniqueness,
+/// monotonicity, boundaries, idempotent replay, record compatibility) and the block reservation that
+/// makes allocation cheap.
+///
+/// <para>Several tests count the Raft entries a run actually proposes, by decoding the key-value
+/// replication payloads a recording batch executor sees. That is what proves values are being served
+/// from memory rather than from a per-value compare-and-swap — a green functional test cannot.</para>
+/// </summary>
 public sealed class TestSequences
 {
     private readonly ILoggerFactory loggerFactory;
@@ -15,42 +29,26 @@ public sealed class TestSequences
         loggerFactory = TestLogFactory.Create(outputHelper);
     }
 
+    // ── semantics ───────────────────────────────────────────────────────────────────────────────
+
     [Fact]
     public async Task TestCreateAndAllocateSequenceValues()
     {
         await using EmbeddedKahunaNode node = await StartNode();
         string name = "orders/" + Guid.NewGuid().ToString("N");
 
-        (SequenceResponseType response, long revision) = await node.Kahuna.LocateAndCreateSequence(
-            name,
-            0,
-            1,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        (SequenceResponseType response, long revision) = await Create(node, name);
 
         Assert.Equal(SequenceResponseType.Success, response);
         Assert.Equal(0, revision);
 
-        (response, SequenceAllocation allocation) = await node.Kahuna.LocateAndNextSequenceValue(
-            name,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        (response, SequenceAllocation allocation) = await Next(node, name);
 
         Assert.Equal(SequenceResponseType.Success, response);
         Assert.Equal(1, allocation.Start);
         Assert.Equal(1, allocation.End);
 
-        (response, allocation) = await node.Kahuna.LocateAndReserveSequenceRange(
-            name,
-            3,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        (response, allocation) = await AllocateRangeRaw(node, name, 3);
 
         Assert.Equal(SequenceResponseType.Success, response);
         Assert.Equal(2, allocation.Start);
@@ -63,57 +61,88 @@ public sealed class TestSequences
             TestContext.Current.CancellationToken
         );
 
+        // CurrentValue is the reserved high-water mark, not the last value handed out: four values have
+        // been issued, but a whole block was reserved to issue them from.
         Assert.Equal(SequenceResponseType.Success, response);
         Assert.NotNull(sequence);
-        Assert.Equal(4, sequence.CurrentValue);
+        Assert.Equal(DefaultBlockSize, sequence.CurrentValue);
+        Assert.Equal(1, sequence.Increment);
+        Assert.Equal(0, sequence.InitialValue);
     }
 
     [Fact]
-    public async Task TestSequenceIdempotencyAndMaxValue()
+    public async Task TestDuplicateCreateReportsAlreadyExists()
     {
         await using EmbeddedKahunaNode node = await StartNode();
-        string name = "invoice/" + Guid.NewGuid().ToString("N");
+        string name = "dup/" + Guid.NewGuid().ToString("N");
 
-        (SequenceResponseType response, _) = await node.Kahuna.LocateAndCreateSequence(
-            name,
-            0,
-            1,
-            2,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        (SequenceResponseType first, _) = await Create(node, name);
+        Assert.Equal(SequenceResponseType.Success, first);
 
-        Assert.Equal(SequenceResponseType.Success, response);
+        (SequenceResponseType second, _) = await Create(node, name);
+        Assert.Equal(SequenceResponseType.AlreadyExists, second);
+    }
 
-        (response, SequenceAllocation first) = await node.Kahuna.LocateAndNextSequenceValue(
-            name,
-            "retry-key",
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+    [Fact]
+    public async Task TestOperationsOnMissingSequenceReportNotFound()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "missing/" + Guid.NewGuid().ToString("N");
 
+        (SequenceResponseType next, _) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.NotFound, next);
+
+        (SequenceResponseType get, _) = await node.Kahuna.LocateAndGetSequence(
+            name, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.Equal(SequenceResponseType.NotFound, get);
+
+        SequenceResponseType delete = await node.Kahuna.LocateAndDeleteSequence(
+            name, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.Equal(SequenceResponseType.NotFound, delete);
+    }
+
+    [Fact]
+    public async Task TestDeleteDiscardsTheReservedBlock()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "recreate/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        (SequenceResponseType response, SequenceAllocation first) = await Next(node, name);
         Assert.Equal(SequenceResponseType.Success, response);
         Assert.Equal(1, first.Start);
 
-        (response, SequenceAllocation replayed) = await node.Kahuna.LocateAndNextSequenceValue(
-            name,
-            "retry-key",
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        Assert.Equal(SequenceResponseType.Success, await node.Kahuna.LocateAndDeleteSequence(
+            name, SequenceDurability.Persistent, TestContext.Current.CancellationToken));
 
+        // The actor still held a block spanning 2..DefaultBlockSize. Recreating the name must restart at
+        // the new record's initial value rather than drain the deleted incarnation's block.
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name, initialValue: 100)).Item1);
+
+        (response, SequenceAllocation afterRecreate) = await Next(node, name);
         Assert.Equal(SequenceResponseType.Success, response);
-        Assert.Equal(first, replayed);
+        Assert.Equal(101, afterRecreate.Start);
+    }
 
-        (response, _) = await node.Kahuna.LocateAndReserveSequenceRange(
-            name,
-            2,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+    [Fact]
+    public async Task TestNonDefaultIncrementIsHonouredAcrossBlockEdge()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 4);
+        string name = "step/" + Guid.NewGuid().ToString("N");
 
-        Assert.Equal(SequenceResponseType.MaxValueExceeded, response);
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name, initialValue: 0, increment: 5)).Item1);
+
+        List<long> issued = [];
+
+        for (int i = 0; i < 10; i++)
+        {
+            (SequenceResponseType response, SequenceAllocation allocation) = await Next(node, name);
+            Assert.Equal(SequenceResponseType.Success, response);
+            issued.Add(allocation.Start);
+        }
+
+        Assert.Equal(Enumerable.Range(1, 10).Select(x => (long)(x * 5)), issued);
     }
 
     [Fact]
@@ -122,16 +151,7 @@ public sealed class TestSequences
         await using EmbeddedKahunaNode node = await StartNode();
         string name = "concurrent/" + Guid.NewGuid().ToString("N");
 
-        (SequenceResponseType response, _) = await node.Kahuna.LocateAndCreateSequence(
-            name,
-            0,
-            1,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
-
-        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
 
         Task<long>[] tasks = Enumerable.Range(0, 100)
             .Select(_ => AllocateNext(node, name))
@@ -142,6 +162,382 @@ public sealed class TestSequences
         Assert.Equal(Enumerable.Range(1, 100).Select(x => (long)x), values.Order());
     }
 
+    /// <summary>
+    /// Mixed single and multi-value reserves racing block exhaustion. A run that does not fit in what is
+    /// left of a block takes a whole new one — never a split allocation — so values may be skipped, but
+    /// no value may be issued twice and every reserve must be internally contiguous.
+    /// </summary>
+    [Fact]
+    public async Task TestMixedReservesRacingBlockExhaustionStayUnique()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 4);
+        string name = "mixed/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        Task<SequenceAllocation>[] tasks = Enumerable.Range(0, 60)
+            .Select(i => AllocateRange(node, name, i % 3 == 0 ? 3 : 1))
+            .ToArray();
+
+        SequenceAllocation[] allocations = await Task.WhenAll(tasks);
+
+        HashSet<long> seen = [];
+
+        foreach (SequenceAllocation allocation in allocations)
+        {
+            Assert.Equal(allocation.Start + allocation.Count - 1, allocation.End);
+
+            for (long value = allocation.Start; value <= allocation.End; value++)
+                Assert.True(seen.Add(value), $"value {value} was issued more than once");
+        }
+
+        Assert.Equal(allocations.Sum(a => a.Count), seen.Count);
+    }
+
+    // ── boundaries ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task TestMaxValueLandingExactlyOnABlockEdge()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 4);
+        string name = "edge/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name, maxValue: 4)).Item1);
+
+        for (int i = 1; i <= 4; i++)
+        {
+            (SequenceResponseType response, SequenceAllocation allocation) = await Next(node, name);
+            Assert.Equal(SequenceResponseType.Success, response);
+            Assert.Equal(i, allocation.Start);
+        }
+
+        (SequenceResponseType exhausted, _) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.MaxValueExceeded, exhausted);
+    }
+
+    [Fact]
+    public async Task TestMaxValueInsideABlockTruncatesTheReservation()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "truncated/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name, maxValue: 3)).Item1);
+
+        for (int i = 1; i <= 3; i++)
+            Assert.Equal(i, (await Next(node, name)).Item2.Start);
+
+        (SequenceResponseType exhausted, _) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.MaxValueExceeded, exhausted);
+
+        // The reservation was clamped to the ceiling the maximum allows, never past it.
+        (_, ReadOnlySequenceEntry? sequence) = await node.Kahuna.LocateAndGetSequence(
+            name, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(sequence);
+        Assert.Equal(3, sequence.CurrentValue);
+    }
+
+    [Fact]
+    public async Task TestExhaustionMidBlockCostsNoWrite()
+    {
+        SequenceWriteRecorder recorder = new();
+        await using EmbeddedKahunaNode node = await StartNode(recorder: recorder);
+        string name = "nowrite/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name, maxValue: 2)).Item1);
+
+        Assert.Equal(1, (await Next(node, name)).Item2.Start);
+        Assert.Equal(2, (await Next(node, name)).Item2.Start);
+
+        int before = recorder.CountFor(name);
+
+        Assert.Equal(SequenceResponseType.MaxValueExceeded, (await Next(node, name)).Item1);
+        Assert.Equal(SequenceResponseType.MaxValueExceeded, (await AllocateRangeRaw(node, name, 5)).Item1);
+
+        Assert.Equal(before, recorder.CountFor(name));
+    }
+
+    /// <summary>
+    /// A sequence approaching <see cref="long.MaxValue"/> must clamp its reservation rather than wrap.
+    /// </summary>
+    [Fact]
+    public async Task TestOverflowNearLongMaxValueIsReportedNotWrapped()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "overflow/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success,
+            (await Create(node, name, initialValue: long.MaxValue - 3)).Item1);
+
+        for (int i = 3; i >= 1; i--)
+        {
+            (SequenceResponseType response, SequenceAllocation allocation) = await Next(node, name);
+            Assert.Equal(SequenceResponseType.Success, response);
+            Assert.Equal(long.MaxValue - i + 1, allocation.Start);
+        }
+
+        (SequenceResponseType exhausted, _) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.MaxValueExceeded, exhausted);
+    }
+
+    [Fact]
+    public async Task TestReserveLargerThanABlockIsServedContiguously()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 4);
+        string name = "wide/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        (SequenceResponseType response, SequenceAllocation allocation) = await AllocateRangeRaw(node, name, 25);
+
+        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(1, allocation.Start);
+        Assert.Equal(25, allocation.End);
+        Assert.Equal(25, allocation.Count);
+    }
+
+    [Fact]
+    public async Task TestInvalidInputIsRejected()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "invalid/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        Assert.Equal(SequenceResponseType.InvalidInput, (await AllocateRangeRaw(node, name, 0)).Item1);
+        Assert.Equal(SequenceResponseType.InvalidInput, (await AllocateRangeRaw(node, name, -1)).Item1);
+
+        // A reserved-prefix name is not addressable as a sequence.
+        (SequenceResponseType reserved, _) = await Next(node, "__kahuna:sequences:whatever");
+        Assert.Equal(SequenceResponseType.InvalidInput, reserved);
+
+        // Non-positive increments and a maximum below the initial value are refused at create.
+        Assert.Equal(SequenceResponseType.InvalidInput, (await Create(node, name + "-b", increment: 0)).Item1);
+        Assert.Equal(SequenceResponseType.InvalidInput, (await Create(node, name + "-c", initialValue: 10, maxValue: 5)).Item1);
+
+        // An idempotency key too large to length-prefix in the record is refused.
+        (SequenceResponseType oversized, _) = await node.Kahuna.LocateAndReserveSequenceRange(
+            name, 1, new string('k', 2000), SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+        Assert.Equal(SequenceResponseType.InvalidInput, oversized);
+    }
+
+    // ── block reservation ───────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The point of the whole design: N allocations cost ceil(N / blockSize) writes, not N.
+    /// </summary>
+    [Fact]
+    public async Task TestAllocationsAreAmortizedOverOneWritePerBlock()
+    {
+        SequenceWriteRecorder recorder = new();
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 10, recorder: recorder);
+        string name = "amortized/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        int afterCreate = recorder.CountFor(name);
+
+        for (int i = 0; i < 30; i++)
+            Assert.Equal(SequenceResponseType.Success, (await Next(node, name)).Item1);
+
+        Assert.Equal(3, recorder.CountFor(name) - afterCreate);
+    }
+
+    /// <summary>
+    /// A block size of one is the escape hatch for callers that cannot tolerate gaps: every value is
+    /// durably reserved before it is handed out, exactly as the pre-block implementation behaved.
+    /// </summary>
+    [Fact]
+    public async Task TestBlockSizeOneWritesOncePerValueAndLeavesNoGaps()
+    {
+        SequenceWriteRecorder recorder = new();
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 1, recorder: recorder);
+        string name = "gapfree/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        int afterCreate = recorder.CountFor(name);
+
+        for (int i = 1; i <= 12; i++)
+            Assert.Equal(i, (await Next(node, name)).Item2.Start);
+
+        Assert.Equal(12, recorder.CountFor(name) - afterCreate);
+
+        // With no block held, the record never runs ahead of the values actually issued.
+        (_, ReadOnlySequenceEntry? sequence) = await node.Kahuna.LocateAndGetSequence(
+            name, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(sequence);
+        Assert.Equal(12, sequence.CurrentValue);
+    }
+
+    [Fact]
+    public async Task TestPlainAllocationsInsideABlockTouchNoStorage()
+    {
+        SequenceWriteRecorder recorder = new();
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 100, recorder: recorder);
+        string name = "quiet/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        // The first allocation reserves the block.
+        Assert.Equal(SequenceResponseType.Success, (await Next(node, name)).Item1);
+
+        int afterFirstBlock = recorder.CountFor(name);
+
+        for (int i = 0; i < 50; i++)
+            Assert.Equal(SequenceResponseType.Success, (await Next(node, name)).Item1);
+
+        Assert.Equal(afterFirstBlock, recorder.CountFor(name));
+    }
+
+    /// <summary>
+    /// Surrendering leadership abandons the block. The next allocation restarts from the durable mark,
+    /// which produces a gap — and never a value the abandoned block could also have issued.
+    /// </summary>
+    [Fact]
+    public async Task TestLeadershipChangeAbandonsTheBlockLeavingAGap()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 100);
+        string name = "surrender/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+        Assert.Equal(1, (await Next(node, name)).Item2.Start);
+
+        await node.Kahuna.OnLeaderChanged(1, "someone-else");
+
+        (SequenceResponseType response, SequenceAllocation afterChange) = await Next(node, name);
+
+        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(101, afterChange.Start);
+    }
+
+    // ── idempotency ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task TestSequenceIdempotencyAndMaxValue()
+    {
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "invoice/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name, maxValue: 2)).Item1);
+
+        (SequenceResponseType response, SequenceAllocation first) = await Next(node, name, "retry-key");
+
+        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(1, first.Start);
+
+        (response, SequenceAllocation replayed) = await Next(node, name, "retry-key");
+
+        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(first, replayed);
+
+        (response, _) = await AllocateRangeRaw(node, name, 2);
+
+        Assert.Equal(SequenceResponseType.MaxValueExceeded, response);
+    }
+
+    /// <summary>
+    /// A keyed reserve is replayable across the block it was issued from being replaced, and across the
+    /// actor losing its state entirely — the record, not memory, is what makes the replay work.
+    /// </summary>
+    [Fact]
+    public async Task TestIdempotentReplaySurvivesBlockTurnoverAndActorLoss()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(blockSize: 4);
+        string name = "replay/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        (SequenceResponseType response, SequenceAllocation keyed) = await Next(node, name, "order-42");
+        Assert.Equal(SequenceResponseType.Success, response);
+
+        // Drain past the block edge so the record is rewritten several times over.
+        for (int i = 0; i < 12; i++)
+            Assert.Equal(SequenceResponseType.Success, (await Next(node, name)).Item1);
+
+        (response, SequenceAllocation afterBumps) = await Next(node, name, "order-42");
+        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(keyed, afterBumps);
+
+        // Dropping every resident block is what a leadership change or an eviction does; the replay must
+        // then be answered from the durable record.
+        await node.Kahuna.OnLeaderChanged(1, "someone-else");
+
+        (response, SequenceAllocation afterActorLoss) = await Next(node, name, "order-42");
+        Assert.Equal(SequenceResponseType.Success, response);
+        Assert.Equal(keyed, afterActorLoss);
+    }
+
+    [Fact]
+    public async Task TestKeyedReserveIsDurableBeforeItIsAnswered()
+    {
+        SequenceWriteRecorder recorder = new();
+        await using EmbeddedKahunaNode node = await StartNode(recorder: recorder);
+        string name = "durable/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+        Assert.Equal(SequenceResponseType.Success, (await Next(node, name)).Item1);
+
+        int afterBlock = recorder.CountFor(name);
+
+        Assert.Equal(SequenceResponseType.Success, (await Next(node, name, "keyed-1")).Item1);
+
+        // Mid-block, with no ceiling to move, the keyed request still writes: that write is what makes
+        // the allocation replayable after this node forgets it.
+        Assert.Equal(1, recorder.CountFor(name) - afterBlock);
+
+        // The replay is answered from memory and writes nothing further.
+        int afterKeyed = recorder.CountFor(name);
+        Assert.Equal(SequenceResponseType.Success, (await Next(node, name, "keyed-1")).Item1);
+        Assert.Equal(afterKeyed, recorder.CountFor(name));
+    }
+
+    /// <summary>
+    /// Idempotency entries are bounded, so a client that never reuses a key cannot grow the record
+    /// without limit — every keyed reserve used to be retained forever and re-serialized on every
+    /// subsequent operation.
+    /// </summary>
+    [Fact]
+    public async Task TestIdempotencyRetentionIsBounded()
+    {
+        await using EmbeddedKahunaNode node = await StartNode(idempotencyRetentionMax: 8);
+        string name = "retention/" + Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SequenceResponseType.Success, (await Create(node, name)).Item1);
+
+        for (int i = 0; i < 40; i++)
+            Assert.Equal(SequenceResponseType.Success, (await Next(node, name, "key-" + i)).Item1);
+
+        (KeyValueResponseType getResponse, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero,
+            "__kahuna:sequences:" + name,
+            -1,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken
+        );
+
+        Assert.Equal(KeyValueResponseType.Get, getResponse);
+        Assert.NotNull(entry?.Value);
+
+        // Each retained entry costs roughly 100 bytes here (its key, the sequence name, four numbers and
+        // a timestamp), so 8 of them fit comfortably under 1.5 KB while the 40 an unbounded record would
+        // hold could not.
+        Assert.True(entry.Value.Length < 1_500, $"record grew to {entry.Value.Length} bytes despite the retention cap");
+
+        // The most recent key still replays; the oldest has been reclaimed and allocates fresh values.
+        (SequenceResponseType recent, SequenceAllocation recentAllocation) = await Next(node, name, "key-39");
+        Assert.Equal(SequenceResponseType.Success, recent);
+        Assert.Equal(40, recentAllocation.Start);
+
+        (SequenceResponseType evicted, SequenceAllocation evictedAllocation) = await Next(node, name, "key-0");
+        Assert.Equal(SequenceResponseType.Success, evicted);
+        Assert.Equal(41, evictedAllocation.Start);
+    }
+
+    // ── record compatibility ────────────────────────────────────────────────────────────────────
+
     [Fact]
     public async Task TestReadsLegacyJsonRecordAndUpgradesToBinary()
     {
@@ -150,7 +546,7 @@ public sealed class TestSequences
 
         // Seed a record in the pre-binary JSON format (System.Text.Json Web shape) directly at the
         // sequencer's storage key, including a populated idempotency map. New nodes never write this
-        // format, so only a hand-seeded blob exercises the Deserialize JSON branch (value[0] == '{').
+        // format, so only a hand-seeded blob exercises the JSON branch (value[0] == '{').
         string legacyJson =
             """
             {"name":"NAME","currentValue":10,"initialValue":0,"increment":1,"maxValue":null,"createdAt":{"n":0,"l":0,"c":0},"updatedAt":{"n":0,"l":0,"c":0},"idempotency":{"reserve:legacy-key":{"name":"NAME","start":5,"end":5,"count":1,"revision":0}}}
@@ -181,33 +577,22 @@ public sealed class TestSequences
         Assert.NotNull(sequence);
         Assert.Equal(10, sequence.CurrentValue);
 
-        // Idempotency replay returns the allocation seeded in the legacy map (no write occurs), proving
-        // the legacy idempotency dictionary deserialized correctly.
-        (SequenceResponseType replayResponse, SequenceAllocation replayed) = await node.Kahuna.LocateAndNextSequenceValue(
-            name,
-            "legacy-key",
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        // Idempotency replay returns the allocation seeded in the legacy map (no allocation occurs),
+        // proving the legacy idempotency dictionary deserialized correctly.
+        (SequenceResponseType replayResponse, SequenceAllocation replayed) = await Next(node, name, "legacy-key");
 
         Assert.Equal(SequenceResponseType.Success, replayResponse);
         Assert.Equal(5, replayed.Start);
         Assert.Equal(5, replayed.End);
 
-        // A fresh allocation reads the legacy record, allocates from CurrentValue=10, and rewrites it in
-        // the new binary format via CAS — the read-legacy → write-binary upgrade path.
-        (SequenceResponseType nextResponse, SequenceAllocation allocated) = await node.Kahuna.LocateAndNextSequenceValue(
-            name,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        // A fresh allocation reads the legacy record, reserves a block from CurrentValue=10, and rewrites
+        // it in the current binary format via compare-and-swap — the read-legacy → write-current upgrade.
+        (SequenceResponseType nextResponse, SequenceAllocation allocated) = await Next(node, name);
 
         Assert.Equal(SequenceResponseType.Success, nextResponse);
         Assert.Equal(11, allocated.Start);
         Assert.Equal(11, allocated.End);
 
-        // The upgraded record (now binary) round-trips on a subsequent read.
         (SequenceResponseType finalResponse, ReadOnlySequenceEntry? upgraded) = await node.Kahuna.LocateAndGetSequence(
             name,
             SequenceDurability.Persistent,
@@ -216,32 +601,192 @@ public sealed class TestSequences
 
         Assert.Equal(SequenceResponseType.Success, finalResponse);
         Assert.NotNull(upgraded);
-        Assert.Equal(11, upgraded.CurrentValue);
+        Assert.Equal(10 + DefaultBlockSize, upgraded.CurrentValue);
     }
 
-    private async Task<EmbeddedKahunaNode> StartNode()
+    /// <summary>
+    /// Records written by the first binary format carried no per-entry timestamp. They must still read,
+    /// replay, and migrate forward on the next write.
+    /// </summary>
+    [Fact]
+    public async Task TestReadsBinaryRecordWithoutEntryTimestamps()
     {
-        EmbeddedKahunaNode node = new(new()
+        await using EmbeddedKahunaNode node = await StartNode();
+        string name = "binaryv1/" + Guid.NewGuid().ToString("N");
+
+        (KeyValueResponseType setResponse, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero,
+            "__kahuna:sequences:" + name,
+            BinaryRecordWithoutEntryTimestamps(name, currentValue: 20, idempotencyKey: "reserve:v1-key", allocated: 7),
+            null,
+            -1,
+            KeyValueFlags.Set,
+            0,
+            KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken
+        );
+
+        Assert.Equal(KeyValueResponseType.Set, setResponse);
+
+        (SequenceResponseType getResponse, ReadOnlySequenceEntry? sequence) = await node.Kahuna.LocateAndGetSequence(
+            name, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SequenceResponseType.Success, getResponse);
+        Assert.NotNull(sequence);
+        Assert.Equal(20, sequence.CurrentValue);
+
+        (SequenceResponseType replayResponse, SequenceAllocation replayed) = await Next(node, name, "v1-key");
+        Assert.Equal(SequenceResponseType.Success, replayResponse);
+        Assert.Equal(7, replayed.Start);
+
+        (SequenceResponseType nextResponse, SequenceAllocation allocated) = await Next(node, name);
+        Assert.Equal(SequenceResponseType.Success, nextResponse);
+        Assert.Equal(21, allocated.Start);
+    }
+
+    // ── harness ─────────────────────────────────────────────────────────────────────────────────
+
+    private const int DefaultBlockSize = 1000;
+
+    /// <summary>
+    /// Counts the Raft entries a run proposes against a sequence's storage key, by decoding the key-value
+    /// replication payloads the batch executor is handed.
+    /// </summary>
+    private sealed class SequenceWriteRecorder : IPartitionBatchExecutor
+    {
+        private IPartitionBatchExecutor inner = null!;
+
+        private readonly ConcurrentDictionary<string, int> writes = new();
+
+        public IPartitionBatchExecutor Wrap(IPartitionBatchExecutor real)
+        {
+            inner = real;
+            return this;
+        }
+
+        public int CountFor(string sequenceName) =>
+            writes.GetValueOrDefault("__kahuna:sequences:" + sequenceName);
+
+        public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
+        {
+            foreach (RaftProposalEntry entry in entries)
+            {
+                if (entry.Type != ReplicationTypes.KeyValues)
+                    continue;
+
+                string key = ReplicationSerializer.UnserializeKeyValueMessage(entry.Data).Key;
+
+                if (key.StartsWith("__kahuna:sequences:", StringComparison.Ordinal))
+                    writes.AddOrUpdate(key, 1, static (_, current) => current + 1);
+            }
+
+            return inner.ReplicateAsync(partitionId, entries, cancellationToken);
+        }
+    }
+
+    private async Task<EmbeddedKahunaNode> StartNode(
+        int blockSize = DefaultBlockSize,
+        int idempotencyRetentionMax = 256,
+        SequenceWriteRecorder? recorder = null
+    )
+    {
+        EmbeddedKahunaOptions options = new()
         {
             Storage = "memory",
             WalStorage = "memory",
-            InitialPartitions = 1
-        }, loggerFactory);
+            InitialPartitions = 1,
+            SequencerBlockSize = blockSize,
+            SequencerIdempotencyRetentionMax = idempotencyRetentionMax
+        };
+
+        if (recorder is not null)
+            options.WriteBatchExecutorDecorator = recorder.Wrap;
+
+        EmbeddedKahunaNode node = new(options, loggerFactory);
 
         await node.StartAsync(TestContext.Current.CancellationToken);
         return node;
     }
 
+    private static Task<(SequenceResponseType, long)> Create(
+        EmbeddedKahunaNode node,
+        string name,
+        long initialValue = 0,
+        long increment = 1,
+        long? maxValue = null
+    ) => node.Kahuna.LocateAndCreateSequence(
+        name, initialValue, increment, maxValue, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+    private static Task<(SequenceResponseType, SequenceAllocation)> Next(
+        EmbeddedKahunaNode node,
+        string name,
+        string? idempotencyKey = null
+    ) => node.Kahuna.LocateAndNextSequenceValue(
+        name, idempotencyKey, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+    private static Task<(SequenceResponseType, SequenceAllocation)> AllocateRangeRaw(
+        EmbeddedKahunaNode node,
+        string name,
+        int count
+    ) => node.Kahuna.LocateAndReserveSequenceRange(
+        name, count, null, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
     private static async Task<long> AllocateNext(EmbeddedKahunaNode node, string name)
     {
-        (SequenceResponseType response, SequenceAllocation allocation) = await node.Kahuna.LocateAndNextSequenceValue(
-            name,
-            null,
-            SequenceDurability.Persistent,
-            TestContext.Current.CancellationToken
-        );
+        (SequenceResponseType response, SequenceAllocation allocation) = await Next(node, name);
 
         Assert.Equal(SequenceResponseType.Success, response);
         return allocation.Start;
+    }
+
+    private static async Task<SequenceAllocation> AllocateRange(EmbeddedKahunaNode node, string name, int count)
+    {
+        (SequenceResponseType response, SequenceAllocation allocation) = await AllocateRangeRaw(node, name, count);
+
+        Assert.Equal(SequenceResponseType.Success, response);
+        return allocation;
+    }
+
+    /// <summary>
+    /// Builds a record in the first binary format: version byte 1, and idempotency entries carrying no
+    /// timestamp. Hand-built because nothing writes this shape any more.
+    /// </summary>
+    private static byte[] BinaryRecordWithoutEntryTimestamps(string name, long currentValue, string idempotencyKey, long allocated)
+    {
+        using MemoryStream stream = new();
+        using BinaryWriter writer = new(stream);
+
+        void WriteString(string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value);
+            writer.Write((ushort)bytes.Length);
+            writer.Write(bytes);
+        }
+
+        void WriteTimestamp()
+        {
+            writer.Write(0);
+            writer.Write(0L);
+            writer.Write(0u);
+        }
+
+        writer.Write((byte)1);
+        WriteString(name);
+        writer.Write(currentValue);
+        writer.Write(0L);           // InitialValue
+        writer.Write(1L);           // Increment
+        writer.Write((byte)0);      // no MaxValue
+        WriteTimestamp();           // CreatedAt
+        WriteTimestamp();           // UpdatedAt
+        writer.Write(1);            // idempotency entry count
+        WriteString(idempotencyKey);
+        WriteString(name);
+        writer.Write(allocated);    // Start
+        writer.Write(allocated);    // End
+        writer.Write(1);            // Count
+        writer.Write(0L);           // Revision
+
+        writer.Flush();
+        return stream.ToArray();
     }
 }

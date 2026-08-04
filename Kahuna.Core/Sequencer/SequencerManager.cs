@@ -1,41 +1,158 @@
-using System.Buffers.Binary;
-using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
-using System.Text.Json;
+using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.Sequencer.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
+using Kommander;
 using Kommander.Time;
-using Polly.Contrib.WaitAndRetry;
+using Nixie;
+using Nixie.Routers;
 
 namespace Kahuna.Server.Sequencer;
 
+/// <summary>
+/// Entry point for sequence operations.
+///
+/// <para>Routing mirrors locks: <see cref="SequenceLocator"/> resolves the leader for the sequence's
+/// partition and forwards there, and the owning node dispatches to the <see cref="SequenceActor"/> that
+/// holds the name — so a sequence has one owning actor in the cluster, and its ceiling bump is a local
+/// write against a record on the same partition.</para>
+///
+/// <para>Allocation state lives in the actors, not here: routing every increment through a full
+/// read-modify-write of a general-purpose key-value record made each value cost a Raft commit. The
+/// actors reserve blocks instead; see <see cref="SequenceActor"/>.</para>
+/// </summary>
 internal sealed class SequencerManager
 {
-    private const int MaxRetries = 64;
+    private const string ReservedPrefix = SequenceActor.ReservedPrefix;
 
-    private const string ReservedPrefix = "__kahuna:sequences:";
-
-    // Format marker stored as byte 0 in every newly written record.
-    // Existing JSON records start with '{' (0x7B), which is never a valid version byte here.
-    private const byte BinaryFormatVersion = 1;
-
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    /// <summary>
+    /// Longest accepted idempotency key, in UTF-8 bytes. Generous for a key while keeping the encoded
+    /// record's 2-byte length prefixes valid.
+    /// </summary>
+    private const int MaxIdempotencyKeyBytes = SequenceStateCodec.MaxIdempotencyKeyBytes;
 
     private readonly KeyValuesManager keyValues;
 
-    private readonly ILogger<IKahuna> logger;
+    private readonly List<IActorRef<SequenceActor, SequenceRequest, SequenceResponse>> instances;
 
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> sequenceLocks = new();
+    private readonly IActorRef<ConsistentHashActor<SequenceActor, SequenceRequest, SequenceResponse>, SequenceRequest, SequenceResponse> router;
 
-    public SequencerManager(KeyValuesManager keyValues, ILogger<IKahuna> logger)
+    private readonly SequenceLocator locator;
+
+    public SequencerManager(
+        ActorSystem actorSystem,
+        IRaft raft,
+        IInterNodeCommunication interNodeCommunication,
+        KeyValuesManager keyValues,
+        KahunaConfiguration configuration,
+        ILogger<IKahuna> logger
+    )
     {
         this.keyValues = keyValues;
-        this.logger = logger;
+
+        // At least one actor: a consistent-hash router over an empty pool has nothing to hash against.
+        int workers = Math.Max(1, configuration.SequencerWorkers);
+
+        instances = new(workers);
+
+        for (int i = 0; i < workers; i++)
+            instances.Add(actorSystem.Spawn<SequenceActor, SequenceRequest, SequenceResponse>(
+                "sequence-" + i,
+                keyValues,
+                raft,
+                configuration,
+                logger
+            ));
+
+        router = actorSystem.CreateConsistentHashRouter(instances);
+
+        locator = new(this, raft, interNodeCommunication, logger);
     }
 
-    public async Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(
+    // ── locating entry points ───────────────────────────────────────────────────────────────────
+
+    public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
+            return Task.FromResult<(SequenceResponseType, ReadOnlySequenceEntry?)>((error, null));
+
+        return locator.LocateAndGetSequence(normalizedName, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, long)> LocateAndCreateSequence(
+        string name,
+        long initialValue,
+        long increment,
+        long? maxValue,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
+            return Task.FromResult((error, -1L));
+
+        if (increment <= 0 || maxValue.HasValue && maxValue.Value < initialValue)
+            return Task.FromResult((SequenceResponseType.InvalidInput, -1L));
+
+        return locator.LocateAndCreateSequence(normalizedName, initialValue, increment, maxValue, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(
+        string name,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return LocateAndReserveSequenceRange(name, 1, idempotencyKey, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(
+        string name,
+        int count,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
+            return Task.FromResult((error, default(SequenceAllocation)));
+
+        if (!TryValidateReserve(count, idempotencyKey, out string? normalizedIdempotencyKey))
+            return Task.FromResult((SequenceResponseType.InvalidInput, default(SequenceAllocation)));
+
+        return locator.LocateAndReserveSequenceRange(normalizedName, count, normalizedIdempotencyKey, durability, cancellationToken);
+    }
+
+    public Task<SequenceResponseType> LocateAndDeleteSequence(
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
+            return Task.FromResult(error);
+
+        return locator.LocateAndDeleteSequence(normalizedName, durability, cancellationToken);
+    }
+
+    // ── owning-node entry points ────────────────────────────────────────────────────────────────
+    // Reached once this node is established as the leader for the sequence's partition, either by the
+    // locator above or by another node forwarding here.
+
+    /// <summary>
+    /// Reads the durable record. Deliberately off the actor path: it reports the reserved high-water
+    /// mark, which is what an observer of the sequence should see, and keeping reads out of the actor's
+    /// mailbox means a stream of them cannot delay allocations.
+    /// </summary>
+    public async Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(
         string name,
         SequenceDurability durability,
         CancellationToken cancellationToken
@@ -46,7 +163,7 @@ internal sealed class SequencerManager
 
         (KeyValueResponseType response, ReadOnlyKeyValueEntry? entry) = await keyValues.LocateAndTryGetValue(
             HLCTimestamp.Zero,
-            GetStorageKey(normalizedName),
+            SequenceActor.GetStorageKey(normalizedName),
             -1,
             HLCTimestamp.Zero,
             ToKeyValueDurability(durability),
@@ -57,16 +174,16 @@ internal sealed class SequencerManager
             return (SequenceResponseType.NotFound, null);
 
         if (response != KeyValueResponseType.Get || entry?.Value is null)
-            return (Map(response), null);
+            return (SequenceActor.Map(response), null);
 
-        SequenceState? state = Deserialize(entry.Value);
+        SequenceState? state = SequenceStateCodec.Deserialize(entry.Value);
         if (state is null)
             return (SequenceResponseType.Error, null);
 
         return (SequenceResponseType.Success, ToReadOnlyEntry(state, entry.Revision, durability));
     }
 
-    public async Task<(SequenceResponseType, long)> LocateAndCreateSequence(
+    public async Task<(SequenceResponseType, long)> CreateSequence(
         string name,
         long initialValue,
         long increment,
@@ -81,49 +198,29 @@ internal sealed class SequencerManager
         if (increment <= 0 || maxValue.HasValue && maxValue.Value < initialValue)
             return (SequenceResponseType.InvalidInput, -1);
 
-        HLCTimestamp now = HLCTimestamp.Zero;
-        SequenceState state = new()
-        {
-            Name = normalizedName,
-            CurrentValue = initialValue,
-            InitialValue = initialValue,
-            Increment = increment,
-            MaxValue = maxValue,
-            CreatedAt = now,
-            UpdatedAt = now
-        };
+        SequenceResponse? response = await router.Ask(new SequenceRequest(
+            SequenceRequestType.Create,
+            normalizedName,
+            initialValue: initialValue,
+            increment: increment,
+            maxValue: maxValue,
+            cancellationToken: cancellationToken
+        )).ConfigureAwait(false);
 
-        (KeyValueResponseType response, long revision, _) = await keyValues.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero,
-            GetStorageKey(normalizedName),
-            Serialize(state),
-            null,
-            -1,
-            KeyValueFlags.SetIfNotExists,
-            0,
-            ToKeyValueDurability(durability),
-            cancellationToken
-        ).ConfigureAwait(false);
-
-        return response switch
-        {
-            KeyValueResponseType.Set => (SequenceResponseType.Success, revision),
-            KeyValueResponseType.NotSet => (SequenceResponseType.AlreadyExists, -1),
-            _ => (Map(response), revision)
-        };
+        return response is null ? (SequenceResponseType.Error, -1) : (response.Type, response.Revision);
     }
 
-    public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(
+    public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(
         string name,
         string? idempotencyKey,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return LocateAndReserveSequenceRange(name, 1, idempotencyKey, durability, cancellationToken);
+        return ReserveSequenceRange(name, 1, idempotencyKey, durability, cancellationToken);
     }
 
-    public async Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(
+    public async Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(
         string name,
         int count,
         string? idempotencyKey,
@@ -134,85 +231,21 @@ internal sealed class SequencerManager
         if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
             return (error, default);
 
-        if (count <= 0)
+        if (!TryValidateReserve(count, idempotencyKey, out string? normalizedIdempotencyKey))
             return (SequenceResponseType.InvalidInput, default);
 
-        // Reject idempotency keys whose UTF-8 encoding would overflow the 2-byte length prefix.
-        // 1024 bytes is generous for a key and keeps the binary frame well within ushort.MaxValue.
-        if (idempotencyKey is not null && Encoding.UTF8.GetByteCount(idempotencyKey.Trim()) > 1024)
-            return (SequenceResponseType.InvalidInput, default);
+        SequenceResponse? response = await router.Ask(new SequenceRequest(
+            SequenceRequestType.Reserve,
+            normalizedName,
+            count,
+            normalizedIdempotencyKey,
+            cancellationToken: cancellationToken
+        )).ConfigureAwait(false);
 
-        SemaphoreSlim sequenceLock = sequenceLocks.GetOrAdd(normalizedName, _ => new(1, 1));
-        await sequenceLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-        try
-        {
-            string? idempotencyKeyName = string.IsNullOrWhiteSpace(idempotencyKey) ? null : $"reserve:{idempotencyKey.Trim()}";
-
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
-            {
-                (KeyValueResponseType getResponse, ReadOnlyKeyValueEntry? entry) = await keyValues.LocateAndTryGetValue(
-                    HLCTimestamp.Zero,
-                    GetStorageKey(normalizedName),
-                    -1,
-                    HLCTimestamp.Zero,
-                    ToKeyValueDurability(durability),
-                    cancellationToken
-                ).ConfigureAwait(false);
-
-                if (getResponse == KeyValueResponseType.DoesNotExist)
-                    return (SequenceResponseType.NotFound, default);
-
-                if (getResponse != KeyValueResponseType.Get || entry?.Value is null)
-                    return (Map(getResponse), default);
-
-                SequenceState? state = Deserialize(entry.Value);
-                if (state is null)
-                    return (SequenceResponseType.Error, default);
-
-                if (idempotencyKeyName is not null && state.Idempotency.TryGetValue(idempotencyKeyName, out SequenceAllocation allocation))
-                    return (SequenceResponseType.Success, allocation);
-
-                if (!TryAllocate(state, count, entry.Revision, out SequenceAllocation nextAllocation, out SequenceResponseType allocateError))
-                    return (allocateError, default);
-
-                if (idempotencyKeyName is not null)
-                    state.Idempotency[idempotencyKeyName] = nextAllocation;
-
-                (KeyValueResponseType setResponse, _, _) = await keyValues.LocateAndTrySetKeyValue(
-                    HLCTimestamp.Zero,
-                    GetStorageKey(normalizedName),
-                    Serialize(state),
-                    null,
-                    entry.Revision,
-                    KeyValueFlags.SetIfEqualToRevision,
-                    0,
-                    ToKeyValueDurability(durability),
-                    cancellationToken
-                ).ConfigureAwait(false);
-
-                if (setResponse == KeyValueResponseType.Set)
-                    return (SequenceResponseType.Success, nextAllocation);
-
-                if (setResponse is KeyValueResponseType.NotSet or KeyValueResponseType.MustRetry)
-                {
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                return (Map(setResponse), default);
-            }
-
-            logger.LogWarning("Sequence allocation exhausted retries for {Name}", normalizedName);
-            return (SequenceResponseType.MustRetry, default);
-        }
-        finally
-        {
-            sequenceLock.Release();
-        }
+        return response is null ? (SequenceResponseType.Error, default) : (response.Type, response.Allocation);
     }
 
-    public async Task<SequenceResponseType> LocateAndDeleteSequence(
+    public async Task<SequenceResponseType> DeleteSequence(
         string name,
         SequenceDurability durability,
         CancellationToken cancellationToken
@@ -221,55 +254,29 @@ internal sealed class SequencerManager
         if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
             return error;
 
-        (KeyValueResponseType response, _, _) = await keyValues.LocateAndTryDeleteKeyValue(
-            HLCTimestamp.Zero,
-            GetStorageKey(normalizedName),
-            ToKeyValueDurability(durability),
-            cancellationToken
-        ).ConfigureAwait(false);
+        SequenceResponse? response = await router.Ask(new SequenceRequest(
+            SequenceRequestType.Delete,
+            normalizedName,
+            cancellationToken: cancellationToken
+        )).ConfigureAwait(false);
 
-        return response switch
-        {
-            KeyValueResponseType.Deleted => SequenceResponseType.Success,
-            KeyValueResponseType.DoesNotExist => SequenceResponseType.NotFound,
-            _ => Map(response)
-        };
+        return response?.Type ?? SequenceResponseType.Error;
     }
 
-    private static bool TryAllocate(
-        SequenceState state,
-        int count,
-        long sourceRevision,
-        out SequenceAllocation allocation,
-        out SequenceResponseType error
-    )
+    /// <summary>
+    /// Discards every reserved block on this node when partition leadership moves. A block is per-node
+    /// state a new leader cannot reconstruct, so it is surrendered rather than drained once the revision
+    /// chain it was won against has changed hands. The abandoned values become gaps.
+    /// </summary>
+    public void OnLeaderChanged()
     {
-        allocation = default;
-        error = SequenceResponseType.Success;
+        SequenceRequest invalidate = new(SequenceRequestType.Invalidate, "");
 
-        try
-        {
-            long start = checked(state.CurrentValue + state.Increment);
-            long end = checked(state.CurrentValue + state.Increment * count);
-
-            if (state.MaxValue.HasValue && end > state.MaxValue.Value)
-            {
-                error = SequenceResponseType.MaxValueExceeded;
-                return false;
-            }
-
-            state.CurrentValue = end;
-            state.UpdatedAt = HLCTimestamp.Zero;
-
-            allocation = new(state.Name, start, end, count, sourceRevision);
-            return true;
-        }
-        catch (OverflowException)
-        {
-            error = SequenceResponseType.MaxValueExceeded;
-            return false;
-        }
+        foreach (IActorRef<SequenceActor, SequenceRequest, SequenceResponse> instance in instances)
+            instance.Send(invalidate);
     }
+
+    // ── validation ──────────────────────────────────────────────────────────────────────────────
 
     private static bool TryValidate(string name, SequenceDurability durability, out string normalizedName, out SequenceResponseType error)
     {
@@ -288,9 +295,15 @@ internal sealed class SequencerManager
         return true;
     }
 
-    private static string GetStorageKey(string name)
+    private static bool TryValidateReserve(int count, string? idempotencyKey, out string? normalizedIdempotencyKey)
     {
-        return ReservedPrefix + name;
+        normalizedIdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim();
+
+        if (count <= 0)
+            return false;
+
+        // Reject idempotency keys whose UTF-8 encoding would overflow the record's 2-byte length prefix.
+        return normalizedIdempotencyKey is null || Encoding.UTF8.GetByteCount(normalizedIdempotencyKey) <= MaxIdempotencyKeyBytes;
     }
 
     private static KeyValueDurability ToKeyValueDurability(SequenceDurability durability)
@@ -315,194 +328,5 @@ internal sealed class SequencerManager
             state.CreatedAt,
             state.UpdatedAt
         );
-    }
-
-    private static SequenceResponseType Map(KeyValueResponseType response)
-    {
-        return response switch
-        {
-            KeyValueResponseType.DoesNotExist => SequenceResponseType.NotFound,
-            KeyValueResponseType.NotSet => SequenceResponseType.AlreadyExists,
-            KeyValueResponseType.InvalidInput => SequenceResponseType.InvalidInput,
-            KeyValueResponseType.MustRetry => SequenceResponseType.MustRetry,
-            KeyValueResponseType.Aborted => SequenceResponseType.Aborted,
-            _ => SequenceResponseType.Error
-        };
-    }
-
-    private static byte[] Serialize(SequenceState state)
-    {
-        // Size with GetByteCount (allocation-free) and encode straight into the buffer span below;
-        // no per-string temporary byte[] are materialised.
-        int nameLen = Encoding.UTF8.GetByteCount(state.Name);
-
-        int size = 1                                           // version
-            + 2 + nameLen                                     // name
-            + 8 + 8 + 8                                       // CurrentValue, InitialValue, Increment
-            + 1 + (state.MaxValue.HasValue ? 8 : 0)           // MaxValue flag + optional value
-            + 16 + 16                                          // CreatedAt, UpdatedAt
-            + 4;                                               // idempotency count
-
-        foreach (KeyValuePair<string, SequenceAllocation> kvp in state.Idempotency)
-            size += 2 + Encoding.UTF8.GetByteCount(kvp.Key)
-                  + 2 + Encoding.UTF8.GetByteCount(kvp.Value.Name)
-                  + 8 + 8 + 4 + 8;
-
-        byte[] buf = new byte[size];
-        int pos = 0;
-
-        buf[pos++] = BinaryFormatVersion;
-
-        pos = WriteString(buf, pos, state.Name, nameLen, "Sequence name");
-
-        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), state.CurrentValue); pos += 8;
-        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), state.InitialValue); pos += 8;
-        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), state.Increment); pos += 8;
-
-        if (state.MaxValue.HasValue)
-        {
-            buf[pos++] = 1;
-            BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), state.MaxValue.Value); pos += 8;
-        }
-        else
-        {
-            buf[pos++] = 0;
-        }
-
-        WriteHlcTimestamp(buf, ref pos, state.CreatedAt);
-        WriteHlcTimestamp(buf, ref pos, state.UpdatedAt);
-
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), state.Idempotency.Count); pos += 4;
-
-        foreach (KeyValuePair<string, SequenceAllocation> kvp in state.Idempotency)
-        {
-            pos = WriteString(buf, pos, kvp.Key, Encoding.UTF8.GetByteCount(kvp.Key), "Idempotency key");
-            pos = WriteString(buf, pos, kvp.Value.Name, Encoding.UTF8.GetByteCount(kvp.Value.Name), "Allocation name");
-
-            BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), kvp.Value.Start); pos += 8;
-            BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), kvp.Value.End); pos += 8;
-            BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), kvp.Value.Count); pos += 4;
-            BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), kvp.Value.Revision); pos += 8;
-        }
-
-        return buf;
-    }
-
-    /// <summary>Writes a 2-byte length prefix then the UTF-8 bytes of <paramref name="value"/>
-    /// (whose byte length must equal <paramref name="byteLen"/>) directly into <paramref name="buf"/>.</summary>
-    private static int WriteString(byte[] buf, int pos, string value, int byteLen, string label)
-    {
-        Debug.Assert(byteLen <= ushort.MaxValue, $"{label} UTF-8 exceeds ushort range");
-        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(pos), (ushort)byteLen); pos += 2;
-        Encoding.UTF8.GetBytes(value.AsSpan(), buf.AsSpan(pos, byteLen)); pos += byteLen;
-        return pos;
-    }
-
-    private static void WriteHlcTimestamp(byte[] buf, ref int pos, HLCTimestamp ts)
-    {
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), ts.N); pos += 4;
-        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), ts.L); pos += 8;
-        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(pos), ts.C); pos += 4;
-    }
-
-    // Backward-compat: records written before this version start with '{' (0x7B).
-    private static SequenceState? Deserialize(byte[] value)
-    {
-        if (value.Length == 0)
-            return null;
-
-        return value[0] == (byte)'{'
-            ? JsonSerializer.Deserialize<SequenceState>(value, JsonOptions)
-            : DeserializeBinary(value);
-    }
-
-    private static SequenceState? DeserializeBinary(byte[] value)
-    {
-        try
-        {
-            ReadOnlySpan<byte> span = value;
-            int pos = 0;
-
-            if (span[pos++] != BinaryFormatVersion)
-                return null;
-
-            ushort nameLen = BinaryPrimitives.ReadUInt16LittleEndian(span[pos..]); pos += 2;
-            string name = Encoding.UTF8.GetString(span.Slice(pos, nameLen)); pos += nameLen;
-
-            long currentValue = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-            long initialValue = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-            long increment = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-
-            long? maxValue = null;
-            if (span[pos++] != 0)
-            {
-                maxValue = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-            }
-
-            HLCTimestamp createdAt = ReadHlcTimestamp(span, ref pos);
-            HLCTimestamp updatedAt = ReadHlcTimestamp(span, ref pos);
-
-            int idempotencyCount = BinaryPrimitives.ReadInt32LittleEndian(span[pos..]); pos += 4;
-            Dictionary<string, SequenceAllocation> idempotency = new(idempotencyCount);
-
-            for (int i = 0; i < idempotencyCount; i++)
-            {
-                ushort keyLen = BinaryPrimitives.ReadUInt16LittleEndian(span[pos..]); pos += 2;
-                string key = Encoding.UTF8.GetString(span.Slice(pos, keyLen)); pos += keyLen;
-
-                ushort aNameLen = BinaryPrimitives.ReadUInt16LittleEndian(span[pos..]); pos += 2;
-                string aName = Encoding.UTF8.GetString(span.Slice(pos, aNameLen)); pos += aNameLen;
-
-                long start = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-                long end = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-                int count = BinaryPrimitives.ReadInt32LittleEndian(span[pos..]); pos += 4;
-                long revision = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-
-                idempotency[key] = new SequenceAllocation(aName, start, end, count, revision);
-            }
-
-            return new SequenceState
-            {
-                Name = name,
-                CurrentValue = currentValue,
-                InitialValue = initialValue,
-                Increment = increment,
-                MaxValue = maxValue,
-                CreatedAt = createdAt,
-                UpdatedAt = updatedAt,
-                Idempotency = idempotency
-            };
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
-
-    private static HLCTimestamp ReadHlcTimestamp(ReadOnlySpan<byte> span, ref int pos)
-    {
-        int n = BinaryPrimitives.ReadInt32LittleEndian(span[pos..]); pos += 4;
-        long l = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
-        uint c = BinaryPrimitives.ReadUInt32LittleEndian(span[pos..]); pos += 4;
-        return new HLCTimestamp(n, l, c);
-    }
-
-    private sealed class SequenceState
-    {
-        public string Name { get; set; } = "";
-
-        public long CurrentValue { get; set; }
-
-        public long InitialValue { get; set; }
-
-        public long Increment { get; set; }
-
-        public long? MaxValue { get; set; }
-
-        public HLCTimestamp CreatedAt { get; set; }
-
-        public HLCTimestamp UpdatedAt { get; set; }
-
-        public Dictionary<string, SequenceAllocation> Idempotency { get; set; } = [];
     }
 }

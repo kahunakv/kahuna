@@ -212,7 +212,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
         flushNotificationSink.OnKeyValueFlushed = keyValues.NotifyFlushed;
-        this.sequencer = new(keyValues, logger);
+        this.sequencer = new(actorSystem, raft, interNodeCommunication, keyValues, configuration, logger);
 
         // Register the key-range data-movement hook once, here, so every host (embedded,
         // server, tests) gets it uniformly without reaching across the internal API boundary.
@@ -1530,6 +1530,57 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         return sequencer.LocateAndDeleteSequence(name, durability, cancellationToken);
     }
+
+    public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.GetSequence(name, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, long)> CreateSequence(
+        string name,
+        long initialValue,
+        long increment,
+        long? maxValue,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.CreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(
+        string name,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.NextSequenceValue(name, idempotencyKey, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(
+        string name,
+        int count,
+        string? idempotencyKey,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.ReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
+    }
+
+    public Task<SequenceResponseType> DeleteSequence(
+        string name,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.DeleteSequence(name, durability, cancellationToken);
+    }
     
     public async Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
@@ -1569,8 +1620,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
         keyValues.OnReplicationError(log);
     }
 
-    public Task<bool> OnLeaderChanged(int partitionId, string node) =>
-        keyValues.OnLeaderChanged(partitionId, node);
+    public Task<bool> OnLeaderChanged(int partitionId, string node)
+    {
+        // Sequence blocks are reserved against a specific record revision on a specific partition.
+        // Once that partition changes hands, surrender the blocks rather than keep draining them.
+        sequencer.OnLeaderChanged();
+
+        return keyValues.OnLeaderChanged(partitionId, node);
+    }
 
     internal Task RunCollectOnAllInstancesAsync() => keyValues.RunCollectOnAllInstancesAsync();
 
