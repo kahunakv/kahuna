@@ -141,7 +141,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
     {
         this.actorSystem = actorSystem;
 
-        persistenceBackend = preSeededBackend;
+        // Overlay of committed-but-unflushed key-value writes: between a Raft apply and the periodic
+        // background flush the raw backend is behind the node's commit frontier, so a cache-missing
+        // read (most visibly on a freshly promoted partition leader) would answer DoesNotExist for a
+        // durably committed key. Wrapping here puts every consumer — actors, scans, the background
+        // writer, PITR — behind the overlay uniformly.
+        persistenceBackend = new UnflushedOverlayPersistenceBackend(preSeededBackend, new UnflushedKeyValueWritesIndex());
 
         // The scheduler only logs its own defensive errors through this logger; production hosts pass a real
         // ILogger<IRaft>, while test harnesses that omit it get a silent sink.

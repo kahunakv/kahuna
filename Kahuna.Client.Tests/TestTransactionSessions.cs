@@ -24,7 +24,7 @@ public class TestTransactionSessions
 
     [Theory, CombinatorialData]
     public async Task TestTransactionSessionCommit(
-        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
@@ -63,7 +63,7 @@ public class TestTransactionSessions
 
     [Theory, CombinatorialData]
     public async Task TestTransactionSessionRollback(
-        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
@@ -101,7 +101,7 @@ public class TestTransactionSessions
 
     [Theory, CombinatorialData]
     public async Task TestTransactionSessionWithMultipleOperations(
-        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
@@ -183,7 +183,7 @@ public class TestTransactionSessions
 
     [Theory, CombinatorialData]
     public async Task TestTransactionSessionWithPessimisticLocking(
-        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
@@ -241,7 +241,7 @@ public class TestTransactionSessions
 
     [Theory, CombinatorialData]
     public async Task TestRetryableTransactionSuccess(
-        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {
@@ -273,7 +273,7 @@ public class TestTransactionSessions
 
     [Theory, CombinatorialData]
     public async Task TestTransactionSessionTimeout(
-        [CombinatorialValues(KahunaCommunicationType.Grpc)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
         [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
     )
     {

@@ -751,8 +751,14 @@ internal sealed class KeyValuesManager : IDisposable
             logger
         );
 
-        restorer = new(backgroundWriter, raft, completionReceiptStore, logger);
-        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger);
+        // The unflushed-writes overlay travels with the decorated backend; the replicator and restorer
+        // record queued writes into it synchronously so reads observe them before the flush lands. A
+        // raw (undecorated) backend — some direct-construction tests — yields null and the recording
+        // becomes a no-op, restoring pre-overlay behavior.
+        UnflushedKeyValueWritesIndex? unflushedWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
+
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites);
+        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the

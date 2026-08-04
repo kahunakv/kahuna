@@ -128,12 +128,83 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task representing the asynchronous operation, with a response indicating the result of the set operation.</returns>
     public override async Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValue(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)
     {
+        if (RejectUnregisteredTransactionalSetMany(request) is { } rejected)
+            return rejected;
+
         return await TrySetManyKeyValueInternal(request, context);
     }
 
     public override async Task<GrpcTryDeleteManyKeyValueResponse> TryDeleteManyKeyValue(GrpcTryDeleteManyKeyValueRequest request, ServerCallContext context)
     {
+        if (RejectUnregisteredTransactionalDeleteMany(request) is { } rejected)
+            return rejected;
+
         return await TryDeleteManyKeyValueInternal(request, context);
+    }
+
+    // A transactional batch operation arriving from a client without coordinator registration identity can
+    // never commit: the server owns the transaction working set, so an unregistered effect is invisible to
+    // commit, which would report Committed while writing nothing (and an unregistered read skips read-set
+    // validation). Rejecting at the client boundary turns that silent loss into a visible InvalidInput.
+    // The already-routed inter-node fan-out (KeyValueServerBatcher → *Internal) legitimately carries
+    // transactional items without identity — registration lives on the origin node — so only the
+    // client-facing entry points apply these checks.
+
+    internal static GrpcTrySetManyKeyValueResponse? RejectUnregisteredTransactionalSetMany(GrpcTrySetManyKeyValueRequest request)
+    {
+        // The set-many wire carries no registration identity, so any transactional item is unregistered.
+        bool transactional = false;
+        foreach (GrpcTrySetManyKeyValueRequestItem item in request.Items)
+        {
+            if (item.TransactionIdNode != 0 || item.TransactionIdPhysical != 0 || item.TransactionIdCounter != 0)
+            {
+                transactional = true;
+                break;
+            }
+        }
+
+        if (!transactional)
+            return null;
+
+        GrpcTrySetManyKeyValueResponse response = new();
+        foreach (GrpcTrySetManyKeyValueRequestItem item in request.Items)
+            response.Items.Add(new GrpcTrySetManyKeyValueResponseItem
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        return response;
+    }
+
+    internal static GrpcTryDeleteManyKeyValueResponse? RejectUnregisteredTransactionalDeleteMany(GrpcTryDeleteManyKeyValueRequest request)
+    {
+        // Delete-many can register (batch-level identity); reject only when identity is absent.
+        if (request is { HasCoordinatorKey: true, HasOperationIdHigh: true, HasOperationIdLow: true } && !string.IsNullOrEmpty(request.CoordinatorKey))
+            return null;
+
+        bool transactional = false;
+        foreach (GrpcTryDeleteManyKeyValueRequestItem item in request.Items)
+        {
+            if (item.TransactionIdNode != 0 || item.TransactionIdPhysical != 0 || item.TransactionIdCounter != 0)
+            {
+                transactional = true;
+                break;
+            }
+        }
+
+        if (!transactional)
+            return null;
+
+        GrpcTryDeleteManyKeyValueResponse response = new();
+        foreach (GrpcTryDeleteManyKeyValueRequestItem item in request.Items)
+            response.Items.Add(new GrpcTryDeleteManyKeyValueResponseItem
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        return response;
     }
     
     /// <summary>
@@ -383,6 +454,21 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     public override async Task<GrpcTryGetManyValuesResponse> TryGetManyValues(GrpcTryGetManyValuesRequest request, ServerCallContext context)
     {
+        // The get-many wire carries no registration identity: a transactional batch read from a client
+        // would skip read-set registration and silently weaken isolation, so it is rejected outright.
+        if (request.TransactionIdNode != 0 || request.TransactionIdPhysical != 0 || request.TransactionIdCounter != 0)
+        {
+            GrpcTryGetManyValuesResponse rejected = new();
+            foreach (GrpcTryManyValuesRequestItem item in request.Items)
+                rejected.Items.Add(new GrpcTryGetManyValuesResponseItem
+                {
+                    Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                    Key = item.Key,
+                    Durability = item.Durability
+                });
+            return rejected;
+        }
+
         // A client sends the whole batch to one node as a unary RPC without routing per key, so this endpoint must
         // route each key to its partition leader itself — exactly as the single-key TryGetKeyValue does. Reading
         // the local actors directly (TryGetManyValuesInternal) returns this node's own state, which for a key whose
@@ -486,6 +572,21 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     public override async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValues(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
     {
+        // Same rejection as TryGetManyValues: no identity on the wire means a transactional batch
+        // existence check cannot register its read set.
+        if (request.TransactionIdNode != 0 || request.TransactionIdPhysical != 0 || request.TransactionIdCounter != 0)
+        {
+            GrpcTryExistsManyValuesResponse rejected = new();
+            foreach (GrpcTryManyValuesRequestItem item in request.Items)
+                rejected.Items.Add(new GrpcTryExistsManyValuesResponseItem
+                {
+                    Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                    Key = item.Key,
+                    Durability = item.Durability
+                });
+            return rejected;
+        }
+
         // Route per key for the same reason as TryGetManyValues: the non-locating internal reads only this node's
         // actors and is correct only on the already-routed inter-node path.
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
@@ -1885,7 +1986,28 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
         TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
 
-        OperationCompletionPayload payload = new()
+        OperationCompletionPayload payload = FromGrpcCompleteOperationRequest(request);
+
+        (KeyValueResponseType outcome, string? recordAnchorKey) = await keyValues.CompleteOperationInbound(request.CoordinatorKey, transactionId, operationId, payload);
+
+        GrpcCompleteOperationResponse response = new()
+        {
+            Acknowledged = outcome == KeyValueResponseType.Set
+        };
+        if (recordAnchorKey is not null)
+            response.RecordAnchorKey = recordAnchorKey;
+
+        return response;
+    }
+
+    /// <summary>
+    /// Restores the completion payload from the inter-node request — the inverse of the sender-side
+    /// mapping. Every effect-bearing field must be restored here; a dropped field silently narrows the
+    /// coordinator's working set.
+    /// </summary>
+    internal static OperationCompletionPayload FromGrpcCompleteOperationRequest(GrpcCompleteOperationRequest request)
+    {
+        return new()
         {
             ModifiedKey = request.HasModifiedKey ? request.ModifiedKey : null,
             AcquiredPointLock = request.HasAcquiredPointLock ? request.AcquiredPointLock : null,
@@ -1898,22 +2020,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList(),
             ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList(),
             StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList(),
+            AcquiredPointLocks = request.AcquiredPointLocks.Count == 0 ? null : request.AcquiredPointLocks.Select(l => (l.Key, (KeyValueDurability)l.Durability)).ToList(),
             Durability = (KeyValueDurability)request.Durability,
             CachedType = (KeyValueResponseType)request.CachedType,
             CachedRevision = request.CachedRevision,
             CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter)
         };
-
-        (KeyValueResponseType outcome, string? recordAnchorKey) = await keyValues.CompleteOperationInbound(request.CoordinatorKey, transactionId, operationId, payload);
-
-        GrpcCompleteOperationResponse response = new()
-        {
-            Acknowledged = outcome == KeyValueResponseType.Set
-        };
-        if (recordAnchorKey is not null)
-            response.RecordAnchorKey = recordAnchorKey;
-
-        return response;
     }
 
     /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>

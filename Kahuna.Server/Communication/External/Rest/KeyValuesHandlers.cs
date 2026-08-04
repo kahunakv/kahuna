@@ -33,9 +33,11 @@ public static class KeyValuesHandlers
                 request.CompareValue,
                 request.CompareRevision,
                 request.Flags,
-                request.ExpiresMs, 
+                request.ExpiresMs,
                 request.Durability,
-                cancellationToken
+                cancellationToken,
+                coordinatorKey: request.CoordinatorKey ?? "",
+                operationId: new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
 
             return new KahunaSetKeyValueResponse
@@ -52,11 +54,13 @@ public static class KeyValuesHandlers
                 return new() { Type = KeyValueResponseType.InvalidInput };
 
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
-                request.TransactionId, 
+                request.TransactionId,
                 request.Key,
                 request.ExpiresMs,
                 request.Durability,
-                cancellationToken
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
 
             return new KahunaExtendKeyValueResponse
@@ -112,10 +116,12 @@ public static class KeyValuesHandlers
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
-                request.TransactionId, 
+                request.TransactionId,
                 request.Key,
                 request.Durability,
-                cancellationToken
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
 
             return new KahunaDeleteKeyValueResponse
@@ -182,6 +188,23 @@ public static class KeyValuesHandlers
                 };
             }
 
+            // The set-many wire carries no registration identity, so a transactional item cannot register
+            // with the coordinator and its write would be silently invisible to commit. Reject it rather
+            // than accept an operation that can never commit.
+            if (request.Items.Any(static i => i.TransactionId != HLCTimestamp.Zero))
+            {
+                return new KahunaSetManyKeyValueResponse
+                {
+                    Items = request.Items.Select(static i => new KahunaSetKeyValueResponseItem
+                    {
+                        Key = i.Key ?? "",
+                        Durability = i.Durability,
+                        Type = KeyValueResponseType.InvalidInput
+                    }).ToList(),
+                    TimeElapsedMs = 0
+                };
+            }
+
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
             List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
@@ -213,11 +236,31 @@ public static class KeyValuesHandlers
                 };
             }
 
+            // Delete-many can register (batch-level identity); a transactional batch without it cannot
+            // register with the coordinator, so its effect would be silently invisible to commit.
+            TransactionOperationId deleteOperationId = new(request.OperationIdHigh, request.OperationIdLow);
+            if ((string.IsNullOrEmpty(request.CoordinatorKey) || deleteOperationId.IsEmpty) &&
+                request.Items.Any(static i => i.TransactionId != HLCTimestamp.Zero))
+            {
+                return new KahunaDeleteManyKeyValueResponse
+                {
+                    Items = request.Items.Select(static i => new KahunaDeleteKeyValueResponseItem
+                    {
+                        Key = i.Key ?? "",
+                        Durability = i.Durability,
+                        Type = KeyValueResponseType.InvalidInput
+                    }).ToList(),
+                    TimeElapsedMs = 0
+                };
+            }
+
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
             List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
                 request.Items,
-                cancellationToken
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                deleteOperationId
             );
 
             return new KahunaDeleteManyKeyValueResponse
@@ -241,7 +284,9 @@ public static class KeyValuesHandlers
                 request.Revision,
                 request.ReadTimestamp,
                 request.Durability,
-                cancellationToken
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
         
             if (keyValueContext is not null)
@@ -279,7 +324,9 @@ public static class KeyValuesHandlers
                 request.Revision,
                 request.ReadTimestamp,
                 request.Durability,
-                cancellationToken
+                cancellationToken,
+                request.CoordinatorKey ?? "",
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
         
             if (keyValueContext is not null)
@@ -328,6 +375,11 @@ public static class KeyValuesHandlers
             if (request.Items is null)
                 return new KahunaManyKeyValuesResponse { Items = [], TimeElapsedMs = 0 };
 
+            // No registration identity on this wire: a transactional batch read would skip read-set
+            // registration and silently weaken isolation, so it is rejected outright.
+            if (request.TransactionId != HLCTimestamp.Zero)
+                return RejectTransactionalManyKeyValues(request);
+
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
             List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
@@ -348,6 +400,11 @@ public static class KeyValuesHandlers
         {
             if (request.Items is null)
                 return new KahunaManyKeyValuesResponse { Items = [], TimeElapsedMs = 0 };
+
+            // Same rejection as try-get-many: no identity on this wire means a transactional batch
+            // existence check cannot register its read set.
+            if (request.TransactionId != HLCTimestamp.Zero)
+                return RejectTransactionalManyKeyValues(request);
 
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -639,6 +696,24 @@ public static class KeyValuesHandlers
             (HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
             return new KahunaGetSnapshotFloorResponse { EffectiveFloor = floor, LiveHolds = liveHolds };
         });
+    }
+
+    /// <summary>
+    /// Rejection response for a transactional batch read arriving without registration identity: one
+    /// InvalidInput item per requested key, so callers correlating by key see every entry rejected.
+    /// </summary>
+    private static KahunaManyKeyValuesResponse RejectTransactionalManyKeyValues(KahunaManyKeyValuesRequest request)
+    {
+        return new()
+        {
+            Items = request.Items!.Select(static i => new KahunaGetManyKeyValuesResponseItem
+            {
+                Key = i.Key ?? "",
+                Durability = i.Durability,
+                Type = KeyValueResponseType.InvalidInput
+            }).ToList(),
+            TimeElapsedMs = 0
+        };
     }
 
     private static List<(string key, long revision, KeyValueDurability durability)> GetManyRequestKeys(List<KahunaGetManyKeyValuesRequestItem> items)

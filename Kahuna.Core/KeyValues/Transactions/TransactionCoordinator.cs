@@ -1129,8 +1129,17 @@ internal sealed class TransactionCoordinator : IDisposable
     /// </summary>
     internal async Task TwoPhaseCommit(TransactionContext context, CancellationToken cancellationToken)
     {
-        if (context.LocksAcquired is null || context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
+        if (context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
             return;
+
+        // A transaction that modified keys but holds no lock set cannot prepare its mutations. Committing
+        // it as an empty no-op would silently drop the writes (the caller would see Committed), so the
+        // only honest outcome is a retryable abort.
+        if (context.LocksAcquired is null)
+        {
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction modified keys but holds no lock set" };
+            return;
+        }
 
         // A Durable-mode transaction promises crash-atomicity, which an ephemeral (in-memory) mutation cannot
         // provide — so a Durable transaction that modified any ephemeral key is rejected outright, before the

@@ -102,6 +102,14 @@ internal sealed class KeyValueContext
 
     public IPersistenceBackend PersistenceBackend  { get; }
 
+    /// <summary>
+    /// Overlay of committed-but-unflushed key-value writes, carried by the decorated persistence
+    /// backend. Write-committing handlers record into it synchronously before enqueueing to the
+    /// background writer so reads observe the commit before the flush lands. Null for ephemeral
+    /// contexts (no backend) and for tests constructed over a raw backend.
+    /// </summary>
+    public UnflushedKeyValueWritesIndex? UnflushedWrites { get; }
+
     public BTree<string, KeyValueEntry> Store  { get; }
     
     public Dictionary<string, KeyValueWriteIntent> LocksByPrefix  { get; }
@@ -177,6 +185,7 @@ internal sealed class KeyValueContext
         BackgroundWriter = backgroundWriter;
         WriteAggregator = writeAggregator;
         PersistenceBackend = persistenceBackend;
+        UnflushedWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
         PointReadExecutor = persistenceBackend is null ? null! : KeyValuePointReadExecutor.For(persistenceBackend);
         Raft = raft;
         BackendReadScheduler = backendReadScheduler;

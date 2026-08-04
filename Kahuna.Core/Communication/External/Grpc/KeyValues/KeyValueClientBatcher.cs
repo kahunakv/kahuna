@@ -212,7 +212,12 @@ internal sealed class KeyValueClientBatcher
         ServerCallContext context
     )
     {
-        GrpcTrySetManyKeyValueResponse trySetResponse = await service.TrySetManyKeyValueInternal(setKeyRequest, context);
+        // Client-facing entry: a transactional batch without registration identity can never commit, so
+        // reject it here exactly as the unary endpoint does (the inter-node batcher stays unguarded —
+        // its already-routed fan-out legitimately carries transactional items without identity).
+        GrpcTrySetManyKeyValueResponse trySetResponse =
+            KeyValuesService.RejectUnregisteredTransactionalSetMany(setKeyRequest)
+            ?? await service.TrySetManyKeyValueInternal(setKeyRequest, context);
         
         GrpcBatchClientKeyValueResponse response = new()
         {
@@ -232,7 +237,10 @@ internal sealed class KeyValueClientBatcher
         ServerCallContext context
     )
     {
-        GrpcTryDeleteManyKeyValueResponse tryDeleteManyResponse = await service.TryDeleteManyKeyValueInternal(deleteManyKeyRequest, context);
+        // Client-facing entry: reject an unregistered transactional batch exactly as the unary endpoint does.
+        GrpcTryDeleteManyKeyValueResponse tryDeleteManyResponse =
+            KeyValuesService.RejectUnregisteredTransactionalDeleteMany(deleteManyKeyRequest)
+            ?? await service.TryDeleteManyKeyValueInternal(deleteManyKeyRequest, context);
 
         GrpcBatchClientKeyValueResponse response = new()
         {

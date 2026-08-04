@@ -446,8 +446,6 @@ public class RestCommunication : IKahunaCommunication
         TransactionOperationId operationId = default
     )
     {
-        // The REST transport does not yet forward register-remote operation identity; coordinatorKey
-        // and operationId are accepted to satisfy the shared communication contract but are not sent.
         KahunaSetKeyValueRequest request = new()
         {
             TransactionId = transactionId,
@@ -455,7 +453,10 @@ public class RestCommunication : IKahunaCommunication
             Value = value,
             ExpiresMs = expiryTime,
             Flags = flags,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
@@ -544,12 +545,19 @@ public class RestCommunication : IKahunaCommunication
         TransactionOperationId operationId = default
     )
     {
-        // REST does not yet forward batch operation identity to the coordinator; the anchored
-        // register-remote path is exercised over gRPC.
+        // The whole batch registers as one coordinator operation so its confirmed persistent keys anchor
+        // the transaction record deterministically. Absent for the non-transactional batch path.
         KahunaDeleteManyKeyValueRequest request = new()
         {
             Items = [.. requestItems]
         };
+
+        if (!string.IsNullOrEmpty(coordinatorKey) && !operationId.IsEmpty)
+        {
+            request.CoordinatorKey = coordinatorKey;
+            request.OperationIdHigh = operationId.High;
+            request.OperationIdLow = operationId.Low;
+        }
 
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteManyKeyValueRequest);
 
@@ -645,7 +653,10 @@ public class RestCommunication : IKahunaCommunication
             CompareValue = compareValue,
             ExpiresMs = expiryTime,
             Flags = KeyValueFlags.SetIfEqualToValue,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
@@ -730,7 +741,10 @@ public class RestCommunication : IKahunaCommunication
             CompareRevision = compareRevision,
             ExpiresMs = expiryTime,
             Flags = KeyValueFlags.SetIfEqualToRevision,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
@@ -810,7 +824,10 @@ public class RestCommunication : IKahunaCommunication
             Key = key,
             Revision = revision,
             ReadTimestamp = readTimestamp,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
@@ -892,7 +909,10 @@ public class RestCommunication : IKahunaCommunication
             Key = key,
             Revision = revision,
             ReadTimestamp = readTimestamp,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExistsKeyValueRequest);
@@ -967,7 +987,10 @@ public class RestCommunication : IKahunaCommunication
         {
             TransactionId = transactionId,
             Key = key,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteKeyValueRequest);
@@ -1044,7 +1067,10 @@ public class RestCommunication : IKahunaCommunication
             TransactionId = transactionId,
             Key = key,
             ExpiresMs = expiresMs,
-            Durability = durability
+            Durability = durability,
+            CoordinatorKey = coordinatorKey,
+            OperationIdHigh = operationId.High,
+            OperationIdLow = operationId.Low
         };
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExtendKeyValueRequest);

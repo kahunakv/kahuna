@@ -39,7 +39,8 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
 
     private (RaftManager, KahunaManager) BuildNode(
         int nodeId, int port, string[] peers,
-        MemoryInterNodeCommmunication interNode, InMemoryCommunication comm)
+        MemoryInterNodeCommmunication interNode, InMemoryCommunication comm,
+        string storage = "memory")
     {
         ActorSystem actorSystem = new(logger: raftLogger);
 
@@ -75,8 +76,11 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
             LocksWorkers              = 8,
             KeyValueWorkers           = 8,
             BackgroundWriterWorkers   = 1,
-            Storage                   = "memory",
-            StoragePath               = "/tmp",
+            Storage                   = storage,
+            StoragePath               = storage == "memory"
+                ? "/tmp"
+                : Directory.CreateDirectory(
+                    Path.Combine(Path.GetTempPath(), $"kahuna-failover-{storage}-{Guid.NewGuid():N}")).FullName,
             StorageRevision           = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration     = TimeSpan.FromMinutes(1),
@@ -93,7 +97,7 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
         return (raft, kahuna);
     }
 
-    private async Task<Node[]> Assemble()
+    private async Task<Node[]> Assemble(string storage = "memory")
     {
         MemoryInterNodeCommmunication interNode = new();
         InMemoryCommunication comm = new();
@@ -102,9 +106,9 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
         string[] p2 = ["localhost:9300", "localhost:9302"];
         string[] p3 = ["localhost:9300", "localhost:9301"];
 
-        (RaftManager r1, KahunaManager k1) = BuildNode(1, 9300, p1, interNode, comm);
-        (RaftManager r2, KahunaManager k2) = BuildNode(2, 9301, p2, interNode, comm);
-        (RaftManager r3, KahunaManager k3) = BuildNode(3, 9302, p3, interNode, comm);
+        (RaftManager r1, KahunaManager k1) = BuildNode(1, 9300, p1, interNode, comm, storage);
+        (RaftManager r2, KahunaManager k2) = BuildNode(2, 9301, p2, interNode, comm, storage);
+        (RaftManager r3, KahunaManager k3) = BuildNode(3, 9302, p3, interNode, comm, storage);
 
         interNode.SetNodes(new() { { "localhost:9300", k1 }, { "localhost:9301", k2 }, { "localhost:9302", k3 } });
         comm.SetNodes(new() { { "localhost:9300", r1 }, { "localhost:9301", r2 }, { "localhost:9302", r3 } });
@@ -415,6 +419,121 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
             Assert.NotNull(entry);
             Assert.Equal(rev2, entry!.Revision);
             Assert.Equal(value2, entry.Value);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// The un-warmed promotion path: a key is written and acknowledged but never read anywhere, so the
+    /// entry is resident only where the write-path apply put it — no cache is warmed. Every data
+    /// partition leader then steps down. A read of the committed key must never come back
+    /// <c>DoesNotExist</c> on any node: the key exists, so the only honest answers during the
+    /// transition are the value or a retryable <c>MustRetry</c>. A terminal absence tells
+    /// read-then-act callers (conditional create, CAS loops, existence checks) that durably
+    /// committed state was never written. The adjacent terminal answers are asserted for the same
+    /// window: an existence probe must not answer absent, and a SetIfNotExists must not succeed
+    /// against the committed key. Runs against all three persistence backends — the absence window
+    /// comes from the shared asynchronous-flush shape, not from any single backend.
+    /// </summary>
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("sqlite")]
+    [InlineData("rocksdb")]
+    public async Task PromotedLeader_UnwarmedKey_NeverReadsAsAbsent(string storage)
+    {
+        Node[] nodes = await Assemble(storage);
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            // ── phase 1: write and acknowledge — deliberately no warming, no reads ──────────
+            byte[] value = "durable"u8.ToArray();
+            (KeyValueResponseType setType, long revision, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, "unwarmed-key", value,
+                    null, 0, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.Set, setType);
+            Assert.True(revision >= 0);
+
+            // ── phase 2: force promotion on every data partition ────────────────────────────
+            for (int p = 1; p <= 2; p++)
+            {
+                Node oldLeader = await LeaderOf(p, nodes);
+                await oldLeader.Raft.StepDownAsync(p, ct);
+            }
+
+            for (int p = 1; p <= 2; p++)
+                await WaitForAnyLeader(p, nodes[0].Raft, nodes[1].Raft, nodes[2].Raft);
+
+            // ── phase 3: read from every node until a terminal answer, tracking any absence ──
+            // MustRetry during the transition is acceptable; DoesNotExist is the defect. The loop
+            // records how long the absence window lasts so a shortened-but-open window is visible.
+            long start = Environment.TickCount64;
+            long deadline = start + (long)(10_000 * TimingScale);
+
+            for (int n = 0; n < nodes.Length; n++)
+            {
+                bool sawAbsent = false;
+                long firstAbsentAt = 0, recoveredAt = 0;
+
+                while (true)
+                {
+                    (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
+                        await nodes[n].Kahuna.LocateAndTryGetValue(
+                            HLCTimestamp.Zero, "unwarmed-key", -1, HLCTimestamp.Zero,
+                            KeyValueDurability.Persistent, ct);
+
+                    if (type == KeyValueResponseType.Get)
+                    {
+                        Assert.NotNull(entry);
+                        Assert.Equal(revision, entry!.Revision);
+                        recoveredAt = Environment.TickCount64;
+                        break;
+                    }
+
+                    if (type == KeyValueResponseType.DoesNotExist)
+                    {
+                        if (!sawAbsent)
+                            firstAbsentAt = Environment.TickCount64;
+                        sawAbsent = true;
+                    }
+                    else
+                        Assert.Equal(KeyValueResponseType.MustRetry, type);
+
+                    if (Environment.TickCount64 >= deadline)
+                        Assert.Fail($"node {n + 1}: no terminal Get within deadline (sawAbsent={sawAbsent})");
+
+                    await Task.Delay(20, ct);
+                }
+
+                Assert.False(sawAbsent,
+                    $"node {n + 1}: committed key read as DoesNotExist after step-down " +
+                    $"(absence window ~{recoveredAt - firstAbsentAt} ms before recovering)");
+            }
+
+            // ── phase 4: the adjacent terminal answers must hold in the same window ──────────
+            // An existence probe must not answer absent for the committed key…
+            while (true)
+            {
+                (KeyValueResponseType existsType, _) = await nodes[0].Kahuna.LocateAndTryExistsValue(
+                    HLCTimestamp.Zero, "unwarmed-key", -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, ct);
+                if (existsType == KeyValueResponseType.Exists)
+                    break;
+                Assert.NotEqual(KeyValueResponseType.DoesNotExist, existsType);
+                Assert.Equal(KeyValueResponseType.MustRetry, existsType);
+                await Task.Delay(20, ct);
+            }
+
+            // …and a SetIfNotExists must not succeed against it.
+            (KeyValueResponseType condType, _, _) = await RetrySet(() =>
+                nodes[0].Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, "unwarmed-key", "usurper"u8.ToArray(),
+                    null, 0, KeyValueFlags.SetIfNotExists, 0, KeyValueDurability.Persistent, ct));
+            Assert.Equal(KeyValueResponseType.NotSet, condType);
         }
         finally
         {
