@@ -4,6 +4,7 @@ using Kommander.Communication.Grpc;
 using Microsoft.Extensions.Logging;
 
 using Google.Protobuf;
+using Grpc.Core;
 using Grpc.Net.Client;
 using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
@@ -28,7 +29,7 @@ namespace Kahuna.Server.Communication.Internode;
 /// This implementation facilitates distributed locking, key-value operations, and other
 /// inter-node coordination mechanisms.
 /// </summary>
-public class GrpcInterNodeCommunication : IInterNodeCommunication
+public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 {
     private readonly ConcurrentDictionary<string, Lazy<GrpcServerBatcher>> batchers = new();
 
@@ -1442,7 +1443,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampCounter = options.ReadTimestamp.C,
         };
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response;
+
+        try
+        {
+            response = await batcher.Enqueue(request);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            // The leader was resolved but died or became unreachable before answering. No session
+            // was opened, so a retry (ideally against another node) is unconditionally safe — tell
+            // the caller that instead of leaking the transport failure as a server error.
+            LogTransactionForwardingFailed(logger, "StartTransaction", node, ex.StatusCode);
+
+            return (KeyValueResponseType.MustRetry, TransactionHandle.None);
+        }
+
         GrpcStartTransactionResponse remoteResponse = response.StartTransaction!;
 
         remoteResponse.ServedFrom = $"https://{node}";
@@ -1471,7 +1487,23 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         if (handle.RecordAnchorKey is not null)
             request.RecordAnchorKey = handle.RecordAnchorKey;
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response;
+
+        try
+        {
+            response = await batcher.Enqueue(request);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            // The commit may or may not have been applied before the transport died — MustRetry
+            // preserves that indeterminacy: the commit path is idempotent and a retry (carrying the
+            // record anchor when one exists) consults the session or the durable decision to
+            // resolve the true outcome. Hand the caller's own anchor back so the retry keeps it.
+            LogTransactionForwardingFailed(logger, "CommitTransaction", node, ex.StatusCode);
+
+            return (KeyValueResponseType.MustRetry, handle.RecordAnchorKey);
+        }
+
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
 
         remoteResponse.ServedFrom = $"https://{node}";
@@ -1495,7 +1527,22 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
         if (handle.RecordAnchorKey is not null)
             request.RecordAnchorKey = handle.RecordAnchorKey;
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response;
+
+        try
+        {
+            response = await batcher.Enqueue(request);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            // Same indeterminacy contract as commit: rollback is idempotent and a retry consults
+            // the session or the durable decision (via the anchor), so MustRetry is safe and a
+            // decided commit can never be undone by the retried rollback.
+            LogTransactionForwardingFailed(logger, "RollbackTransaction", node, ex.StatusCode);
+
+            return KeyValueResponseType.MustRetry;
+        }
+
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
 
         remoteResponse.ServedFrom = $"https://{node}";
@@ -2176,4 +2223,15 @@ public class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         return new(() => new(url, logger));
     }
+
+    /// <summary>
+    /// True for transport failures that mean the remote node was unreachable or stopped answering —
+    /// killed, partitioned away, or too slow — where surfacing MustRetry lets the caller re-route.
+    /// Other status codes (e.g. an application error on the remote) still propagate as exceptions.
+    /// </summary>
+    private static bool IsRetryableTransportFailure(RpcException ex) =>
+        ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded or StatusCode.Cancelled;
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Operation} forwarding to {Node} failed with transport status {StatusCode}, returning MustRetry")]
+    private static partial void LogTransactionForwardingFailed(ILogger<GrpcInterNodeCommunication> logger, string operation, string node, StatusCode statusCode);
 }

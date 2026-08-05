@@ -21,10 +21,10 @@ internal readonly record struct StagedMutation(byte[]? Value, long Revision, lon
 /// <para>Fidelity note: value/revision/expiry/<c>NoRevision</c> are exact — a <c>SET NOREV</c> materializes
 /// revision-free on the durable path exactly as a direct write would. The mutation <see cref="KeyValueState"/> is
 /// derived from value presence (a null value is a delete), and the bucket is derived from the key (its parent
-/// prefix) so it matches what the apply path recomputes. Only the validated base (<c>BaseRevision</c>/
-/// <c>BaseState</c>) is set best-effort — the authoritative pre-image lives in the owning actor's staged proposal
-/// and would require an actor-side staging dispatch to source exactly; it is not consulted for the committed value
-/// (the materializer replays only value/revision/expiry/NoRevision), only folded into the intent's dedup digest.</para>
+/// prefix) so it matches what the apply path recomputes. The validated base (<c>BaseRevision</c>/<c>BaseState</c>)
+/// is the transaction's own pre-write read observation when one exists — exact, and enforced by the commit-time
+/// staged-base compare-and-set — or the unknown-base sentinel for a blind write; it is never consulted for the
+/// committed value (the materializer replays only value/revision/expiry/NoRevision).</para>
 /// </summary>
 internal static class DurableFinalizeInputBuilder
 {
@@ -38,7 +38,8 @@ internal static class DurableFinalizeInputBuilder
         IReadOnlyCollection<(string Key, KeyValueDurability Durability)> modifiedKeys,
         IReadOnlyDictionary<string, StagedMutation> stagedByKey,
         Func<string, (int PartitionId, long Generation)> locate,
-        out DurableFinalizeInput? input)
+        out DurableFinalizeInput? input,
+        IReadOnlyDictionary<string, KeyValueTransactionReadKey>? writtenBases = null)
     {
         input = null;
 
@@ -71,6 +72,20 @@ internal static class DurableFinalizeInputBuilder
                 ? new HLCTimestamp(commitTimestamp.N, commitTimestamp.L + staged.ExpiresMs, commitTimestamp.C)
                 : HLCTimestamp.Zero;
 
+            // The validated base is the transaction's own pre-write read observation of this key, when it made
+            // one: the exact committed revision/existence its read-modify-write is conditioned on, checked by
+            // the commit-time staged-base compare-and-set. A key written blind (no prior read) has no base
+            // dependency — last-writer-wins by design — and carries the unknown-base sentinel, which the check
+            // skips. The staged revision is NOT a substitute (a mutation may bump it several times, or not at
+            // all, relative to the committed head).
+            long baseRevision = PreparedIntent.UnknownBaseRevision;
+            KeyValueState baseState = KeyValueState.Undefined;
+            if (writtenBases is not null && writtenBases.TryGetValue(key, out KeyValueTransactionReadKey? observedBase))
+            {
+                baseRevision = observedBase.Revision;
+                baseState = observedBase.Exists ? KeyValueState.Set : KeyValueState.Undefined;
+            }
+
             PreparedIntent intent = new(
                 transactionId, epoch, key, manifestHash, anchorKey, commitTimestamp,
                 State: staged.Value is not null ? KeyValueState.Set : KeyValueState.Deleted,
@@ -79,8 +94,8 @@ internal static class DurableFinalizeInputBuilder
                 Revision: staged.Revision,
                 Expires: expires,
                 NoRevision: staged.NoRevision,
-                BaseRevision: staged.Revision - 1,
-                BaseState: KeyValueState.Set,
+                BaseRevision: baseRevision,
+                BaseState: baseState,
                 RecoveryDeadline: decisionDeadline,
                 Resolution: PreparedIntentResolution.Pending
             );

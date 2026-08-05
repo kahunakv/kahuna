@@ -54,14 +54,36 @@ public sealed class TestSessionReaping
     }
 
     [Fact]
-    public void Reap_RejectsAConcurrentCommitWhichMirrorsTheReapOutcome()
+    public async Task Reap_AConcurrentCommitMirrorsTheReapOutcome()
     {
         TransactionContext ctx = NewSession();
 
         FinalizeAttempt? reap = ctx.TryEnterReap();
         Assert.NotNull(reap);
 
-        // A commit racing the reaper is rejected: there is nothing left to finalize on a reaped session.
+        // A commit racing the reaper mirrors the reap's attempt rather than being rejected: fabricating a
+        // definite Aborted while the reap is still deciding could contradict the outcome the reap publishes
+        // (for a fenced durable transaction, even Committed).
+        Assert.Equal(FinalizeAdmission.Mirror, ctx.EnterFinalize(out FinalizeAttempt? commit));
+        Assert.Same(reap, commit);
+
+        ctx.CompleteFinalize(reap!, new FinalizeOutcome(KeyValueResponseType.RolledBack, null));
+        Assert.Equal(KeyValueResponseType.RolledBack, (await commit!.Completion).Type);
+    }
+
+    [Fact]
+    public void Reap_BetweenAttempts_RejectsAConcurrentCommit()
+    {
+        TransactionContext ctx = NewSession();
+
+        FinalizeAttempt? reap = ctx.TryEnterReap();
+        Assert.NotNull(reap);
+
+        // The reap's cleanup could not fully release: it publishes a non-terminal MustRetry, freeing the slot
+        // while the session stays Reaping until a later sweep. Only in this window — nothing to mirror, the
+        // reaper still owns the session — is a commit rejected (the coordinator answers MustRetry for it).
+        ctx.CompleteFinalize(reap!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
+
         Assert.Equal(FinalizeAdmission.Rejected, ctx.EnterFinalize(out FinalizeAttempt? commit));
         Assert.Null(commit);
     }

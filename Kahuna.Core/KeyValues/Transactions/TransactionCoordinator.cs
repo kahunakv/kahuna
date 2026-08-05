@@ -295,9 +295,13 @@ internal sealed class TransactionCoordinator : IDisposable
         // Serialize against a concurrent commit, rollback, or reaper on the same session. The owner runs the
         // finalize once; any concurrent finalizer mirrors the owner's published outcome rather than racing a
         // second two-phase commit against the same working set.
+        // Rejected means the reaper claimed the session and its reap is between attempts (a retrying sweep):
+        // the outcome is genuinely undecided at this instant, so answer the retryable MustRetry — never a
+        // fabricated definite Aborted, which a stalled commit decision could later contradict. A retry mirrors
+        // the reap once it re-arms, or replays the retained outcome once the reap turns terminal.
         FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
         if (admission == FinalizeAdmission.Rejected)
-            return (KeyValueResponseType.Aborted, null);
+            return (KeyValueResponseType.MustRetry, null);
 
         if (admission == FinalizeAdmission.Mirror)
         {
@@ -408,10 +412,18 @@ internal sealed class TransactionCoordinator : IDisposable
             // Committed result never depends on it. Release every confirmed lock shape not finalized by 2PC
             // and clean the transaction's read MVCC snapshots. Because no terminal promise rides on its
             // completion, AsyncRelease may run it detached without over-promising cleanup.
-            if (context.AsyncRelease)
-                _ = ReleaseWorkingSet(context);
-            else
-                await ReleaseWorkingSet(context);
+            //
+            // EXCEPT while a durable finalize attempt is unresolved (a MustRetry with a decision proposal
+            // possibly still in flight): releasing the locks then would let a conflicting writer interleave
+            // ahead of a commit that can still land, so the working set is held until a retry resolves the
+            // attempt or the reaper/rollback fences it through the record CAS.
+            if (context.UnresolvedDurableFinalize is null)
+            {
+                if (context.AsyncRelease)
+                    _ = ReleaseWorkingSet(context);
+                else
+                    await ReleaseWorkingSet(context);
+            }
         }
     }
 
@@ -441,10 +453,12 @@ internal sealed class TransactionCoordinator : IDisposable
         }
 
         // Rollback contends for the same finalize slot as commit and the reaper, so a concurrent finalize is
-        // never run twice on one session; a mirroring caller returns the owner's outcome.
+        // never run twice on one session; a mirroring caller returns the owner's outcome. A Rejected admission
+        // (the reaper owns the session, between attempts) answers the retryable MustRetry — the reap decides the
+        // real outcome, which for a fenced durable transaction can even be Committed.
         FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
         if (admission == FinalizeAdmission.Rejected)
-            return KeyValueResponseType.Aborted;
+            return KeyValueResponseType.MustRetry;
 
         if (admission == FinalizeAdmission.Mirror)
         {
@@ -486,6 +500,29 @@ internal sealed class TransactionCoordinator : IDisposable
             return new(KeyValueResponseType.MustRetry, null);
 
         context.Action = KeyValueTransactionAction.Abort;
+
+        // A prior commit attempt on this session may have left a durable decision proposal in flight (its
+        // replication timed out — indeterminate, not failed). Before this rollback may claim RolledBack, install
+        // a durable Abort through the record CAS: if the stalled commit already won, the transaction is committed
+        // and that is the only truthful answer; if the abort wins, any late commit is permanently fenced out.
+        DurableFinalizeInput? unresolved = context.UnresolvedDurableFinalize;
+        if (unresolved is not null)
+        {
+            DurableFinalizeOutcome fenced = await DurableFinalizer.FenceAbandonedAsync(
+                unresolved, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), CancellationToken.None);
+
+            if (fenced.Result == DurableFinalizeResult.MustRetry)
+                return new(KeyValueResponseType.MustRetry, null);
+
+            context.UnresolvedDurableFinalize = null;
+
+            if (fenced.Result == DurableFinalizeResult.Committed)
+            {
+                await ReleaseWorkingSet(context);
+                return new(KeyValueResponseType.Committed, context.RecordAnchorKey);
+            }
+            // Durable Abort installed: the rollback below is safe to report.
+        }
 
         // Rollback runs no prepare: it clears the transaction's staged (un-prepared) writes, releases every
         // confirmed lock shape, and cleans its read MVCC — all from the server-owned working set. Cleanup is
@@ -916,6 +953,39 @@ internal sealed class TransactionCoordinator : IDisposable
 
             logger.LogWarning("Reaping abandoned interactive transaction {TransactionId}", transactionId);
 
+            // An abandoned durable finalize may have a decision proposal still in flight — a replication timeout
+            // is indeterminate, and a stalled [record init + prepare + commit] bundle can apply after a partition
+            // heals. Before this reap may claim RolledBack, install a durable Abort through the record CAS and
+            // take whatever the record answers: an abort (including a tombstone from absence) permanently rejects
+            // any late commit, while a commit that already won means this transaction COMMITTED and the reap must
+            // report that, not fabricate a rollback the record contradicts.
+            DurableFinalizeInput? unresolved = context.UnresolvedDurableFinalize;
+            if (unresolved is not null)
+            {
+                DurableFinalizeOutcome fenced = await DurableFinalizer.FenceAbandonedAsync(unresolved, now, CancellationToken.None);
+
+                if (fenced.Result == DurableFinalizeResult.MustRetry)
+                    // The fence itself could not be installed (replication unavailable): the outcome is still
+                    // indeterminate. Do not release the working set — that would widen the window in which a
+                    // stalled commit could interleave with new writers — and retry on a later sweep.
+                    return;
+
+                context.UnresolvedDurableFinalize = null;
+
+                if (fenced.Result == DurableFinalizeResult.Committed)
+                {
+                    // The stalled decision won: the transaction is durably committed and its resolution has run.
+                    // Release the remaining working set (idempotent for keys the commit apply already cleaned)
+                    // and retain the truthful outcome so a late duplicate commit/rollback replays Committed.
+                    await ReleaseWorkingSet(context);
+                    outcome = new(KeyValueResponseType.Committed, context.RecordAnchorKey);
+                    RetainTerminalOutcome(transactionId, outcome, now);
+                    FinalizeSession(transactionId);
+                    return;
+                }
+                // A durable Abort is installed: any late commit is fenced out, so the rollback below is safe.
+            }
+
             bool cleaned = await ReleaseWorkingSet(context);
 
             if (context.HasPendingOperations)
@@ -1311,7 +1381,10 @@ internal sealed class TransactionCoordinator : IDisposable
         resolveDecidedBlockers: manager.TryResolveDecidedDurableBlockersAsync,
         // One-phase commit: a single-participant transaction whose anchor partition is led locally decides in
         // one durable barrier ([init + prepare + decision] in one atomic batch) instead of two.
-        replicateOnePhaseBundle: manager.ReplicateDurableOnePhaseBundleThroughSchedulerFenced);
+        replicateOnePhaseBundle: manager.ReplicateDurableOnePhaseBundleThroughSchedulerFenced,
+        // Write-side compare-and-set before anything durable: a staged base that moved while the in-memory
+        // write-intent lease lapsed aborts truthfully instead of silently discarding the other writer's commit.
+        validateStagedBases: ValidateStagedBasesAsync);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
@@ -1407,6 +1480,19 @@ internal sealed class TransactionCoordinator : IDisposable
         input = null;
         opId = HLCTimestamp.Zero;
 
+        // A prior durable attempt on this session proposed its canonical record without reaching a record-backed
+        // outcome. Its identity — commit timestamp, decision deadline, manifest hash — is frozen in the record
+        // CAS, so a retry must re-drive that same frozen input under a fresh operation id (exactly as the
+        // reaper's and rollback's fences do): rebuilding would mint a new identity that the existing record
+        // rejects on every transition (init, prepare, decision alike), leaving the transaction permanently
+        // retryable instead of ever resolving it.
+        if (context.UnresolvedDurableFinalize is { } unresolved)
+        {
+            input = unresolved;
+            opId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            return true;
+        }
+
         if (persistentKeys.Count == 0 || context.RecordAnchorKey is null)
             return false;
 
@@ -1428,10 +1514,21 @@ internal sealed class TransactionCoordinator : IDisposable
         foreach ((string key, StagedValue value) in staged)
             stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.ExpiresMs, value.NoRevision);
 
+        // Each read-then-written key's pre-write observation is the exact committed base its mutation is
+        // conditioned on; frozen into the intents so the staged-base compare-and-set can enforce it.
+        Dictionary<string, KeyValueTransactionReadKey>? writtenBases = null;
+        if (context.WrittenBaseObservations is { Count: > 0 } observations)
+        {
+            writtenBases = new Dictionary<string, KeyValueTransactionReadKey>(observations.Count);
+            foreach (((string key, KeyValueDurability durability), KeyValueTransactionReadKey observed) in observations)
+                if (durability == KeyValueDurability.Persistent)
+                    writtenBases[key] = observed;
+        }
+
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
                 commitTimestamp, decisionDeadline, persistentKeys, stagedByKey,
-                manager.LocateDurablePartition, out input))
+                manager.LocateDurablePartition, out input, writtenBases))
             return false;
 
         opId = commitTimestamp;
@@ -1480,6 +1577,13 @@ internal sealed class TransactionCoordinator : IDisposable
         // deadlock broken only by the read's own deadline. Probing for the concurrent writer first turns that
         // standoff into the immediate mutual abort the probe exists to produce.
         // The finalizer records its own decision-scoped latency into finalizeLatency.
+        // From here on the attempt drives real replication, and a proposal that times out is indeterminate — it
+        // can still commit after a partition heals, carrying a bundled commit decision whose propose-time attempt
+        // HLC passes the record's deadline gate whenever it applies. Record the frozen input so any finalizer that
+        // later gives up on this session (the reaper, an explicit rollback) must fence through the record CAS
+        // before reporting a definite abort. Cleared below only on a record-backed terminal outcome.
+        context.UnresolvedDurableFinalize = input;
+
         DurableFinalizeOutcome outcome;
         try
         {
@@ -1507,6 +1611,11 @@ internal sealed class TransactionCoordinator : IDisposable
             // The attempt has ended (decision installed or given up); free the slot for the next transaction.
             ReleaseDurableSlot();
         }
+
+        // A terminal outcome is record-backed (classified from the canonical record), so no stalled proposal can
+        // contradict it; only a MustRetry leaves the attempt unresolved and keeps the fence obligation in place.
+        if (outcome.Result is DurableFinalizeResult.Committed or DurableFinalizeResult.Aborted)
+            context.UnresolvedDurableFinalize = null;
 
         context.Result = outcome.Result switch
         {
@@ -1750,6 +1859,130 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     private readonly record struct ReadValidationFailure(string AbortReason, Action Log);
+
+    /// <summary>
+    /// The write-side compare-and-set, run by the finalizer before anything durable is proposed: checks each
+    /// frozen intent's validated base revision against the key's current committed state, so a
+    /// base that moved after staging — the in-memory write-intent lease lapsed mid-finalize and another
+    /// transaction committed the same base first — aborts truthfully instead of silently discarding that
+    /// writer's commit. Each key resolves in three tiers:
+    /// <list type="bullet">
+    /// <item>A live durable intent owned by this transaction (a retry of a prepared-but-undecided attempt):
+    /// the base is frozen beneath that intent by the single-live-intent rule, so it is valid by construction —
+    /// the check that admitted the prepare already ran before it was proposed.</item>
+    /// <item>A foreign durable intent: its canonical record decides. A committed winner's revision that is not
+    /// this transaction's validated base is the moved-base conflict, even before its value materializes into
+    /// MVCC (the ordinary read paths cannot answer this: they either overlay that intent behind a wait, or
+    /// serve this transaction's own staged view). An aborted holder never materializes and falls through to
+    /// the committed read; an undecided one is a retryable unknown.</item>
+    /// <item>No intent: the plain committed read compares revision and existence directly.</item>
+    /// </list>
+    /// </summary>
+    private async Task<StagedBaseValidation> ValidateStagedBasesAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
+    {
+        List<(string key, long revision, KeyValueDurability durability)> probes = [];
+        List<PreparedIntent> toProbe = [];
+
+        foreach (DurablePartitionPrepare partition in input.Partitions)
+        {
+            foreach (PreparedIntent staged in partition.Intents)
+            {
+                // A blind write carries no validated base: it is last-writer-wins by design, and a foreign
+                // holder on its key is the prepare apply's conflict to resolve, not this check's.
+                if (!staged.HasValidatedBase)
+                    continue;
+
+                PreparedIntent? holder = manager.DurablePreparedIntentStore.Get(staged.Key);
+
+                if (holder is not null)
+                {
+                    if (holder.TransactionId == input.TransactionId && holder.Epoch == input.Epoch)
+                        continue;
+
+                    TransactionRecord? holderRecord = await manager.LookupDurableRecordRouted(
+                        holder.TransactionId, holder.Epoch, holder.RecordAnchorKey, cancellationToken);
+
+                    // The routed record is authoritative; a missing record (already purged after settlement)
+                    // falls back to the resolution stamped on the intent itself.
+                    TransactionDecision holderDecision = holderRecord?.Decision ?? holder.Resolution switch
+                    {
+                        PreparedIntentResolution.Committed => TransactionDecision.Commit,
+                        PreparedIntentResolution.Aborted => TransactionDecision.Abort,
+                        _ => TransactionDecision.Undecided
+                    };
+
+                    if (holderDecision == TransactionDecision.Commit)
+                    {
+                        // The holder's mutation is this key's next committed state whether or not it has
+                        // materialized yet. It is only a valid base if it is exactly the base this transaction
+                        // validated against — possible when the holder settled before staging but its intent
+                        // has not been garbage-collected yet. Revisions are the exact part of the frozen base
+                        // (the builder's BaseState is nominal), so they alone decide.
+                        if (holder.Revision == staged.BaseRevision)
+                            continue;
+
+                        logger.LogWarning(
+                            "Staged base for {Key} was overtaken by committed transaction {HolderTransactionId} at revision {HolderRevision} (validated base was {BaseRevision})",
+                            staged.Key, holder.TransactionId, holder.Revision, staged.BaseRevision);
+                        return StagedBaseValidation.Conflict;
+                    }
+
+                    if (holderDecision == TransactionDecision.Undecided)
+                        return StagedBaseValidation.Unknown;
+
+                    // Aborted holder: its value never materializes; the committed state beneath it decides.
+                }
+
+                probes.Add((staged.Key, -1, KeyValueDurability.Persistent));
+                toProbe.Add(staged);
+            }
+        }
+
+        if (probes.Count == 0)
+            return StagedBaseValidation.Valid;
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
+            await manager.LocateAndTryExistsManyValues(HLCTimestamp.Zero, HLCTimestamp.Zero, probes, cancellationToken);
+
+        Dictionary<string, (KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> byKey = new(results.Count);
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability _, ReadOnlyKeyValueEntry? entry) in results)
+            byKey[key] = (type, entry);
+
+        foreach (PreparedIntent staged in toProbe)
+        {
+            if (!byKey.TryGetValue(staged.Key, out (KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry) current))
+                return StagedBaseValidation.Unknown;
+
+            if (current.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored
+                or KeyValueResponseType.Aborted or KeyValueResponseType.WaitingForReplication)
+                return StagedBaseValidation.Unknown;
+
+            // The frozen base is the transaction's own pre-write read observation — existence and revision are
+            // both exact. Existence must match; and when the key exists on both sides, so must the revision.
+            // (A DoesNotExist probe carries a default revision for a never-written key, so only a positive
+            // existence answer's counter is compared.)
+            bool baseExisted = staged.BaseState == KeyValueState.Set;
+            bool existsNow = current.Type == KeyValueResponseType.Exists && current.Entry is not null;
+
+            if (baseExisted != existsNow)
+            {
+                logger.LogWarning(
+                    "Staged base changed for {Key}: observed exists={BaseExisted} rev={BaseRevision}, exists now={ExistsNow}",
+                    staged.Key, baseExisted, staged.BaseRevision, existsNow);
+                return StagedBaseValidation.Conflict;
+            }
+
+            if (existsNow && current.Entry!.Revision != staged.BaseRevision)
+            {
+                logger.LogWarning(
+                    "Staged base revision changed for {Key}: validated against {BaseRevision}, committed is now {CurrentRevision}",
+                    staged.Key, staged.BaseRevision, current.Entry.Revision);
+                return StagedBaseValidation.Conflict;
+            }
+        }
+
+        return StagedBaseValidation.Valid;
+    }
 
     /// <summary>
     /// Probes the read-set for concurrent writers (write-skew guard) — optimistic transactions only.

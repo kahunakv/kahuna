@@ -647,6 +647,14 @@ internal sealed class KeyValuesManager : IDisposable
         transactionRecordStore = externalRecordStore ?? new TransactionRecordStore(configuration.StoragePath, configuration.StorageRevision, logger);
         preparedIntentStore = externalIntentStore ?? new PreparedIntentStore(configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // A one-phase bundled commit is legal only if its own prepare — earlier in the same atomic batch — took
+        // ownership of every written key; the record store validates that against the live intent set at apply
+        // time. Both stores apply on the same ordered per-partition path, so the lookup is deterministic at the
+        // commit transition's log position on every replica.
+        transactionRecordStore.AttachBundledPrepareProbe((intentKey, transactionId, epoch) =>
+            preparedIntentStore.Get(intentKey) is { } liveIntent &&
+            liveIntent.TransactionId == transactionId && liveIntent.Epoch == epoch);
+
         durableRecordRetentionTtl = configuration.TransactionOutcomeRetentionTtl;
         durableRecordGcMaxPerPass = configuration.DurableRecordGcMaxPerPass;
         completionReceiptRetentionTtl = configuration.CompletionReceiptRetentionTtl;

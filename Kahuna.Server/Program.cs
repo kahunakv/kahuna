@@ -230,6 +230,11 @@ builder.Services.AddSingleton(kahunaConfiguration);
 // Start server
 WebApplication app = builder.Build();
 
+// Must wrap the pipeline before any route runs: maps retryable infrastructure exceptions
+// (Raft resolution, inter-node transport) escaping the kv/locks/sequences surfaces to a typed
+// MustRetry response instead of an unclassifiable HTTP 500.
+app.UseRetryableExceptionMapping();
+
 app.MapRestRaftRoutes();
 app.MapRestKahunaRoutes();
 

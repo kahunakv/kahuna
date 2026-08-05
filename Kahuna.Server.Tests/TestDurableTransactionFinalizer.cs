@@ -867,6 +867,276 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Contains((3, ReplicationTypes.TransactionRecord), seam.Calls); // standalone init on the anchor partition
     }
 
+    /// <summary>
+    /// The presumed-abort fence for an abandoned finalize whose one-phase [init + prepare + commit] bundle
+    /// timed out with nothing yet applied (a replication timeout is indeterminate — the proposal can still
+    /// commit after a partition heals, and its propose-time attempt HLC passes the deadline gate whenever it
+    /// applies). The fence installs an Abort tombstone from absence; when the stalled bundle finally applies,
+    /// its init cannot resurrect the terminal record and its commit is rejected — so the RolledBack the
+    /// coordinator reported can never be contradicted by a late durable commit (the Jepsen G1a shape).
+    /// </summary>
+    [Fact]
+    public async Task FenceAbandoned_FromAbsence_InstallsTombstoneThatRejectsTheStalledLateCommit()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore _) = Build(seam);
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        DurableFinalizeOutcome fenced = await finalizer.FenceAbandonedAsync(input, opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, fenced.Result);
+        Assert.Equal(TransactionAbortClass.PresumedAbort, fenced.AbortClass);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+
+        // The stalled bundle now applies (partition healed): the init must not resurrect the tombstone and the
+        // commit — whose attempt HLC is well within the frozen deadline — must be rejected by the terminal abort.
+        byte[] stalledInit = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
+            txId, 1, input.CoordinatorKey, input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline,
+            input.ManifestHash, input.Manifest, Ts(1500), input.CreatedAt)]);
+        byte[] stalledCommit = TransactionRecordStore.SerializeDelta([new CommitTransactionCommand(
+            txId, 1, input.ManifestHash, Ts(1500), AttemptHlc: Ts(1600))]);
+        records.Replicate(5, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = stalledInit });
+        records.Replicate(5, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = stalledCommit });
+
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+    }
+
+    /// <summary>
+    /// The fence over an abandoned 2PC attempt that got its record initialized and its intent prepared but
+    /// never learned its decision's fate: the abort wins the CAS from Undecided, and the fence's resolution
+    /// rolls the prepared intent back and settles it, leaving nothing staged.
+    /// </summary>
+    [Fact]
+    public async Task FenceAbandoned_OverAnUndecidedPreparedAttempt_AbortsAndSettlesTheIntent()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = Build(seam);
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        // Fail every record proposal after the init (the decision), leaving record Undecided + intent prepared —
+        // the exact state of a coordinator whose decision replication timed out mid-2PC.
+        int recordCalls = 0;
+        seam.Fail = (_, type) => type == ReplicationTypes.TransactionRecord && Interlocked.Increment(ref recordCalls) > 1;
+
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.MustRetry, first.Result);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+        Assert.NotNull(intents.Get("acct/1"));
+
+        // Replication heals; the fence drives the durable abort and resolves the intent.
+        seam.Fail = null;
+        DurableFinalizeOutcome fenced = await finalizer.FenceAbandonedAsync(input, opId: Ts(3000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, fenced.Result);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1"));
+    }
+
+    /// <summary>
+    /// When the stalled decision already won — the record is durably Commit but the coordinator never learned
+    /// it (deferred resolution not yet run models the not-yet-settled state) — the fence's abort loses the CAS
+    /// and the truthful outcome is Committed: the reaper/rollback must report the commit, never fabricate a
+    /// rollback the record contradicts. The fence also completes the resolution, materializing the intent.
+    /// </summary>
+    [Fact]
+    public async Task FenceAbandoned_WhenTheStalledCommitAlreadyWon_ReportsCommittedAndResolves()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer deferred, TransactionRecordStore records, PreparedIntentStore intents) =
+            Build(seam, _ => { /* captured but never run: the committed intent stays unsettled */ });
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        DurableFinalizeOutcome first = await deferred.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.NotNull(intents.Get("acct/1")); // decision durable, resolution never ran
+
+        // A different finalizer (synchronous resolution) fences the "abandoned" attempt: the abort is rejected
+        // by the committed record, the outcome is Committed, and the resolution settles the intent inline.
+        DurableTransactionFinalizer fencer = new(records, intents, seam.Replicate);
+        DurableFinalizeOutcome fenced = await fencer.FenceAbandonedAsync(input, opId: Ts(3000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, fenced.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1"));
+    }
+
+    /// <summary>
+    /// While replication is unavailable the fence itself cannot be installed: the outcome stays the retryable
+    /// MustRetry and nothing is decided — the caller (reaper/rollback) must keep the transaction indeterminate
+    /// and retry, never report a definite outcome it cannot fence.
+    /// </summary>
+    [Fact]
+    public async Task FenceAbandoned_WhenReplicationUnavailable_ReportsMustRetryAndDecidesNothing()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new() { Fail = (_, type) => type == ReplicationTypes.TransactionRecord };
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore _) = Build(seam);
+
+        DurableFinalizeOutcome fenced = await finalizer.FenceAbandonedAsync(
+            Input(txId, 1, (5, "acct/1")), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, fenced.Result);
+        Assert.Null(records.Get(txId, 1));
+    }
+
+    // ── one-phase bundled-commit gate ────────────────────────────────────────────
+
+    // Mirrors the production one-phase bundle apply (ReplicateDurableOnePhaseBundleThroughSchedulerFenced +
+    // the ordered scheduler completion): [record init, prepare, commit decision] apply in order as one committed
+    // batch. BeforeApply models the in-flight window between the finalizer's pre-flight/validation and the
+    // batch's ordered apply — where a competing transaction's entries can land first once the in-memory write
+    // intents that excluded them are gone (killed node, expired lease, a stall outliving the locks).
+    private static DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate OnePhase(
+        TransactionRecordStore records, PreparedIntentStore intents, Action? beforeApply = null) =>
+        (partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct) =>
+        {
+            beforeApply?.Invoke();
+
+            records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
+            bool prepareAck = intents.ApplyDeltaAckPrepares(new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
+            records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = decisionDelta });
+
+            return Task.FromResult<(bool BatchCommitted, bool PrepareAcknowledged)?>((true, prepareAck));
+        };
+
+    private static (TransactionRecordStore Records, PreparedIntentStore Intents) StoresWithProbe()
+    {
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        records.AttachBundledPrepareProbe((key, txId, epoch) =>
+            intents.Get(key) is { } live && live.TransactionId == txId && live.Epoch == epoch);
+        return (records, intents);
+    }
+
+    /// <summary>
+    /// The lost-update shape, prevented: a one-phase bundle whose prepare is rejected at its ordered apply —
+    /// another transaction took the key after the pre-flight check passed — must NOT durably commit. The bundled
+    /// decision shares the atomic batch and cannot be withheld, so the record store's bundled-prepare gate rejects
+    /// the commit transition: the record stays Undecided, the finalizer answers the retryable MustRetry (never
+    /// Committed for a mutation that was never durably prepared), the never-prepared values are not applied to
+    /// the leader's live state, and the competing transaction's intent is untouched.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_PrepareRejectedAtApply_DoesNotCommitTheRecordOrReportCommitted()
+    {
+        HLCTimestamp winnerTx = Ts(500);
+        HLCTimestamp loserTx = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        ConcurrentQueue<string> localApplies = new();
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyCommitLocally: (_, i) => { localApplies.Enqueue(i.Key); return Task.FromResult(true); },
+            replicateOnePhaseBundle: OnePhase(records, intents,
+                // The competing transaction's prepare lands between this bundle's pre-flight and its ordered
+                // apply — the healed-partition interleaving the in-memory locks can no longer exclude.
+                beforeApply: () => Assert.Equal(TransactionApplyOutcome.Applied,
+                    intents.Apply(new PrepareIntentCommand(Intent(winnerTx, 1, "acct/1"))).Outcome)));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(loserTx, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(loserTx, 1)!.Decision);
+        Assert.Empty(localApplies);
+
+        // The winner's intent still owns the key, unharmed by the rejected bundle.
+        PreparedIntent? holder = intents.Get("acct/1");
+        Assert.NotNull(holder);
+        Assert.Equal(winnerTx, holder!.TransactionId);
+    }
+
+    /// <summary>The gate must not over-reject: an uncontended one-phase bundle applies its own prepare in the
+    /// same batch, so the bundled commit passes the gate and the fast path commits and settles as before.</summary>
+    [Fact]
+    public async Task OnePhase_UncontendedBundle_StillCommitsThroughTheGate()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: OnePhase(records, intents));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1")); // resolved and settled by the inline resolution
+    }
+
+    /// <summary>
+    /// The gate's transition rules on the record store itself: a bundled commit is rejected without its live
+    /// intent — including when no probe is attached (fail closed) — while an unbundled commit (2PC, whose
+    /// decision is only proposed after every prepare durably committed) is unaffected, and a replay of a bundled
+    /// commit against the already-terminal record stays an idempotent no-op even after settlement removed the
+    /// intent.
+    /// </summary>
+    [Fact]
+    public void BundledCommitGate_RejectsWithoutLiveIntent_PassesWithIt_SkipsTerminalReplay()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        InitializeTransactionCommand init = new(
+            txId, 1, input.CoordinatorKey, input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline,
+            input.ManifestHash, input.Manifest, Ts(1500), input.CreatedAt);
+        CommitTransactionCommand bundledCommit = new(txId, 1, input.ManifestHash, Ts(1500), AttemptHlc: Ts(1600), BundledPrepareKeys: ["acct/1"]);
+
+        // No live intent (the bundled prepare was rejected): the commit is gated out; the record stays Undecided.
+        Assert.Equal(TransactionApplyOutcome.Applied, records.Apply(init).Outcome);
+        Assert.Equal(TransactionApplyOutcome.Rejected, records.Apply(bundledCommit).Outcome);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+
+        // An unbundled commit for the same record is not gated (the 2PC contract's own barrier ordered it).
+        CommitTransactionCommand unbundled = new(txId, 1, input.ManifestHash, Ts(1500), AttemptHlc: Ts(1600));
+        Assert.Equal(TransactionApplyOutcome.Applied, records.Apply(unbundled).Outcome);
+
+        // A replay of the bundled commit against the terminal record is idempotent even though the intent —
+        // long settled and removed — no longer exists: the gate applies only to the deciding transition.
+        Assert.Equal(TransactionApplyOutcome.IdempotentNoop, records.Apply(bundledCommit).Outcome);
+
+        // Fail closed: a gated commit reaching a store with no probe attached must reject, never commit a
+        // mutation whose prepare it cannot verify.
+        TransactionRecordStore probeless = new();
+        Assert.Equal(TransactionApplyOutcome.Applied, probeless.Apply(init).Outcome);
+        Assert.Equal(TransactionApplyOutcome.Rejected, probeless.Apply(bundledCommit).Outcome);
+        Assert.Equal(TransactionDecision.Undecided, probeless.Get(txId, 1)!.Decision);
+    }
+
+    /// <summary>The bundled prepare keys survive the wire: a commit command round-tripped through the delta
+    /// serializer (as a follower, WAL replay, or state transfer would decode it) still carries its gate.</summary>
+    [Fact]
+    public void BundledPrepareKeys_SurviveDeltaSerializationRoundTrip()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore _) = StoresWithProbe();
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        InitializeTransactionCommand init = new(
+            txId, 1, input.CoordinatorKey, input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline,
+            input.ManifestHash, input.Manifest, Ts(1500), input.CreatedAt);
+        records.Apply(init);
+
+        // Serialize, then defeat the producer-side decoded-command cache by copying the bytes, forcing the
+        // proto decode path a follower or a WAL replay would take.
+        byte[] delta = TransactionRecordStore.SerializeDelta([
+            new CommitTransactionCommand(txId, 1, input.ManifestHash, Ts(1500), AttemptHlc: Ts(1600), BundledPrepareKeys: ["acct/1"])]);
+        byte[] wireCopy = [.. delta];
+
+        records.Replicate(5, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = wireCopy });
+
+        // No live intent exists, so the decoded command must still gate the commit out.
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+    }
+
     [Fact]
     public void Materializer_ProducesKeyValueRecordStampedWithCommitTimestamp()
     {

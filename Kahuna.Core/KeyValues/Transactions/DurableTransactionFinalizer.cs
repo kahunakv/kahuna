@@ -37,6 +37,22 @@ internal enum DurableFinalizeResult
     MustRetry
 }
 
+/// <summary>The result of checking every staged write's validated base against current committed state before
+/// anything durable is proposed (the write-side compare-and-set).</summary>
+internal enum StagedBaseValidation
+{
+    /// <summary>Every staged write's base still matches the committed state it was validated against.</summary>
+    Valid,
+
+    /// <summary>A base moved — another transaction committed the same base first. Committing would silently
+    /// discard that write, so the only truthful outcome is a conflict abort.</summary>
+    Conflict,
+
+    /// <summary>A base could not be resolved right now (a foreign undecided intent, a read that must wait for
+    /// replication): the check is retryable, and nothing may be decided from it.</summary>
+    Unknown
+}
+
 /// <summary>The outcome of a finalize attempt, already mapped to the MustRetry/Aborted result contract: only a
 /// conflict-class abort is <see cref="DurableFinalizeResult.Aborted"/>; every other abort and every
 /// infrastructural failure is <see cref="DurableFinalizeResult.MustRetry"/>.</summary>
@@ -119,6 +135,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     public delegate Task<(bool BatchCommitted, bool PrepareAcknowledged)?> ReplicateOnePhaseBundleDelegate(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
+    /// <summary>Checks every frozen intent's validated base (<see cref="PreparedIntent.BaseRevision"/> /
+    /// <see cref="PreparedIntent.BaseState"/>) against the key's current committed state — the write-side
+    /// compare-and-set that catches a base that moved after staging. The in-memory write-intent lease that
+    /// normally prevents this can lapse while a transaction is still finalizing (a killed node's wiped locks, a
+    /// stall outliving the lease), letting another transaction commit the same base first; committing over it
+    /// would silently discard that write. Null disables the check (protocol tests that fabricate intents).</summary>
+    public delegate Task<StagedBaseValidation> ValidateStagedBasesDelegate(DurableFinalizeInput input, CancellationToken cancellationToken);
+
     private readonly TransactionRecordStore recordStore;
 
     // Consulted by the one-phase fast path's pre-flight check (foreign durable intent on any written key ⇒
@@ -145,6 +169,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Null disables the one-phase commit fast path; every finalize then runs the standard 2PC flow.
     private readonly ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle;
+
+    // Null disables the up-front staged-base check (protocol tests that fabricate intents).
+    private readonly ValidateStagedBasesDelegate? validateStagedBases;
 
     // Mints a fresh HLC immediately before the terminal transition, used as the attempt's AttemptHlc so elapsed
     // prepare/validate time can actually trip the frozen decision deadline. Null keeps the deprecated behaviour of
@@ -176,8 +203,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         int maxMaterializationBatchItems = 512,
         long maxMaterializationBatchBytes = 4 * 1024 * 1024,
         ResolveDecidedBlockersDelegate? resolveDecidedBlockers = null,
-        ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle = null)
+        ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle = null,
+        ValidateStagedBasesDelegate? validateStagedBases = null)
     {
+        this.validateStagedBases = validateStagedBases;
         this.recordStore = recordStore;
         this.intentStore = intentStore;
         this.replicateOnePhaseBundle = replicateOnePhaseBundle;
@@ -207,6 +236,32 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         CancellationToken cancellationToken)
     {
         long startTicks = Stopwatch.GetTimestamp();
+
+        // ── Staged-base compare-and-set, before anything durable is proposed ──
+        // Each frozen intent carries the committed base it was validated against; if that base moved — the
+        // in-memory write-intent lease lapsed mid-finalize and another transaction committed the same base
+        // first — committing here would silently discard that write (a lost update). The read-set validation
+        // cannot cover this: a read-then-written key is validated as a write, and this is that validation.
+        // A base that cannot be resolved right now (a foreign undecided intent) decides nothing and retries.
+        if (validateStagedBases is not null)
+        {
+            switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
+            {
+                case StagedBaseValidation.Conflict:
+                {
+                    // The abort is driven through the record CAS (a tombstone from absence when nothing durable
+                    // exists yet), never fabricated: a prior attempt of this same frozen input may have left a
+                    // decision proposal in flight, and only a record-backed abort fences it out.
+                    DurableFinalizeOutcome conflictOutcome = await DecideAsync(
+                        input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false);
+                    await FinishResolutionAsync(input, conflictOutcome, cancellationToken).ConfigureAwait(false);
+                    return conflictOutcome;
+                }
+
+                case StagedBaseValidation.Unknown:
+                    return Retry();
+            }
+        }
 
         // ── Initialize the canonical record (Undecided) on the anchor partition ──
         byte[] initDelta = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
@@ -465,10 +520,20 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             return null;
 
         // Mint the attempt HLC now: the deadline gate in the record state machine still evaluates it when the
-        // bundled decision applies, so a stalled proposal can never commit past the frozen deadline.
+        // bundled decision applies, so a stalled proposal can never commit past the frozen deadline. The decision
+        // also carries its bundled prepare keys: sharing the atomic batch means it cannot be withheld if the
+        // prepare is rejected, so the record store's bundled-prepare gate re-checks — at apply time, in log order —
+        // that this transaction's intent actually took every key. A bundle applying after the in-memory write
+        // intents were lost (killed node, expired lease, a stall outliving the locks) whose keys were meanwhile
+        // taken by another transaction keeps the record Undecided instead of committing a never-prepared mutation.
         HLCTimestamp attemptHlc = attemptClock?.Invoke() ?? opId;
+
+        string[] bundledPrepareKeys = new string[partition.Intents.Count];
+        for (int i = 0; i < partition.Intents.Count; i++)
+            bundledPrepareKeys[i] = partition.Intents[i].Key;
+
         byte[] decisionDelta = TransactionRecordStore.SerializeDelta([
-            new CommitTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc)]);
+            new CommitTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc, bundledPrepareKeys)]);
 
         (bool BatchCommitted, bool PrepareAcknowledged)? proposed = await replicateOnePhaseBundle!(
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
@@ -482,20 +547,27 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (!proposed.Value.BatchCommitted)
             return Retry();
 
-        // Invariant canary — see the metric's doc. The record read below still reports the truthful winner.
+        // A rejected bundled prepare (another transaction took a key while this proposal was in flight) also
+        // rejects the bundled commit through the record store's bundled-prepare gate, so the record read below
+        // reports the truthful winner: Undecided, never a Commit for a mutation that was never durably prepared.
         if (!proposed.Value.PrepareAcknowledged)
             DurableTransactionMetrics.OnePhasePrepareRejections.Add(1);
 
         // The winner is whatever the canonical record reflects after apply, exactly as in DecideAsync: the
-        // deadline gate may have kept the record Undecided (late commit → presumed-abort recovery owns it),
-        // and a concurrent recovery abort may have won the race in the log.
+        // deadline gate or the bundled-prepare gate may have kept the record Undecided (late commit →
+        // presumed-abort recovery owns it; rejected prepare → the retry falls back to 2PC and aborts
+        // truthfully), and a concurrent recovery abort may have won the race in the log.
         TransactionRecord? record = recordStore.Get(input.TransactionId, input.Epoch);
         if (record is null)
             return Retry();
 
         if (record.Decision == TransactionDecision.Undecided)
         {
-            DurableTransactionMetrics.LateCommitRejections.Add(1);
+            // With the prepare acknowledged, the only transition that keeps an initialized record Undecided is
+            // the deadline gate; with it rejected, the bundled-prepare gate withheld the commit and the retry
+            // will fall back to 2PC, whose own prepare rejection drives a truthful abort.
+            if (proposed.Value.PrepareAcknowledged)
+                DurableTransactionMetrics.LateCommitRejections.Add(1);
             return Retry();
         }
 
@@ -531,6 +603,26 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
             _ => Retry()
         };
+    }
+
+    /// <summary>
+    /// Fences an abandoned finalize attempt whose decision proposal may still be in flight: drives a durable
+    /// Abort through the record CAS and classifies from the record that results. If the stalled attempt's commit
+    /// already applied (or applies first), the CAS rejects the abort and the truthful outcome is
+    /// <see cref="DurableFinalizeResult.Committed"/>; if the abort wins — including as a tombstone created from
+    /// absence — any late commit is permanently rejected and <see cref="DurableFinalizeResult.Aborted"/> is safe
+    /// to report. A <see cref="DurableFinalizeResult.MustRetry"/> means the fence itself could not be installed
+    /// (replication unavailable): the transaction stays indeterminate and the caller must not report a definite
+    /// outcome. The terminal decision's resolution (materialize or roll back the prepared intents) runs before
+    /// returning, exactly as after a normal finalize.
+    /// </summary>
+    public async Task<DurableFinalizeOutcome> FenceAbandonedAsync(DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        DurableFinalizeOutcome outcome = await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken).ConfigureAwait(false);
+
+        await FinishResolutionAsync(input, outcome, cancellationToken).ConfigureAwait(false);
+
+        return outcome;
     }
 
     private async Task<DurableFinalizeOutcome> DecideAsync(

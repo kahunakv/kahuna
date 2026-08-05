@@ -43,9 +43,16 @@ internal sealed record PreparedIntent(
     HLCTimestamp RecoveryDeadline,
     PreparedIntentResolution Resolution)
 {
+    /// <summary>The <see cref="BaseRevision"/> value marking a mutation with no validated base: the key was
+    /// written without a prior read in its transaction (a blind, last-writer-wins write), so the commit-time
+    /// staged-base compare-and-set has nothing to check for it.</summary>
+    public const long UnknownBaseRevision = long.MinValue;
+
     public bool IsPending => Resolution == PreparedIntentResolution.Pending;
 
     public bool IsResolved => Resolution != PreparedIntentResolution.Pending;
+
+    public bool HasValidatedBase => BaseRevision != UnknownBaseRevision;
 }
 
 /// <summary>

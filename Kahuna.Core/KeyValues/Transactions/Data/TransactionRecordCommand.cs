@@ -32,13 +32,23 @@ internal sealed record InitializeTransactionCommand(
 /// <see cref="TransactionDecision.Undecided"/> record whose manifest hash matches and whose decision deadline has
 /// not passed (<see cref="AttemptHlc"/> &lt;= the record's frozen deadline). It can never create a record from
 /// absence.
+///
+/// <para><see cref="BundledPrepareKeys"/> is set only by the one-phase fast path, whose commit shares one atomic
+/// batch with its own prepared-intent group and so cannot be withheld if that prepare is rejected. When non-empty,
+/// the transition is additionally legal only if a live prepared intent owned by this (TransactionId, Epoch) exists
+/// at every listed key at apply time — the prepare applies earlier in the same batch, so the check is
+/// deterministic in log order on every replica. Without it, a bundle that applies after a competing transaction
+/// took the key (a stalled proposal surfacing after a partition heals, with the in-memory locks that justified
+/// deciding up front long gone) would durably record Commit for a mutation that was never durably prepared —
+/// reporting a lost update as committed.</para>
 /// </summary>
 internal sealed record CommitTransactionCommand(
     HLCTimestamp TransactionId,
     long Epoch,
     long ManifestHash,
     HLCTimestamp OpId,
-    HLCTimestamp AttemptHlc) : TransactionRecordCommand;
+    HLCTimestamp AttemptHlc,
+    IReadOnlyList<string>? BundledPrepareKeys = null) : TransactionRecordCommand;
 
 /// <summary>
 /// Attempts the terminal <see cref="TransactionDecision.Abort"/> transition. Valid from

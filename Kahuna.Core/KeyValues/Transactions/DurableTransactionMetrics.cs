@@ -62,15 +62,28 @@ internal static class DurableTransactionMetrics
             description: "One-phase-eligible finalizes that fell back to the standard 2PC flow.");
 
     /// <summary>
-    /// Invariant canary — must stay at zero. A one-phase bundle whose prepare was rejected even though the
-    /// pre-flight foreign-intent check passed: the commit decision is durable but the intent never installed.
-    /// The safety argument (in-memory write-intent exclusivity makes a post-check conflicting prepare
-    /// unreachable) would be broken. Alert on any non-zero value.
+    /// A one-phase bundle whose prepare was rejected even though the pre-flight foreign-intent check passed —
+    /// another transaction took a key between the check and the batch's ordered apply. Reachable when the
+    /// in-memory write intents that normally exclude conflicting writers are lost while the proposal is in
+    /// flight (a stalled proposal surfacing after a partition heals, a killed node's wiped locks, an expired
+    /// intent lease). The bundled commit decision is rejected with the prepare by the record store's
+    /// bundled-prepare gate, so the transaction stays Undecided and retries truthfully.
     /// </summary>
     internal static readonly Counter<long> OnePhasePrepareRejections =
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.one_phase_prepare_rejections",
-            description: "One-phase bundles whose prepare was rejected after the decision was already proposed (invariant violation).");
+            description: "One-phase bundles whose prepare was rejected after the decision was already proposed.");
+
+    /// <summary>
+    /// One-phase bundled commit decisions rejected by the record store's bundled-prepare gate: the commit
+    /// transition applied without a live same-transaction prepared intent at every bundled key, so the record
+    /// was kept Undecided instead of durably committing a mutation that was never durably prepared. Expected to
+    /// track <see cref="OnePhasePrepareRejections"/>; each occurrence is a prevented lost update.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseGatedCommitRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_gated_commit_rejections",
+            description: "One-phase bundled commits rejected because their bundled prepare did not take ownership of every key.");
 
     /// <summary>
     /// Wall time of the finalize's prepare stage: record init + every participant prepare (anchor-bundled when

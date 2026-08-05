@@ -121,6 +121,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "ROLLBACK-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}")]
     public static partial void LogRollbackTransactionRedirected(this ILogger<IKahuna> logger, string keyValueName, int partition, string leader);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KEYVALUE leader for partition {Partition} could not be resolved, returning MustRetry: {Reason}")]
+    public static partial void LogKeyValueLeaderNotResolved(this ILogger<IKahuna> logger, int partition, string reason);
+
     // ── KeyValuesManager ──────────────────────────────────────────────────
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Starting {Workers} ephemeral key/value workers")]

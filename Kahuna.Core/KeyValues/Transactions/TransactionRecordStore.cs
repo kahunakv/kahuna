@@ -76,6 +76,18 @@ internal sealed class TransactionRecordStore
     public void AttachAnchorResolver(Func<string, (int PartitionId, long Generation)> resolver) =>
         resolveAnchorPartition = resolver;
 
+    // Answers whether a live prepared intent owned by (TransactionId, Epoch) exists at a key, consulted by the
+    // bundled-prepare gate below. Reading the intent store here is deterministic: both stores apply on the same
+    // ordered per-partition path, so at the log position where a commit transition applies, the bundled prepare
+    // (earlier in the same atomic batch) has already been applied or rejected identically on every replica.
+    private Func<string, HLCTimestamp, long, bool>? bundledPrepareProbe;
+
+    /// <summary>Wires the prepared-intent lookup used to validate one-phase bundled commits (manager
+    /// construction). A gated commit applying without a probe attached is rejected — the store fails closed
+    /// rather than durably committing a mutation whose prepare it cannot verify.</summary>
+    public void AttachBundledPrepareProbe(Func<string, HLCTimestamp, long, bool> probe) =>
+        bundledPrepareProbe = probe;
+
     /// <summary>Applies one transition to the record it targets and reflects the result in the map. This is the
     /// single apply entry point shared by local proposal apply, follower replication, and restore.</summary>
     public TransactionRecordApplyResult Apply(TransactionRecordCommand command)
@@ -85,6 +97,28 @@ internal sealed class TransactionRecordStore
         lock (applyGate)
         {
             records.TryGetValue(key, out TransactionRecord? existing);
+
+            // One-phase bundled commit: the decision shared an atomic batch with its own prepared-intent group
+            // and could not be withheld when that prepare was rejected, so its legality is decided here instead —
+            // the Undecided → Commit transition applies only if this transaction's live intent holds every bundled
+            // key. A bundle surfacing late (a stalled proposal committing after a partition heals) whose keys were
+            // meanwhile taken by another transaction is rejected: the record stays Undecided and yields to
+            // presumed-abort recovery, instead of durably reporting Commit for a mutation that was never durably
+            // prepared. Replays against an already-terminal record skip the gate (idempotence is the state
+            // machine's to judge; settlement may have removed the intent by then).
+            if (command is CommitTransactionCommand { BundledPrepareKeys.Count: > 0 } bundledCommit &&
+                existing is { Decision: TransactionDecision.Undecided })
+            {
+                foreach (string prepareKey in bundledCommit.BundledPrepareKeys)
+                {
+                    if (bundledPrepareProbe is null ||
+                        !bundledPrepareProbe(prepareKey, bundledCommit.TransactionId, bundledCommit.Epoch))
+                    {
+                        DurableTransactionMetrics.OnePhaseGatedCommitRejections.Add(1);
+                        return new(TransactionApplyOutcome.Rejected, existing, "bundled prepare not applied");
+                    }
+                }
+            }
 
             TransactionRecordApplyResult result = TransactionRecordStateMachine.Apply(existing, command);
 
@@ -247,7 +281,8 @@ internal sealed class TransactionRecordStore
             }
 
             case CommitTransactionCommand c:
-                return new()
+            {
+                TransactionRecordCommandMessage m = new()
                 {
                     Kind = TransactionRecordCommandKindMessage.TransactionRecordCommit,
                     TransactionIdNode = c.TransactionId.N, TransactionIdPhysical = c.TransactionId.L, TransactionIdCounter = c.TransactionId.C,
@@ -255,6 +290,13 @@ internal sealed class TransactionRecordStore
                     OpIdNode = c.OpId.N, OpIdPhysical = c.OpId.L, OpIdCounter = c.OpId.C,
                     AttemptNode = c.AttemptHlc.N, AttemptPhysical = c.AttemptHlc.L, AttemptCounter = c.AttemptHlc.C
                 };
+
+                if (c.BundledPrepareKeys is not null)
+                    foreach (string bundledKey in c.BundledPrepareKeys)
+                        m.BundledPrepareKeys.Add(bundledKey);
+
+                return m;
+            }
 
             case AbortTransactionCommand a:
                 return new()
@@ -306,7 +348,8 @@ internal sealed class TransactionRecordStore
 
             case TransactionRecordCommandKindMessage.TransactionRecordCommit:
                 return new CommitTransactionCommand(txId, m.Epoch, m.ManifestHash, opId,
-                    new HLCTimestamp(m.AttemptNode, m.AttemptPhysical, m.AttemptCounter));
+                    new HLCTimestamp(m.AttemptNode, m.AttemptPhysical, m.AttemptCounter),
+                    m.BundledPrepareKeys.Count > 0 ? m.BundledPrepareKeys.ToArray() : null);
 
             case TransactionRecordCommandKindMessage.TransactionRecordAbort:
                 return new AbortTransactionCommand(txId, m.Epoch, m.ManifestHash, (TransactionAbortClass)m.AbortClass, opId,

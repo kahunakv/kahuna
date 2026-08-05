@@ -89,6 +89,19 @@ internal class TransactionContext
     public bool AsyncRelease { get; set; }
 
     /// <summary>
+    /// The frozen finalize input of a durable finalize attempt whose outcome is still unresolved: the attempt may
+    /// have proposed its canonical record — possibly with a bundled commit decision — without learning whether the
+    /// proposal committed (a replication timeout is indeterminate, not a failure: the entry can still commit after
+    /// a partition heals, and its propose-time attempt HLC passes the record's deadline gate whenever it applies).
+    /// While set, no finalizer may report a definite abort for this transaction without first installing a durable
+    /// Abort through the record CAS and classifying from the record that results — the abort tombstone is what
+    /// permanently fences out the stalled commit. Set when a durable finalize begins driving replication, cleared
+    /// when an attempt reaches a record-backed terminal outcome. Accessed only while holding the session's single
+    /// finalize slot (owner finalize or reaper), so no additional synchronization is needed.
+    /// </summary>
+    internal DurableFinalizeInput? UnresolvedDurableFinalize { get; set; }
+
+    /// <summary>
     /// Point locks acquired during execution.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? LocksAcquired { get; set; }
@@ -144,6 +157,15 @@ internal class TransactionContext
     /// Keys read during the transaction and their observed revisions.
     /// </summary>
     public Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>? ReadKeys { get; set; }
+
+    /// <summary>
+    /// For each key this transaction read and then wrote, the read observation that became the write's
+    /// validated base: the committed revision/existence the read-modify-write is conditioned on. Moved out of
+    /// <see cref="ReadKeys"/> by the first write of the key (a written key is validated as a write, not as a
+    /// read dependency) and consumed by the commit-time staged-base compare-and-set. Keys written with no
+    /// prior read never appear here — a blind write has no base dependency.
+    /// </summary>
+    public Dictionary<(string, KeyValueDurability), KeyValueTransactionReadKey>? WrittenBaseObservations { get; private set; }
 
     /// <summary>
     /// Internal 2PC state field; advanced atomically via <see cref="SetState"/>.
@@ -311,10 +333,16 @@ internal class TransactionContext
         ModifiedKeys ??= [];
         ModifiedKeys.Add(modified);
 
-        // A write supersedes any earlier read observation of the same key: it is validated as a write, not as a
-        // read dependency on external committed state. Dropping it also prevents a later read of the key's own
-        // staged value from tripping the two-inconsistent-snapshots conflict against that write's revision.
-        ReadKeys?.Remove(modified);
+        // A write supersedes any earlier read observation of the same key: it leaves the read set (so a later
+        // read of the key's own staged value never trips the two-inconsistent-snapshots conflict against that
+        // write's revision) and becomes the write's validated base instead — the committed state this
+        // read-modify-write is conditioned on, checked by the commit-time staged-base compare-and-set. A key
+        // written with no prior read has no base dependency (a blind write is last-writer-wins by design).
+        if (ReadKeys is not null && ReadKeys.Remove(modified, out KeyValueTransactionReadKey? observed))
+        {
+            WrittenBaseObservations ??= [];
+            WrittenBaseObservations.TryAdd(modified, observed);
+        }
 
         if (RecordAnchorKey is null && modified.Durability == KeyValueDurability.Persistent)
             RecordAnchorKey = modified.Key;
@@ -482,16 +510,20 @@ internal class TransactionContext
     {
         lock (registryLock)
         {
-            if (lifecycle is SessionLifecycle.Reaping or SessionLifecycle.Terminal)
-            {
-                attempt = null;
-                return FinalizeAdmission.Rejected;
-            }
-
+            // An installed attempt is mirrored regardless of lifecycle: a commit/rollback racing the reaper
+            // awaits and mirrors the reap's published outcome (which is record-fenced for a durable transaction),
+            // and a terminal session's retained attempt replays its terminal outcome. Only a session the reaper
+            // claimed whose slot is currently released (a reap retrying across sweeps) has nothing to mirror.
             if (activeFinalize is not null)
             {
                 attempt = activeFinalize;
                 return FinalizeAdmission.Mirror;
+            }
+
+            if (lifecycle is SessionLifecycle.Reaping or SessionLifecycle.Terminal)
+            {
+                attempt = null;
+                return FinalizeAdmission.Rejected;
             }
 
             // Install a fresh attempt. The session may already be Finalizing — a prior attempt that timed

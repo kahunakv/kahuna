@@ -53,6 +53,14 @@ message TransactionRecordCommandMessage {
   repeated TransactionParticipantRefMessage participants = 24; // initialize only
 
   int32  abortClass = 25; // abort only (TransactionAbortClass)
+
+  // commit only: when non-empty, this commit was proposed in the same atomic batch as its own prepared-intent
+  // group for these keys (the one-phase fast path). The commit transition is then legal only if a live prepared
+  // intent owned by this (transactionId, epoch) exists at every listed key when the transition applies — the
+  // prepare applies earlier in the same batch, so at this point in log order the answer is identical on every
+  // replica. A rejected prepare (another transaction owns a key) must reject the bundled decision with it;
+  // otherwise the record would durably say Commit for a mutation that was never durably prepared.
+  repeated string bundledPrepareKeys = 26;
 }
 
 // A batch of transitions committing as a single atomic data-partition log entry. Applied in order; each
