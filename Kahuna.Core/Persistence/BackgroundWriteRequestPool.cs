@@ -42,16 +42,17 @@ internal static class BackgroundWriteRequestPool
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
         int state,
-        bool noRevision = false)
+        bool noRevision = false,
+        long logIndex = -1)
     {
         if (pool.TryDequeue(out BackgroundWriteRequest? request))
         {
             Interlocked.Decrement(ref count);
-            request.Reset(type, partitionId, key, value, revision, expires, lastUsed, lastModified, state, noRevision);
+            request.Reset(type, partitionId, key, value, revision, expires, lastUsed, lastModified, state, noRevision, logIndex);
             return request;
         }
 
-        return new BackgroundWriteRequest(type, partitionId, key, value, revision, expires, lastUsed, lastModified, state, noRevision);
+        return new BackgroundWriteRequest(type, partitionId, key, value, revision, expires, lastUsed, lastModified, state, noRevision, logIndex);
     }
 
     /// <summary>

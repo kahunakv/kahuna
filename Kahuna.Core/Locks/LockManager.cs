@@ -90,6 +90,9 @@ internal sealed class LockManager
     /// <param name="backgroundWriter"></param>
     /// <param name="configuration"></param>
     /// <param name="logger"></param>
+    /// <summary>Per-partition application-durability floor tracker, shared node-wide.</summary>
+    private readonly PartitionDurabilityTracker? durabilityTracker;
+
     public LockManager(
         ActorSystem actorSystem,
         IRaft raft,
@@ -98,28 +101,30 @@ internal sealed class LockManager
         IPersistenceBackend persistenceBackend,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger
+        ILogger<IKahuna> logger,
+        PartitionDurabilityTracker? durabilityTracker = null
     )
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
         this.backendReadScheduler = backendReadScheduler;
         this.backgroundWriter = backgroundWriter;
+        this.durabilityTracker = durabilityTracker;
         this.logger = logger;
-        
+
         locator = new(this, configuration, raft, interNodeCommunication, logger);
-        
+
         proposalRouter = GetProposalRouter(persistenceBackend, configuration);
         ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
         persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
-        
+
         // The unflushed-lock-writes overlay travels with the decorated backend; the replicator and
         // restorer record queued mutations into it synchronously so lock reads observe them before
         // the flush lands. A raw (undecorated) backend yields null and recording becomes a no-op.
         UnflushedLockWritesIndex? unflushedLockWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedLockWrites;
 
-        restorer = new(backgroundWriter, raft, logger, unflushedLockWrites);
-        replicator = new(backgroundWriter, raft, logger, unflushedLockWrites);
+        restorer = new(backgroundWriter, raft, logger, unflushedLockWrites, durabilityTracker);
+        replicator = new(backgroundWriter, raft, logger, unflushedLockWrites, durabilityTracker);
     }
 
     /// <summary>
@@ -189,9 +194,9 @@ internal sealed class LockManager
 
         for (int i = 0; i < configuration.LocksWorkers; i++)
             proposalInstances.Add(actorSystem.Spawn<LockProposalActor, LockProposalRequest>(
-                "proposal-lock-" + i, 
-                raft, 
-                persistenceBackend, 
+                "proposal-lock-" + i,
+                raft,
+                persistenceBackend,
                 configuration,
                 logger
             ));

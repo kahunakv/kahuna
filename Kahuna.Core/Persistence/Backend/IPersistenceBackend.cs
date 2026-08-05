@@ -17,6 +17,21 @@ internal interface IPersistenceBackend
 
     public bool StoreKeyValues(List<PersistenceRequestItem> items);
 
+    /// <summary>
+    /// Durably records per-partition application-durability floors: the highest Raft WAL log index
+    /// whose delivered entries are all persisted in this backend. Written strictly <b>after</b> the
+    /// flush batches the floors certify, so a crash between the two leaves the floor stale-low
+    /// (safe: entries are redelivered on restore) and never ahead of the data it vouches for.
+    /// The default keeps backends and test fakes that do not participate at "no opinion".
+    /// </summary>
+    public bool StoreDurabilityFloors(IReadOnlyList<(int PartitionId, long Floor)> floors) => true;
+
+    /// <summary>
+    /// Reads a partition's persisted application-durability floor, or -1 when none was recorded.
+    /// Consulted at startup, before any WAL entry has been delivered.
+    /// </summary>
+    public long GetDurabilityFloor(int partitionId) => -1;
+
     public LockEntry? GetLock(string resource);
     
     public KeyValueEntry? GetKeyValue(string keyName);

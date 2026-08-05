@@ -47,6 +47,14 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
     /// <summary>The lock overlay index producers record queued lock mutations into.</summary>
     internal UnflushedLockWritesIndex UnflushedLockWrites => unflushedLockWrites;
 
+    // Floors pass straight through: the overlay tracks unflushed rows, and a floor write happens
+    // only after the rows it certifies flushed. Explicit forwarding is required — the interface's
+    // default implementations would otherwise silently discard them.
+    public bool StoreDurabilityFloors(IReadOnlyList<(int PartitionId, long Floor)> floors) =>
+        inner.StoreDurabilityFloors(floors);
+
+    public long GetDurabilityFloor(int partitionId) => inner.GetDurabilityFloor(partitionId);
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         bool stored = inner.StoreLocks(items);

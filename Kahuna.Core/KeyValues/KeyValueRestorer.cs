@@ -28,15 +28,18 @@ internal sealed class KeyValueRestorer
 
     private readonly UnflushedKeyValueWritesIndex? unflushedWrites;
 
+    private readonly PartitionDurabilityTracker? durabilityTracker;
+
     private readonly ILogger<IKahuna> logger;
 
-    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null)
+    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null, PartitionDurabilityTracker? durabilityTracker = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.completionReceiptStore = completionReceiptStore;
         this.logger = logger;
         this.unflushedWrites = unflushedWrites;
+        this.durabilityTracker = durabilityTracker;
     }
 
     /// <summary>
@@ -70,6 +73,11 @@ internal sealed class KeyValueRestorer
             HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
             HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+            // Register before enqueueing: the partition's durability floor must not pass this
+            // replayed entry until its flush lands. Replay runs in log-id order, so the
+            // registration always precedes any watermark advance over this index.
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
             // Record before enqueueing so reads observe the replayed committed write even before the
             // background flush lands it in the backend.
             unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
@@ -85,7 +93,8 @@ internal sealed class KeyValueRestorer
                 lastUsed,
                 lastModified,
                 (int)state,
-                keyValueMessage.NoRevision
+                keyValueMessage.NoRevision,
+                logIndex: log.Id
             ));
 
             // Rebuild the completion receipt from the replayed committed record so a re-commit after a

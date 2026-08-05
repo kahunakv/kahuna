@@ -5,6 +5,7 @@ using Kommander;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -39,12 +40,12 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.logger = logger;
     }
-    
+
     public async Task Receive(LockProposalRequest message)
     {
         if (!raft.Joined)
             return;
-        
+
         LockProposal proposal = message.Proposal;
         HLCTimestamp currentTime = message.Timestamp;
         int partitionId = dataPartitionRouter.Locate(proposal.Resource);
@@ -71,41 +72,46 @@ internal sealed class LockProposalActor : IActor<LockProposalRequest>
         if (proposal.Owner is not null)
             lockMessage.Owner = UnsafeByteOperations.UnsafeWrap(proposal.Owner);
 
+        // Registration with the durability tracker happens on the ordered consumer-apply path
+        // (LockReplicator runs on leaders and followers alike, in log-id order); this actor only
+        // threads the committed index into CompleteProposal so the apply's background write can be
+        // resolved against the floor as soon as it flushes.
         RaftReplicationResult result = await raft.ReplicateLogs(
             partitionId,
             ReplicationTypes.Locks,
             ReplicationSerializer.Serialize(lockMessage)
         );
-        
+
         IActorRef<LockActor, LockRequest, LockResponse> lockActor = message.LockActor;
 
         if (!result.Success)
         {
             logger.LogWarning("Failed to replicate lock {Resource} Partition={Partition} Status={Status} Ticket={Ticket}", proposal.Resource, partitionId, result.Status, result.TicketId);
-            
+
             lockActor.Send(new(
-                LockRequestType.ReleaseProposal, 
-                proposal.Resource, 
-                null, 
-                0, 
+                LockRequestType.ReleaseProposal,
+                proposal.Resource,
+                null,
+                0,
                 proposal.Durability,
                 message.ProposalId,
                 partitionId,
                 message.Promise
             ));
-            
+
             return;
         }
 
         lockActor.Send(new(
-            LockRequestType.CompleteProposal, 
-            proposal.Resource, 
-            null, 
-            0, 
+            LockRequestType.CompleteProposal,
+            proposal.Resource,
+            null,
+            0,
             proposal.Durability,
             message.ProposalId,
             partitionId,
-            message.Promise
+            message.Promise,
+            result.LogIndex
         ));
-    }        
+    }
 }

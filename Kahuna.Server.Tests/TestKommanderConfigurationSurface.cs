@@ -89,12 +89,23 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.WalSingleFsyncCommit)] = nameof(KahunaCommandLineOptions.RaftWalSingleFsyncCommit)
     };
 
+    /// <summary>
+    /// Writable RaftConfiguration members that are code-level hooks rather than operator-settable
+    /// options: they carry live objects no CLI value can express and are wired by the host
+    /// (KahunaManager assigns the application-durability provider after construction, before the
+    /// node joins).
+    /// </summary>
+    private static readonly HashSet<string> NonCliHookProperties =
+    [
+        nameof(RaftConfiguration.ApplicationDurabilityProvider)
+    ];
+
     [Fact]
     public void TestServerCliExposesEveryKommanderRaftConfigurationOption()
     {
         string[] writableRaftProperties = typeof(RaftConfiguration)
             .GetProperties()
-            .Where(property => property.SetMethod?.IsPublic == true)
+            .Where(property => property.SetMethod?.IsPublic == true && !NonCliHookProperties.Contains(property.Name))
             .Select(property => property.Name)
             .Order()
             .ToArray();

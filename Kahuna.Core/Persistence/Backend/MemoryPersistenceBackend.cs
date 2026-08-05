@@ -55,6 +55,23 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     /// <param name="items">A list of <see cref="PersistenceRequestItem"/> containing the lock data to be stored or updated.</param>
     /// <returns>Returns <c>true</c> if the locks were successfully stored or updated.</returns>
+    /// <summary>
+    /// Per-partition application-durability floors. The memory backend has no real durability, but
+    /// mirroring the contract keeps embedded/test topologies on the same code path as disk backends.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, long> durabilityFloors = new();
+
+    public bool StoreDurabilityFloors(IReadOnlyList<(int PartitionId, long Floor)> floors)
+    {
+        foreach ((int partitionId, long floor) in floors)
+            durabilityFloors.AddOrUpdate(partitionId, floor, (_, existing) => Math.Max(existing, floor));
+
+        return true;
+    }
+
+    public long GetDurabilityFloor(int partitionId) =>
+        durabilityFloors.TryGetValue(partitionId, out long floor) ? floor : -1;
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))

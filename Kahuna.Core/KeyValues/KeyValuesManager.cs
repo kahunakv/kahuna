@@ -74,6 +74,9 @@ internal sealed class KeyValuesManager : IDisposable
     private readonly IActorRef<KeyValueCollectorActor, KeyValueCollectorRequest> keyValueCollector;
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
+    /// <summary>Per-partition application-durability floor tracker, shared node-wide.</summary>
+    private readonly PartitionDurabilityTracker? durabilityTracker;
     
     private readonly Writes.PartitionWriteAggregator writeAggregator;
 
@@ -601,7 +604,8 @@ internal sealed class KeyValuesManager : IDisposable
         CompletionReceiptStore? externalReceiptStore = null,
         TransactionRecordStore? externalRecordStore = null,
         PreparedIntentStore? externalIntentStore = null,
-        Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null
+        Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null,
+        PartitionDurabilityTracker? durabilityTracker = null
     )
     {
         this.actorSystem = actorSystem;
@@ -609,6 +613,7 @@ internal sealed class KeyValuesManager : IDisposable
         this.backendReadScheduler = backendReadScheduler;
         this.interNodeCommunication = interNodeCommunication;
         this.backgroundWriter = backgroundWriter;
+        this.durabilityTracker = durabilityTracker;
         this.logger = logger;
 
         this.persistenceBackend = persistenceBackend;
@@ -757,8 +762,8 @@ internal sealed class KeyValuesManager : IDisposable
         // becomes a no-op, restoring pre-overlay behavior.
         UnflushedKeyValueWritesIndex? unflushedWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
 
-        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites);
-        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites);
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
+        replicator = new(backgroundWriter, persistentKeyValuesRouter, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
         kvStateMachineTransfer = new(this, persistenceBackend, logger);
 
         // Whole-partition state transfer for the meta partition (id 0). Repairs a node below the
@@ -1361,28 +1366,65 @@ internal sealed class KeyValuesManager : IDisposable
     {
         if (log.LogType == ReplicationTypes.RangeMap)
         {
+            RegisterSynchronousApply(partitionId, log.Id);
             bool result = rangeMapStore.Restore(partitionId, log);
             // A replayed range-descriptor entry may introduce key spaces that are not yet in the
             // per-node KeySpaceRegistry. Sync so that routing on this node matches the restored map.
             if (result)
+            {
                 SyncKeySpaceRegistryFromRangeMap();
+                durabilityTracker?.Resolve(partitionId, log.Id);
+            }
             return Task.FromResult(result);
         }
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
-            return Task.FromResult(snapshotFloorStore.Restore(partitionId, log));
+        {
+            RegisterSynchronousApply(partitionId, log.Id);
+            bool result = snapshotFloorStore.Restore(partitionId, log);
+            if (result)
+                durabilityTracker?.Resolve(partitionId, log.Id);
+            return Task.FromResult(result);
+        }
 
         if (log.LogType == ReplicationTypes.TransactionRecord)
-            return Task.FromResult(transactionRecordStore.Restore(partitionId, log));
+        {
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.TransactionRecords);
+            bool result = transactionRecordStore.Restore(partitionId, log);
+            if (result)
+                durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
+            return Task.FromResult(result);
+        }
 
         if (log.LogType == ReplicationTypes.PreparedIntent)
-            return Task.FromResult(preparedIntentStore.Restore(partitionId, log));
+        {
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.PreparedIntents);
+            bool result = preparedIntentStore.Restore(partitionId, log);
+            if (result)
+                durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.PreparedIntents);
+            return Task.FromResult(result);
+        }
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
-            return Task.FromResult(completionReceiptStore.Restore(partitionId, log));
+        {
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Receipts);
+            bool result = completionReceiptStore.Restore(partitionId, log);
+            if (result)
+                durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.Receipts);
+            return Task.FromResult(result);
+        }
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
+
+    /// <summary>
+    /// Registers a WAL entry whose apply persists synchronously (range map, snapshot floor): it is
+    /// tracked pending across the apply so a failed apply leaves the durability floor below it, and
+    /// resolves immediately on success. The Flush channel is only nominal — the resolve happens
+    /// inline, never through a background flush.
+    /// </summary>
+    private void RegisterSynchronousApply(int partitionId, long logIndex) =>
+        durabilityTracker?.RegisterPending(partitionId, logIndex, DurabilityChannel.Flush);
 
     /// <summary>
     /// Receives replication messages once they're committed to the Raft log.
@@ -1394,18 +1436,28 @@ internal sealed class KeyValuesManager : IDisposable
     {
         if (log.LogType == ReplicationTypes.RangeMap)
         {
+            RegisterSynchronousApply(partitionId, log.Id);
             bool result = rangeMapStore.Replicate(partitionId, log);
             // Keep the per-node KeySpaceRegistry in sync with every replicated range-descriptor
             // update. Without this, follower nodes that receive a new key-range descriptor via Raft
             // still route the corresponding key space via hash (the default), causing 2PC prepare
             // to be sent to the wrong partition and the transaction to be aborted.
             if (result)
+            {
                 SyncKeySpaceRegistryFromRangeMap();
+                durabilityTracker?.Resolve(partitionId, log.Id);
+            }
             return Task.FromResult(result);
         }
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
-            return Task.FromResult(snapshotFloorStore.Replicate(partitionId, log));
+        {
+            RegisterSynchronousApply(partitionId, log.Id);
+            bool result = snapshotFloorStore.Replicate(partitionId, log);
+            if (result)
+                durabilityTracker?.Resolve(partitionId, log.Id);
+            return Task.FromResult(result);
+        }
 
         // Durable records apply here, in Raft commit order, on every node. On the leader the write scheduler's
         // completion applies the identical delta too, and the fast-path ticket release means either side can run
@@ -1413,26 +1465,46 @@ internal sealed class KeyValuesManager : IDisposable
         // instead of deserializing and applying the same delta a second time.
         if (log.LogType == ReplicationTypes.TransactionRecord)
         {
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.TransactionRecords);
+
             if (durableApplyResults.TryConsume(partitionId, log.Id, out bool recorded))
+            {
+                if (recorded)
+                    durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
                 return Task.FromResult(recorded);
+            }
 
             bool applied = transactionRecordStore.Replicate(partitionId, log);
             durableApplyResults.RecordApplied(partitionId, log.Id, applied);
+            if (applied)
+                durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
             return Task.FromResult(applied);
         }
 
         if (log.LogType == ReplicationTypes.PreparedIntent)
         {
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.PreparedIntents);
+
             // The prepare acknowledgement is what a local producer needs from this apply; a prepare rejected on its
             // merits is still a successfully applied log entry, so it never fails replication.
             if (!durableApplyResults.TryConsume(partitionId, log.Id, out _))
                 durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(log));
 
+            // A rejected prepare is still an applied entry (the store recorded the rejection), so the
+            // snapshot that covers this apply certifies it either way.
+            durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.PreparedIntents);
+
             return Task.FromResult(true);
         }
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
-            return Task.FromResult(completionReceiptStore.Replicate(partitionId, log));
+        {
+            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Receipts);
+            bool result = completionReceiptStore.Replicate(partitionId, log);
+            if (result)
+                durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.Receipts);
+            return Task.FromResult(result);
+        }
 
         return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }

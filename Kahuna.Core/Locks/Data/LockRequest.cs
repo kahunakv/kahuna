@@ -80,9 +80,16 @@ internal sealed class LockRequest : IConsistentHashable
     public int PartitionId { get; }
     
     /// <summary>
-    /// 
+    ///
     /// </summary>
     public TaskCompletionSource<LockResponse?>? Promise { get; }
+
+    /// <summary>
+    /// For CompleteProposal requests: the Raft WAL log index the proposal committed at, so the
+    /// apply can stamp it on the background write and the partition's application-durability floor
+    /// advances once the flush lands. -1 for every other request type.
+    /// </summary>
+    public long ProposalLogIndex { get; }
 
     /// <summary>
     /// Constructor
@@ -93,19 +100,19 @@ internal sealed class LockRequest : IConsistentHashable
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <param name="proposalId"></param>
-    /// <param name="messagePromise"></param>
-    /// <param name="proposalId"></param>
-    /// <param name="partitionId"></param> 
-    /// <param name="promise"></param> 
+    /// <param name="partitionId"></param>
+    /// <param name="promise"></param>
+    /// <param name="proposalLogIndex"></param>
     public LockRequest(
-        LockRequestType type, 
-        string resource, 
-        byte[]? owner, 
-        int expiresMs, 
-        LockDurability durability, 
-        int proposalId, 
+        LockRequestType type,
+        string resource,
+        byte[]? owner,
+        int expiresMs,
+        LockDurability durability,
+        int proposalId,
         int partitionId,
-        TaskCompletionSource<LockResponse?>? promise
+        TaskCompletionSource<LockResponse?>? promise,
+        long proposalLogIndex = -1
     )
     {
         Type = type;
@@ -116,6 +123,7 @@ internal sealed class LockRequest : IConsistentHashable
         ProposalId = proposalId;
         PartitionId = partitionId;
         Promise = promise;
+        ProposalLogIndex = proposalLogIndex;
     }
 
     /// <summary>

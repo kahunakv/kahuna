@@ -77,6 +77,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
     private readonly PreparedIntentStore? preparedIntentStore;
 
+    /// <summary>Per-partition application-durability floor tracker, shared node-wide. Null when the
+    /// node does not participate in durability-floor reporting.</summary>
+    private readonly PartitionDurabilityTracker? durabilityTracker;
+
     private readonly KahunaConfiguration configuration;
 
     private readonly ILogger<IKahuna> logger;
@@ -113,11 +117,29 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// If a write fails, these lock items are kept in memory until the next write attempt.
     /// </summary>
     private List<PersistenceRequestItem>? pendingLockItems;
-    
+
     /// <summary>
     /// If a write fails, these key/value items are kept in memory until the next write attempt.
     /// </summary>
     private List<PersistenceRequestItem>? pendingKeyValuesItems;
+
+    /// <summary>
+    /// WAL indexes of the retained lock batch, resolved against the durability tracker when the
+    /// retried flush finally lands. Travels with <see cref="pendingLockItems"/>.
+    /// </summary>
+    private List<(int PartitionId, long LogIndex)>? pendingLockIndexes;
+
+    /// <summary>
+    /// WAL indexes of the retained key/value batch, resolved against the durability tracker when
+    /// the retried flush finally lands. Travels with <see cref="pendingKeyValuesItems"/>.
+    /// </summary>
+    private List<(int PartitionId, long LogIndex)>? pendingKeyValueIndexes;
+
+    /// <summary>
+    /// Per-partition floors already persisted to the backend, so a flush cycle only writes floors
+    /// that actually advanced.
+    /// </summary>
+    private readonly Dictionary<int, long> lastPersistedFloors = [];
     
     /// <summary>
     /// Whether a checkpoint operation is pending.
@@ -185,7 +207,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         PreparedIntentStore? preparedIntentStore,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
-        FlushNotificationSink flushNotificationSink
+        FlushNotificationSink flushNotificationSink,
+        PartitionDurabilityTracker? durabilityTracker = null
     )
     {
         this.raft = raft;
@@ -195,6 +218,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         this.completionReceiptStore = completionReceiptStore;
         this.transactionRecordStore = transactionRecordStore;
         this.preparedIntentStore = preparedIntentStore;
+        this.durabilityTracker = durabilityTracker;
         this.configuration = configuration;
         this.logger = logger;
         this.flushNotificationSink = flushNotificationSink;
@@ -232,6 +256,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await CheckpointPartitions();
                 await FlushLocks();
                 await FlushKeyValues();
+                await AdvanceDurabilityFloors();
                 await RunTargetedRevisionCleanup();
                 await RunFullRevisionSweep();
                 UpdatePitrHorizon();
@@ -252,6 +277,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 {
                     bool locksFlushed = await FlushLocks(drainFully: true);
                     bool keyValuesFlushed = await FlushKeyValues(drainFully: true);
+                    await AdvanceDurabilityFloors();
                     await RunTargetedRevisionCleanup();
                     if (locksFlushed && keyValuesFlushed)
                         message.CompletionSource?.TrySetResult(true);
@@ -343,11 +369,108 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// </summary>
     internal bool TryCaptureCheckpointSnapshots(int partitionId)
     {
+        // Capture each store's resolve ceiling before its snapshot: the snapshot covers every apply
+        // completed so far, which includes everything at or below the ceiling, so a durable snapshot
+        // certifies those WAL entries for the partition's application-durability floor.
+        long receiptCeiling = durabilityTracker?.GetHighestApplied(partitionId, DurabilityChannel.Receipts) ?? -1;
+        long recordCeiling = durabilityTracker?.GetHighestApplied(partitionId, DurabilityChannel.TransactionRecords) ?? -1;
+        long intentCeiling = durabilityTracker?.GetHighestApplied(partitionId, DurabilityChannel.PreparedIntents) ?? -1;
+
         bool receipts = completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
         bool records = transactionRecordStore?.PersistSnapshot(partitionId) ?? true;
         bool intents = preparedIntentStore?.PersistSnapshot(partitionId) ?? true;
 
+        if (receipts)
+            durabilityTracker?.ResolveUpTo(partitionId, DurabilityChannel.Receipts, receiptCeiling);
+        if (records)
+            durabilityTracker?.ResolveUpTo(partitionId, DurabilityChannel.TransactionRecords, recordCeiling);
+        if (intents)
+            durabilityTracker?.ResolveUpTo(partitionId, DurabilityChannel.PreparedIntents, intentCeiling);
+
         return receipts && records && intents;
+    }
+
+    /// <summary>
+    /// Resolves the WAL indexes of a durably-stored flush batch against the durability tracker so
+    /// the partitions' application-durability floors can advance past them.
+    /// </summary>
+    private void ResolveFlushedIndexes(List<(int PartitionId, long LogIndex)>? batchIndexes)
+    {
+        if (durabilityTracker is null || batchIndexes is null)
+            return;
+
+        foreach ((int partitionId, long logIndex) in batchIndexes)
+            durabilityTracker.Resolve(partitionId, logIndex);
+    }
+
+    /// <summary>
+    /// Advances the application-durability floors after a flush cycle. Two steps:
+    /// <para>
+    /// <b>Snapshot-channel resolution.</b> Partitions whose floor is blocked on unresolved
+    /// receipt / transaction-record / prepared-intent entries get those stores' snapshots persisted
+    /// here — on followers as well as leaders. The leader's checkpoint gate also captures these
+    /// snapshots, but only for partitions it leads; without this pass a follower's floor (and
+    /// therefore its WAL retention) would freeze on the first durable-2PC entry it applies.
+    /// </para>
+    /// <para>
+    /// <b>Floor persistence.</b> Every partition whose watermark advanced past its last persisted
+    /// floor gets the new floor written to the backend — strictly after the flush batches it
+    /// certifies, so the persisted floor can never lead the data it vouches for. The floor read at
+    /// the next startup is what Kommander uses to widen restart replay.
+    /// </para>
+    /// </summary>
+    private async ValueTask AdvanceDurabilityFloors()
+    {
+        if (durabilityTracker is null)
+            return;
+
+        foreach (int partitionId in durabilityTracker.ObservedPartitions)
+        {
+            if (!durabilityTracker.HasPendingSnapshotWork(partitionId))
+                continue;
+
+            if (!TryCaptureCheckpointSnapshots(partitionId))
+                logger.LogWarning(
+                    "Durability floor of partition #{PartitionId} is blocked on a store snapshot that could not be persisted; WAL retention cannot advance past it until a snapshot succeeds",
+                    partitionId);
+        }
+
+        List<(int PartitionId, long Floor)>? floorsToPersist = null;
+
+        foreach (int partitionId in durabilityTracker.ObservedPartitions)
+        {
+            long watermark = durabilityTracker.GetWatermark(partitionId);
+
+            if (watermark >= 0 && watermark > lastPersistedFloors.GetValueOrDefault(partitionId, -1))
+                (floorsToPersist ??= []).Add((partitionId, watermark));
+        }
+
+        if (floorsToPersist is null)
+            return;
+
+        bool stored;
+
+        try
+        {
+            stored = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreDurabilityFloors(floorsToPersist));
+        }
+        catch (ReadBackpressureExceededException)
+        {
+            // Writer queue saturated: skip this cycle; the floors are retried on the next flush tick.
+            return;
+        }
+
+        if (!stored)
+        {
+            logger.LogWarning("Failed to persist {Count} advanced durability floors; retrying next flush cycle", floorsToPersist.Count);
+            return;
+        }
+
+        foreach ((int partitionId, long floor) in floorsToPersist)
+        {
+            lastPersistedFloors[partitionId] = floor;
+            logger.LogDebug("Durability floor of partition #{PartitionId} advanced to {Floor}", partitionId, floor);
+        }
     }
 
     /// <summary>
@@ -377,15 +500,19 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             stopwatch.Restart();
 
             List<PersistenceRequestItem> items;
+            List<(int PartitionId, long LogIndex)>? batchIndexes;
 
             if (pendingLockItems != null)
             {
                 items = pendingLockItems;
+                batchIndexes = pendingLockIndexes;
                 pendingLockItems = null;
+                pendingLockIndexes = null;
             }
             else
             {
                 items = [];
+                batchIndexes = null;
 
                 long size = 0;
                 int counter = 0;
@@ -419,6 +546,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         lockRequest.LastModified.C,
                         lockRequest.State
                     ));
+
+                    // Carry the WAL index so the durability floor advances when this batch lands;
+                    // travels beside the items so the retry path keeps the linkage.
+                    if (lockRequest.LogIndex >= 0 && lockRequest.PartitionId >= 0)
+                        (batchIndexes ??= []).Add((lockRequest.PartitionId, lockRequest.LogIndex));
 
                     if (lockRequest.Value is not null)
                         size += lockRequest.Value.Length;
@@ -460,11 +592,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (!success)
             {
                 pendingLockItems = items;
+                pendingLockIndexes = batchIndexes;
                 logger.LogError("Coundn't store batch of {Count} locks", items.Count);
                 return false;
             }
 
             logger.LogSuccessfullyStoredLocks(items.Count, stopwatch.ElapsedMilliseconds);
+
+            ResolveFlushedIndexes(batchIndexes);
+
             pendingCheckpoint = true;
 
             if (!drainFully && (Environment.TickCount64 - startTick) >= budgetMs)
@@ -501,15 +637,19 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             stopwatch.Restart();
 
             List<PersistenceRequestItem> items;
+            List<(int PartitionId, long LogIndex)>? batchIndexes;
 
             if (pendingKeyValuesItems != null)
             {
                 items = pendingKeyValuesItems;
+                batchIndexes = pendingKeyValueIndexes;
                 pendingKeyValuesItems = null;
+                pendingKeyValueIndexes = null;
             }
             else
             {
                 items = [];
+                batchIndexes = null;
 
                 long size = 0;
                 int counter = 0;
@@ -545,6 +685,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         keyValueRequest.State,
                         keyValueRequest.NoRevision
                     ));
+
+                    // Carry the WAL index so the durability floor advances when this batch lands;
+                    // travels beside the items so the retry path keeps the linkage.
+                    if (keyValueRequest.LogIndex >= 0 && keyValueRequest.PartitionId >= 0)
+                        (batchIndexes ??= []).Add((keyValueRequest.PartitionId, keyValueRequest.LogIndex));
 
                     if (keyValueRequest.Value is not null)
                         size += keyValueRequest.Value.Length;
@@ -589,11 +734,14 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 // but report the failure so a caller waiting on a full drain (e.g. a full backup) never
                 // treats an incomplete flush as success and publishes a checkpoint missing committed data.
                 pendingKeyValuesItems = items;
+                pendingKeyValueIndexes = batchIndexes;
                 logger.LogError("Coundn't store batch of {Count} key-values", items.Count);
                 return false;
             }
 
             logger.LogSuccessfullyStoredKeyValues(items.Count, stopwatch.ElapsedMilliseconds);
+
+            ResolveFlushedIndexes(batchIndexes);
 
             // Acknowledge each durably-stored key-value back to its owning actor so it can advance
             // FlushedRevision and release the entry for eviction. The actor ignores acks that don't

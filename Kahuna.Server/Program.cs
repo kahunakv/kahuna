@@ -107,14 +107,26 @@ else
     builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
     // Resolve KahunaManager through a factory so the (optional) shared bundle is injected when registered
     // and null otherwise — GetService returns null for an unregistered service, preserving the default path.
-    builder.Services.AddSingleton<IKahuna>(services => new KahunaManager(
-        services.GetRequiredService<ActorSystem>(),
-        services.GetRequiredService<IRaft>(),
-        services.GetRequiredService<KahunaConfiguration>(),
-        services.GetRequiredService<IInterNodeCommunication>(),
-        services.GetService<RocksDbSharedResources>(),
-        services.GetRequiredService<ILogger<IKahuna>>(),
-        services.GetRequiredService<ILogger<IRaft>>()));
+    builder.Services.AddSingleton<IKahuna>(services =>
+    {
+        IRaft raft = services.GetRequiredService<IRaft>();
+
+        KahunaManager manager = new(
+            services.GetRequiredService<ActorSystem>(),
+            raft,
+            services.GetRequiredService<KahunaConfiguration>(),
+            services.GetRequiredService<IInterNodeCommunication>(),
+            services.GetService<RocksDbSharedResources>(),
+            services.GetRequiredService<ILogger<IKahuna>>(),
+            services.GetRequiredService<ILogger<IRaft>>());
+
+        // Restart replay and WAL compaction consult Kahuna's application-durability floor. Wired
+        // here — before ReplicationService joins the cluster — and read lazily by Kommander, so
+        // the first partition restore already sees it.
+        raft.Configuration.ApplicationDurabilityProvider = manager.DurabilityProvider;
+
+        return manager;
+    });
     builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
     builder.Services.AddSingleton(opts);
     builder.Services.AddHostedService<ReplicationService>();

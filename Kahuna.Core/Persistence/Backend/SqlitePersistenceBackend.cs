@@ -339,6 +339,18 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             using (SqliteCommand commandPitrMeta = new(createPitrMetaQuery, connection))
                 commandPitrMeta.ExecuteNonQuery();
 
+            // Per-partition application-durability floors (only shard 0 is ever written/read — the
+            // floor is partition-scoped, not key-scoped). A new table, so it is created on existing
+            // databases too.
+            const string createDurabilityFloorQuery = """
+                CREATE TABLE IF NOT EXISTS durability_floor (
+                    partition INTEGER PRIMARY KEY,
+                    floor INTEGER
+                );
+                """;
+            using (SqliteCommand commandDurabilityFloor = new(createDurabilityFloorQuery, connection))
+                commandDurabilityFloor.ExecuteNonQuery();
+
             const string pragmasQuery = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
             using SqliteCommand command4 = new(pragmasQuery, connection);
             command4.ExecuteNonQuery();
@@ -362,6 +374,81 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// <returns>
     /// A boolean value indicating whether the lock data was successfully stored.
     /// </returns>
+    public bool StoreDurabilityFloors(IReadOnlyList<(int PartitionId, long Floor)> floors)
+    {
+        try
+        {
+            const string upsert = """
+                INSERT INTO durability_floor (partition, floor) VALUES (@partition, @floor)
+                ON CONFLICT(partition) DO UPDATE SET floor = MAX(floor, @floor);
+                """;
+
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(0);
+
+            readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+            try
+            {
+                using SqliteTransaction transaction = connection.BeginTransaction();
+
+                using SqliteCommand command = new(upsert, connection);
+                command.Transaction = transaction;
+
+                SqliteParameter paramPartition = command.Parameters.Add("@partition", SqliteType.Integer);
+                SqliteParameter paramFloor = command.Parameters.Add("@floor", SqliteType.Integer);
+                command.Prepare();
+
+                foreach ((int partitionId, long floor) in floors)
+                {
+                    paramPartition.Value = partitionId;
+                    paramFloor.Value = floor;
+                    command.ExecuteNonQuery();
+                }
+
+                transaction.Commit();
+            }
+            finally
+            {
+                readerWriterLock.ReleaseWriterLock();
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("StoreDurabilityFloors: {Type} {Message}", ex.GetType().Name, ex.Message);
+            return false;
+        }
+    }
+
+    public long GetDurabilityFloor(int partitionId)
+    {
+        try
+        {
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(0);
+
+            readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+
+            try
+            {
+                using SqliteCommand command = new("SELECT floor FROM durability_floor WHERE partition = @partition", connection);
+                command.Parameters.AddWithValue("@partition", partitionId);
+
+                object? result = command.ExecuteScalar();
+                return result is long floor ? floor : -1;
+            }
+            finally
+            {
+                readerWriterLock.ReleaseReaderLock();
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("GetDurabilityFloor: {Type} {Message}", ex.GetType().Name, ex.Message);
+            return -1;
+        }
+    }
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         try

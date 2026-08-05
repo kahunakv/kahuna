@@ -37,6 +37,14 @@ public sealed class BackgroundWriteRequest
 
     public bool NoRevision { get; private set; }
 
+    /// <summary>
+    /// Raft WAL log index of the committed entry this write persists, or -1 when the write is not
+    /// WAL-tracked (ephemeral mutations, callers without an index). The background writer resolves
+    /// the index against the partition durability tracker when the flush batch carrying this write
+    /// lands, letting the partition's application-durability floor advance past the entry.
+    /// </summary>
+    public long LogIndex { get; private set; } = -1;
+
     public TaskCompletionSource<bool>? CompletionSource { get; private set; }
 
     public BackgroundWriteRequest(
@@ -49,7 +57,8 @@ public sealed class BackgroundWriteRequest
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
         int state,
-        bool noRevision = false
+        bool noRevision = false,
+        long logIndex = -1
     )
     {
         Type = type;
@@ -62,6 +71,7 @@ public sealed class BackgroundWriteRequest
         LastModified = lastModified;
         State = state;
         NoRevision = noRevision;
+        LogIndex = logIndex;
     }
 
     public BackgroundWriteRequest(BackgroundWriteType type)
@@ -91,7 +101,8 @@ public sealed class BackgroundWriteRequest
         HLCTimestamp lastUsed,
         HLCTimestamp lastModified,
         int state,
-        bool noRevision
+        bool noRevision,
+        long logIndex
     )
     {
         Type = type;
@@ -104,6 +115,7 @@ public sealed class BackgroundWriteRequest
         LastModified = lastModified;
         State = state;
         NoRevision = noRevision;
+        LogIndex = logIndex;
         CompletionSource = null;
     }
 

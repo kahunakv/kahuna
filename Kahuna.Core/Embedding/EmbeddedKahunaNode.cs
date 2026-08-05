@@ -156,6 +156,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         this.standaloneComm = new();
         this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+
+        // Restart replay and WAL compaction consult Kahuna's application-durability floor; wired
+        // before StartAsync joins the cluster, so the first partition restore already sees it.
+        raftConfiguration.ApplicationDurabilityProvider = ((KahunaManager)Kahuna).DurabilityProvider;
     }
 
     /// <summary>
@@ -281,6 +285,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         this.standaloneComm = null;
         this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+
+        // Restart replay and WAL compaction consult Kahuna's application-durability floor; wired
+        // before StartAsync joins the cluster, so the first partition restore already sees it.
+        raftConfiguration.ApplicationDurabilityProvider = ((KahunaManager)Kahuna).DurabilityProvider;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)

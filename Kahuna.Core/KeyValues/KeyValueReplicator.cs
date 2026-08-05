@@ -43,6 +43,8 @@ internal sealed class KeyValueReplicator
 
     private readonly UnflushedKeyValueWritesIndex? unflushedWrites;
 
+    private readonly PartitionDurabilityTracker? durabilityTracker;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueReplicator(
@@ -53,7 +55,8 @@ internal sealed class KeyValueReplicator
         KeySpaceRegistry keySpaceRegistry,
         CompletionReceiptStore completionReceiptStore,
         ILogger<IKahuna> logger,
-        UnflushedKeyValueWritesIndex? unflushedWrites = null)
+        UnflushedKeyValueWritesIndex? unflushedWrites = null,
+        PartitionDurabilityTracker? durabilityTracker = null)
     {
         this.backgroundWriter         = backgroundWriter;
         this.persistentRouter         = persistentRouter;
@@ -62,6 +65,7 @@ internal sealed class KeyValueReplicator
         this.keySpaceRegistry         = keySpaceRegistry;
         this.completionReceiptStore   = completionReceiptStore;
         this.unflushedWrites          = unflushedWrites;
+        this.durabilityTracker        = durabilityTracker;
         this.logger                   = logger;
     }
 
@@ -194,6 +198,12 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+                    // Register before enqueueing: the partition's durability floor must not pass
+                    // this entry until its flush lands. Applies arrive in log-id order (leaders
+                    // deliver their own committed proposals through this path too), so the
+                    // registration always precedes any watermark advance over this index.
+                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
                     // Record before enqueueing so a read that misses the actor cache observes this
                     // committed write even before the background flush lands it in the backend.
                     unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
@@ -209,7 +219,8 @@ internal sealed class KeyValueReplicator
                         lastUsed,
                         lastModified,
                         (int)KeyValueState.Set,
-                        keyValueMessage.NoRevision
+                        keyValueMessage.NoRevision,
+                        logIndex: log.Id
                     ));
 
                     SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
@@ -244,6 +255,8 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
                     unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Deleted, keyValueMessage.NoRevision);
 
@@ -257,7 +270,8 @@ internal sealed class KeyValueReplicator
                         lastUsed,
                         lastModified,
                         (int)KeyValueState.Deleted,
-                        keyValueMessage.NoRevision
+                        keyValueMessage.NoRevision,
+                        logIndex: log.Id
                     ));
 
                     SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
@@ -286,6 +300,8 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
                     unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
 
@@ -299,7 +315,8 @@ internal sealed class KeyValueReplicator
                         lastUsed,
                         lastModified,
                         (int)KeyValueState.Set,
-                        keyValueMessage.NoRevision
+                        keyValueMessage.NoRevision,
+                        logIndex: log.Id
                     ));
 
                     SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,

@@ -24,6 +24,8 @@ internal sealed class LockReplicator
 
     private readonly UnflushedLockWritesIndex? unflushedLockWrites;
 
+    private readonly PartitionDurabilityTracker? durabilityTracker;
+
     private readonly ILogger<IKahuna> logger;
 
     /// <summary>
@@ -33,12 +35,14 @@ internal sealed class LockReplicator
     /// <param name="raft"></param>
     /// <param name="logger"></param>
     /// <param name="unflushedLockWrites"></param>
-    public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger, UnflushedLockWritesIndex? unflushedLockWrites = null)
+    /// <param name="durabilityTracker"></param>
+    public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger, UnflushedLockWritesIndex? unflushedLockWrites = null, PartitionDurabilityTracker? durabilityTracker = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.logger = logger;
         this.unflushedLockWrites = unflushedLockWrites;
+        this.durabilityTracker = durabilityTracker;
     }
 
     /// <summary>
@@ -95,6 +99,11 @@ internal sealed class LockReplicator
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Register before enqueueing: the partition's durability floor must not pass
+                    // this entry until its flush lands. Applies run in log-id order here, so the
+                    // registration always precedes any watermark advance over this index.
+                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
                     // Record before enqueueing so a lock read that misses the actor table observes this
                     // committed mutation even before the background flush lands it in the backend.
                     unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
@@ -112,7 +121,8 @@ internal sealed class LockReplicator
                         new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
-                        (int)LockState.Locked
+                        (int)LockState.Locked,
+                        logIndex: log.Id
                     ));
 
                     return true;
@@ -146,6 +156,11 @@ internal sealed class LockReplicator
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Register before enqueueing: the partition's durability floor must not pass
+                    // this entry until its flush lands. Applies run in log-id order here, so the
+                    // registration always precedes any watermark advance over this index.
+                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
                     // Record before enqueueing so a lock read that misses the actor table observes this
                     // committed mutation even before the background flush lands it in the backend.
                     unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
@@ -163,7 +178,8 @@ internal sealed class LockReplicator
                         new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
-                        (int)LockState.Unlocked
+                        (int)LockState.Unlocked,
+                        logIndex: log.Id
                     ));
                     
                     return true;
@@ -197,6 +213,11 @@ internal sealed class LockReplicator
                     else
                         owner = lockMessage.Owner.ToByteArray();
                     
+                    // Register before enqueueing: the partition's durability floor must not pass
+                    // this entry until its flush lands. Applies run in log-id order here, so the
+                    // registration always precedes any watermark advance over this index.
+                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+
                     // Record before enqueueing so a lock read that misses the actor table observes this
                     // committed mutation even before the background flush lands it in the backend.
                     unflushedLockWrites?.Record(lockMessage.Resource, owner, lockMessage.FencingToken,
@@ -214,7 +235,8 @@ internal sealed class LockReplicator
                         new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
                         new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
-                        (int)LockState.Locked
+                        (int)LockState.Locked,
+                        logIndex: log.Id
                     ));
 
                     return true;

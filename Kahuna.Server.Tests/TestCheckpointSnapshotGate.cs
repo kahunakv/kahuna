@@ -66,7 +66,7 @@ public sealed class TestCheckpointSnapshotGate : IDisposable
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bg = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             name, raft, raft.ReadScheduler, new MemoryPersistenceBackend(),
             null!, null!, records, intents,
-            Config(), NullLogger<IKahuna>.Instance, new FlushNotificationSink());
+            Config(), NullLogger<IKahuna>.Instance, new FlushNotificationSink(), null!);
 
         return (bg.Runner.Actor as BackgroundWriterActor)!;
     }

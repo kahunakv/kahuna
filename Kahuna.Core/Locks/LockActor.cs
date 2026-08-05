@@ -496,7 +496,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             proposal.Expires,
             proposal.LastUsed,
             proposal.LastModified,
-            (int)proposal.State
+            (int)proposal.State,
+            logIndex: message.ProposalLogIndex
         ));
 
         entry.ReplicationIntent = null;

@@ -63,6 +63,18 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
+    /// <summary>Per-partition application-durability floor tracker, shared by every subsystem.</summary>
+    private readonly PartitionDurabilityTracker durabilityTracker;
+
+    /// <summary>
+    /// Kahuna's <see cref="IApplicationDurabilityProvider"/>. Hosts assign it to
+    /// <c>RaftConfiguration.ApplicationDurabilityProvider</c> after constructing the manager and
+    /// before the Raft node joins, so restart replay and WAL compaction respect this node's
+    /// application-durability floor. Kommander reads the configuration property lazily, so
+    /// post-construction assignment is safe.
+    /// </summary>
+    public IApplicationDurabilityProvider DurabilityProvider { get; }
+
     /// <summary>
     /// Kahuna-owned scheduler for all persistence-backend reads (point gets, scans, read-before-write),
     /// separate from Kommander's WAL read pool so data-plane reads never contend with consensus WAL reads.
@@ -198,6 +210,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.
         FlushNotificationSink flushNotificationSink = new();
 
+        // Per-partition application-durability floor: every committed WAL entry registers here at
+        // its ordered consumer apply and resolves when its durable artifact (flushed row or store
+        // snapshot) lands. The provider answers Kommander's replay/compaction floor queries; hosts
+        // wire it into RaftConfiguration.ApplicationDurabilityProvider before the node joins.
+        durabilityTracker = new PartitionDurabilityTracker();
+        DurabilityProvider = new KahunaDurabilityProvider(durabilityTracker, persistenceBackend);
+
         backgroundWriter = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
             "background-writer",
             raft,
@@ -209,11 +228,12 @@ public sealed class KahunaManager : IKahuna, IDisposable
             preparedIntentStore,
             configuration,
             logger,
-            flushNotificationSink
+            flushNotificationSink,
+            durabilityTracker
         );
 
-        this.locks = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger);
-        this.keyValues = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator);
+        this.locks = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, durabilityTracker);
+        this.keyValues = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator, durabilityTracker);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
