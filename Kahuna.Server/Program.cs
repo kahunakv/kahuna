@@ -385,6 +385,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         RecentHeartbeat = TimeSpan.FromMilliseconds(opts.RaftRecentHeartbeat),
         VotingTimeout = TimeSpan.FromMilliseconds(opts.RaftVotingTimeout),
         CheckLeaderInterval = TimeSpan.FromMilliseconds(opts.RaftCheckLeaderInterval),
+        LeadershipBarrierTimeout = TimeSpan.FromMilliseconds(opts.RaftLeadershipBarrierTimeout),
         TimerInitialDelay = TimeSpan.FromMilliseconds(opts.RaftTimerInitialDelay),
         UpdateNodesInterval = TimeSpan.FromMilliseconds(opts.RaftUpdateNodesInterval),
         StartElectionTimeout = opts.RaftStartElectionTimeout,
@@ -439,6 +440,11 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         SuspicionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuspicionTimeout),
         DeadMemberEvictionGrace = TimeSpan.FromMilliseconds(opts.RaftDeadMemberEvictionGrace),
         PingInterval = opts.RaftPingInterval == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(opts.RaftPingInterval),
+        // A node evicted from the roster while it was down (dead-member eviction firing across a
+        // slow restart) re-runs the join flow instead of parking as NotMember forever. KAHUNA_AUTO_REJOIN=0
+        // forces it off (the CLI bool is a bare switch and cannot express "false").
+        EnableAutoRejoin = opts.RaftEnableAutoRejoin
+            && Environment.GetEnvironmentVariable("KAHUNA_AUTO_REJOIN") != "0",
         // Quiesce idle partitions in cluster mode: with many partitions the per-partition
         // keep-alive heartbeats dominate idle traffic, so a leader stops heartbeating a partition
         // once it has been idle for QuiesceAfter and leans on SWIM node liveness instead. Requires

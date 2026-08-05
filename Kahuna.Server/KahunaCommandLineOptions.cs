@@ -175,6 +175,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-voting-timeout", Required = false, HelpText = "Raft vote wait timeout in milliseconds", Default = 1500)]
     public int RaftVotingTimeout { get; set; } = 1500;
 
+    [Option("raft-leadership-barrier-timeout", Required = false, HelpText = "How long a newly elected leader waits for its promotion barrier entry to commit before reverting to follower, in milliseconds. Until that entry commits the node heartbeats but does not serve, so raising this trades failover latency for tolerance of a slow quorum", Default = 10000)]
+    public int RaftLeadershipBarrierTimeout { get; set; } = 10000;
+
     [Option("raft-check-leader-interval", Required = false, HelpText = "Raft leader check interval in milliseconds", Default = 250)]
     public int RaftCheckLeaderInterval { get; set; } = 250;
 
@@ -306,6 +309,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-ping-interval", Required = false, HelpText = "Interval between SWIM ping rounds in milliseconds (0 disables the failure detector). Must be > 0 and < raft-start-election-timeout when quiescence is enabled.", Default = 1000)]
     public int RaftPingInterval { get; set; } = 1000;
+
+    [Option("raft-enable-auto-rejoin", Required = false, HelpText = "A node that finds itself removed from the committed roster (dead-member eviction firing across a slow restart) re-runs the join flow against the remaining members instead of staying NotMember. Disable only when an operator workflow removes live nodes and expects them to stay out.", Default = true)]
+    public bool RaftEnableAutoRejoin { get; set; } = true;
 
     [Option("raft-enable-quiescence", Required = false, HelpText = "Quiesce idle partitions: a leader stops per-partition heartbeats after a partition is idle, relying on the SWIM failure detector for node liveness. Cuts O(NxM) idle heartbeat traffic across many partitions. Requires SWIM (raft-ping-interval > 0 and < raft-start-election-timeout).", Default = true)]
     public bool RaftEnableQuiescence { get; set; } = true;
