@@ -1622,7 +1622,17 @@ internal sealed class TransactionCoordinator : IDisposable
             // On commit, preserve the last statement's result exactly as the ticket path does (its CommitMutations
             // sets no result on success), so an auto-commit script ending in a read returns that read — not a
             // synthetic Set. A bare commit with no prior result still reports Set.
-            DurableFinalizeResult.Committed => context.Result ?? new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
+            //
+            // Never preserve a failure, though: a discarded earlier attempt can have written one here — the
+            // one-phase fast path's pre-propose validation sets a conflict Aborted when its write-skew probe
+            // finds a concurrent intent, then falls back to the standard flow, whose re-validation can pass
+            // (the intent's owner resolved meanwhile) and commit. The transaction durably committed and its
+            // writes are visible; answering that stale Aborted would tell the client a committed write had
+            // no effect — an aborted-read anomaly for every reader that then observes it.
+            DurableFinalizeResult.Committed =>
+                context.Result is { Type: not (KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry) }
+                    ? context.Result
+                    : new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
             DurableFinalizeResult.Aborted => new KeyValueTransactionResult
             {
                 Type = KeyValueResponseType.Aborted,
