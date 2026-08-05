@@ -160,7 +160,7 @@ public sealed class TestTerminalOutcomeWindow
         {
             while (!cts.IsCancellationRequested)
                 window.PruneExpired(new HLCTimestamp(0, 100_000_000, 0), TimeSpan.FromMilliseconds(1));
-        });
+        }, TestContext.Current.CancellationToken);
 
         for (long i = 0; i < 20_000; i++)
             window.Retain(Tx(i), Committed, Tx(i), max);

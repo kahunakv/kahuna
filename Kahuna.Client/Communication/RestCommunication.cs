@@ -1667,7 +1667,8 @@ public class RestCommunication : IKahunaCommunication
             if (readType(response) != KeyValueResponseType.MustRetry)
                 return response;
 
-            logger?.LogDebug("Server asked to retry {Verb}", verb);
+            if (logger is not null && logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Server asked to retry {Verb}", verb);
 
             carryForward?.Invoke(request, response);
 

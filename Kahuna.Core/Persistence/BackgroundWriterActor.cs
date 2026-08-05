@@ -469,7 +469,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         foreach ((int partitionId, long floor) in floorsToPersist)
         {
             lastPersistedFloors[partitionId] = floor;
-            logger.LogDebug("Durability floor of partition #{PartitionId} advanced to {Floor}", partitionId, floor);
+
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Durability floor of partition #{PartitionId} advanced to {Floor}", partitionId, floor);
         }
     }
 

@@ -202,7 +202,11 @@ internal sealed class LockLocator
         if (!raft.Joined)
             return (LockResponseType.MustRetry, null);
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        // Lock reads are gated on a quorum-confirmed leadership check (Raft read-index), not local
+        // belief: a minority-partitioned leader keeps believing it leads and would answer with a
+        // stale holder — the one read where staleness can break mutual-exclusion assumptions.
+        // Writes don't need this; replication itself fails on a deposed leader.
+        if (await raft.ConfirmLeadershipAsync(partitionId, cancellationToken))
             return await manager.GetLock(resource, durability);
 
         string leader;
@@ -223,7 +227,7 @@ internal sealed class LockLocator
         }
 
         if (leader == raft.GetLocalEndpoint())
-            return await manager.GetLock(resource, durability);
+            return (LockResponseType.MustRetry, null);
 
         logger.LogGetLockRedirect(resource, partitionId, leader);
 

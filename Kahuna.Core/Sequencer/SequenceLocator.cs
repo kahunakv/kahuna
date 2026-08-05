@@ -40,7 +40,7 @@ internal sealed class SequenceLocator
         CancellationToken cancellationToken
     )
     {
-        (bool servedLocally, string leader) = await ResolveOwner(name, cancellationToken).ConfigureAwait(false);
+        (bool servedLocally, string leader) = await ResolveOwner(name, confirmLeadership: true, cancellationToken).ConfigureAwait(false);
 
         if (leader.Length == 0)
             return (SequenceResponseType.MustRetry, null);
@@ -60,7 +60,7 @@ internal sealed class SequenceLocator
         CancellationToken cancellationToken
     )
     {
-        (bool servedLocally, string leader) = await ResolveOwner(name, cancellationToken).ConfigureAwait(false);
+        (bool servedLocally, string leader) = await ResolveOwner(name, confirmLeadership: false, cancellationToken).ConfigureAwait(false);
 
         if (leader.Length == 0)
             return (SequenceResponseType.MustRetry, -1);
@@ -79,7 +79,7 @@ internal sealed class SequenceLocator
         CancellationToken cancellationToken
     )
     {
-        (bool servedLocally, string leader) = await ResolveOwner(name, cancellationToken).ConfigureAwait(false);
+        (bool servedLocally, string leader) = await ResolveOwner(name, confirmLeadership: false, cancellationToken).ConfigureAwait(false);
 
         if (leader.Length == 0)
             return (SequenceResponseType.MustRetry, default);
@@ -96,7 +96,7 @@ internal sealed class SequenceLocator
         CancellationToken cancellationToken
     )
     {
-        (bool servedLocally, string leader) = await ResolveOwner(name, cancellationToken).ConfigureAwait(false);
+        (bool servedLocally, string leader) = await ResolveOwner(name, confirmLeadership: false, cancellationToken).ConfigureAwait(false);
 
         if (leader.Length == 0)
             return SequenceResponseType.MustRetry;
@@ -110,19 +110,32 @@ internal sealed class SequenceLocator
     /// <summary>
     /// Resolves the node that owns <paramref name="name"/>.
     /// </summary>
+    /// <param name="name">The sequence name.</param>
+    /// <param name="confirmLeadership">
+    /// When <see langword="true"/>, local ownership requires a quorum-confirmed leadership check
+    /// (Raft read-index) instead of local belief. Read paths must pass <see langword="true"/>: a
+    /// minority-partitioned leader keeps believing it leads and would answer a read with stale
+    /// state. Mutation paths pass <see langword="false"/> — their CAS write replicates, so a
+    /// deposed leader fails them anyway.
+    /// </param>
+    /// <param name="cancellationToken"></param>
     /// <returns>
     /// <c>(true, local endpoint)</c> when this node owns the sequence, <c>(false, leader)</c> when another
     /// does, and an empty leader when ownership cannot be resolved right now — the caller turns that into
     /// a retryable answer rather than an error, because it means an election is in progress.
     /// </returns>
-    private async Task<(bool ServedLocally, string Leader)> ResolveOwner(string name, CancellationToken cancellationToken)
+    private async Task<(bool ServedLocally, string Leader)> ResolveOwner(string name, bool confirmLeadership, CancellationToken cancellationToken)
     {
         if (!raft.Joined)
             return (false, "");
 
         int partitionId = dataPartitionRouter.Locate(SequenceActor.GetStorageKey(name));
 
-        if (await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        bool servesLocally = confirmLeadership
+            ? await raft.ConfirmLeadershipAsync(partitionId, cancellationToken).ConfigureAwait(false)
+            : await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+        if (servesLocally)
             return (true, raft.GetLocalEndpoint());
 
         string leader;
@@ -142,7 +155,7 @@ internal sealed class SequenceLocator
         }
 
         if (leader == raft.GetLocalEndpoint())
-            return (true, leader);
+            return confirmLeadership ? (false, "") : (true, leader);
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogDebug("Sequence '{Name}' on partition {PartitionId} redirected to {Leader}", name, partitionId, leader);

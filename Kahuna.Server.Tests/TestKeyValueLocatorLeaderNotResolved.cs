@@ -138,6 +138,8 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
 
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
 
+        public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(false);
+
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => throw WaitForLeaderError;
 
         public IWAL WalAdapter => throw new NotImplementedException();

@@ -162,14 +162,14 @@ public sealed class TestLockPromotionInheritedApply : RaftTrackingTest
 
         Node[] nodes = [new(r1, k1), new(r2, k2), new(r3, k3)];
 
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         try
         {
-            await Task.WhenAll(r1.JoinCluster(), r2.JoinCluster(), r3.JoinCluster());
+            await Task.WhenAll(r1.JoinCluster(ct), r2.JoinCluster(ct), r3.JoinCluster(ct));
 
             for (int partition = 0; partition <= 2; partition++)
                 await WaitForAnyLeader(partition, r1, r2, r3);
-
-            CancellationToken ct = TestContext.Current.CancellationToken;
 
             byte[] holder = "holder-a"u8.ToArray();
             byte[] usurper = "holder-b"u8.ToArray();
@@ -222,7 +222,7 @@ public sealed class TestLockPromotionInheritedApply : RaftTrackingTest
         {
             foreach (Node node in nodes)
             {
-                try { await TestClusterNodeRegistry.DisposeAsync(node.Raft); }
+                try { await TestClusterNodeRegistry.DisposeAsync(node.Raft, ct); }
                 catch (ObjectDisposedException) { }
             }
         }

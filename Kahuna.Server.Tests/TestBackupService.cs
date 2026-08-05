@@ -1189,6 +1189,7 @@ public sealed class TestBackupService : IDisposable
         public bool IsLeader { get; set; }
         public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(IsLeader);
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(IsLeader);
+        public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(IsLeader);
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, TimeSpan timeout, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);

@@ -101,6 +101,62 @@ internal sealed class KeyValueLocator
     }
 
     /// <summary>
+    /// Gates an authoritative local read on a quorum-confirmed leadership check (Raft read-index).
+    /// Local belief (<see cref="IRaft.AmILeader"/>) is not enough for reads: a minority-partitioned
+    /// leader keeps believing it leads until it receives a higher-term message, and a belief-gated
+    /// read serves stale state as a successful response. Writes don't need this — replication itself
+    /// fails on a deposed leader — so read paths answer <see cref="KeyValueResponseType.MustRetry"/>
+    /// whenever this returns <see langword="false"/>, matching the write path's behavior.
+    /// </summary>
+    private ValueTask<bool> ConfirmLeadershipForRead(int partitionId, CancellationToken cancellationToken) =>
+        raft.ConfirmLeadershipAsync(partitionId, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ConfirmLeadershipForRead"/> for a locally-led key group: confirms every distinct
+    /// partition the group's keys route to. A group is served locally only when this node believes
+    /// it leads all of them, so all must confirm before any key in the group is answered from
+    /// local state.
+    /// </summary>
+    private async ValueTask<bool> ConfirmLeadershipForGroupRead(
+        List<(string key, long revision, KeyValueDurability durability)> xkeys,
+        CancellationToken cancellationToken
+    )
+    {
+        HashSet<int> partitions = [];
+
+        foreach ((string key, _, _) in xkeys)
+            partitions.Add(RouteKey(key));
+
+        foreach (int partitionId in partitions)
+        {
+            if (!await ConfirmLeadershipForRead(partitionId, cancellationToken))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <inheritdoc cref="ConfirmLeadershipForGroupRead(List{ValueTuple{string, long, KeyValueDurability}}, CancellationToken)"/>
+    private async ValueTask<bool> ConfirmLeadershipForGroupRead(
+        List<(string key, KeyValueDurability durability)> xkeys,
+        CancellationToken cancellationToken
+    )
+    {
+        HashSet<int> partitions = [];
+
+        foreach ((string key, _) in xkeys)
+            partitions.Add(RouteKey(key));
+
+        foreach (int partitionId in partitions)
+        {
+            if (!await ConfirmLeadershipForRead(partitionId, cancellationToken))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -446,14 +502,14 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, null);
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        if (await ConfirmLeadershipForRead(partitionId, cancellationToken))
             return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
             return (KeyValueResponseType.MustRetry, null);
         if (leader == raft.GetLocalEndpoint())
-            return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+            return (KeyValueResponseType.MustRetry, null);
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -490,14 +546,14 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, null);
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        if (await ConfirmLeadershipForRead(partitionId, cancellationToken))
             return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
             return (KeyValueResponseType.MustRetry, null);
         if (leader == raft.GetLocalEndpoint())
-            return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
+            return (KeyValueResponseType.MustRetry, null);
 
         logger.LogExistsKeyValueRedirect(key, partitionId, leader);
 
@@ -601,6 +657,17 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupRead(xkeys, cancellationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, _, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, key, durability, null));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
                 await manager.TryExistsManyValues(transactionId, readTimestamp, xkeys);
 
@@ -631,6 +698,17 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupRead(xkeys, cancellationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, _, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, key, durability, null));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
                 await manager.TryGetManyValues(transactionId, readTimestamp, xkeys);
 
@@ -666,14 +744,14 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return KeyValueResponseType.MustRetry;
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        if (await ConfirmLeadershipForRead(partitionId, cancellationToken))
             return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
             return KeyValueResponseType.MustRetry;
         if (leader == raft.GetLocalEndpoint())
-            return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
+            return KeyValueResponseType.MustRetry;
 
         logger.LogCheckWriteIntentRedirect(key, partitionId, leader);
 
@@ -755,10 +833,14 @@ internal sealed class KeyValueLocator
     {
         logger.LogCheckManyWriteIntentsRedirect(xkeys.Count, leader);
 
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> nodeResponses =
-            leader == localNode
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> nodeResponses;
+
+        if (leader == localNode)
+            nodeResponses = await ConfirmLeadershipForGroupRead(xkeys, cancellationToken)
                 ? await manager.TryCheckManyWriteIntentValues(transactionId, xkeys)
-                : await interNodeCommunication.TryCheckManyWriteIntents(leader, transactionId, xkeys, cancellationToken);
+                : BuildManyWriteIntentRejection(xkeys, KeyValueResponseType.MustRetry);
+        else
+            nodeResponses = await interNodeCommunication.TryCheckManyWriteIntents(leader, transactionId, xkeys, cancellationToken);
 
         lock (lockSync)
         {
@@ -1747,7 +1829,7 @@ internal sealed class KeyValueLocator
         {
             int singlePartitionId = RoutePrefixKey(prefixedKey);
 
-            if (!raft.Joined || await raft.AmILeader(singlePartitionId, cancellationToken))
+            if (!raft.Joined || await ConfirmLeadershipForRead(singlePartitionId, cancellationToken))
                 return await manager.GetByBucket(transactionId, prefixedKey, readTimestamp, durability);
 
             string? singleLeader = await TryWaitForLeader(singlePartitionId, cancellationToken);
@@ -1888,7 +1970,7 @@ internal sealed class KeyValueLocator
         {
             int singlePartitionId = RoutePrefixKey(prefix);
 
-            if (!raft.Joined || await raft.AmILeader(singlePartitionId, cancellationToken))
+            if (!raft.Joined || await ConfirmLeadershipForRead(singlePartitionId, cancellationToken))
                 return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
 
             string? singleLeader = await TryWaitForLeader(singlePartitionId, cancellationToken);
@@ -1975,7 +2057,7 @@ internal sealed class KeyValueLocator
         KeyValueDurability durability,
         CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken))
+        if (!raft.Joined || await ConfirmLeadershipForRead(partitionId, cancellationToken))
             return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
