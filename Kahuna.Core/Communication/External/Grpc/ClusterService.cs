@@ -26,7 +26,8 @@ public sealed class ClusterService : Cluster.ClusterBase
         GrpcClusterMemberRole localRole = GrpcClusterMemberRole.ClusterMemberRoleNotMember;
         GrpcGetMembershipResponse response = new()
         {
-            MembershipVersion = membership.MembershipVersion
+            MembershipVersion = membership.MembershipVersion,
+            Initialized = raft.IsInitialized
         };
 
         foreach (ClusterMember m in membership.Members)

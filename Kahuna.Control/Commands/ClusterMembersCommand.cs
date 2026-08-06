@@ -17,8 +17,8 @@ public static class ClusterMembersCommand
             return;
         }
 
-        AnsiConsole.MarkupLine("Membership version [cyan]{0}[/]  Local role [cyan]{1}[/]\n",
-            membership.MembershipVersion, membership.LocalRole);
+        AnsiConsole.MarkupLine("Membership version [cyan]{0}[/]  Local role [cyan]{1}[/]  Initialized [cyan]{2}[/]\n",
+            membership.MembershipVersion, membership.LocalRole, membership.Initialized);
 
         Table table = new();
         table.AddColumn("Endpoint");

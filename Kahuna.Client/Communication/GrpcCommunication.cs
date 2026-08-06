@@ -2203,7 +2203,8 @@ public class GrpcCommunication : IKahunaCommunication
         {
             MembershipVersion = response.MembershipVersion,
             Members = members,
-            LocalRole = GrpcRoleToString(response.LocalRole)
+            LocalRole = GrpcRoleToString(response.LocalRole),
+            Initialized = response.Initialized
         };
     }
 

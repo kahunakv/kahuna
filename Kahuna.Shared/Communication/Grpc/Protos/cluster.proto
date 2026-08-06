@@ -18,6 +18,9 @@ message GrpcGetMembershipResponse {
   int64 MembershipVersion = 1;
   repeated GrpcClusterMember Members = 2;
   GrpcClusterMemberRole LocalRole = 3;
+  // Whether the node has completed cluster initialization. Until true the node refuses
+  // every key/value request, even though it already answers membership queries.
+  bool Initialized = 4;
 }
 
 enum GrpcClusterMemberRole {
