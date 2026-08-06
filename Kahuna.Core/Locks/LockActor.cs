@@ -225,6 +225,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         entry.Owner = proposal.Owner;
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;
+        entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         return new(LockResponseType.Locked, entry.FencingToken);
@@ -270,6 +271,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;
+        entry.LastModified = proposal.LastModified;
 
         return new(LockResponseType.Extended, entry.FencingToken);
     }
@@ -310,6 +312,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         
         entry.Owner = proposal.Owner;
         entry.LastUsed = proposal.LastUsed;
+        entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         return LockStaticResponses.UnlockedResponse;
@@ -531,10 +534,15 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             return LockStaticResponses.DoesNotExistResponse;
         }
 
+        // LastModified must be installed along with the committed values: the InvalidateOrApply
+        // advance guard orders same-token mutations by it, so a stale stamp here would let the
+        // replicator's late delivery of an older mutation (e.g. this entry's own grant) overwrite
+        // a newer one (e.g. its release) and resurrect a held lock.
         entry.FencingToken = proposal.FencingToken;
         entry.Owner = proposal.Owner;
         entry.Expires = proposal.Expires;
         entry.LastUsed = proposal.LastUsed;
+        entry.LastModified = proposal.LastModified;
         entry.State = proposal.State;
 
         // Record before enqueueing so a read that misses the actor table (e.g. on a later promoted

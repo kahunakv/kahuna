@@ -1,8 +1,10 @@
 
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.Replication;
 using Kahuna.Shared.Locks;
 using Kommander;
+using Kommander.Data;
 using Kommander.Communication.Memory;
 using Kommander.Discovery;
 using Kommander.Time;
@@ -289,6 +291,129 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
         finally
         {
             await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// The replicator's cache-coherence applies are asynchronous and can reach the lock actor after
+    /// the proposing leader's own CompleteProposal already installed a newer mutation for the same
+    /// fencing token (a grant and its release reuse the token). The advance guard orders same-token
+    /// applies by the entry's modification stamp, so a late delivery of the grant must not overwrite
+    /// the completed release and resurrect a held lock — the next acquire would answer Busy for the
+    /// remainder of the stale lease. Replication delivery is unwired from Raft here and driven by
+    /// hand, making the late delivery deterministic instead of a timing accident.
+    /// </summary>
+    [Fact]
+    public async Task LateGrantApply_AfterCompletedRelease_DoesNotResurrectHeldLock()
+    {
+        MemoryInterNodeCommmunication interNode = new();
+        InMemoryCommunication comm = new();
+
+        ActorSystem actorSystem = new(logger: raftLogger);
+
+        RaftConfiguration raftCfg = new()
+        {
+            NodeName              = "lockreplay1",
+            NodeId                = 1,
+            Host                  = "localhost",
+            Port                  = 9320,
+            InitialPartitions     = 2,
+            HeartbeatInterval     = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            CheckLeaderInterval   = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            StartElectionTimeout  = (int)(50  * TimingScale),
+            EndElectionTimeout    = (int)(150 * TimingScale),
+            ElectionTimeoutSeed   = ElectionTimeoutSeedBase + 50,
+            EnableQuiescence = false, PartitionExecutorPoolSize = 1
+        };
+
+        RaftManager raft = new(
+            raftCfg,
+            new StaticDiscovery([]),
+            new InMemoryWAL(raftLogger),
+            comm,
+            new HybridLogicalClock(),
+            raftLogger);
+
+        KahunaConfiguration kahunaConfig = new()
+        {
+            HttpsCertificate          = "",
+            HttpsCertificatePassword  = "",
+            LocksWorkers              = 8,
+            KeyValueWorkers           = 8,
+            BackgroundWriterWorkers   = 1,
+            Storage                   = "memory",
+            StoragePath               = "/tmp",
+            StorageRevision           = Guid.NewGuid().ToString(),
+            DefaultTransactionTimeout = 5000,
+            ScriptCacheExpiration     = TimeSpan.FromMinutes(1),
+        };
+
+        KahunaManager kahuna = new(actorSystem, Track(raft), kahunaConfig, interNode, kahunaLogger);
+
+        // Deliberately not wired to kahuna.OnReplicationReceived: committed lock entries are
+        // captured and delivered by hand below, so the cache-coherence apply lands exactly when
+        // the test wants it — after the release's CompleteProposal.
+        List<(int PartitionId, RaftLog Log)> lockLogs = [];
+        object sync = new();
+        raft.OnReplicationReceived += (partitionId, log) =>
+        {
+            if (log.LogType == ReplicationTypes.Locks && log.LogData is not null)
+            {
+                lock (sync)
+                    lockLogs.Add((partitionId, log));
+            }
+
+            return Task.FromResult(true);
+        };
+        raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+
+        interNode.SetNodes(new() { { "localhost:9320", kahuna } });
+        comm.SetNodes(new() { { "localhost:9320", raft } });
+
+        TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
+
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            await raft.JoinCluster();
+            for (int partition = 0; partition <= 2; partition++)
+                await WaitForAnyLeader(partition, raft);
+
+            const string resource = "late-apply-lock";
+            byte[] ownerA = Guid.NewGuid().ToByteArray();
+
+            (LockResponseType lockType, long grantedToken) = await RetryLockOp(() =>
+                kahuna.LocateAndTryLock(resource, ownerA, 30_000, LockDurability.Persistent, ct));
+            Assert.Equal(LockResponseType.Locked, lockType);
+
+            LockResponseType unlockType = await RetryUnlock(() =>
+                kahuna.LocateAndTryUnlock(resource, ownerA, LockDurability.Persistent, ct));
+            Assert.Equal(LockResponseType.Unlocked, unlockType);
+
+            // Deliver the grant's committed entry only now — after the release completed —
+            // replaying the window where the ordered consumer lags the proposal acks.
+            (int PartitionId, RaftLog Log) grant;
+            lock (sync)
+                grant = lockLogs.First(l =>
+                    (LockRequestType)ReplicationSerializer.UnserializeLockMessage(l.Log.LogData!).Type == LockRequestType.TryLock);
+
+            Assert.True(await kahuna.OnReplicationReceived(grant.PartitionId, grant.Log));
+
+            // The released lock must be grantable to a new owner: a Busy here means the stale
+            // grant overwrote the completed release in the resident entry.
+            byte[] ownerB = Guid.NewGuid().ToByteArray();
+            (LockResponseType relockType, long newToken) = await RetryLockOp(() =>
+                kahuna.LocateAndTryLock(resource, ownerB, 30_000, LockDurability.Persistent, ct));
+
+            Assert.Equal(LockResponseType.Locked, relockType);
+            Assert.True(newToken > grantedToken,
+                $"token {newToken} did not advance past {grantedToken}");
+        }
+        finally
+        {
+            try { await TestClusterNodeRegistry.DisposeAsync(raft); }
+            catch (ObjectDisposedException) { }
         }
     }
 
