@@ -1072,6 +1072,51 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     /// <summary>
+    /// The write-skew analog of the lost-update gate above: a transaction whose validated read set reaches
+    /// beyond its written keys must not take the one-phase fast path. The bundle validates before anything
+    /// durable and its apply-time gates re-check only the written keys, so a stalled bundle would decide against
+    /// a read-only dependency validated arbitrarily long ago — after the in-memory write intents that made the
+    /// transaction visible to concurrent validators' conflict probes were already lost. Ineligibility routes it
+    /// through 2PC, where the durable prepared intent is installed — and probe-visible to those validators —
+    /// before the read set is validated and the decision proposed.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_ReadSetBeyondWrites_FallsBackToTwoPhaseWithProbeVisibleIntent()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        bool onePhaseInvoked = false;
+        bool intentVisibleDuringValidation = false;
+
+        DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate onePhaseSeam = OnePhase(records, intents);
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: (partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct) =>
+            {
+                onePhaseInvoked = true;
+                return onePhaseSeam(partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct);
+            });
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")),
+            validateReadSet: _ =>
+            {
+                intentVisibleDuringValidation = intents.Get("acct/1") is { } live && live.TransactionId == txId;
+                return Task.FromResult(true);
+            },
+            opId: Ts(2000),
+            CancellationToken.None,
+            readSetExtendsBeyondWrites: true);
+
+        Assert.False(onePhaseInvoked);
+        Assert.True(intentVisibleDuringValidation);
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+    }
+
+    /// <summary>
     /// The gate's transition rules on the record store itself: a bundled commit is rejected without its live
     /// intent — including when no probe is attached (fail closed) — while an unbundled commit (2PC, whose
     /// decision is only proposed after every prepare durably committed) is unaffected, and a replay of a bundled

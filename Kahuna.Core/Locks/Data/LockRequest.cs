@@ -92,6 +92,13 @@ internal sealed class LockRequest : IConsistentHashable
     public long ProposalLogIndex { get; }
 
     /// <summary>
+    /// Committed lock state carried by an <c>InvalidateOrApply</c> message so the owning actor can
+    /// bring a resident cache entry up to date. Non-null only when <see cref="Type"/> is
+    /// <see cref="LockRequestType.InvalidateOrApply"/>.
+    /// </summary>
+    public LockInvalidateOrApplyData? InvalidateOrApplyData { get; }
+
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
@@ -112,7 +119,8 @@ internal sealed class LockRequest : IConsistentHashable
         int proposalId,
         int partitionId,
         TaskCompletionSource<LockResponse?>? promise,
-        long proposalLogIndex = -1
+        long proposalLogIndex = -1,
+        LockInvalidateOrApplyData? invalidateOrApplyData = null
     )
     {
         Type = type;
@@ -124,6 +132,7 @@ internal sealed class LockRequest : IConsistentHashable
         PartitionId = partitionId;
         Promise = promise;
         ProposalLogIndex = proposalLogIndex;
+        InvalidateOrApplyData = invalidateOrApplyData;
     }
 
     /// <summary>

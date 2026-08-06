@@ -132,6 +132,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
                 LockRequestType.Get => await GetLock(message),
                 LockRequestType.CompleteProposal => CompleteProposal(message),
                 LockRequestType.ReleaseProposal => ReleaseProposal(message),
+                LockRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 _ => LockStaticResponses.ErroredResponse
             };
         }
@@ -189,8 +190,12 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             return LockStaticResponses.WaitingForReplication;
         
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        
-        if (entry.Owner is not null)
+
+        // Gate the busy check on the state, not just the owner: an unlocked entry loaded from the
+        // backend or the unflushed overlay retains the releasing holder's owner bytes and its
+        // original (possibly unexpired) lease, but the lock is free — treating it as held would
+        // refuse grants until that stale lease ran out.
+        if (entry.State == LockState.Locked && entry.Owner is not null)
         {
             bool isExpired = entry.Expires - currentTime < TimeSpan.Zero;
 
@@ -396,6 +401,56 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     }
 
     /// <summary>
+    /// Applies a committed lock mutation delivered by the replication/restore path to a resident
+    /// cache entry. Committed mutations from other leaders reach this node only through that path,
+    /// so without this apply the in-memory entry of a former leader stays frozen at its last tenure
+    /// and a re-promotion would mint fencing tokens from that stale state — replaying token values
+    /// that were already granted. A non-resident resource is a no-op: a cold load reads the flushed
+    /// backend plus the unflushed overlay, which the replicator records into before sending this
+    /// message, so it always observes the mutation.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private LockResponse InvalidateOrApply(LockRequest message)
+    {
+        LockInvalidateOrApplyData data = message.InvalidateOrApplyData!;
+
+        if (!locks.TryGetValue(message.Resource, out LockEntry? entry))
+            return LockStaticResponses.DoesNotExistResponse;
+
+        // A live replication intent means this actor owns an in-flight proposal for the resource:
+        // CompleteProposal installs the committed values (or ReleaseProposal drops the entry)
+        // exactly once, so this apply must not race it. An expired intent is abandoned state and
+        // no longer owns the entry.
+        if (entry.ReplicationIntent is not null)
+        {
+            HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
+                return LockStaticResponses.WaitingForReplication;
+
+            entry.ReplicationIntent = null;
+        }
+
+        // Applies can race the leader's own CompleteProposal (they arrive through different
+        // senders), so only ever advance the entry: an older token — or the same token with an
+        // older modification stamp (extend and unlock reuse the token) — is a stale or duplicate
+        // delivery and must not regress the cache.
+        if (entry.FencingToken > data.FencingToken
+            || (entry.FencingToken == data.FencingToken && entry.LastModified >= data.LastModified))
+            return LockStaticResponses.LockedResponse;
+
+        entry.Owner = message.Owner;
+        entry.FencingToken = data.FencingToken;
+        entry.Expires = data.Expires;
+        entry.LastUsed = data.LastUsed;
+        entry.LastModified = data.LastModified;
+        entry.State = data.State;
+
+        return LockStaticResponses.LockedResponse;
+    }
+
+    /// <summary>
     /// Creates a proposal for a lock operation and sends it to the proposal actor for replication.
     /// </summary>
     /// <param name="message"></param>
@@ -576,11 +631,18 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         entry.ReplicationIntent = null;
         proposals.Remove(message.ProposalId);
 
+        // The proposal failed or its outcome is unknown (e.g. leadership was lost mid-replication),
+        // so the cached entry can no longer be trusted as the latest committed state — the entry it
+        // was minted from may already be behind another leader's committed grants. Drop it: the
+        // next access cold-loads through the flushed backend plus the unflushed overlay, which
+        // reflect every committed mutation this node has applied.
+        locks.Remove(message.Resource);
+
         if (message.Promise is null)
             return LockStaticResponses.LockedResponse;
-        
+
         message.Promise.TrySetResult(LockStaticResponses.ErroredResponse);
-                
+
         return LockStaticResponses.ErroredResponse;
     }
 }

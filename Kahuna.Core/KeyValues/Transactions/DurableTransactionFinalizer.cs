@@ -233,7 +233,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         DurableFinalizeInput input,
         Func<CancellationToken, Task<bool>> validateReadSet,
         HLCTimestamp opId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool readSetExtendsBeyondWrites = false)
     {
         long startTicks = Stopwatch.GetTimestamp();
 
@@ -284,7 +285,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // [record init + prepare + commit decision] as a single atomic batch. Any ineligibility (remote
         // anchor leader, a foreign durable intent on a written key, failed validation, scheduler rejection
         // outcome that is retryable-but-ambiguous) falls through to the standard 2PC flow below, unchanged.
+        //
+        // Ineligible whenever the validated read set reaches beyond the written keys. The bundle's validation
+        // runs before anything durable, and its only apply-time re-checks cover written keys (staged-base
+        // compare-and-set, bundled-prepare gate) — a read-only dependency is re-checked by nothing. A stalled
+        // bundle (a killed leader's WAL tail committing after restart) would then decide with a read validated
+        // long ago, while the in-memory write intents that make this transaction visible to other validators'
+        // conflict probes are already gone — closing no one's write-skew window but its own victim's. The 2PC
+        // flow keeps a durable, probe-visible prepared intent on every written key from prepare until the
+        // decision, so concurrent validators abort instead of committing around it.
         if (replicateOnePhaseBundle is not null &&
+            !readSetExtendsBeyondWrites &&
             input.Partitions.Count == 1 &&
             input.Partitions[0].PartitionId == input.AnchorPartitionId)
         {

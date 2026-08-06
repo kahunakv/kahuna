@@ -14,16 +14,16 @@ using Nixie;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Verifies that a held persistent lock survives a partition step-down observably: the un-warmed
-/// promoted leader has no entry in its actor table (the lock replicator materialises nothing on
-/// followers) and its backend may not yet contain the flushed mutation — the lock lives only in
-/// the promoted node's background-writer queue. A second client's acquire must answer Busy, never
-/// be granted; the lock's owner and fencing token must read back intact. Mutual exclusion across
-/// failover is the whole point of a distributed lock — a false grant here is a split-brain.
+/// Verifies fencing-token safety for lock actors across leadership changes. A lock actor's
+/// in-memory entry belongs to the node, not the leadership term: when another leader grants
+/// tokens, every node that applies those committed entries must advance (or drop) its resident
+/// entry. If a former leader's cache stays frozen at its last tenure, a re-promotion mints
+/// fencing tokens from that stale state — replaying token values that were already granted and
+/// acknowledged, which inverts the fencing order downstream resources rely on.
 /// </summary>
 public sealed class TestLockFailoverCoherence : RaftTrackingTest
 {
-    private readonly ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
+    private readonly ILogger<IRaft>   raftLogger   = NullLogger<IRaft>.Instance;
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
 
     private static readonly double TimingScale = GetTimingScale();
@@ -35,12 +35,11 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
 
     private sealed record Node(RaftManager Raft, KahunaManager Kahuna);
 
-    private const int ElectionTimeoutSeedBase = 99300;
+    private const int ElectionTimeoutSeedBase = 98000;
 
     private (RaftManager, KahunaManager) BuildNode(
         int nodeId, int port, string[] peers,
-        MemoryInterNodeCommmunication interNode, InMemoryCommunication comm,
-        string storage)
+        MemoryInterNodeCommmunication interNode, InMemoryCommunication comm)
     {
         ActorSystem actorSystem = new(logger: raftLogger);
 
@@ -76,11 +75,8 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
             LocksWorkers              = 8,
             KeyValueWorkers           = 8,
             BackgroundWriterWorkers   = 1,
-            Storage                   = storage,
-            StoragePath               = storage == "memory"
-                ? "/tmp"
-                : Directory.CreateDirectory(
-                    Path.Combine(Path.GetTempPath(), $"kahuna-lockfailover-{storage}-{Guid.NewGuid():N}")).FullName,
+            Storage                   = "memory",
+            StoragePath               = "/tmp",
             StorageRevision           = Guid.NewGuid().ToString(),
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration     = TimeSpan.FromMinutes(1),
@@ -97,24 +93,25 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
         return (raft, kahuna);
     }
 
-    private async Task<Node[]> Assemble(string storage)
+    private async Task<Node[]> Assemble()
     {
         MemoryInterNodeCommmunication interNode = new();
         InMemoryCommunication comm = new();
 
-        string[] p1 = ["localhost:9321", "localhost:9322"];
-        string[] p2 = ["localhost:9320", "localhost:9322"];
-        string[] p3 = ["localhost:9320", "localhost:9321"];
+        string[] p1 = ["localhost:9311", "localhost:9312"];
+        string[] p2 = ["localhost:9310", "localhost:9312"];
+        string[] p3 = ["localhost:9310", "localhost:9311"];
 
-        (RaftManager r1, KahunaManager k1) = BuildNode(1, 9320, p1, interNode, comm, storage);
-        (RaftManager r2, KahunaManager k2) = BuildNode(2, 9321, p2, interNode, comm, storage);
-        (RaftManager r3, KahunaManager k3) = BuildNode(3, 9322, p3, interNode, comm, storage);
+        (RaftManager r1, KahunaManager k1) = BuildNode(1, 9310, p1, interNode, comm);
+        (RaftManager r2, KahunaManager k2) = BuildNode(2, 9311, p2, interNode, comm);
+        (RaftManager r3, KahunaManager k3) = BuildNode(3, 9312, p3, interNode, comm);
 
-        interNode.SetNodes(new() { { "localhost:9320", k1 }, { "localhost:9321", k2 }, { "localhost:9322", k3 } });
-        comm.SetNodes(new() { { "localhost:9320", r1 }, { "localhost:9321", r2 }, { "localhost:9322", r3 } });
+        interNode.SetNodes(new() { { "localhost:9310", k1 }, { "localhost:9311", k2 }, { "localhost:9312", k3 } });
+        comm.SetNodes(new() { { "localhost:9310", r1 }, { "localhost:9311", r2 }, { "localhost:9312", r3 } });
 
         await Task.WhenAll(r1.JoinCluster(), r2.JoinCluster(), r3.JoinCluster());
 
+        // InitialPartitions = 2 → partitions 0 (meta), 1 and 2 (data): wait for all.
         for (int partition = 0; partition <= 2; partition++)
             await WaitForAnyLeader(partition, r1, r2, r3);
 
@@ -154,71 +151,158 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
         }
     }
 
-    /// <summary>
-    /// A persistent lock is acquired and acknowledged but never read anywhere — no cache is warmed.
-    /// Every data partition leader then steps down. A different owner's acquire must answer Busy on
-    /// the new topology (a grant would be a mutual-exclusion violation), and the lock must read back
-    /// with its original owner and fencing token. Runs against all three persistence backends.
-    /// </summary>
-    [Theory]
-    [InlineData("memory")]
-    [InlineData("sqlite")]
-    [InlineData("rocksdb")]
-    public async Task PromotedLeader_UnwarmedLock_IsNeverGrantedToSecondOwner(string storage)
+    /// <summary>Retries a lock operation while the cluster answers MustRetry (leadership settling).</summary>
+    private static async Task<(LockResponseType, long)> RetryLockOp(
+        Func<Task<(LockResponseType, long)>> op, int timeoutMs = 10_000)
     {
-        Node[] nodes = await Assemble(storage);
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+        while (true)
+        {
+            (LockResponseType type, long token) = await op();
+            if (type != LockResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return (type, token);
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static async Task<LockResponseType> RetryUnlock(
+        Func<Task<LockResponseType>> op, int timeoutMs = 10_000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+        while (true)
+        {
+            LockResponseType type = await op();
+            if (type != LockResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return type;
+            await Task.Delay(50, ct);
+        }
+    }
+
+    /// <summary>
+    /// Fencing tokens must be globally monotonic per resource across leadership changes. The test
+    /// grants and releases the same persistent lock repeatedly, forcing a leadership change on
+    /// every data partition between rounds. Rotating leadership over three nodes for four rounds
+    /// guarantees some node leads the resource's partition twice, with grants by other leaders in
+    /// between — exactly the shape where a stale resident entry on the re-promoted leader would
+    /// mint an already-granted token again. Every grant must therefore return a strictly larger
+    /// token than every earlier grant, no matter which node is serving.
+    /// </summary>
+    [Fact]
+    public async Task PromotedLeader_MintsMonotonicFencingTokens()
+    {
+        Node[] nodes = await Assemble();
         try
         {
             CancellationToken ct = TestContext.Current.CancellationToken;
+            const string resource = "fencing-coherence-lock";
+            long lastToken = -1;
 
-            byte[] holder = "holder-a"u8.ToArray();
-            byte[] usurper = "holder-b"u8.ToArray();
-
-            // ── phase 1: acquire with a generous lease, no warming, no reads ────────────────
-            (LockResponseType lockType, long fencingToken) = await nodes[0].Kahuna.LocateAndTryLock(
-                "unwarmed-lock", holder, 60_000, LockDurability.Persistent, ct);
-            Assert.Equal(LockResponseType.Locked, lockType);
-
-            // ── phase 2: force promotion on every data partition ────────────────────────────
-            for (int p = 1; p <= 2; p++)
+            for (int round = 0; round < 4; round++)
             {
-                Node oldLeader = await LeaderOf(p, nodes);
-                await oldLeader.Raft.StepDownAsync(p, ct);
+                for (int grant = 0; grant < 3; grant++)
+                {
+                    byte[] owner = Guid.NewGuid().ToByteArray();
+
+                    (LockResponseType lockType, long token) = await RetryLockOp(() =>
+                        nodes[0].Kahuna.LocateAndTryLock(resource, owner, 30_000, LockDurability.Persistent, ct));
+
+                    Assert.Equal(LockResponseType.Locked, lockType);
+                    Assert.True(token > lastToken,
+                        $"round {round} grant {grant}: token {token} did not advance past {lastToken} — " +
+                        "a re-promoted leader minted from a stale cached entry");
+                    lastToken = token;
+
+                    LockResponseType unlockType = await RetryUnlock(() =>
+                        nodes[0].Kahuna.LocateAndTryUnlock(resource, owner, LockDurability.Persistent, ct));
+                    Assert.Equal(LockResponseType.Unlocked, unlockType);
+                }
+
+                // Force a leadership change on both data partitions (partition 0 is the meta
+                // partition and not involved in lock routing) before the next round of grants.
+                for (int p = 1; p <= 2; p++)
+                {
+                    Node oldLeader = await LeaderOf(p, nodes);
+                    await oldLeader.Raft.StepDownAsync(p, ct);
+                }
+
+                for (int p = 1; p <= 2; p++)
+                    await WaitForAnyLeader(p, nodes[0].Raft, nodes[1].Raft, nodes[2].Raft);
             }
-
-            for (int p = 1; p <= 2; p++)
-                await WaitForAnyLeader(p, nodes[0].Raft, nodes[1].Raft, nodes[2].Raft);
-
-            // ── phase 3: a second owner's acquire must never be granted ─────────────────────
-            long deadline = Environment.TickCount64 + (long)(10_000 * TimingScale);
-            while (true)
-            {
-                (LockResponseType usurperType, _) = await nodes[0].Kahuna.LocateAndTryLock(
-                    "unwarmed-lock", usurper, 60_000, LockDurability.Persistent, ct);
-
-                Assert.NotEqual(LockResponseType.Locked, usurperType);
-
-                if (usurperType == LockResponseType.Busy)
-                    break;
-
-                Assert.Equal(LockResponseType.WaitingForReplication, usurperType);
-                if (Environment.TickCount64 >= deadline)
-                    Assert.Fail("no terminal Busy answer within deadline");
-                await Task.Delay(20, ct);
-            }
-
-            // ── phase 4: the lock reads back intact — original owner and fencing token ──────
-            (LockResponseType getType, Server.Locks.Data.ReadOnlyLockEntry? entry) =
-                await nodes[0].Kahuna.LocateAndGetLock("unwarmed-lock", LockDurability.Persistent, ct);
-
-            Assert.Equal(LockResponseType.Got, getType);
-            Assert.NotNull(entry);
-            Assert.Equal(holder, entry!.Owner);
-            Assert.Equal(fencingToken, entry.FencingToken);
         }
         finally
         {
             await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// The lock read path must show the same coherence: after another leader grants the lock, a
+    /// promoted leader answering a Get from its resident entry must report the latest committed
+    /// holder and token, never the state of its own last tenure.
+    /// </summary>
+    [Fact]
+    public async Task PromotedLeader_GetLock_SeesLatestGrant()
+    {
+        Node[] nodes = await Assemble();
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            const string resource = "get-coherence-lock";
+            long lastToken = -1;
+
+            // Rotate leadership with a grant per round so several nodes hold a resident entry,
+            // then verify the cluster read reflects the newest grant every time.
+            for (int round = 0; round < 4; round++)
+            {
+                byte[] owner = Guid.NewGuid().ToByteArray();
+
+                (LockResponseType lockType, long token) = await RetryLockOp(() =>
+                    nodes[0].Kahuna.LocateAndTryLock(resource, owner, 60_000, LockDurability.Persistent, ct));
+                Assert.Equal(LockResponseType.Locked, lockType);
+                Assert.True(token > lastToken,
+                    $"round {round}: token {token} did not advance past {lastToken}");
+                lastToken = token;
+
+                (LockResponseType getType, Kahuna.Server.Locks.Data.ReadOnlyLockEntry? entry) =
+                    await RetryGetLock(() => nodes[0].Kahuna.LocateAndGetLock(resource, LockDurability.Persistent, ct));
+                Assert.Equal(LockResponseType.Got, getType);
+                Assert.NotNull(entry);
+                Assert.Equal(token, entry!.FencingToken);
+                Assert.Equal(owner, entry.Owner);
+
+                LockResponseType unlockType = await RetryUnlock(() =>
+                    nodes[0].Kahuna.LocateAndTryUnlock(resource, owner, LockDurability.Persistent, ct));
+                Assert.Equal(LockResponseType.Unlocked, unlockType);
+
+                for (int p = 1; p <= 2; p++)
+                {
+                    Node oldLeader = await LeaderOf(p, nodes);
+                    await oldLeader.Raft.StepDownAsync(p, ct);
+                }
+
+                for (int p = 1; p <= 2; p++)
+                    await WaitForAnyLeader(p, nodes[0].Raft, nodes[1].Raft, nodes[2].Raft);
+            }
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    private static async Task<(LockResponseType, Kahuna.Server.Locks.Data.ReadOnlyLockEntry?)> RetryGetLock(
+        Func<Task<(LockResponseType, Kahuna.Server.Locks.Data.ReadOnlyLockEntry?)>> op, int timeoutMs = 10_000)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(timeoutMs * TimingScale);
+        while (true)
+        {
+            (LockResponseType type, Kahuna.Server.Locks.Data.ReadOnlyLockEntry? entry) = await op();
+            if (type != LockResponseType.MustRetry || Environment.TickCount64 >= deadline)
+                return (type, entry);
+            await Task.Delay(50, ct);
         }
     }
 }

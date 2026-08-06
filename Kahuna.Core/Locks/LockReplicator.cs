@@ -8,6 +8,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 using Nixie;
+using Nixie.Routers;
 
 namespace Kahuna.Server.Locks;
 
@@ -19,6 +20,8 @@ namespace Kahuna.Server.Locks;
 internal sealed class LockReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
+
+    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse>? persistentLocksRouter;
 
     private readonly IRaft raft;
 
@@ -36,13 +39,51 @@ internal sealed class LockReplicator
     /// <param name="logger"></param>
     /// <param name="unflushedLockWrites"></param>
     /// <param name="durabilityTracker"></param>
-    public LockReplicator(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, ILogger<IKahuna> logger, UnflushedLockWritesIndex? unflushedLockWrites = null, PartitionDurabilityTracker? durabilityTracker = null)
+    /// <param name="persistentLocksRouter"></param>
+    public LockReplicator(
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        IRaft raft,
+        ILogger<IKahuna> logger,
+        UnflushedLockWritesIndex? unflushedLockWrites = null,
+        PartitionDurabilityTracker? durabilityTracker = null,
+        IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse>? persistentLocksRouter = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.logger = logger;
         this.unflushedLockWrites = unflushedLockWrites;
         this.durabilityTracker = durabilityTracker;
+        this.persistentLocksRouter = persistentLocksRouter;
+    }
+
+    /// <summary>
+    /// Routes an <c>InvalidateOrApply</c> message to the owning actor in the persistent pool so a
+    /// resident in-memory entry advances to this committed mutation. Without it, the actor cache of
+    /// a node that lost leadership stays frozen at its last tenure, and a later re-promotion would
+    /// mint fencing tokens (or answer reads) from that stale state. Ephemeral locks are never
+    /// replicated via Raft, so every entry seen here belongs to the persistent pool.
+    /// </summary>
+    private void SendInvalidateOrApply(
+        int partitionId,
+        string resource,
+        byte[]? owner,
+        long fencingToken,
+        HLCTimestamp expires,
+        HLCTimestamp lastUsed,
+        HLCTimestamp lastModified,
+        LockState state)
+    {
+        persistentLocksRouter?.Send(new(
+            LockRequestType.InvalidateOrApply,
+            resource,
+            owner,
+            0,
+            LockDurability.Persistent,
+            0,
+            partitionId,
+            null,
+            invalidateOrApplyData: new(fencingToken, expires, lastUsed, lastModified, state)
+        ));
     }
 
     /// <summary>
@@ -125,6 +166,12 @@ internal sealed class LockReplicator
                         logIndex: log.Id
                     ));
 
+                    SendInvalidateOrApply(partitionId, lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Locked);
+
                     return true;
                 }
 
@@ -181,7 +228,15 @@ internal sealed class LockReplicator
                         (int)LockState.Unlocked,
                         logIndex: log.Id
                     ));
-                    
+
+                    // Owner is null for the cache apply: an unlock clears the holder, matching the
+                    // entry state CompleteProposal installs on the proposing leader.
+                    SendInvalidateOrApply(partitionId, lockMessage.Resource, null, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Unlocked);
+
                     return true;
                 }
 
@@ -238,6 +293,12 @@ internal sealed class LockReplicator
                         (int)LockState.Locked,
                         logIndex: log.Id
                     ));
+
+                    SendInvalidateOrApply(partitionId, lockMessage.Resource, owner, lockMessage.FencingToken,
+                        new(lockMessage.ExpireNode, lockMessage.ExpirePhysical, lockMessage.ExpireCounter),
+                        new(lockMessage.LastUsedNode, lockMessage.LastUsedPhysical, lockMessage.LastUsedCounter),
+                        new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
+                        LockState.Locked);
 
                     return true;
                 }

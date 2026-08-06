@@ -1200,7 +1200,24 @@ internal sealed class TransactionCoordinator : IDisposable
     internal async Task TwoPhaseCommit(TransactionContext context, CancellationToken cancellationToken)
     {
         if (context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
+        {
+            // A transaction with no writes still has to prove its reads form one consistent cut of committed
+            // state: each read was served at a different moment against the latest committed version, so a
+            // concurrent commit landing between two of them yields a snapshot no serial order can explain — an
+            // anti-dependency cycle closed by this very transaction. The concurrent-writer probe runs first
+            // (it answers immediately for an undecided foreign intent, and a writer that validated its reads
+            // but has not yet decided is invisible to the revision check); the revision re-check then catches
+            // any read a decided commit has already made stale. Failure sets the Aborted result.
+            if (RequiresReadSetValidation(context) && (context.ReadObservationConflict || context.ReadKeys is { Count: > 0 }))
+            {
+                if (!await CheckReadSetForConflicts(context, cancellationToken))
+                    return;
+
+                await ValidateReadSet(context, cancellationToken);
+            }
+
             return;
+        }
 
         // A transaction that modified keys but holds no lock set cannot prepare its mutations. Committing
         // it as an empty no-op would silently drop the writes (the caller would see Committed), so the
@@ -1596,7 +1613,8 @@ internal sealed class TransactionCoordinator : IDisposable
                         && await ValidateReadSet(context, ct).ConfigureAwait(false);
                 },
                 opId,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                readSetExtendsBeyondWrites: HasReadDependenciesBeyondWrites(context)).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -1737,6 +1755,39 @@ internal sealed class TransactionCoordinator : IDisposable
     {
         return context.ReadValidation == ReadValidation.TrackAndValidate
             || context.Locking == KeyValueTransactionLocking.Optimistic;
+    }
+
+    /// <summary>
+    /// Whether the transaction's validated read footprint reaches beyond the keys it writes: a point read of a
+    /// key it never modifies, or any prefix/range lock (a scan's footprint). Written keys are re-fenced at
+    /// decision-apply time (staged-base compare-and-set, bundled-prepare gate), but a read-only dependency is
+    /// protected solely by commit-time validation — so the finalize path must not choose a protocol that lets
+    /// the decision apply after that validation can no longer be trusted. Always false when the read set is not
+    /// validated at all, since no read-stability promise exists to protect.
+    /// </summary>
+    private static bool HasReadDependenciesBeyondWrites(TransactionContext context)
+    {
+        if (!RequiresReadSetValidation(context))
+            return false;
+
+        if (context.PrefixLocksAcquired is { Count: > 0 } || context.RangeLocksAcquired is { Count: > 0 })
+            return true;
+
+        if (context.ReadKeys is null || context.ReadKeys.Count == 0)
+            return false;
+
+        foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+        {
+            if (string.IsNullOrEmpty(readKey.Key))
+                continue;
+
+            if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
+                continue;
+
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

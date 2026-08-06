@@ -123,8 +123,11 @@ internal sealed class LockManager
         // the flush lands. A raw (undecorated) backend yields null and recording becomes a no-op.
         UnflushedLockWritesIndex? unflushedLockWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedLockWrites;
 
-        restorer = new(backgroundWriter, raft, logger, unflushedLockWrites, durabilityTracker);
-        replicator = new(backgroundWriter, raft, logger, unflushedLockWrites, durabilityTracker);
+        // The persistent router lets the restorer/replicator send cache-coherence applies to the
+        // owning lock actors, so a resident entry on a node that lost leadership tracks committed
+        // mutations instead of staying frozen at that node's last tenure.
+        restorer = new(backgroundWriter, raft, logger, unflushedLockWrites, durabilityTracker, persistentLocksRouter);
+        replicator = new(backgroundWriter, raft, logger, unflushedLockWrites, durabilityTracker, persistentLocksRouter);
     }
 
     /// <summary>
