@@ -104,12 +104,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 (SequenceDurability)request.Durability,
                 context.CancellationToken));
 
-        return new()
-        {
-            Type = (GrpcSequenceResponseType)response,
-            Allocation = ToGrpcSequenceAllocation(allocation),
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
+        return BuildAllocationResponse(response, allocation, stopwatch);
     }
 
     public override async Task<GrpcSequenceAllocationResponse> ReserveSequenceRange(GrpcReserveSequenceRangeRequest request, ServerCallContext context)
@@ -133,12 +128,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 (SequenceDurability)request.Durability,
                 context.CancellationToken));
 
-        return new()
-        {
-            Type = (GrpcSequenceResponseType)response,
-            Allocation = ToGrpcSequenceAllocation(allocation),
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
+        return BuildAllocationResponse(response, allocation, stopwatch);
     }
 
     public override async Task<GrpcSequenceResponse> DeleteSequence(GrpcDeleteSequenceRequest request, ServerCallContext context)
@@ -183,11 +173,32 @@ public sealed class SequencesService : Sequencer.SequencerBase
         return entry;
     }
 
+    /// <summary>
+    /// Every failure reply carries a <c>default</c> allocation, whose <c>Name</c> is null. Protobuf string
+    /// fields reject null, so an allocation must only be attached when one was actually produced — otherwise
+    /// a plain NotFound/MustRetry answer would throw here and reach the caller as an opaque transport error
+    /// instead of its response type.
+    /// </summary>
+    internal static GrpcSequenceAllocationResponse BuildAllocationResponse(SequenceResponseType response, SequenceAllocation allocation, ValueStopwatch stopwatch)
+    {
+        GrpcSequenceAllocationResponse grpcResponse = new()
+        {
+            Type = (GrpcSequenceResponseType)response,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+        };
+
+        if (allocation.Name is not null)
+            grpcResponse.Allocation = ToGrpcSequenceAllocation(allocation);
+
+        return grpcResponse;
+    }
+
     private static GrpcSequenceAllocation ToGrpcSequenceAllocation(SequenceAllocation allocation)
     {
         return new()
         {
-            Name = allocation.Name,
+            // An unnamed allocation cannot be expressed on the wire; empty is protobuf's own default.
+            Name = allocation.Name ?? "",
             Start = allocation.Start,
             End = allocation.End,
             Count = allocation.Count,
