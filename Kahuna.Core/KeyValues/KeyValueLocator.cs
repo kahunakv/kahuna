@@ -2296,19 +2296,32 @@ internal sealed class KeyValueLocator
     /// <returns></returns>
     public async Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        List<(string, ReadOnlyKeyValueEntry)> unionItems = [];
-        HashSet<string> seenKeys = [];
+        // Every per-node view (and the local disk page) can lag the commit frontier: a node that has
+        // not yet applied a committed delete or overwrite still contributes the previous version of
+        // the key. Merging newest-wins by (revision, commit HLC) — with tombstones traveling so a
+        // delete is a mergeable version rather than an absence — lets the freshest contribution
+        // (the key's partition leader applies synchronously before acking, and is always scanned)
+        // suppress the stale copies. First-wins union would resurrect deleted keys and serve stale
+        // values whenever a lagging node happened to be merged first.
+        Dictionary<string, ReadOnlyKeyValueEntry> merged = new(StringComparer.Ordinal);
 
-        KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, readTimestamp, durability);
-
-        if (items.Type == KeyValueResponseType.Get)
+        static void MergeItems(Dictionary<string, ReadOnlyKeyValueEntry> merged, List<(string, ReadOnlyKeyValueEntry)> items)
         {
-            foreach ((string key, ReadOnlyKeyValueEntry entry) in items.Items)
+            foreach ((string key, ReadOnlyKeyValueEntry entry) in items)
             {
-                if (seenKeys.Add(key))
-                    unionItems.Add((key, entry));
+                if (merged.TryGetValue(key, out ReadOnlyKeyValueEntry? existing)
+                    && (existing.Revision > entry.Revision
+                        || (existing.Revision == entry.Revision && existing.LastModified >= entry.LastModified)))
+                    continue;
+
+                merged[key] = entry;
             }
         }
+
+        KeyValueGetByBucketResult items = await manager.ScanByPrefix(prefixKeyName, readTimestamp, durability, includeTombstones: true);
+
+        if (items.Type == KeyValueResponseType.Get)
+            MergeItems(merged, items.Items);
 
         IList<RaftNode> nodes = raft.GetNodes();
 
@@ -2321,27 +2334,23 @@ internal sealed class KeyValueLocator
         foreach (KeyValueGetByBucketResult nodeResult in nodeResults)
         {
             if (nodeResult.Type == KeyValueResponseType.Get)
-            {
-                foreach ((string key, ReadOnlyKeyValueEntry entry) in nodeResult.Items)
-                {
-                    if (seenKeys.Add(key))
-                        unionItems.Add((key, entry));
-                }
-            }
+                MergeItems(merged, nodeResult.Items);
         }
 
         if (durability == KeyValueDurability.Persistent)
         {
-            KeyValueGetByBucketResult result = await manager.ScanByPrefixFromDisk(prefixKeyName, readTimestamp);
+            KeyValueGetByBucketResult result = await manager.ScanByPrefixFromDisk(prefixKeyName, readTimestamp, includeTombstones: true);
 
             if (result.Type == KeyValueResponseType.Get)
-            {
-                foreach ((string key, ReadOnlyKeyValueEntry entry) in result.Items)
-                {
-                    if (seenKeys.Add(key))
-                        unionItems.Add((key, entry));
-                }
-            }
+                MergeItems(merged, result.Items);
+        }
+
+        List<(string, ReadOnlyKeyValueEntry)> unionItems = new(merged.Count);
+
+        foreach ((string key, ReadOnlyKeyValueEntry entry) in merged)
+        {
+            if (entry.State != KeyValueState.Deleted)
+                unionItems.Add((key, entry));
         }
 
         return new(KeyValueResponseType.Get, unionItems);
@@ -2355,6 +2364,6 @@ internal sealed class KeyValueLocator
         CancellationToken cancellationToken
     )
     {
-        return await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, readTimestamp, durability, cancellationToken);
+        return await interNodeCommunication.ScanByPrefix(node.Endpoint, prefixKeyName, readTimestamp, durability, includeTombstones: true, cancellationToken);
     }
 }

@@ -124,6 +124,48 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
+    // ── Deleted entries travel with their state when tombstones are requested ─────────────
+
+    [Fact]
+    public async Task PrefixFromDiskScan_DeletedEntry_IncludedWhenTombstonesRequested()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("pfx-tombstone");
+
+        scheduler.Start();
+        try
+        {
+            PrefixBackend backend = new([
+                ("ns/live", Encoding.UTF8.GetBytes("alive"), 1L, KeyValueState.Set),
+                ("ns/dead", null, 2L, KeyValueState.Deleted),
+            ]);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "pfx-tombstone-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueRequest scan = MakePrefixScan("ns/");
+            scan.IncludeTombstones = true;
+
+            KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.NotNull(resp.Items);
+
+            // The cluster-wide scan union merges newest-wins per key, so a persisted tombstone must
+            // surface with its state (to suppress a stale live copy from a lagging node) instead of
+            // being filtered here.
+            Assert.Equal(2, resp.Items!.Count);
+            Dictionary<string, ReadOnlyKeyValueEntry> byKey = resp.Items!.ToDictionary(i => i.Item1, i => i.Item2);
+            Assert.Equal(KeyValueState.Set, byKey["ns/live"].State);
+            Assert.Equal(KeyValueState.Deleted, byKey["ns/dead"].State);
+        }
+        finally { scheduler.Stop(); }
+    }
+
     // ── Backend fault → MustRetry ─────────────────────────────────────────────────────────
 
     [Fact]

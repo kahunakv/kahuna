@@ -1401,9 +1401,9 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="prefixKeyName"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
+    public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones = false)
     {
-        return keyValues.ScanByPrefix(prefixKeyName, readTimestamp, durability);
+        return keyValues.ScanByPrefix(prefixKeyName, readTimestamp, durability, includeTombstones);
     }
     
     /// <summary>

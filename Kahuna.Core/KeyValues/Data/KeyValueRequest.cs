@@ -73,6 +73,14 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <summary>Range scan: fixed snapshot timestamp for consistent paging (Zero = latest).</summary>
     public HLCTimestamp ReadTimestamp { get; internal set; }
 
+    /// <summary>
+    /// Prefix scans: when set, entries whose newest visible state is <see cref="KeyValueState.Deleted"/>
+    /// are returned with that state instead of being filtered out. The cluster-wide scan union needs
+    /// tombstones to travel so a node that has applied a committed delete can suppress a stale live
+    /// copy contributed by a node that has not applied it yet.
+    /// </summary>
+    public bool IncludeTombstones { get; internal set; }
+
     /// <summary>Optional: a foreign prepared intent's canonical decision, resolved off-mailbox by routing to the
     /// transaction's anchor-partition leader, so a read that meets a still-pending remote-anchor intent resolves
     /// the outcome instead of retrying until settlement. Default (Zero identity) means no hint.</summary>
@@ -290,6 +298,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         RangeLockImportList = null;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
+        IncludeTombstones = false;
         ForeignDecisionHint = default;
         ForeignScanDecisions = null;
         Continuation = null;

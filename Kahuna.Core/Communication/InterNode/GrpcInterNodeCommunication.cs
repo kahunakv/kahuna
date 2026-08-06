@@ -1390,7 +1390,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             remoteResponse.HasMore);
     }
 
-    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1401,6 +1401,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampNode = readTimestamp.N,
             ReadTimestampPhysical = readTimestamp.L,
             ReadTimestampCounter = readTimestamp.C,
+            IncludeTombstones = includeTombstones,
         };
         
         GrpcServerBatcherResponse batchResponse;

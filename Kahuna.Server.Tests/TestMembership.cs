@@ -794,7 +794,7 @@ public sealed class TestMembership : BaseCluster
         public Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => throw new NotImplementedException();
         public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal) => throw new NotImplementedException();
         public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotImplementedException();
-        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotImplementedException();
+        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones = false) => throw new NotImplementedException();
         public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options) => throw new NotImplementedException();
         public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle) => throw new NotImplementedException();

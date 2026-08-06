@@ -19,17 +19,20 @@ internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
     private readonly HLCTimestamp readTimestamp;
     private readonly HLCTimestamp currentTime;
     private readonly (string, long, bool)? scanKey;
+    private readonly bool includeTombstones;
 
     internal PrefixFromDiskScanContinuation(
         string prefix,
         HLCTimestamp readTimestamp,
         HLCTimestamp currentTime,
         TaskCompletionSource<KeyValueResponse?> promise,
-        (string, long, bool)? scanKey) : base(promise)
+        (string, long, bool)? scanKey,
+        bool includeTombstones = false) : base(promise)
     {
         this.readTimestamp = readTimestamp;
         this.currentTime = currentTime;
         this.scanKey = scanKey;
+        this.includeTombstones = includeTombstones;
     }
 
     internal override void RemovePendingKey(KeyValueContext context)
@@ -60,9 +63,12 @@ internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
                 if (items.ContainsKey(key))
                     continue;
 
-                if (entry.State == KeyValueState.Deleted ||
-                    (entry.Expires != HLCTimestamp.Zero &&
-                     entry.Expires - currentTime < TimeSpan.Zero))
+                if (entry.State == KeyValueState.Deleted && !includeTombstones)
+                    continue;
+
+                if (entry.State != KeyValueState.Deleted &&
+                    entry.Expires != HLCTimestamp.Zero &&
+                    entry.Expires - currentTime < TimeSpan.Zero)
                     continue;
 
                 items.Add(key, entry);

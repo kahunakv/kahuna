@@ -1208,10 +1208,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.ScanByPrefix(prefixedKey, readTimestamp, durability);
+            return await kahunaNode.ScanByPrefix(prefixedKey, readTimestamp, durability, includeTombstones);
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }

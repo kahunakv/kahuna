@@ -1758,7 +1758,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
         HLCTimestamp readTimestamp = new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter);
 
-        KeyValueGetByBucketResult result = await keyValues.ScanByPrefix(request.PrefixKey, readTimestamp, (KeyValueDurability) request.Durability);
+        KeyValueGetByBucketResult result = await keyValues.ScanByPrefix(request.PrefixKey, readTimestamp, (KeyValueDurability) request.Durability, request.IncludeTombstones);
 
         GrpcScanByPrefixResponse response = new()
         {
@@ -2127,6 +2127,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 ExpiresNode = context.Expires.N,
                 ExpiresPhysical = context.Expires.L,
                 ExpiresCounter = context.Expires.C,
+                LastUsedNode = context.LastUsed.N,
+                LastUsedPhysical = context.LastUsed.L,
+                LastUsedCounter = context.LastUsed.C,
+                LastModifiedNode = context.LastModified.N,
+                LastModifiedPhysical = context.LastModified.L,
+                LastModifiedCounter = context.LastModified.C,
+                State = (GrpcKeyValueState)context.State,
             };
             
             if (context.Value is not null)

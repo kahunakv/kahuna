@@ -98,7 +98,7 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => throw new NotImplementedException();
     public virtual Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal) => throw new NotImplementedException();
     public virtual Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotImplementedException();
-    public virtual Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotImplementedException();
+    public virtual Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones = false) => throw new NotImplementedException();
     public virtual Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public virtual Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options) => throw new NotImplementedException();
     public virtual Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle) => throw new NotImplementedException();

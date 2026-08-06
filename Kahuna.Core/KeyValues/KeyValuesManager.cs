@@ -6053,7 +6053,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="durability"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones = false)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix,
@@ -6073,6 +6073,7 @@ internal sealed class KeyValuesManager : IDisposable
         );
 
         request.ReadTimestamp = readTimestamp;
+        request.IncludeTombstones = includeTombstones;
 
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         
@@ -6124,7 +6125,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// <param name="prefixKeyName"></param>    
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<KeyValueGetByBucketResult> ScanByPrefixFromDisk(string prefixKeyName, HLCTimestamp readTimestamp)
+    public async Task<KeyValueGetByBucketResult> ScanByPrefixFromDisk(string prefixKeyName, HLCTimestamp readTimestamp, bool includeTombstones = false)
     {
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefixFromDisk,
@@ -6144,6 +6145,7 @@ internal sealed class KeyValuesManager : IDisposable
         );
 
         request.ReadTimestamp = readTimestamp;
+        request.IncludeTombstones = includeTombstones;
 
         KeyValueResponse? response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 

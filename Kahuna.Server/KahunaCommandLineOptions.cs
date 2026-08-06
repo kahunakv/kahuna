@@ -178,6 +178,15 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-leadership-barrier-timeout", Required = false, HelpText = "How long a newly elected leader waits for its promotion barrier entry to commit before reverting to follower, in milliseconds. Until that entry commits the node heartbeats but does not serve, so raising this trades failover latency for tolerance of a slow quorum", Default = 10000)]
     public int RaftLeadershipBarrierTimeout { get; set; } = 10000;
 
+    [Option("raft-leadership-confirmation-timeout", Required = false, HelpText = "Maximum time a read-index leadership confirmation may wait for the quorum ack round plus applied-frontier catch-up before failing, in milliseconds", Default = 2000)]
+    public int RaftLeadershipConfirmationTimeout { get; set; } = 2000;
+
+    [Option("raft-enable-check-quorum", Required = false, HelpText = "When set, a leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower", Default = false)]
+    public bool RaftEnableCheckQuorum { get; set; }
+
+    [Option("raft-check-quorum-interval-multiplier", Required = false, HelpText = "Number of heartbeat intervals without a majority of same-term acks after which a leader with check-quorum enabled steps down", Default = 8)]
+    public int RaftCheckQuorumIntervalMultiplier { get; set; } = 8;
+
     [Option("raft-check-leader-interval", Required = false, HelpText = "Raft leader check interval in milliseconds", Default = 250)]
     public int RaftCheckLeaderInterval { get; set; } = 250;
 

@@ -54,6 +54,37 @@ public sealed class TestKeyValueScanBounds : RaftTrackingTest
     }
 
     [Fact]
+    public async Task EphemeralPrefixScan_TombstonesRequested_ReturnsTombstoneState()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        InsertLive(context, "k/live", now);
+        InsertTombstone(context, "k/dead", now);
+
+        TryScanByPrefixHandler scan = new(context);
+
+        // Default contract: tombstones are invisible.
+        KeyValueResponse plain = await scan.Execute(BuildRequest("k", limit: 0));
+        Assert.Equal(KeyValueResponseType.Get, plain.Type);
+        Assert.Single(plain.Items!);
+        Assert.Equal("k/live", plain.Items![0].Item1);
+
+        // The cluster-wide scan union requests tombstones so a node that applied a committed delete
+        // can suppress a stale live copy contributed by a node that has not applied it yet.
+        KeyValueRequest withTombstones = BuildRequest("k", limit: 0);
+        withTombstones.IncludeTombstones = true;
+
+        KeyValueResponse response = await scan.Execute(withTombstones);
+        Assert.Equal(KeyValueResponseType.Get, response.Type);
+        Assert.Equal(2, response.Items!.Count);
+
+        Dictionary<string, ReadOnlyKeyValueEntry> byKey = response.Items!.ToDictionary(i => i.Item1, i => i.Item2);
+        Assert.Equal(KeyValueState.Set, byKey["k/live"].State);
+        Assert.Equal(KeyValueState.Deleted, byKey["k/dead"].State);
+    }
+
+    [Fact]
     public async Task EphemeralRangeScan_WithManyTombstones_ResumesWithoutLosingEntries()
     {
         (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());

@@ -50,10 +50,12 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 
         TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
 
-        // (prefix, -3, false) = non-snapshot prefix-from-disk scan.
+        // (prefix, -3, includeTombstones) = non-snapshot prefix-from-disk scan. The tombstone flag is
+        // part of the coalescing key so a tombstone-carrying scan never shares a continuation (and its
+        // filtered result) with a plain scan for the same prefix.
         // Snapshot scans are not registered in PendingReads (no coalescing).
         bool isNonSnapshot = readTimestamp.IsNull();
-        (string, long, bool)? scanKey = isNonSnapshot ? (message.Key, -3L, false) : null;
+        (string, long, bool)? scanKey = isNonSnapshot ? (message.Key, -3L, message.IncludeTombstones) : null;
 
         if (scanKey.HasValue &&
             context.PendingReads.TryGetValue(scanKey.Value, out ReadContinuation? inflight))
@@ -64,10 +66,12 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
-        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise, scanKey);
+        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise, scanKey, message.IncludeTombstones);
         ArmReadDeadline(cont, currentTime);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;
+
+        bool includeTombstones = message.IncludeTombstones;
 
         Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
         try
@@ -102,9 +106,12 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 
                         KeyValueEntry? snapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
                             key, entry.Revision - 1, readTimestamp);
-                        if (snapshot is null || snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined)
+                        if (snapshot is null || snapshot.State is KeyValueState.Undefined)
                             continue;
-                        if (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires.CompareTo(currentTime) < 0)
+                        if (snapshot.State is KeyValueState.Deleted && !includeTombstones)
+                            continue;
+                        if (snapshot.State is not KeyValueState.Deleted &&
+                            snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires.CompareTo(currentTime) < 0)
                             continue;
                         projected.Add((key, new(snapshot.Value, snapshot.Revision,
                             snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));

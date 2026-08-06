@@ -44,7 +44,7 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
         {
             inspected++;
 
-            KeyValueResponse response = await Get(currentTime, key, message.Durability, message.ReadTimestamp);
+            KeyValueResponse response = await Get(currentTime, key, message.Durability, message.IncludeTombstones, message.ReadTimestamp);
 
             if (response is { Type: KeyValueResponseType.Get, Entry: not null })
                 items.Add((key, response.Entry));
@@ -68,7 +68,7 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
         return new(KeyValueResponseType.Get, items);
     }
 
-    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, HLCTimestamp readTimestamp = default, ReadOnlyKeyValueEntry? keyValueEntry = null)
+    private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, bool includeTombstones, HLCTimestamp readTimestamp = default, ReadOnlyKeyValueEntry? keyValueEntry = null)
     {
         KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
 
@@ -78,8 +78,10 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
             if (!entry.TryGetRevisionAtOrBefore(readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
-                (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
+            if (snapshot.State is KeyValueState.Undefined ||
+                (snapshot.State is KeyValueState.Deleted && !includeTombstones) ||
+                (snapshot.State is not KeyValueState.Deleted &&
+                 snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
             return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
@@ -91,7 +93,10 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
                 snapshot.State));
         }
 
-        if (entry is null || entry.State == KeyValueState.Deleted || entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero)
+        if (entry is null
+            || (entry.State == KeyValueState.Deleted && !includeTombstones)
+            || (entry.State != KeyValueState.Deleted &&
+                entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         ReadOnlyKeyValueEntry readOnlyKeyValueEntry = new(
