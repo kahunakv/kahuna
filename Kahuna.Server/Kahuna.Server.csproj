@@ -9,6 +9,37 @@
   <InvariantGlobalization>true</InvariantGlobalization>
 </PropertyGroup>
 
+<!-- Ships as a .NET global tool: `dotnet tool install -g Kahuna.Server` then `kahuna-server`.
+     The Web SDK disables packing by default, so IsPackable must be set explicitly. PackAsTool only
+     adds targets under Pack, leaving build/run/publish (and therefore the Docker image) untouched.
+     PackageId must live here rather than on the pack command line — as a global property it flows
+     into the whole restore graph and collides with the referenced projects. -->
+<PropertyGroup>
+  <IsPackable>true</IsPackable>
+  <PackAsTool>true</PackAsTool>
+  <ToolCommandName>kahuna-server</ToolCommandName>
+  <PackageId>Kahuna.Server</PackageId>
+  <Version>1.0.3</Version>
+  <Authors>Andres Gutierrez</Authors>
+  <Company>Kahuna KV</Company>
+  <Description>Kahuna server node — distributed key-value store, lock manager and sequencer. Run `kahuna-server` to start a standalone node.</Description>
+  <PackageDescription>Kahuna server node — distributed key-value store, lock manager and sequencer. Run `kahuna-server` to start a standalone node.</PackageDescription>
+  <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  <PackageReadmeFile>README.md</PackageReadmeFile>
+  <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
+  <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
+  <PackageTags>dotnet;kahuna;keyvalue;locks;raft;server;database</PackageTags>
+  <PackageOutputPath>./nupkg</PackageOutputPath>
+  <IncludeSymbols>false</IncludeSymbols>
+</PropertyGroup>
+
+<ItemGroup>
+  <None Include="../README.md">
+    <Pack>True</Pack>
+    <PackagePath>\</PackagePath>
+  </None>
+</ItemGroup>
+
   <PropertyGroup>
     <NoWarn>SYSLIB0051</NoWarn>
   </PropertyGroup>

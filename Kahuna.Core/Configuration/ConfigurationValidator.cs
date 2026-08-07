@@ -9,6 +9,28 @@ namespace Kahuna.Server.Configuration;
 /// </summary>
 public static class ConfigurationValidator
 {
+    /// <summary>
+    /// Whether the Kestrel HTTPS listener should be created at all.
+    ///
+    /// Binding HTTPS without a certificate is not merely useless: Kestrel resolves an empty
+    /// certificate path against the current working directory and aborts startup, so a node launched
+    /// with no flags could never start. With no certificate the node binds HTTP only.
+    ///
+    /// Ports explicitly requested as HTTPS without a certificate are a contradiction and throw —
+    /// silently serving plaintext on a port the operator asked to be secure is the one outcome that
+    /// must not happen.
+    /// </summary>
+    public static bool ShouldBindHttps(string? httpsCertificate, IEnumerable<string>? httpsPorts)
+    {
+        if (!string.IsNullOrEmpty(httpsCertificate))
+            return true;
+
+        if (httpsPorts is not null && httpsPorts.Any())
+            throw new KahunaServerException("--https-ports requires --https-certificate; refusing to serve plaintext on a port requested as HTTPS");
+
+        return false;
+    }
+
     public static KahunaConfiguration Validate(KahunaConfiguration configuration, string? walPath = null)
     {
         if (!string.IsNullOrEmpty(configuration.HttpsCertificate))
@@ -22,15 +44,17 @@ public static class ConfigurationValidator
             configuration.HttpsTrustedThumbprint = xcertificate.Thumbprint;
         }
 
+        // Create the directories a backend is about to open. RocksDB creates its own, but SQLite does
+        // not, and a node must not fail to start merely because its data directory does not exist yet.
         if (!string.IsNullOrEmpty(configuration.StoragePath))
         {
-            if (Directory.Exists(configuration.StoragePath))
+            if (!Directory.Exists(configuration.StoragePath))
                 Directory.CreateDirectory(configuration.StoragePath);
         }
 
         if (!string.IsNullOrEmpty(walPath))
         {
-            if (Directory.Exists(walPath))
+            if (!Directory.Exists(walPath))
                 Directory.CreateDirectory(walPath);
         }
 

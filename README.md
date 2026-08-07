@@ -37,6 +37,36 @@ as well as priests, ministers, and sorcerers.
 
 Check the [documentation](https://kahunakv.github.io/) for more information on architecture, installation, and usage examples.
 
+## Installation
+
+The quickest way to get a node running is the .NET global tool:
+
+```bash
+dotnet tool install -g Kahuna.Server
+kahuna-server
+```
+
+With no arguments this starts a standalone node on HTTP port 2070. Its key-value data and Raft
+write-ahead log go under the per-user data directory — `~/.local/share/kahuna` on Linux/macOS,
+`%LOCALAPPDATA%\kahuna` on Windows — and both resolved paths are printed at startup. Set
+`KAHUNA_HOME` to relocate them, or pass `--storage-path` / `--wal-path` explicitly.
+
+A node started this way serves **HTTP only**: HTTPS binds only when you supply a certificate.
+
+```bash
+kahuna-server --https-certificate /path/to/certificate.pfx --https-ports 2071
+```
+
+The command-line client is a separate tool:
+
+```bash
+dotnet tool install -g Kahuna.Control
+kahuna-cli
+```
+
+For a multi-node cluster, or to build from source, see the Docker images under `docker/` and the
+scripts in `scripts/`.
+
 ## Architecture
 
 <img src="https://github.com/user-attachments/assets/b60b213c-d12d-48a5-ba22-38fe99d2a590" height="350">

@@ -50,6 +50,24 @@ if (string.IsNullOrEmpty(opts.RaftNodeName))
 // over the same gRPC/REST surface as a clustered node.
 bool standalone = opts.InitialCluster is null || !opts.InitialCluster.Any();
 
+// An unset storage/WAL path would reach the backend as "", which composes to "/{revision}" — an
+// absolute path at the root of the filesystem rather than anything the user owns. Resolve both to a
+// concrete per-user directory here, once, before either the standalone or cluster branch reads them,
+// so the two branches cannot drift. An explicitly configured path is kept verbatim, so the container
+// entrypoint and the cluster run scripts are unaffected.
+if (!DataPathResolver.IsInMemory(opts.Storage))
+    opts.StoragePath = DataPathResolver.ResolveStoragePath(opts.StoragePath);
+
+if (!DataPathResolver.IsInMemory(opts.WalStorage))
+    opts.WalPath = DataPathResolver.ResolveWalPath(opts.WalPath);
+
+// A server's storage identity must be stable across restarts. Left unset it reaches the embedded
+// node, which mints a per-boot GUID to give in-process test nodes an isolated keyspace — correct
+// there, silent data loss here.
+opts.StorageRevision = DataPathResolver.ResolveStorageRevision(opts.StorageRevision);
+
+bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertificate, opts.HttpsPorts);
+
 if (standalone)
 {
     builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
@@ -152,6 +170,9 @@ builder.WebHost.ConfigureKestrel(options =>
                 listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
             });
 
+    if (!httpsConfigured)
+        return;
+
     if (opts.HttpsPorts is null || !opts.HttpsPorts.Any())
         options.Listen(IPAddress.Any, 2071, listenOptions =>
         {
@@ -229,6 +250,17 @@ builder.Services.AddSingleton(kahunaConfiguration);
 
 // Start server
 WebApplication app = builder.Build();
+
+// "Where is my data?" and "am I actually on TLS?" must both be answerable from the console without
+// reconstructing the flag defaults — especially for a node started with no flags at all.
+if (app.Logger.IsEnabled(LogLevel.Information))
+{
+    app.Logger.LogInformation("Storage: {Storage} at {StoragePath}", opts.Storage, DataPathResolver.IsInMemory(opts.Storage) ? "(in-memory)" : opts.StoragePath);
+    app.Logger.LogInformation("WAL: {WalStorage} at {WalPath}", opts.WalStorage, DataPathResolver.IsInMemory(opts.WalStorage) ? "(in-memory)" : opts.WalPath);
+}
+
+if (!httpsConfigured)
+    app.Logger.LogInformation("HTTPS disabled: no certificate configured (pass --https-certificate to enable it)");
 
 // Must wrap the pipeline before any route runs: maps retryable infrastructure exceptions
 // (Raft resolution, inter-node transport) escaping the kv/locks/sequences surfaces to a typed
