@@ -1190,6 +1190,10 @@ public sealed class TestBackupService : IDisposable
         public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(IsLeader);
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(IsLeader);
         public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(IsLeader);
+        public ValueTask<bool> ConfirmLocalApplicationAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(IsLeader);
+        public IReadOnlyList<Kommander.System.RaftReplica> GetPartitionReplicas(int partitionId) => [];
+        public int GetEffectiveReplicationFactor(int partitionId) => 0;
+        public Task<Kommander.Data.RaftPartitionLifecycleResult> SetReplicationFactorAsync(int partitionId, int replicationFactor, CancellationToken ct = default) => throw new NotImplementedException();
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);
         public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, TimeSpan timeout, CancellationToken cancellationToken = default) => ValueTask.FromResult(string.Empty);

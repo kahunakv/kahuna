@@ -49,4 +49,16 @@ internal static class SnapshotFloorMetrics
         Meter.CreateCounter<long>(
             "kahuna.snapshot_floor.missing_protected_version_total",
             description: "Floor-protected boundary revisions scheduled for trimming at a reclamation site (must stay 0).");
+
+    /// <summary>
+    /// Increments when a destructive revision-prune cycle is skipped because the node could not
+    /// confirm its meta-partition application is caught up with the cluster's commit frontier —
+    /// the local hold registry may be missing committed acquires, so pruning from it could delete
+    /// revisions the cluster still holds. Occasional increments around elections or partitions
+    /// are expected (the cycle retries); a sustained rate means a node cannot catch up.
+    /// </summary>
+    internal static readonly Counter<long> PruneSkippedUnconfirmed =
+        Meter.CreateCounter<long>(
+            "kahuna.snapshot_floor.prune_skipped_unconfirmed_total",
+            description: "Revision-prune cycles skipped because meta-partition catch-up could not be confirmed.");
 }

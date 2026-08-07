@@ -200,6 +200,10 @@ public sealed class TestClusterReadiness : IDisposable
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => throw new NotImplementedException();
 
         public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public ValueTask<bool> ConfirmLocalApplicationAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public IReadOnlyList<Kommander.System.RaftReplica> GetPartitionReplicas(int partitionId) => throw new NotImplementedException();
+        public int GetEffectiveReplicationFactor(int partitionId) => throw new NotImplementedException();
+        public Task<Kommander.Data.RaftPartitionLifecycleResult> SetReplicationFactorAsync(int partitionId, int replicationFactor, CancellationToken ct = default) => throw new NotImplementedException();
 
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => throw new NotImplementedException();
 

@@ -105,6 +105,10 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public ValueTask<bool> AmILeaderQuick(int partitionId) => inner.AmILeaderQuick(partitionId);
     public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => inner.AmILeader(partitionId, cancellationToken);
     public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => inner.ConfirmLeadershipAsync(partitionId, cancellationToken);
+    public ValueTask<bool> ConfirmLocalApplicationAsync(int partitionId, CancellationToken cancellationToken = default) => inner.ConfirmLocalApplicationAsync(partitionId, cancellationToken);
+    public IReadOnlyList<Kommander.System.RaftReplica> GetPartitionReplicas(int partitionId) => inner.GetPartitionReplicas(partitionId);
+    public int GetEffectiveReplicationFactor(int partitionId) => inner.GetEffectiveReplicationFactor(partitionId);
+    public Task<Kommander.Data.RaftPartitionLifecycleResult> SetReplicationFactorAsync(int partitionId, int replicationFactor, CancellationToken ct = default) => inner.SetReplicationFactorAsync(partitionId, replicationFactor, ct);
     public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => inner.WaitForLeader(partitionId, cancellationToken);
     public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => inner.WaitForLeaderStableAsync(partitionId, minStableFor, cancellationToken);
     public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, TimeSpan timeout, CancellationToken cancellationToken = default) => inner.WaitForLeaderStableAsync(partitionId, minStableFor, timeout, cancellationToken);

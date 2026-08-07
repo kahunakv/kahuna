@@ -195,7 +195,38 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// letting the delete remove a boundary the sample never saw.
     /// </summary>
     internal Action? AfterPruneSampleHook;
-    
+
+    /// <summary>
+    /// Test seam replacing the meta-partition catch-up confirmation that gates destructive
+    /// revision prunes. Null in production (the real <c>ConfirmLocalApplicationAsync</c> runs);
+    /// set by tests to force the confirmed/unconfirmed outcome without controlling elections.
+    /// </summary>
+    internal Func<ValueTask<bool>>? ConfirmPruneFreshnessOverride;
+
+    /// <summary>
+    /// A destructive revision prune must never run from a possibly-stale local hold registry: a
+    /// node whose meta-partition application lags the cluster (a fresh join before the P0 state
+    /// transfer, or a partitioned node whose prune timer keeps firing) sees an empty or stale
+    /// hold set and would delete revisions the cluster still holds. Confirm that this node's
+    /// applied frontier covers the cluster's commit frontier before sampling the floor; on
+    /// failure the cycle is skipped and retried later — disk retention grows until the node
+    /// catches up, which is the safe direction. Holds committed after this confirmation are
+    /// covered on the leader by the acquire/prune-window generation protocol; cross-node, the
+    /// residual exposure narrows from unbounded staleness to the confirmation→sample window.
+    /// With no floor store there are no holds to protect and no gate is needed.
+    /// </summary>
+    private ValueTask<bool> ConfirmFloorRegistryFreshness()
+    {
+        if (snapshotFloorStore is null)
+            return ValueTask.FromResult(true);
+
+        if (ConfirmPruneFreshnessOverride is not null)
+            return ConfirmPruneFreshnessOverride();
+
+        return raft.ConfirmLocalApplicationAsync(RangeMapStore.MetaPartitionId);
+    }
+
+
     public BackgroundWriterActor(
         IActorContext<BackgroundWriterActor, BackgroundWriteRequest> context,
         IRaft raft,
@@ -787,6 +818,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         if (pendingRevisionCleanupKeys.Count == 0)
             return;
 
+        if (!await ConfirmFloorRegistryFreshness())
+        {
+            // Keys stay queued; the next flush cycle retries once catch-up can be confirmed.
+            SnapshotFloorMetrics.PruneSkippedUnconfirmed.Add(1);
+            logger.LogWarning(
+                "Skipping targeted revision cleanup of {Count} key(s): meta-partition catch-up could not be confirmed, the local hold registry may be stale. backend={Backend}",
+                pendingRevisionCleanupKeys.Count,
+                configuration.Storage);
+            return;
+        }
+
         List<string> keysToClean = [..pendingRevisionCleanupKeys];
         pendingRevisionCleanupKeys.Clear();
 
@@ -914,6 +956,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         if (!intervalElapsed && !fullSweepBacklogPending)
             return;
+
+        if (!await ConfirmFloorRegistryFreshness())
+        {
+            // The interval is not consumed, so the sweep retries on the next eligible cycle once
+            // catch-up can be confirmed.
+            SnapshotFloorMetrics.PruneSkippedUnconfirmed.Add(1);
+            logger.LogWarning(
+                "Skipping full revision sweep: meta-partition catch-up could not be confirmed, the local hold registry may be stale. backend={Backend}",
+                configuration.Storage);
+            return;
+        }
 
         lastFullSweepUtc = now;
         fullSweepBacklogPending = false;

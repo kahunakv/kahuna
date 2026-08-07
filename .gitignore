@@ -46,3 +46,4 @@ Kahuna.Server/*.lst
 nupkgs/
 nupkg/
 specs/
+.DS_Store

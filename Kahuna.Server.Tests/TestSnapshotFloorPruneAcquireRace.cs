@@ -580,4 +580,128 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             await Cleanup(raft, kahuna);
         }
     }
+
+    /// <summary>
+    /// A node that cannot confirm its meta-partition application is caught up must not run the
+    /// targeted revision cleanup: its local hold registry may be missing committed acquires, so a
+    /// prune from it could delete revisions the cluster still holds. The skipped cycle keeps its
+    /// keys queued and retries — once catch-up confirms, the same keys are pruned.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_UnconfirmedCatchUp_SkipsTargetedCleanupUntilConfirmed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(retentionCount: 1);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/unconfirmed/targeted";
+
+            // Warm-up flush instantiates the BackgroundWriterActor without triggering cleanup.
+            await kahuna.FlushPersistenceAsync();
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            // Simulate a node that cannot prove catch-up (partitioned / still applying P0).
+            actor.ConfirmPruneFreshnessOverride = () => ValueTask.FromResult(false);
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            // Flush stores both revisions and would prune revision 0 (retentionCount=1) —
+            // but the unconfirmed gate must skip the cleanup and keep the key queued.
+            await kahuna.FlushPersistenceAsync();
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+
+            // Still unconfirmed on a later cycle: still skipped.
+            await kahuna.FlushPersistenceAsync();
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+
+            // Catch-up confirms (single-node leader: the real path also succeeds) — the queued
+            // key from the skipped cycles is pruned on the next cycle.
+            actor.ConfirmPruneFreshnessOverride = null;
+            await kahuna.FlushPersistenceAsync();
+            Assert.Null(backend.GetKeyValueRevision(key, 0));
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
+    /// Same gate for the backend-wide sweep: an unconfirmed node skips the sweep without
+    /// consuming the interval, so the sweep runs on the next eligible periodic cycle once
+    /// catch-up confirms. The sweep only runs from the periodic flush timer (explicit flushes
+    /// do not sweep), so this test drives it with a short timer delay and polls.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_UnconfirmedCatchUp_SkipsFullSweepUntilConfirmed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // A 1 ms sweep interval survives config validation (which clamps only <= 0 back to the
+        // 5-minute default), so every 50 ms periodic cycle is sweep-eligible.
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(
+            retentionCount: 1, cleanupOnWrite: false, cleanupInterval: TimeSpan.FromMilliseconds(1),
+            dirtyObjectsWriterDelay: 50);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/unconfirmed/sweep";
+
+            await kahuna.FlushPersistenceAsync();
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            actor.ConfirmPruneFreshnessOverride = () => ValueTask.FromResult(false);
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            // Flush the revisions to the backend, then let several sweep-eligible periodic
+            // cycles pass. The unconfirmed gate must skip every one, leaving revision 0 in place.
+            await kahuna.FlushPersistenceAsync();
+            await Task.Delay(500, ct);
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+
+            // Catch-up confirms — the next periodic cycle sweeps revision 0 away.
+            actor.ConfirmPruneFreshnessOverride = null;
+            bool pruned = false;
+            for (int attempt = 0; attempt < 100 && !pruned; attempt++)
+            {
+                pruned = backend.GetKeyValueRevision(key, 0) is null;
+                if (!pruned)
+                    await Task.Delay(100, ct);
+            }
+            Assert.True(pruned, "the full sweep must prune revision 0 once catch-up confirms");
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
 }
