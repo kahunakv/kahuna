@@ -376,7 +376,7 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
         {
             CancellationToken ct = TestContext.Current.CancellationToken;
 
-            await raft.JoinCluster();
+            await raft.JoinCluster(ct);
             for (int partition = 0; partition <= 2; partition++)
                 await WaitForAnyLeader(partition, raft);
 
@@ -412,7 +412,7 @@ public sealed class TestLockFailoverCoherence : RaftTrackingTest
         }
         finally
         {
-            try { await TestClusterNodeRegistry.DisposeAsync(raft); }
+            try { await TestClusterNodeRegistry.DisposeAsync(raft, TestContext.Current.CancellationToken); }
             catch (ObjectDisposedException) { }
         }
     }

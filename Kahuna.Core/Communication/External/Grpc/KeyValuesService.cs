@@ -524,6 +524,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 ExpiresNode = keyValueContext.Expires.N,
                 ExpiresPhysical = keyValueContext.Expires.L,
                 ExpiresCounter = keyValueContext.Expires.C,
+                LastUsedNode = keyValueContext.LastUsed.N,
+                LastUsedPhysical = keyValueContext.LastUsed.L,
+                LastUsedCounter = keyValueContext.LastUsed.C,
+                LastModifiedNode = keyValueContext.LastModified.N,
+                LastModifiedPhysical = keyValueContext.LastModified.L,
+                LastModifiedCounter = keyValueContext.LastModified.C,
+                State = (GrpcKeyValueState)keyValueContext.State,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
 
@@ -638,6 +645,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 ExpiresNode = keyValueContext.Expires.N,
                 ExpiresPhysical = keyValueContext.Expires.L,
                 ExpiresCounter = keyValueContext.Expires.C,
+                LastUsedNode = keyValueContext.LastUsed.N,
+                LastUsedPhysical = keyValueContext.LastUsed.L,
+                LastUsedCounter = keyValueContext.LastUsed.C,
+                LastModifiedNode = keyValueContext.LastModified.N,
+                LastModifiedPhysical = keyValueContext.LastModified.L,
+                LastModifiedCounter = keyValueContext.LastModified.C,
+                State = (GrpcKeyValueState)keyValueContext.State,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
             

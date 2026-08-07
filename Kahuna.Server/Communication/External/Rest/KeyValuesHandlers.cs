@@ -177,6 +177,7 @@ public static class KeyValuesHandlers
             {
                 return new KahunaSetManyKeyValueResponse
                 {
+                    Type = KeyValueResponseType.InvalidInput,
                     Items =
                     [
                         new KahunaSetKeyValueResponseItem
@@ -195,6 +196,7 @@ public static class KeyValuesHandlers
             {
                 return new KahunaSetManyKeyValueResponse
                 {
+                    Type = KeyValueResponseType.InvalidInput,
                     Items = request.Items.Select(static i => new KahunaSetKeyValueResponseItem
                     {
                         Key = i.Key ?? "",
@@ -214,6 +216,7 @@ public static class KeyValuesHandlers
 
             return new KahunaSetManyKeyValueResponse
             {
+                Type = KeyValueResponseType.Set,
                 Items = responses,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
@@ -225,6 +228,7 @@ public static class KeyValuesHandlers
             {
                 return new KahunaDeleteManyKeyValueResponse
                 {
+                    Type = KeyValueResponseType.InvalidInput,
                     Items =
                     [
                         new KahunaDeleteKeyValueResponseItem
@@ -244,6 +248,7 @@ public static class KeyValuesHandlers
             {
                 return new KahunaDeleteManyKeyValueResponse
                 {
+                    Type = KeyValueResponseType.InvalidInput,
                     Items = request.Items.Select(static i => new KahunaDeleteKeyValueResponseItem
                     {
                         Key = i.Key ?? "",
@@ -265,6 +270,7 @@ public static class KeyValuesHandlers
 
             return new KahunaDeleteManyKeyValueResponse
             {
+                Type = KeyValueResponseType.Deleted,
                 Items = responses,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
@@ -373,7 +379,7 @@ public static class KeyValuesHandlers
         app.MapPost("/v1/kv/try-get-many", async (KahunaManyKeyValuesRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (request.Items is null)
-                return new KahunaManyKeyValuesResponse { Items = [], TimeElapsedMs = 0 };
+                return new KahunaManyKeyValuesResponse { Type = KeyValueResponseType.InvalidInput, Items = [], TimeElapsedMs = 0 };
 
             // No registration identity on this wire: a transactional batch read would skip read-set
             // registration and silently weaken isolation, so it is rejected outright.
@@ -391,6 +397,7 @@ public static class KeyValuesHandlers
 
             return new KahunaManyKeyValuesResponse
             {
+                Type = KeyValueResponseType.Get,
                 Items = GetManyResponseItems(responses, includeValues: true),
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
@@ -399,7 +406,7 @@ public static class KeyValuesHandlers
         app.MapPost("/v1/kv/try-exists-many", async (KahunaManyKeyValuesRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (request.Items is null)
-                return new KahunaManyKeyValuesResponse { Items = [], TimeElapsedMs = 0 };
+                return new KahunaManyKeyValuesResponse { Type = KeyValueResponseType.InvalidInput, Items = [], TimeElapsedMs = 0 };
 
             // Same rejection as try-get-many: no identity on this wire means a transactional batch
             // existence check cannot register its read set.
@@ -417,6 +424,7 @@ public static class KeyValuesHandlers
 
             return new KahunaManyKeyValuesResponse
             {
+                Type = KeyValueResponseType.Get,
                 Items = GetManyResponseItems(responses, includeValues: false),
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
@@ -694,7 +702,7 @@ public static class KeyValuesHandlers
         app.MapGet("/v1/kv/snapshot-floor", async (IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             (HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
-            return new KahunaGetSnapshotFloorResponse { EffectiveFloor = floor, LiveHolds = liveHolds };
+            return new KahunaGetSnapshotFloorResponse { Type = KeyValueResponseType.Get, EffectiveFloor = floor, LiveHolds = liveHolds };
         });
     }
 
@@ -706,6 +714,7 @@ public static class KeyValuesHandlers
     {
         return new()
         {
+            Type = KeyValueResponseType.InvalidInput,
             Items = request.Items!.Select(static i => new KahunaGetManyKeyValuesResponseItem
             {
                 Key = i.Key ?? "",

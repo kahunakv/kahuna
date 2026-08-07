@@ -1,7 +1,10 @@
 
+using System.Text.Json;
+
 using Grpc.Core;
 
 using Kahuna.Communication.External.Rest;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -99,6 +102,119 @@ public sealed class TestInterNodeTransportMustRetry
         Assert.Null(RetryableExceptionMapping.TryGetMustRetryBody(new PathString("/v1/backups/create")));
         Assert.Null(RetryableExceptionMapping.TryGetMustRetryBody(new PathString("/v1/raft/append-logs")));
         Assert.Null(RetryableExceptionMapping.TryGetMustRetryBody(new PathString("/")));
+    }
+
+    /// <summary>
+    /// The substituted MustRetry body must be a legal instance of the snapshot-floor response
+    /// contract. Before the DTO carried a type, the body deserialized as an empty success — zero
+    /// live holds under HTTP 200 — which a floor-polling backup/PITR coordinator reads as "my hold
+    /// was lost" and acts on, for a request that never reached the floor registry.
+    /// </summary>
+    [Fact]
+    public void RestMapping_SnapshotFloorMustRetryBodyDeserializesIntoItsDto()
+    {
+        string? body = RetryableExceptionMapping.TryGetMustRetryBody(new PathString("/v1/kv/snapshot-floor"));
+
+        Assert.NotNull(body);
+
+        KahunaGetSnapshotFloorResponse? response = JsonSerializer.Deserialize(
+            body, KahunaJsonContext.Default.KahunaGetSnapshotFloorResponse);
+
+        Assert.NotNull(response);
+        Assert.Equal(KeyValueResponseType.MustRetry, response.Type);
+    }
+
+    /// <summary>
+    /// A successful floor read must serialize a type distinguishable from both MustRetry and the
+    /// enum default, so a client can tell "measured" from "refused" and from "field absent".
+    /// </summary>
+    [Fact]
+    public void SnapshotFloorSuccess_SerializesDistinguishableType()
+    {
+        string json = JsonSerializer.Serialize(
+            new KahunaGetSnapshotFloorResponse
+            {
+                Type = KeyValueResponseType.Get,
+                EffectiveFloor = new HLCTimestamp(1, 100, 2),
+                LiveHolds = 3
+            },
+            KahunaJsonContext.Default.KahunaGetSnapshotFloorResponse);
+
+        Assert.Contains($"\"type\":{(int)KeyValueResponseType.Get}", json);
+        Assert.NotEqual(default, KeyValueResponseType.Get);
+        Assert.NotEqual(KeyValueResponseType.MustRetry, KeyValueResponseType.Get);
+
+        KahunaGetSnapshotFloorResponse? roundTripped = JsonSerializer.Deserialize(
+            json, KahunaJsonContext.Default.KahunaGetSnapshotFloorResponse);
+
+        Assert.NotNull(roundTripped);
+        Assert.Equal(KeyValueResponseType.Get, roundTripped.Type);
+        Assert.Equal(new HLCTimestamp(1, 100, 2), roundTripped.EffectiveFloor);
+        Assert.Equal(3, roundTripped.LiveHolds);
+    }
+
+    /// <summary>
+    /// The mapping substitutes one body per URL prefix, but each endpoint's DTO is its own contract:
+    /// any response type on a mapped surface that cannot express the surface's MustRetry silently
+    /// turns a refusal into a well-formed empty success. This pins the single-response contracts of
+    /// the snapshot subsystem.
+    /// </summary>
+    [Fact]
+    public void RestMapping_KvMustRetryBodyDeserializesIntoSnapshotHoldDtos()
+    {
+        string body = RetryableExceptionMapping.TryGetMustRetryBody(new PathString("/v1/kv/snapshot-hold/acquire"))!;
+
+        Assert.Equal(KeyValueResponseType.MustRetry,
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaAcquireSnapshotHoldResponse)!.Type);
+        Assert.Equal(KeyValueResponseType.MustRetry,
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaRenewSnapshotHoldResponse)!.Type);
+        Assert.Equal(KeyValueResponseType.MustRetry,
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaReleaseSnapshotHoldResponse)!.Type);
+    }
+
+    /// <summary>
+    /// The batch envelopes classify outcomes per item, so a substituted MustRetry body used to
+    /// deserialize as an empty item list — "none of these keys exist" / "nothing was written" for a
+    /// request that never reached a handler. The envelope-level type makes the refusal expressible;
+    /// the null item list distinguishes it from a real answer about zero keys.
+    /// </summary>
+    [Fact]
+    public void RestMapping_KvMustRetryBodyDeserializesIntoBatchEnvelopes()
+    {
+        string body = RetryableExceptionMapping.TryGetMustRetryBody(new PathString("/v1/kv/try-get-many"))!;
+
+        KahunaManyKeyValuesResponse getMany =
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaManyKeyValuesResponse)!;
+        Assert.Equal(KeyValueResponseType.MustRetry, getMany.Type);
+        Assert.Null(getMany.Items);
+
+        KahunaSetManyKeyValueResponse setMany =
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaSetManyKeyValueResponse)!;
+        Assert.Equal(KeyValueResponseType.MustRetry, setMany.Type);
+        Assert.Null(setMany.Items);
+
+        KahunaDeleteManyKeyValueResponse deleteMany =
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaDeleteManyKeyValueResponse)!;
+        Assert.Equal(KeyValueResponseType.MustRetry, deleteMany.Type);
+        Assert.Null(deleteMany.Items);
+    }
+
+    /// <summary>An answered batch read must serialize an envelope type distinguishable from both
+    /// MustRetry and the enum default, so an old-server body (no type) is also tellable apart.</summary>
+    [Fact]
+    public void BatchGetManySuccess_SerializesDistinguishableEnvelopeType()
+    {
+        string json = JsonSerializer.Serialize(
+            new KahunaManyKeyValuesResponse { Type = KeyValueResponseType.Get, Items = [], TimeElapsedMs = 1 },
+            KahunaJsonContext.Default.KahunaManyKeyValuesResponse);
+
+        Assert.Contains($"\"type\":{(int)KeyValueResponseType.Get}", json);
+
+        KahunaManyKeyValuesResponse roundTripped =
+            JsonSerializer.Deserialize(json, KahunaJsonContext.Default.KahunaManyKeyValuesResponse)!;
+        Assert.Equal(KeyValueResponseType.Get, roundTripped.Type);
+        Assert.NotNull(roundTripped.Items);
+        Assert.Empty(roundTripped.Items);
     }
 
     /// <summary>Pins the serialized bodies to the shared enums so the constants cannot drift.</summary>

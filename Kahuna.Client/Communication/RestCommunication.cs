@@ -534,6 +534,12 @@ public class RestCommunication : IKahunaCommunication
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
+        // A retryable server-side failure arrives as HTTP 200 whose body is only {"type":101}:
+        // returning its absent item list as an empty batch would read as "nothing was written".
+        // Per-item outcomes (including InvalidInput rejections) still flow through Items.
+        if (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored)
+            throw new KahunaException("TrySetManyKeyValues failed", response.Type);
+
         return (response.Items ?? [], response.TimeElapsedMs);
     }
 
@@ -580,6 +586,11 @@ public class RestCommunication : IKahunaCommunication
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
+        // Same refusal classification as TrySetManyKeyValues: an envelope-level MustRetry has no
+        // per-key outcomes, so surfacing it as an empty batch would misreport "nothing was deleted".
+        if (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored)
+            throw new KahunaException("TryDeleteManyKeyValues failed", response.Type);
+
         return (response.Items ?? [], response.TimeElapsedMs);
     }
 
@@ -610,6 +621,11 @@ public class RestCommunication : IKahunaCommunication
         KahunaManyKeyValuesResponse response = await PostKeyValueRequest<KahunaManyKeyValuesRequest, KahunaManyKeyValuesResponse>(
             url, verb, request, KahunaJsonContext.Default.KahunaManyKeyValuesRequest, cancellationToken
         ).ConfigureAwait(false);
+
+        // A refusal envelope carries no per-key outcomes: treating it as an empty batch would read
+        // as "none of these keys exist" for a request that never reached a handler.
+        if (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored)
+            throw new KahunaException($"{verb} failed", response.Type);
 
         return (response.Items ?? [], response.TimeElapsedMs);
     }
@@ -1822,6 +1838,13 @@ public class RestCommunication : IKahunaCommunication
 
         if (response is null)
             throw new KahunaException("GetSnapshotFloor returned null", KeyValueResponseType.Errored);
+
+        // A retryable server-side failure arrives as an HTTP 200 whose body is only {"type":101}:
+        // treating it as data would report zero live holds for a request that never reached the
+        // floor registry. Get is a real answer; Set (the enum default) is what a body from a server
+        // that predates the type field deserializes to, so it is accepted as success too.
+        if (response.Type is not (KeyValueResponseType.Get or KeyValueResponseType.Set))
+            throw new KahunaException("GetSnapshotFloor failed", response.Type);
 
         return (response.EffectiveFloor, response.LiveHolds);
     }
