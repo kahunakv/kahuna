@@ -908,23 +908,43 @@ internal sealed class KeyValuesManager : IDisposable
     /// <summary>
     /// Returns the current effective floor (minimum live held timestamp, or
     /// <see cref="HLCTimestamp.Zero"/> when no hold is live) and the count of live holds.
+    ///
+    /// <para>Answers locally only under read-index leadership confirmation — never from local
+    /// belief alone. A node that merely thinks itself meta-partition leader (a stale view during
+    /// an election, or a fresh leader that has not yet applied inherited hold mutations) would
+    /// report an empty registry: zero live holds and a <see cref="HLCTimestamp.Zero"/> floor, the
+    /// value that means "reclaim anything". When leadership cannot be confirmed and no other
+    /// node is named leader, the answer is <see cref="KeyValueResponseType.MustRetry"/> — failing
+    /// closed instead of failing open.</para>
     /// </summary>
-    public async Task<(HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct)
+    public async Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct)
     {
-        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+        if (!raft.Joined)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
+
+        if (await raft.ConfirmLeadershipAsync(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return ReadLocalSnapshotFloor();
 
         string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
         if (leader == raft.GetLocalEndpoint())
-            return ReadLocalSnapshotFloor();
+        {
+            // The election settled on this node after the confirmation above failed; confirm
+            // again before answering. If it still cannot be confirmed, the local hold registry
+            // may not include committed mutations from the prior term — refuse to answer.
+            if (await raft.ConfirmLeadershipAsync(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                return ReadLocalSnapshotFloor();
+
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
+        }
 
         return await interNodeCommunication.GetSnapshotFloor(leader, ct).ConfigureAwait(false);
     }
 
-    private (HLCTimestamp EffectiveFloor, int LiveHolds) ReadLocalSnapshotFloor()
+    private (KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds) ReadLocalSnapshotFloor()
     {
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        return snapshotFloorStore.GetEffectiveFloorAndCount(now);
+        (HLCTimestamp floor, int liveHolds) = snapshotFloorStore.GetEffectiveFloorAndCount(now);
+        return (KeyValueResponseType.Get, floor, liveHolds);
     }
 
     /// <summary>

@@ -2041,7 +2041,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)batchResponse.ReleaseSnapshotHold!.Type;
     }
 
-    public async Task<(HLCTimestamp Floor, int LiveHolds)>
+    public async Task<(KeyValueResponseType Type, HLCTimestamp Floor, int LiveHolds)>
         GetSnapshotFloor(string node, CancellationToken cancellationToken)
     {
         GrpcGetSnapshotFloorRequest request = new();
@@ -2055,7 +2055,15 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
 
         GrpcGetSnapshotFloorResponse r = batchResponse.GetSnapshotFloor!;
+
+        // A response from a server predating the Type field deserializes as TypeSet (the proto
+        // default); it carried real data, so treat it as an authoritative answer.
+        KeyValueResponseType type = (KeyValueResponseType)r.Type;
+        if (type == KeyValueResponseType.Set)
+            type = KeyValueResponseType.Get;
+
         return (
+            type,
             new HLCTimestamp(r.EffectiveFloorNode, r.EffectiveFloorPhysical, r.EffectiveFloorCounter),
             r.LiveHolds
         );

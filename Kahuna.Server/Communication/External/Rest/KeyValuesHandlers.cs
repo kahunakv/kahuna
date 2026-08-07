@@ -701,8 +701,8 @@ public static class KeyValuesHandlers
 
         app.MapGet("/v1/kv/snapshot-floor", async (IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            (HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
-            return new KahunaGetSnapshotFloorResponse { Type = KeyValueResponseType.Get, EffectiveFloor = floor, LiveHolds = liveHolds };
+            (KeyValueResponseType type, HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
+            return new KahunaGetSnapshotFloorResponse { Type = type, EffectiveFloor = floor, LiveHolds = liveHolds };
         });
     }
 

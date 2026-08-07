@@ -465,7 +465,11 @@ public interface IKahuna
     /// <summary>
     /// Returns the current effective floor (minimum live held timestamp, or
     /// <see cref="HLCTimestamp.Zero"/> when no hold is live) and the count of live holds.
+    /// The floor and count are meaningful only when Type is <see cref="KeyValueResponseType.Get"/>;
+    /// <see cref="KeyValueResponseType.MustRetry"/> means no node with confirmed meta-partition
+    /// leadership could answer — the caller must retry rather than treat the result as
+    /// "no holds", because an empty answer is indistinguishable from "reclaim anything".
     /// </summary>
-    public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)>
+    public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)>
         GetSnapshotFloor(CancellationToken ct);
 }

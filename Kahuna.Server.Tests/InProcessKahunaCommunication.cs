@@ -306,7 +306,17 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         string url, string holdId, CancellationToken cancellationToken) =>
         kahuna.LocateAndReleaseSnapshotHold(holdId, cancellationToken);
 
-    public Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
-        string url, CancellationToken cancellationToken) =>
-        kahuna.GetSnapshotFloor(cancellationToken);
+    public async Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
+        string url, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType type, HLCTimestamp floor, int liveHolds) =
+            await kahuna.GetSnapshotFloor(cancellationToken);
+
+        // Mirror the real transports: a refused (non-authoritative) answer must surface as an
+        // error, never as zero live holds.
+        if (type != KeyValueResponseType.Get)
+            throw new KahunaException("GetSnapshotFloor failed", type);
+
+        return (floor, liveHolds);
+    }
 }

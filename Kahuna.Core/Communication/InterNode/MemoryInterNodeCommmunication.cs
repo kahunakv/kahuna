@@ -1409,7 +1409,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
-    public async Task<(HLCTimestamp Floor, int LiveHolds)>
+    public async Task<(KeyValueResponseType Type, HLCTimestamp Floor, int LiveHolds)>
         GetSnapshotFloor(string node, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))

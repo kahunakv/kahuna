@@ -188,7 +188,7 @@ public sealed class TestSnapshotFloorPinEndToEnd : RaftTrackingTest
             Assert.NotEmpty(holdId);
 
             // Confirm the floor is now pinned at T1.
-            (HLCTimestamp floor, int live) = await kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await kahuna.GetSnapshotFloor(ct);
             Assert.Equal(t1, floor);
             Assert.Equal(1, live);
 
@@ -225,6 +225,160 @@ public sealed class TestSnapshotFloorPinEndToEnd : RaftTrackingTest
             // If the boundary pin is broken, the revision is trimmed and the read falls back
             // to GetKeyValueRevisionAtOrBefore — that fallback call would make this non-zero.
             Assert.Equal(0, callsAfter - callsBefore);
+        }
+        finally
+        {
+            await TestClusterNodeRegistry.DisposeAsync(raft, TestContext.Current.CancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// With two concurrent holds the pinned boundary answers only for the minimum floor: a read
+    /// at the higher hold's timestamp lands in the trimmed gap between the boundary and the
+    /// retention window, where the true as-of revision lives only on disk. The read must fall
+    /// back to the persisted revision history and return that revision — not silently rewind to
+    /// the floor-boundary value. A read at the minimum floor itself must still be served from
+    /// memory with no disk fallback.
+    /// </summary>
+    [Fact]
+    public async Task TwoHolds_ReadAboveFloor_ServesTrueRevisionFromDisk()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (RaftManager raft, KahunaManager kahuna, CountingBackend backend) = BuildSingleNode(revisionRetention: 2);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            string key = "pin/twoholds/" + Guid.NewGuid().ToString("N")[..8];
+
+            // ── rev 1 at T1 → hold A (the minimum floor) ──────────────────────────────
+            (KeyValueResponseType setType1, _, _) =
+                await kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key,
+                    "value-at-T1"u8.ToArray(), null, -1,
+                    KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, setType1);
+
+            (KeyValueResponseType readType1, ReadOnlyKeyValueEntry? readEntry1) =
+                await kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1,
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, readType1);
+            HLCTimestamp t1 = readEntry1!.LastModified;
+
+            (KeyValueResponseType holdTypeA, string holdIdA, _) =
+                await kahuna.LocateAndAcquireSnapshotHold("two-holds-a", t1, 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, holdTypeA);
+            Assert.NotEmpty(holdIdA);
+
+            // ── rev 2 at T2 → hold B (above the floor) ────────────────────────────────
+            (KeyValueResponseType setType2, _, _) =
+                await kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key,
+                    "value-at-T2"u8.ToArray(), null, -1,
+                    KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, setType2);
+
+            (KeyValueResponseType readType2, ReadOnlyKeyValueEntry? readEntry2) =
+                await kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1,
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, readType2);
+            HLCTimestamp t2 = readEntry2!.LastModified;
+            Assert.True(t1.CompareTo(t2) < 0);
+
+            (KeyValueResponseType holdTypeB, string holdIdB, _) =
+                await kahuna.LocateAndAcquireSnapshotHold("two-holds-b", t2, 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, holdTypeB);
+            Assert.NotEmpty(holdIdB);
+
+            (_, HLCTimestamp floor, int live) = await kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(t1, floor);
+            Assert.Equal(2, live);
+
+            // ── revs 3-5: push revisions 1 and 2 below the retention window ───────────
+            // With RevisionRetention=2 the trims pin rev 1 (floor boundary) and drop rev 2
+            // from memory, opening the gap that a read at T2 lands in.
+            for (int i = 3; i <= 5; i++)
+            {
+                (KeyValueResponseType setTypeN, _, _) =
+                    await kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, key,
+                        System.Text.Encoding.UTF8.GetBytes($"value-{i}"), null, -1,
+                        KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+                Assert.Equal(KeyValueResponseType.Set, setTypeN);
+            }
+
+            // ── read at T1 (the floor): must be memory-served, no disk fallback ───────
+            int callsBefore = backend.RevisionAtOrBeforeCalls;
+
+            (KeyValueResponseType floorGetType, ReadOnlyKeyValueEntry? floorSnap) =
+                await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, key, -1, t1, KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Get, floorGetType);
+            Assert.Equal("value-at-T1", System.Text.Encoding.UTF8.GetString(floorSnap!.Value ?? []));
+            Assert.Equal(0, backend.RevisionAtOrBeforeCalls - callsBefore);
+
+            // ── read at T2: rev 2 is disk-only; the read must fall back and find it ───
+            // The revision history flush is asynchronous, so poll until the correct value
+            // appears; with the boundary served unconditionally from memory this loop never
+            // converges (the read permanently returns the rev-1 value) and the test fails.
+            callsBefore = backend.RevisionAtOrBeforeCalls;
+
+            KeyValueResponseType gapGetType = KeyValueResponseType.Errored;
+            ReadOnlyKeyValueEntry? gapSnap = null;
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                (gapGetType, gapSnap) = await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, key, -1, t2, KeyValueDurability.Persistent, ct);
+
+                if (gapGetType == KeyValueResponseType.Get && gapSnap is not null &&
+                    System.Text.Encoding.UTF8.GetString(gapSnap.Value ?? []) == "value-at-T2")
+                    break;
+
+                await Task.Delay(100, ct);
+            }
+
+            Assert.Equal(KeyValueResponseType.Get, gapGetType);
+            Assert.NotNull(gapSnap);
+            Assert.Equal("value-at-T2", System.Text.Encoding.UTF8.GetString(gapSnap.Value ?? []));
+
+            // The correct answer can only have come from the persisted revision history.
+            Assert.True(backend.RevisionAtOrBeforeCalls - callsBefore >= 1,
+                "read above the floor must consult the persisted revision history");
+        }
+        finally
+        {
+            await TestClusterNodeRegistry.DisposeAsync(raft, TestContext.Current.CancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Before the node has joined the cluster its hold registry cannot be authoritative, and there
+    /// is no leader to route to. The floor query must fail closed with MustRetry — never answer
+    /// "zero live holds", which is indistinguishable from "reclaim anything". Once the node joins
+    /// and leadership is confirmed, the same query answers authoritatively.
+    /// </summary>
+    [Fact]
+    public async Task GetSnapshotFloor_BeforeJoin_FailsClosedWithMustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (RaftManager raft, KahunaManager kahuna, _) = BuildSingleNode(revisionRetention: 2);
+
+        try
+        {
+            (KeyValueResponseType typeBeforeJoin, _, _) = await kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, typeBeforeJoin);
+
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+
+            (KeyValueResponseType typeAfterJoin, HLCTimestamp floor, int live) = await kahuna.GetSnapshotFloor(ct);
+            Assert.Equal(KeyValueResponseType.Get, typeAfterJoin);
+            Assert.Equal(HLCTimestamp.Zero, floor);
+            Assert.Equal(0, live);
         }
         finally
         {

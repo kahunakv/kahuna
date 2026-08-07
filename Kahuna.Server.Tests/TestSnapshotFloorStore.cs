@@ -507,9 +507,48 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             Assert.NotEqual(HLCTimestamp.Zero, leaseExpiry);
 
             // The floor must equal the only held timestamp.
-            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(forkT, floor);
             Assert.Equal(1, live);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// A non-leader node must never answer the floor query from its own replica: it routes to the
+    /// confirmed meta-partition leader and relays the authoritative answer. Every node in the
+    /// cluster must therefore agree on the floor and the live count while a hold is live — the
+    /// contradictory-answers symptom (one node naming a floor while another reports zero holds a
+    /// fraction of a second later) is exactly what this guards against.
+    /// </summary>
+    [Fact]
+    public async Task GetSnapshotFloor_EveryNodeAgrees_WhileHoldIsLive()
+    {
+        Node[] nodes = await Assemble("memory",
+            [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
+        try
+        {
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            HLCTimestamp t1 = leader.Raft.HybridLogicalClock.TrySendOrLocalEvent(leader.Raft.GetLocalNodeId());
+            (KeyValueResponseType acquireType, string holdId, _) =
+                await leader.Kahuna.LocateAndAcquireSnapshotHold("agree-1", t1, 60_000, ct);
+            Assert.Equal(KeyValueResponseType.Set, acquireType);
+            Assert.NotEmpty(holdId);
+
+            foreach (Node node in nodes)
+            {
+                (KeyValueResponseType type, HLCTimestamp floor, int live) =
+                    await node.Kahuna.GetSnapshotFloor(ct);
+
+                Assert.Equal(KeyValueResponseType.Get, type);
+                Assert.Equal(t1, floor);
+                Assert.Equal(1, live);
+            }
         }
         finally
         {
@@ -534,7 +573,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             (_, string holdId2, _) = await leader.Kahuna.LocateAndAcquireSnapshotHold("branch-2", t2, 60_000, ct);
 
             // Floor = min(t1, t2) = t1.
-            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(t1, floor);
             Assert.Equal(2, live);
 
@@ -543,7 +582,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Deleted, rel);
 
             // Floor now rises to t2.
-            (HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(t2, floorAfter);
             Assert.Equal(1, liveAfter);
         }
@@ -571,7 +610,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             Assert.Equal(id1, id2);
 
             // Still only one hold in the registry.
-            (_, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, _, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(1, live);
         }
         finally
@@ -729,7 +768,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             HLCTimestamp floor = leader.Kahuna.SnapshotFloorStore.GetEffectiveFloor(later);
             Assert.Equal(HLCTimestamp.Zero, floor);
 
-            (HLCTimestamp floorApi, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floorApi, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(HLCTimestamp.Zero, floorApi);
             Assert.Equal(0, live);
         }
@@ -789,7 +828,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
 
             // The floor should now be visible on the leader after replication.
             await WaitUntil(leader, state => state.Live >= 1);
-            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(forkT, floor);
             Assert.Equal(1, live);
 
@@ -806,7 +845,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
 
             // Floor must drop back to zero once the only hold is released.
             await WaitUntil(leader, state => state.Live == 0);
-            (HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(HLCTimestamp.Zero, floorAfter);
             Assert.Equal(0, liveAfter);
         }
@@ -958,7 +997,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             Assert.Equal(HLCTimestamp.Zero, leaseExpiry);
 
             // No hold registered — floor stays at Zero.
-            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(HLCTimestamp.Zero, floor);
             Assert.Equal(0, live);
         }
@@ -996,7 +1035,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             Assert.Equal(HLCTimestamp.Zero, renewExpiry);
 
             // The existing hold was not removed — floor is still set.
-            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(forkT, floor);
             Assert.Equal(1, live);
         }

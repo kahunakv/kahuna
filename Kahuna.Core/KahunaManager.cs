@@ -272,8 +272,10 @@ public sealed class KahunaManager : IKahuna, IDisposable
                 // floor already passed the cut or the hold cannot be acquired.
                 acquireSnapshotHold: async (cut, holdCt) =>
                 {
-                    (HLCTimestamp floor, _) = await keyValues.GetSnapshotFloor(holdCt);
-                    if (floor.CompareTo(cut) > 0)
+                    (KeyValueResponseType floorType, HLCTimestamp floor, _) = await keyValues.GetSnapshotFloor(holdCt);
+                    // An unconfirmed floor answer (no node with confirmed meta leadership) cannot
+                    // prove the floor has not already passed the cut — fail the backup closed.
+                    if (floorType != KeyValueResponseType.Get || floor.CompareTo(cut) > 0)
                         return null;
 
                     (KeyValueResponseType type, string holdId, _) = await keyValues.AcquireSnapshotHold(
@@ -2038,7 +2040,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) =>
         keyValues.ReleaseSnapshotHold(holdId, ct);
 
-    public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)>
+    public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)>
         GetSnapshotFloor(CancellationToken ct) =>
         keyValues.GetSnapshotFloor(ct);
 }

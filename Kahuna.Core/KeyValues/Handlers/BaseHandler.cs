@@ -306,6 +306,18 @@ internal abstract class BaseHandler
             }
         }
 
+        // Record which revision is pinned as the boundary so snapshot reads can tell an
+        // authoritative in-memory hit from a boundary hit that sits below trimmed, disk-only
+        // revisions. A newly pinned boundary starts with full coverage (Zero — nothing trimmed
+        // above it yet); the coverage bound then shrinks as removals above it accumulate below.
+        // A stale record from a released floor is left in place: its revision is trimmed by this
+        // same pass (it is no longer exempt), after which no lookup can hit it.
+        if (floorBoundaryRevision >= 0 && floorBoundaryRevision != entry.FloorBoundaryRevision)
+        {
+            entry.FloorBoundaryRevision = floorBoundaryRevision;
+            entry.FloorBoundaryCoverageEnd = HLCTimestamp.Zero;
+        }
+
         foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
         {
             if (kv.Key < cutoff && kv.Key != floorBoundaryRevision)
@@ -335,6 +347,15 @@ internal abstract class BaseHandler
                 entry.Revisions.TryGetValue(revision, out KeyValueRevisionEntry removed);
                 entry.Revisions.Remove(revision);
                 bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(entry.Revisions.Count == 0, removed.Value);
+
+                // Removing a revision above the pinned boundary opens (or widens) the gap between
+                // the boundary and the retention window. Track the earliest timestamp ever trimmed
+                // above the boundary: at-or-after it, a boundary hit is no longer authoritative
+                // and the read must consult the persisted revision history instead.
+                if (entry.FloorBoundaryRevision >= 0 && revision > entry.FloorBoundaryRevision
+                    && (entry.FloorBoundaryCoverageEnd == HLCTimestamp.Zero
+                        || removed.LastModified.CompareTo(entry.FloorBoundaryCoverageEnd) < 0))
+                    entry.FloorBoundaryCoverageEnd = removed.LastModified;
             }
 
             context.AdjustEstimatedEntryBytes(entry, -bytesFreed);

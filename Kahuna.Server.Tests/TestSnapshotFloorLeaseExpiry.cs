@@ -182,7 +182,7 @@ public sealed class TestSnapshotFloorLeaseExpiry : RaftTrackingTest
             Assert.Equal(1, purged);
 
             // After the purge, the floor must drop to Zero.
-            (HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(HLCTimestamp.Zero, floorAfter);
             Assert.Equal(0, liveAfter);
         }
@@ -221,7 +221,7 @@ public sealed class TestSnapshotFloorLeaseExpiry : RaftTrackingTest
             await leader.Kahuna.PurgeExpiredSnapshotHoldsAsync(ct);
 
             // After the purge: hold-long must still be live. The floor must be non-zero.
-            (HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floorAfter, int liveAfter) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.NotEqual(HLCTimestamp.Zero, floorAfter);
             Assert.Equal(1, liveAfter);
         }
@@ -250,7 +250,7 @@ public sealed class TestSnapshotFloorLeaseExpiry : RaftTrackingTest
             Assert.Equal(0, purged);
 
             // Hold still there.
-            (HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
+            (_, HLCTimestamp floor, int live) = await leader.Kahuna.GetSnapshotFloor(ct);
             Assert.Equal(forkT, floor);
             Assert.Equal(1, live);
         }

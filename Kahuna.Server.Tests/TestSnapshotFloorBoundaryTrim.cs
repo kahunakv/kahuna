@@ -465,4 +465,153 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
         Assert.True(entry.Revisions!.ContainsKey(2));
         Assert.Equal(0, Interlocked.Read(ref counter));
     }
+
+    private static bool InjectRelease(SnapshotFloorStore store, string holdId)
+    {
+        SnapshotFloorDeltaMessage delta = new();
+        delta.Entries.Add(new SnapshotFloorDeltaEntry
+        {
+            Remove = true,
+            Hold = new SnapshotHoldMessage { HoldId = holdId },
+        });
+        byte[]  data = ReplicationSerializer.Serialize(delta);
+        RaftLog log  = new() { LogType = ReplicationTypes.SnapshotFloor, LogData = data };
+        return store.Restore(RangeMapStore.MetaPartitionId, log);
+    }
+
+    /// <summary>
+    /// Pinning a boundary makes the archive {boundary} ∪ {newest N} with trimmed, disk-only
+    /// revisions between them. The trim must record the boundary revision and the earliest
+    /// LastModified trimmed above it, and <see cref="KeyValueEntry.TryGetRevisionAtOrBefore"/>
+    /// must serve the boundary from memory only for snapshots strictly older than that gap —
+    /// at or beyond it, the hit must be reported as a miss so the read consults disk.
+    /// </summary>
+    [Fact]
+    public void WithHold_BoundaryHitBeyondTrimmedGap_ReportsMiss()
+    {
+        const int count     = 6;
+        const int retention = 3;
+        const long refRevision = count;
+
+        RaftManager         raft   = BuildRaft();
+        KahunaConfiguration config = BuildConfig(retention);
+        SnapshotFloorStore  store  = new(raft, null, null, NullLogger<IKahuna>.Instance);
+
+        // Hold at revision 2's LastModified → boundary = 2; trim removes revisions 1 and 3.
+        HLCTimestamp holdTs    = new(1, 2000L, 0);
+        HLCTimestamp farFuture = new(1, long.MaxValue / 2, 0);
+        Assert.True(InjectHold(store, new SnapshotHold("h1", "client", holdTs, farFuture)));
+
+        KeyValueContext ctx    = BuildContext(raft, config, store);
+        TestableTrimHandler h = new(ctx);
+        KeyValueEntry entry   = BuildEntry(count);
+
+        h.TrimRevisions(entry, refRevision);
+
+        // Revision 3 (ts 3000) was trimmed above the boundary — the gap starts there.
+        Assert.Equal(2L, entry.FloorBoundaryRevision);
+        Assert.Equal(new HLCTimestamp(1, 3000L, 0), entry.FloorBoundaryCoverageEnd);
+
+        // At the floor itself and anywhere strictly before the gap: boundary served from memory.
+        Assert.True(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 2000L, 0), out long rev, out _));
+        Assert.Equal(2L, rev);
+        Assert.True(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 2500L, 0), out rev, out _));
+        Assert.Equal(2L, rev);
+
+        // At or inside the gap: the newest at-or-before revision (3) lives only on disk — the
+        // boundary hit must be reported as a miss so the caller falls back to disk.
+        Assert.False(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 3000L, 0), out _, out _));
+        Assert.False(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 3500L, 0), out _, out _));
+
+        // Inside the retained window: authoritative as always.
+        Assert.True(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 4000L, 0), out rev, out _));
+        Assert.Equal(4L, rev);
+    }
+
+    /// <summary>
+    /// Repeated trims widen the gap upward (newer revisions fall out of the window) but the gap's
+    /// start — the earliest LastModified ever trimmed above the boundary — must be preserved as
+    /// the minimum across trims, not overwritten by later (newer) removals.
+    /// </summary>
+    [Fact]
+    public void WithHold_RepeatedTrims_PreserveEarliestGapStart()
+    {
+        const int retention = 3;
+
+        RaftManager         raft   = BuildRaft();
+        KahunaConfiguration config = BuildConfig(retention);
+        SnapshotFloorStore  store  = new(raft, null, null, NullLogger<IKahuna>.Instance);
+
+        HLCTimestamp holdTs    = new(1, 2000L, 0);
+        HLCTimestamp farFuture = new(1, long.MaxValue / 2, 0);
+        Assert.True(InjectHold(store, new SnapshotHold("h1", "client", holdTs, farFuture)));
+
+        KeyValueContext ctx    = BuildContext(raft, config, store);
+        TestableTrimHandler h = new(ctx);
+        KeyValueEntry entry   = BuildEntry(6);
+
+        h.TrimRevisions(entry, 6); // removes 1 and 3; archive = {2, 4, 5, 6}
+
+        // Two more commits archive revisions 7 and 8; the next trim pushes 4 and 5 out.
+        entry.Revisions![7] = new KeyValueRevisionEntry([7], new HLCTimestamp(1, 7000L, 0), HLCTimestamp.Zero, KeyValueState.Set);
+        entry.Revisions[8]  = new KeyValueRevisionEntry([8], new HLCTimestamp(1, 8000L, 0), HLCTimestamp.Zero, KeyValueState.Set);
+
+        h.TrimRevisions(entry, 8); // cutoff 6: removes 4 and 5; archive = {2, 6, 7, 8}
+
+        Assert.Equal(2L, entry.FloorBoundaryRevision);
+        // Gap start stays at revision 3's timestamp — the earliest removal above the boundary.
+        Assert.Equal(new HLCTimestamp(1, 3000L, 0), entry.FloorBoundaryCoverageEnd);
+
+        // A snapshot between the later removals (4/5) and the window must also miss: the true
+        // answer (revision 4 or 5) is disk-only.
+        Assert.False(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 4500L, 0), out _, out _));
+
+        // Window hit unaffected.
+        Assert.True(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 6000L, 0), out long rev, out _));
+        Assert.Equal(6L, rev);
+    }
+
+    /// <summary>
+    /// When the minimum hold is released and the floor advances, the next trim rebinds the
+    /// boundary to the newest retained revision at-or-before the new floor and resets the gap
+    /// tracking: the old gap belonged to the old boundary and must not linger on the new one.
+    /// </summary>
+    [Fact]
+    public void FloorAdvance_RebindsBoundaryAndResetsGap()
+    {
+        const int retention = 3;
+
+        RaftManager         raft   = BuildRaft();
+        KahunaConfiguration config = BuildConfig(retention);
+        SnapshotFloorStore  store  = new(raft, null, null, NullLogger<IKahuna>.Instance);
+
+        HLCTimestamp farFuture = new(1, long.MaxValue / 2, 0);
+        Assert.True(InjectHold(store, new SnapshotHold("h1", "client", new HLCTimestamp(1, 2000L, 0), farFuture)));
+
+        KeyValueContext ctx    = BuildContext(raft, config, store);
+        TestableTrimHandler h = new(ctx);
+        KeyValueEntry entry   = BuildEntry(6);
+
+        h.TrimRevisions(entry, 6); // boundary 2; removes 1, 3; archive = {2, 4, 5, 6}
+        Assert.Equal(2L, entry.FloorBoundaryRevision);
+
+        // Release the old minimum hold and pin a newer one at revision 5's timestamp.
+        Assert.True(InjectRelease(store, "h1"));
+        Assert.True(InjectHold(store, new SnapshotHold("h2", "client", new HLCTimestamp(1, 5000L, 0), farFuture)));
+
+        entry.Revisions![7] = new KeyValueRevisionEntry([7], new HLCTimestamp(1, 7000L, 0), HLCTimestamp.Zero, KeyValueState.Set);
+        entry.Revisions[8]  = new KeyValueRevisionEntry([8], new HLCTimestamp(1, 8000L, 0), HLCTimestamp.Zero, KeyValueState.Set);
+        entry.Revisions[9]  = new KeyValueRevisionEntry([9], new HLCTimestamp(1, 9000L, 0), HLCTimestamp.Zero, KeyValueState.Set);
+
+        h.TrimRevisions(entry, 9); // cutoff 7: boundary rebinds to 5; removes 2, 4, 6
+
+        Assert.Equal(5L, entry.FloorBoundaryRevision);
+        // Gap tracking was reset on rebind and now starts at revision 6's timestamp — the only
+        // removal above the new boundary — not at the old boundary's revision-3 gap.
+        Assert.Equal(new HLCTimestamp(1, 6000L, 0), entry.FloorBoundaryCoverageEnd);
+
+        Assert.True(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 5000L, 0), out long rev, out _));
+        Assert.Equal(5L, rev);
+        Assert.False(entry.TryGetRevisionAtOrBefore(new HLCTimestamp(1, 6500L, 0), out _, out _));
+    }
 }

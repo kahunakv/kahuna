@@ -143,6 +143,11 @@ public interface IInterNodeCommunication
     /// <summary>Forwards a snapshot-hold release to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<KeyValueResponseType> ReleaseSnapshotHold(string node, string holdId, CancellationToken cancellationToken);
 
-    /// <summary>Reads the authoritative snapshot floor from the meta-partition leader on <paramref name="node"/>.</summary>
-    public Task<(HLCTimestamp Floor, int LiveHolds)> GetSnapshotFloor(string node, CancellationToken cancellationToken);
+    /// <summary>
+    /// Reads the authoritative snapshot floor from the meta-partition leader on <paramref name="node"/>.
+    /// The floor and count are meaningful only when Type is <see cref="KeyValueResponseType.Get"/>;
+    /// <see cref="KeyValueResponseType.MustRetry"/> means the remote node could not confirm
+    /// leadership and refused to answer from possibly-stale local state.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, HLCTimestamp Floor, int LiveHolds)> GetSnapshotFloor(string node, CancellationToken cancellationToken);
 }

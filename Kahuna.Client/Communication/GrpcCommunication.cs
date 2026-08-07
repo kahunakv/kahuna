@@ -2159,6 +2159,13 @@ public class GrpcCommunication : IKahunaCommunication
             new GrpcGetSnapshotFloorRequest(),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        // TypeGot is a real answer; TypeSet (the proto default) is what a server predating the
+        // type field sends, so it is accepted as success too. Anything else — in particular
+        // MustRetry, from a node that could not confirm meta-partition leadership — must not be
+        // reported as data: an empty floor is indistinguishable from "no holds anywhere".
+        if (response.Type is not (GrpcKeyValueResponseType.TypeGot or GrpcKeyValueResponseType.TypeSet))
+            throw new KahunaException("GetSnapshotFloor failed", (KeyValueResponseType)response.Type);
+
         HLCTimestamp floor = new(response.EffectiveFloorNode, response.EffectiveFloorPhysical, response.EffectiveFloorCounter);
         return (floor, response.LiveHolds);
     }

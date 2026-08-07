@@ -71,6 +71,25 @@ internal sealed class KeyValueEntry
     public KeyValueRevisionHistory? Revisions { get; set; }
 
     /// <summary>
+    /// Revision number of the floor-boundary revision currently pinned in <see cref="Revisions"/>
+    /// below the contiguous newest-N retention window, or -1 when no boundary is pinned. Maintained
+    /// by the trim path so <see cref="TryGetRevisionAtOrBefore"/> can distinguish an authoritative
+    /// in-memory hit (inside the contiguous window) from a hit on the pinned boundary, which may sit
+    /// below revisions that were trimmed from memory and now live only on disk.
+    /// </summary>
+    public long FloorBoundaryRevision { get; set; } = -1;
+
+    /// <summary>
+    /// Exclusive upper bound of the snapshot range the pinned floor-boundary revision answers
+    /// authoritatively: the smallest <see cref="KeyValueRevisionEntry.LastModified"/> among revisions
+    /// above the boundary that were trimmed from the in-memory archive. Zero while no revision above
+    /// the boundary has been trimmed (the boundary is still contiguous with the retention window).
+    /// For a snapshot at-or-after this timestamp the true newest at-or-before revision may be one of
+    /// the trimmed, disk-only revisions, so the boundary must not be served from memory.
+    /// </summary>
+    public HLCTimestamp FloorBoundaryCoverageEnd { get; set; }
+
+    /// <summary>
     /// Transaction whose committed mutation most recently advanced this resident head through the
     /// archival apply path. This actor-local proof distinguishes a completed apply from a cache entry
     /// that merely happens to have matching revision metadata. It is intentionally transient; a
@@ -131,7 +150,9 @@ internal sealed class KeyValueEntry
     ///
     /// Only the archived history is consulted (the caller checks the live revision first). Returns
     /// false when no revision ≤ the snapshot is retained — either the key did not exist at the
-    /// snapshot, or the relevant revision was already trimmed (best effort, bounded by retention).
+    /// snapshot, the relevant revision was already trimmed (best effort, bounded by retention), or
+    /// the only in-memory candidate is the pinned floor-boundary revision and the snapshot falls
+    /// inside the trimmed gap above it, where the true answer lives only on disk.
     /// </summary>
     public bool TryGetRevisionAtOrBefore(HLCTimestamp snapshot, out long revisionNumber, out KeyValueRevisionEntry revision)
     {
@@ -158,6 +179,23 @@ internal sealed class KeyValueEntry
             }
         }
 
-        return found;
+        if (!found)
+            return false;
+
+        // The archive is not a contiguous newest-N suffix when a snapshot floor pins a boundary:
+        // it is {boundary} ∪ {newest N}, with trimmed revisions between them living only on disk.
+        // A hit on the boundary is therefore authoritative only for snapshots strictly older than
+        // every revision trimmed above it; at or after that point one of the trimmed revisions may
+        // be the true newest at-or-before, so report a miss and let the caller consult disk.
+        if (revisionNumber == FloorBoundaryRevision
+            && FloorBoundaryCoverageEnd != HLCTimestamp.Zero
+            && snapshot.CompareTo(FloorBoundaryCoverageEnd) >= 0)
+        {
+            revisionNumber = -1;
+            revision = default;
+            return false;
+        }
+
+        return true;
     }
 }

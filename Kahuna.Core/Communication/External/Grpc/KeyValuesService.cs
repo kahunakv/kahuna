@@ -2397,11 +2397,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcGetSnapshotFloorResponse> GetSnapshotFloor(
         GrpcGetSnapshotFloorRequest request, ServerCallContext context)
     {
-        (HLCTimestamp floor, int liveHolds) =
+        (KeyValueResponseType type, HLCTimestamp floor, int liveHolds) =
             await keyValues.GetSnapshotFloor(context.CancellationToken).ConfigureAwait(false);
 
         return new()
         {
+            Type                   = (GrpcKeyValueResponseType)type,
             EffectiveFloorNode     = floor.N,
             EffectiveFloorPhysical = floor.L,
             EffectiveFloorCounter  = floor.C,

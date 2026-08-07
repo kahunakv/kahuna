@@ -1465,4 +1465,8 @@ message GrpcGetSnapshotFloorResponse {
   int64  EffectiveFloorPhysical = 2;
   uint32 EffectiveFloorCounter  = 3;
   int32  LiveHolds              = 4;
+  // TYPE_GOT on an authoritative answer; TYPE_MUST_RETRY when the answering node could not
+  // confirm meta-partition leadership and refused to report from possibly-stale local state.
+  // Absent (TYPE_SET, the enum default) from servers predating this field — treated as success.
+  GrpcKeyValueResponseType Type = 5;
 }
