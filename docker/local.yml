@@ -23,6 +23,11 @@ services:
       Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
       Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
       Logging__LogLevel__Kommander: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
+      # Extra server flags, appended to the command line. Empty by default, so the stock cluster behaves
+      # exactly as before. Set it to reach behaviour that ships off — e.g.
+      # KAHUNA_EXTRA_ARGS="--max-concurrent-sessions 1" docker compose -f docker/local.yml up -d
+      # makes the transaction admission gate reachable so a refusal can be exercised end to end.
+      KAHUNA_EXTRA_ARGS: ${KAHUNA_EXTRA_ARGS:-}
     networks:
       custom_net:
         ipv4_address: 172.30.0.2
@@ -49,6 +54,11 @@ services:
       Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
       Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
       Logging__LogLevel__Kommander: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
+      # Extra server flags, appended to the command line. Empty by default, so the stock cluster behaves
+      # exactly as before. Set it to reach behaviour that ships off — e.g.
+      # KAHUNA_EXTRA_ARGS="--max-concurrent-sessions 1" docker compose -f docker/local.yml up -d
+      # makes the transaction admission gate reachable so a refusal can be exercised end to end.
+      KAHUNA_EXTRA_ARGS: ${KAHUNA_EXTRA_ARGS:-}
     networks:
       custom_net:
         ipv4_address: 172.30.0.3
@@ -75,6 +85,11 @@ services:
       Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
       Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
       Logging__LogLevel__Kommander: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
+      # Extra server flags, appended to the command line. Empty by default, so the stock cluster behaves
+      # exactly as before. Set it to reach behaviour that ships off — e.g.
+      # KAHUNA_EXTRA_ARGS="--max-concurrent-sessions 1" docker compose -f docker/local.yml up -d
+      # makes the transaction admission gate reachable so a refusal can be exercised end to end.
+      KAHUNA_EXTRA_ARGS: ${KAHUNA_EXTRA_ARGS:-}
     networks:
       custom_net:
         ipv4_address: 172.30.0.4

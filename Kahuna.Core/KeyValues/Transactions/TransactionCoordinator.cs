@@ -131,12 +131,20 @@ internal sealed class TransactionCoordinator : IDisposable
             options.Timeout <= 0 ? configuration.DefaultTransactionTimeout : options.Timeout,
             configuration.MaxTransactionTimeout);
 
-        // Take a session slot before the session exists. Bounded by the session's own timeout so a Begin issued
-        // against a node already holding its full complement of sessions fails as a retryable timeout instead of
-        // parking indefinitely. Below the ceiling this completes synchronously.
+        // How long this caller will queue at the door, which is deliberately not the session timeout above.
+        // Those are unrelated quantities: the session timeout is the reaper window — how long a transaction may
+        // live — while this bounds how long the caller waits to start one, and a long-running transaction is not
+        // thereby a patient one. Reusing the session timeout here let a caller that asked for a long-lived
+        // session occupy a queue slot for that whole span. Clamped so no caller can hold a slot longer than the
+        // operator allows.
+        int admissionWait = Math.Min(
+            options.AdmissionWaitMs <= 0 ? configuration.DefaultAdmissionWaitMs : options.AdmissionWaitMs,
+            configuration.MaxAdmissionWaitMs);
+
+        // Take a session slot before the session exists. Below the ceiling this completes synchronously.
         AdmissionLease? lease;
 
-        using (CancellationTokenSource admissionCts = new(TimeSpan.FromMilliseconds(timeout)))
+        using (CancellationTokenSource admissionCts = new(TimeSpan.FromMilliseconds(admissionWait)))
         {
             try
             {
@@ -144,15 +152,17 @@ internal sealed class TransactionCoordinator : IDisposable
             }
             catch (OperationCanceledException)
             {
-                // No session was created, so there is nothing to clean up and the caller may simply try again.
-                return (KeyValueResponseType.MustRetry, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
+                // The admission budget expired while queued. No session was created, so there is nothing to clean
+                // up, but the node is saturated — the caller should back off rather than re-queue immediately,
+                // which is what separates this from the transient MustRetry conditions below.
+                return (KeyValueResponseType.AdmissionRefused, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
             }
         }
 
-        // Refused outright because the wait queue is full — the gate shedding load. Retryable for the same
-        // reason a timeout is: nothing was started.
+        // Refused outright because the wait queue is full — the gate shedding load. Same contract as a budget
+        // expiry: nothing was started, so a retry is safe, but it should follow a back-off.
         if (lease is null)
-            return (KeyValueResponseType.MustRetry, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
+            return (KeyValueResponseType.AdmissionRefused, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
 
         bool added = false;
         HLCTimestamp transactionId = HLCTimestamp.Zero;

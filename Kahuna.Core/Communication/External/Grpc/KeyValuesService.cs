@@ -1862,6 +1862,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             DecisionDurability = (DecisionDurability)request.DecisionDurability,
             Priority = TransactionPriorityWire.FromGrpc(request.Priority),
             ReadTimestamp = new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            AdmissionWaitMs = request.AdmissionWaitMs,
         }, context.CancellationToken);
 
         GrpcStartTransactionResponse response = new()

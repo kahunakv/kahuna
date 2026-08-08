@@ -14,6 +14,19 @@ public sealed class KahunaTransactionOptions
     public int Timeout { get; set; }
 
     /// <summary>
+    /// Milliseconds this caller is willing to queue for an admission slot when the server is at its session
+    /// ceiling. Deliberately separate from <see cref="Timeout"/>, which is how long the transaction may live
+    /// once started: a transaction that intends to run for a long time is not thereby willing to wait a long
+    /// time to begin. Zero means "use the server default"; the server also clamps it to its own maximum.
+    /// <para>
+    /// When the wait is exhausted — or the server's queue is already full — the call fails with
+    /// <see cref="KeyValueResponseType.AdmissionRefused"/>. Nothing was started, so retrying is safe, but the
+    /// server is shedding load and the retry should follow a back-off.
+    /// </para>
+    /// </summary>
+    public int AdmissionWaitMs { get; set; }
+
+    /// <summary>
     /// Specifies the locking strategy to be used for key-value transactions.
     /// </summary>
     public KeyValueTransactionLocking Locking { get; set; } = KeyValueTransactionLocking.Pessimistic;

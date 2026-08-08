@@ -22,6 +22,16 @@ public sealed class KeyValueTransactionOptions
     public int Timeout { get; set; }
 
     /// <summary>
+    /// Milliseconds this caller is willing to queue for an admission slot when the node is at its session
+    /// ceiling. Deliberately separate from <see cref="Timeout"/>: that is the session's lifetime — the window
+    /// the reaper enforces — whereas this is only how long the caller waits at the door, and a transaction
+    /// that intends to live a long time is not thereby willing to wait a long time to start.
+    /// A value &lt;= 0 means "use the server default"; the server also clamps this to its own maximum, so a
+    /// caller cannot occupy a queue slot for longer than the operator permits.
+    /// </summary>
+    public int AdmissionWaitMs { get; set; }
+
+    /// <summary>
     /// Specifies the locking strategy to be used for key-value transactions.
     /// </summary>
     public KeyValueTransactionLocking Locking { get; set; } = KeyValueTransactionLocking.Pessimistic;

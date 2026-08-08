@@ -778,6 +778,9 @@ message GrpcStartTransactionRequest
   int64 ReadTimestampPhysical = 9;
   uint32 ReadTimestampCounter = 10;
   GrpcTransactionPriority Priority = 11;
+  // How long the caller will queue for an admission slot. Distinct from Timeout, which is the session's
+  // lifetime. Zero means "use the server default"; the server clamps it to its own maximum.
+  int32 AdmissionWaitMs = 12;
 }
 
 message GrpcStartTransactionResponse
@@ -1384,6 +1387,15 @@ enum GrpcKeyValueResponseType {
   TYPE_DOES_NOT_EXIST = 103;
   TYPE_ALREADY_LOCKED = 104;
   TYPE_PREFIX_LOCK_UNSUPPORTED_ON_RANGED_SPACE = 105;
+  // 106 and 107 are internal actor-only results that never reach an external caller. They are declared
+  // here so the numbering matches the C# enum and cannot be reused by a future external value.
+  TYPE_RANGE_LOCKS = 106;
+  TYPE_SAFE_TIMESTAMP = 107;
+  // The node refused to admit the transaction: its admission queue was full, or the caller's admission
+  // wait budget expired. Nothing was started, so a retry is safe — but the node is shedding load, so the
+  // caller should back off first. Deliberately distinct from TYPE_MUST_RETRY, which is transient and
+  // should be retried promptly.
+  TYPE_ADMISSION_REFUSED = 108;
 }
 
 enum GrpcKeyValueDurability {

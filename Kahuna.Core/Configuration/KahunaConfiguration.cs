@@ -127,6 +127,24 @@ public sealed class KahunaConfiguration
     public int MaxTransactionTimeout { get; set; } = 300_000;
 
     /// <summary>
+    /// Default milliseconds a caller queues for an admission slot when it does not ask for a specific budget.
+    /// This is the door-wait, not the session lifetime: <see cref="MaxTransactionTimeout"/> bounds how long an
+    /// admitted transaction may live, while this bounds how long an unadmitted one waits to begin. The two were
+    /// once the same value, which meant a caller asking for a long-lived session also asked — silently — to
+    /// park at the gate for that whole span. Kept short by default so a saturated node refuses quickly and the
+    /// caller can back off, rather than holding the request open.
+    /// </summary>
+    public int DefaultAdmissionWaitMs { get; set; } = 5_000;
+
+    /// <summary>
+    /// Hard upper bound, in milliseconds, on any admission wait. A caller-supplied budget is clamped to this,
+    /// so no caller can occupy a queue slot for longer than the operator allows. This bounds queue
+    /// <i>duration</i>, complementing <see cref="TransactionPriorityMaxQueued"/>, which bounds only queue
+    /// <i>depth</i> — without it a single patient caller can hold a slot indefinitely while others are refused.
+    /// </summary>
+    public int MaxAdmissionWaitMs { get; set; } = 30_000;
+
+    /// <summary>
     /// Script transactions that may execute concurrently on this node before further ones are queued and
     /// started in priority order. A value &lt;= 0 disables the gate entirely: every transaction starts
     /// immediately and its priority is recorded for observability only, which is byte-for-byte the behavior

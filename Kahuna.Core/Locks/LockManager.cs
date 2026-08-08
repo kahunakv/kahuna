@@ -13,6 +13,7 @@ using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Locks;
@@ -67,7 +68,13 @@ internal sealed class LockManager
     private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
 
     /// <summary>
-    /// 
+    /// Routes a resource to its data partition so lock operations can validate leadership and
+    /// carry the partition id for read-scheduler routing.
+    /// </summary>
+    private readonly DataPartitionRouter dataPartitionRouter;
+
+    /// <summary>
+    ///
     /// </summary>
     private readonly LockLocator locator;
     
@@ -112,6 +119,7 @@ internal sealed class LockManager
         this.durabilityTracker = durabilityTracker;
         this.logger = logger;
 
+        dataPartitionRouter = new(raft);
         locator = new(this, configuration, raft, interNodeCommunication, logger);
 
         proposalRouter = GetProposalRouter(persistenceBackend, configuration);
@@ -314,14 +322,24 @@ internal sealed class LockManager
     /// <returns></returns>
     public async Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
+        int partitionId = dataPartitionRouter.Locate(resource);
+
+        // Forwarded requests arrive here without any leadership validation: the sender resolved
+        // the leader from its cached view, which can name a node that is still mid-promotion (its
+        // lock projection behind the committed log) or already deposed. Answering from that state
+        // is how a released lock resurfaces as Busy. A non-leader must refuse retryably so the
+        // caller re-resolves and lands on the published, fully caught-up leader.
+        if (!await raft.AmILeader(partitionId, CancellationToken.None))
+            return (LockResponseType.MustRetry, 0);
+
         LockRequest request = new(
-            LockRequestType.TryLock, 
-            resource, 
-            owner, 
-            expiresMs, 
+            LockRequestType.TryLock,
+            resource,
+            owner,
+            expiresMs,
             durability,
             0,
-            0,
+            partitionId,
             null
         );
 
@@ -356,14 +374,20 @@ internal sealed class LockManager
     /// <returns></returns>
     public async Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
     {
+        int partitionId = dataPartitionRouter.Locate(resource);
+
+        // See TryLock: forwarded requests must not be answered from a non-leader's stale state.
+        if (!await raft.AmILeader(partitionId, CancellationToken.None))
+            return (LockResponseType.MustRetry, 0);
+
         LockRequest request = new(
-            LockRequestType.TryExtendLock, 
-            resource, 
-            owner, 
-            expiresMs, 
+            LockRequestType.TryExtendLock,
+            resource,
+            owner,
+            expiresMs,
             durability,
             0,
-            0,
+            partitionId,
             null
         );
 
@@ -397,14 +421,20 @@ internal sealed class LockManager
     /// <returns></returns>
     public async Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability)
     {
+        int partitionId = dataPartitionRouter.Locate(resource);
+
+        // See TryLock: forwarded requests must not be answered from a non-leader's stale state.
+        if (!await raft.AmILeader(partitionId, CancellationToken.None))
+            return LockResponseType.MustRetry;
+
         LockRequest request = new(
-            LockRequestType.TryUnlock, 
-            resource, 
-            owner, 
-            0, 
+            LockRequestType.TryUnlock,
+            resource,
+            owner,
+            0,
             durability,
             0,
-            0,
+            partitionId,
             null
         );
 
@@ -437,14 +467,21 @@ internal sealed class LockManager
     /// <returns></returns>
     public async Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability)
     {
+        int partitionId = dataPartitionRouter.Locate(resource);
+
+        // Reads mirror the locator's quorum-confirmed gate (read-index): a forwarded Get answered
+        // by a minority-partitioned or mid-promotion node would report a stale holder/token.
+        if (!await raft.ConfirmLeadershipAsync(partitionId, CancellationToken.None))
+            return (LockResponseType.MustRetry, null);
+
         LockRequest request = new(
-            LockRequestType.Get, 
-            resource, 
-            null, 
-            0, 
+            LockRequestType.Get,
+            resource,
+            null,
+            0,
             durability,
             0,
-            0,
+            partitionId,
             null
         );
 

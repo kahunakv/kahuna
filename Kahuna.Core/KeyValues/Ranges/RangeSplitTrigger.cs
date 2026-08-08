@@ -374,9 +374,15 @@ internal sealed class RangeSplitTrigger : IDisposable
                 // Best-effort cleanup: remove the partition we just created to avoid leaving it
                 // permanently orphaned (unreferenced by routing). Log but swallow any failure —
                 // the partition stays unreferenced until an operator or future cleanup removes it.
+                // Replication of the removal is retried inside Kommander; a non-exception rejection
+                // that still surfaces here (lost system leadership, terminal error) cannot be
+                // repaired from this node, so it must at least be visible.
                 try
                 {
-                    await raft.RemovePartitionAsync(newId, ct);
+                    RaftPartitionLifecycleResult removeResult = await raft.RemovePartitionAsync(newId, ct);
+
+                    if (!removeResult.Success)
+                        logger.LogRangeSplitTriggerOrphanRemoveRejected(newId, removeResult.Status.ToString());
                 }
                 catch (Exception ex)
                 {

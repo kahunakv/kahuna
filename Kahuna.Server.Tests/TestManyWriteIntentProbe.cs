@@ -165,8 +165,12 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
             string prefix = "probe/cluster/" + Guid.NewGuid().ToString("N")[..8];
             List<(string key, KeyValueDurability durability)> keys = new(keyCount);
 
+            // Partition routing hashes the key-space prefix (everything before the last '/'), so keys
+            // sharing one prefix would all land on a single partition and the "spread beyond the local
+            // node" premise below would hinge on which node happens to lead that one partition. Give
+            // every key its own key space so the set genuinely hashes across all partitions.
             for (int i = 0; i < keyCount; i++)
-                keys.Add(($"{prefix}/{i}", KeyValueDurability.Persistent));
+                keys.Add(($"{prefix}/{i}/v", KeyValueDurability.Persistent));
 
             HLCTimestamp probeTransaction = new(0, 500, 0);
 

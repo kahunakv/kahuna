@@ -81,4 +81,18 @@ public enum KeyValueResponseType
     /// <c>HLCTimestamp.Zero</c> the shard has no in-flight prepared transactions.
     /// </summary>
     SafeTimestamp = 107,
+
+    /// <summary>
+    /// The node refused to admit the transaction: either its admission queue was full or the caller's
+    /// admission wait budget expired before a slot came free. Nothing was started — no identity minted, no
+    /// lock taken, no write proposed — so retrying is always safe.
+    /// <para>
+    /// <b>Retryable, but back off first.</b> This is deliberately distinct from <see cref="MustRetry"/>,
+    /// which signals a transient condition (a leader still being elected, a partition catching up) that
+    /// clears on its own and should be retried promptly. Here the node is shedding load, so an immediate
+    /// retry re-queues against the very saturation the gate exists to relieve. Callers should back off —
+    /// or shed the work themselves — rather than spin.
+    /// </para>
+    /// </summary>
+    AdmissionRefused = 108,
 }

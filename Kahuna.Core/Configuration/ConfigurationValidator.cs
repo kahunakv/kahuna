@@ -113,6 +113,20 @@ public static class ConfigurationValidator
                 $"MaxTransactionTimeout ({configuration.MaxTransactionTimeout} ms) must be >= DefaultTransactionTimeout ({configuration.DefaultTransactionTimeout} ms); " +
                 "a maximum below the default would clamp every default-length session.");
 
+        if (configuration.DefaultAdmissionWaitMs <= 0)
+            throw new KahunaServerException(
+                $"DefaultAdmissionWaitMs ({configuration.DefaultAdmissionWaitMs} ms) must be greater than zero; " +
+                "a non-positive value resolves every unconstrained request to zero, which refuses admission before the caller can ever be queued.");
+
+        if (configuration.MaxAdmissionWaitMs <= 0)
+            throw new KahunaServerException(
+                $"MaxAdmissionWaitMs ({configuration.MaxAdmissionWaitMs} ms) must be greater than zero.");
+
+        if (configuration.MaxAdmissionWaitMs < configuration.DefaultAdmissionWaitMs)
+            throw new KahunaServerException(
+                $"MaxAdmissionWaitMs ({configuration.MaxAdmissionWaitMs} ms) must be >= DefaultAdmissionWaitMs ({configuration.DefaultAdmissionWaitMs} ms); " +
+                "a maximum below the default would clamp every caller that did not ask for a specific budget.");
+
         // ── Partition write aggregator ──────────────────────────────────────────────────────────────
         // Linger may be zero (immediate dispatch) but never negative.
         if (configuration.KeyValueWriteLingerMs < 0)

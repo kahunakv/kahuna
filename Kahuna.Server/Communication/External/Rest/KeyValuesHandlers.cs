@@ -626,7 +626,8 @@ public static class KeyValuesHandlers
                 ReadValidation = request.ReadValidation,
                 DecisionDurability = request.DecisionDurability,
                 Priority = request.Priority,
-                ReadTimestamp = request.ReadTimestamp
+                ReadTimestamp = request.ReadTimestamp,
+                AdmissionWaitMs = request.AdmissionWaitMs
             }, cancellationToken);
 
             return new KahunaStartTransactionResponse { Type = type, TransactionId = handle.TransactionId };

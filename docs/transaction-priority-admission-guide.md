@@ -101,6 +101,17 @@ END
 Accepted values are `background`, `low`, `normal`, `high`, `critical`. Anything else is rejected as a
 malformed script, the same way an unrecognized `locking` value is.
 
+A script may also state how long it is willing to *wait to start*, separately from how long it may run:
+
+```sql
+BEGIN (priority="high", timeout=5000, admissionWait=2000)
+  ...
+END
+```
+
+`timeout` is the execution deadline; `admissionWait` is the door-wait. The two are independent clocks —
+see §6. A non-numeric `admissionWait` is rejected as a malformed script.
+
 ### What priority does *not* apply to
 
 The gate governs **transactions**. A script that opens one — an explicit `BEGIN` block or a
@@ -128,8 +139,21 @@ durations:
 | **session** | `MaxConcurrentSessions` | as long as the client keeps the session open |
 
 They are **separate pools on purpose**. A session is client-paced and may sit idle for minutes; sharing
-one pool would let idle sessions occupy every slot and stall script transactions node-wide. Size
-`MaxConcurrentSessions` generously — it bounds open sessions, not concurrent work.
+one pool would let idle sessions occupy every slot and stall script transactions node-wide.
+
+How to size `MaxConcurrentSessions` depends entirely on how the caller uses sessions, and the two shapes
+pull in opposite directions:
+
+- **One session per client session** — the shape this design assumes. The ceiling bounds *connections*,
+  not work, so size it generously.
+- **One session per transaction** — what a storage engine layered on Kahuna typically does. Here the
+  ceiling bounds **all work on the node**, including the caller's own internal writes such as catalog
+  updates and schema checkpoints. Size it as a work ceiling, and treat a reserve as effectively
+  mandatory once you set one: without it, a burst of bulk transactions can occupy every slot and starve
+  the internal work the caller needs to make progress at all.
+
+If you are not sure which shape you have, check whether the caller opens a session per user request or
+per transaction. Advice written for the first shape actively misleads for the second.
 
 ### Reserved slots
 
@@ -208,6 +232,12 @@ Every knob is available on `KahunaConfiguration`, `KahunaCommandLineOptions`, an
 | `TransactionPriorityReservedSlots` | `--transaction-priority-reserved-slots` | `0` | Slots only `High`/`Critical` may occupy. |
 | `TransactionPriorityAgingThreshold` | `--transaction-priority-aging-threshold` | `1000` | Milliseconds of waiting per effective priority level. `0` = no aging. |
 | `TransactionPriorityMaxQueued` | `--transaction-priority-max-queued` | `4096` | Callers that may wait per gate before further ones are refused. `0` = unbounded. |
+| `DefaultAdmissionWaitMs` | `--default-admission-wait` | `5000` | How long a caller queues for a slot when it does not request its own budget. |
+| `MaxAdmissionWaitMs` | `--max-admission-wait` | `30000` | Hard ceiling on any admission wait. Caller-supplied budgets are clamped to it. |
+
+A caller may also ask for its own budget per request: `AdmissionWaitMs` on the session options (and on
+the REST/gRPC Begin request), or `admissionWait` inline in a script. A value `<= 0` means "use
+`DefaultAdmissionWaitMs`"; anything larger than `MaxAdmissionWaitMs` is clamped down.
 
 ### Turning it on
 
@@ -232,12 +262,32 @@ A ceiling alone bounds only how much work *runs*. The queue behind it would stil
 load — each waiter retaining a continuation and a cancellation registration — consuming the very memory
 the ceiling exists to protect, precisely during the overload it is meant to survive.
 
-`TransactionPriorityMaxQueued` bounds the wait queue. Past it, admission is refused immediately and the
-caller receives **`MustRetry`** — the same retryable backpressure code the durable admission gate uses.
-Nothing was started, so a retry is always safe.
+`TransactionPriorityMaxQueued` bounds the wait queue **depth**. Past it, admission is refused immediately
+and the caller receives **`AdmissionRefused`**. Nothing was started, so a retry is always safe.
 
-Clients should treat `MustRetry` from Begin or from a script transaction as "back off and retry", not as
-a failure. It is also what a caller receives if its own timeout expires while it is still queued.
+`MaxAdmissionWaitMs` bounds the wait queue **duration**, which depth alone does not: without it a single
+patient caller can occupy a queue slot for as long as it likes while others are turned away.
+
+#### The two retryable codes, and why they are not the same
+
+Both are safe to retry. They ask for *opposite* client behaviour, which is the whole reason they are
+distinct:
+
+| Code | What happened | What the client should do |
+|---|---|---|
+| `AdmissionRefused` | The queue was full, or this caller's admission budget expired. The node is deliberately shedding load. | **Back off**, then retry. Retrying immediately re-queues against the very saturation the gate exists to relieve. |
+| `MustRetry` | A transient condition — a partition leader still being elected, a replica catching up. | **Retry promptly.** It clears on its own, usually in milliseconds. |
+
+A client that cannot tell these apart must pick one policy and be wrong half the time: a tight retry loop
+makes an overloaded node worse, and a long back-off makes ordinary start-up look like an outage.
+
+Both admission gates — sessions and script transactions — use `AdmissionRefused`, so a client never has
+to know which gate it hit in order to know how to react.
+
+> **Note for callers upgrading.** Both refusals previously arrived as other codes: the session gate
+> returned `MustRetry` for both cases, and the script gate returned `MustRetry` for a full queue but
+> `Aborted` for a timed-out wait — the last of these wrongly implying the transaction had started and
+> failed. Any client branching on those codes for admission should move to `AdmissionRefused`.
 
 ---
 
@@ -253,8 +303,14 @@ All instruments are observable gauges on the `Kahuna` meter, tagged by `gate` (`
 | `kahuna.tx_admission.max_queue_depth` | High-water mark of simultaneous waiters. |
 | `kahuna.tx_admission.admitted` | Transactions admitted since start. |
 | `kahuna.tx_admission.aged_promotions` | Waiters that aging promoted at least once. |
-| `kahuna.tx_admission.abandoned_while_waiting` | Waiters whose own timeout fired before they ever started. |
-| `kahuna.tx_admission.rejected_queue_full` | Requests refused outright — the node is shedding load. |
+| `kahuna.tx_admission.abandoned_while_waiting` | Waiters whose admission budget expired before they ever started. |
+| `kahuna.tx_admission.rejected_queue_full` | Requests refused outright because the queue was full. |
+
+`abandoned_while_waiting` and `rejected_queue_full` remain **distinct** even though both now return the
+same `AdmissionRefused` response code. They answer different questions: the counters say *why* the node
+refused, the response code says *what the client should do about it*. The split is what tells you whether
+to raise the ceiling (callers are giving up at the door) or to raise the queue bound / shed upstream (the
+queue is overflowing).
 
 Reading them:
 
@@ -291,6 +347,31 @@ process lifetime, so release is guaranteed on every path:
   publishing the session) disposes the slot rather than orphaning it.
 
 Lease release is idempotent, so overlapping completion paths cannot double-count and inflate the ceiling.
+
+**The admission wait is bounded independently of the transaction's own timeout.** These are two clocks
+that measure unrelated things, and conflating them is a bug rather than a simplification:
+
+| Clock | Bounds | Enforced by |
+|---|---|---|
+| `Timeout` (session) | how long an admitted transaction may **live** | the reaper, which reclaims the session and its MVCC snapshots |
+| `timeout` (script) | how long an admitted transaction may **run** | the execution deadline |
+| `AdmissionWaitMs` / `admissionWait` | how long a caller waits **to start** | the admission gate |
+
+A transaction that intends to run for a long time is not thereby willing to wait a long time to begin.
+Reusing the session timeout as the door-wait meant a caller asking for a long-lived session was silently
+also asking to park at the gate for that whole span, with no way to shorten one without shortening the
+other — and shortening the reaper window would let live range locks be reclaimed out from under a healthy
+transaction.
+
+For script transactions the split has a second consequence: the execution deadline now starts **when the
+transaction is admitted**, not when it was submitted, so time spent queued is no longer deducted from the
+time the script has to do its work. This matches where the transaction's HLC identity is minted. A
+script's `timeout` therefore means "wall time from start" rather than "wall time from submission".
+
+> **Behaviour change on upgrade.** A caller that sets no admission budget now gets
+> `DefaultAdmissionWaitMs` (5 s), which is *shorter* than the previous effective wait — the session
+> timeout clamped to `MaxTransactionTimeout`, i.e. up to 5 minutes at stock settings. That is the point
+> of the change, but anyone who was relying on a long queue wait should set `AdmissionWaitMs` explicitly.
 
 **Leader changes.** Admission sits *after* leader routing: `KeyValueLocator` forwards to the
 coordinator-partition leader before the gate runs, so followers never queue work they will not execute. A
@@ -340,6 +421,16 @@ before the field existed necessarily sends zero, and that must resolve to `Norma
 - If you add a new transaction entry point, admit **before** minting the transaction id. A transaction
   that queued must carry the HLC of when it actually started; otherwise its reads anchor to a snapshot
   taken before it ran.
+- **Arm the execution/lifetime deadline after admission, and give the wait its own token.** A single
+  `CancellationTokenSource` spanning both phases silently charges the queue wait to the transaction's own
+  budget. Build a short `using`-scoped source from the admission budget for the `AdmitAsync` call alone,
+  and start the transaction's deadline once the slot is held. Note that `CancelAfter` *reschedules* an
+  existing timer, so a second call after admission masks the bug — which also means a test can pass
+  against both the broken and fixed shapes if the "revert" it is checked against keeps that second call.
+  Verify against a single pre-admission `CancelAfter` and none after.
+- **A refusal is not an abort.** Nothing is minted, locked, or written before a slot is held, so an
+  admission failure must return `AdmissionRefused` — never `Aborted` (which claims the transaction ran
+  and conflicted) and never `MustRetry` (which invites the tight retry the gate is shedding).
 - Tests: `TestTransactionPriorityOrderer` covers the gate in isolation with a manually advanced
   `TimeProvider` (so aging assertions are exact rather than racing a real clock);
   `TestTransactionPriorityAdmission` drives the real script and interactive entry points against an

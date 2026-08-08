@@ -16,6 +16,13 @@ public sealed class KahunaStartTransactionRequest
     [JsonPropertyName("timeout")]
     public int Timeout { get; set; }
 
+    /// <summary>
+    /// How long the caller will queue for an admission slot, as distinct from <see cref="Timeout"/>, which is
+    /// the session's lifetime. Zero means "use the server default"; the server clamps it to its own maximum.
+    /// </summary>
+    [JsonPropertyName("admissionWaitMs")]
+    public int AdmissionWaitMs { get; set; }
+
     [JsonPropertyName("lockingType")]
     public KeyValueTransactionLocking LockingType { get; set; }
 

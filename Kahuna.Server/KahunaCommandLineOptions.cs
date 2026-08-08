@@ -118,6 +118,12 @@ public sealed class KahunaCommandLineOptions
     [Option("default-transaction-timeout", Required = false, HelpText = "Default transaction timeout (in milliseconds)", Default = 5000)]
     public int DefaultTransactionTimeout { get; set; } = 5000;
 
+    [Option("default-admission-wait", Required = false, HelpText = "Milliseconds a caller queues for an admission slot when it does not request its own budget; this is the wait to start a transaction, not the transaction's lifetime", Default = 5000)]
+    public int DefaultAdmissionWaitMs { get; set; } = 5000;
+
+    [Option("max-admission-wait", Required = false, HelpText = "Hard upper bound (in milliseconds) on any admission wait, so no caller can hold a queue slot longer than this", Default = 30000)]
+    public int MaxAdmissionWaitMs { get; set; } = 30000;
+
     [Option("max-concurrent-transactions", Required = false, HelpText = "Script transactions that may execute concurrently before further ones queue and start in priority order (0 = no limit)", Default = 0)]
     public int MaxConcurrentTransactions { get; set; }
 
@@ -366,6 +372,24 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-suggestion-timeout", Required = false, HelpText = "How long the P0 leader waits for a suggested move to be confirmed before declaring it dropped in milliseconds. After timeout the partition is eligible again subject to raft-move-cooldown.", Default = 15000)]
     public int RaftSuggestionTimeout { get; set; } = 15000;
+
+    [Option("raft-replication-factor", Required = false, HelpText = "Desired number of voter replicas per partition range. 0 (the default) means full replication: every roster voter hosts every range. When > 0, each range gets a replica set of this size and quorum is computed per range over its voter replicas only. Prefer odd values.", Default = 0)]
+    public int RaftReplicationFactor { get; set; }
+
+    [Option("raft-enable-placement-rebalancer", Required = false, HelpText = "Master switch for the continual replica-placement rebalancer on the P0 leader. When false (default) no rebalancing moves are planned; in-flight replica transitions are still driven to completion. Initial placement at raft-replication-factor is applied regardless.", Default = false)]
+    public bool RaftEnablePlacementRebalancer { get; set; }
+
+    [Option("raft-max-replica-moves-per-pass", Required = false, HelpText = "Maximum number of new replica moves (add or remove sequences) initiated per placement-controller pass. Bounds the blast radius of a bad plan.", Default = 2)]
+    public int RaftMaxReplicaMovesPerPass { get; set; } = 2;
+
+    [Option("raft-max-concurrent-replica-transfers", Required = false, HelpText = "Maximum number of ranges with an in-flight transitional replica (learner catching up or removal awaiting final drop) at any time. Caps concurrent backfill/snapshot transfers so rebalancing never starves client traffic.", Default = 1)]
+    public int RaftMaxConcurrentReplicaTransfers { get; set; } = 1;
+
+    [Option("raft-replica-count-deadband", Required = false, HelpText = "Minimum per-node replica-count imbalance above the even-spread ceiling before the placement planner emits balancing moves. Under-replicated ranges bypass the deadband.", Default = 1)]
+    public int RaftReplicaCountDeadband { get; set; } = 1;
+
+    [Option("raft-zone", Required = false, HelpText = "Optional locality hint (zone/rack) for the local node. When set, the placement planner prefers spreading a range's replicas across distinct zones.", Default = null)]
+    public string? RaftZone { get; set; }
 
     [Option("raft-grpc-enable-append-logs-coalescing", Required = false, HelpText = "Enable coalescing of multiple AppendLogs calls into a single gRPC frame per write cycle. Useful for write-heavy multi-partition workloads where per-peer send concurrency is the bottleneck.", Default = false)]
     public bool RaftGrpcEnableAppendLogsCoalescing { get; set; }

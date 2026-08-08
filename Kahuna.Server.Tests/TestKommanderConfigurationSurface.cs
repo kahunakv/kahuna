@@ -89,7 +89,13 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.EnableSharedExecutorPool)] = nameof(KahunaCommandLineOptions.RaftEnableSharedExecutorPool),
         [nameof(RaftConfiguration.PartitionExecutorPoolSize)] = nameof(KahunaCommandLineOptions.RaftExecutorPoolSize),
         [nameof(RaftConfiguration.WalGroupCommitLingerMs)] = nameof(KahunaCommandLineOptions.RaftWalGroupCommitLingerMs),
-        [nameof(RaftConfiguration.WalSingleFsyncCommit)] = nameof(KahunaCommandLineOptions.RaftWalSingleFsyncCommit)
+        [nameof(RaftConfiguration.WalSingleFsyncCommit)] = nameof(KahunaCommandLineOptions.RaftWalSingleFsyncCommit),
+        [nameof(RaftConfiguration.ReplicationFactor)] = nameof(KahunaCommandLineOptions.RaftReplicationFactor),
+        [nameof(RaftConfiguration.EnablePlacementRebalancer)] = nameof(KahunaCommandLineOptions.RaftEnablePlacementRebalancer),
+        [nameof(RaftConfiguration.MaxReplicaMovesPerPass)] = nameof(KahunaCommandLineOptions.RaftMaxReplicaMovesPerPass),
+        [nameof(RaftConfiguration.MaxConcurrentReplicaTransfers)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentReplicaTransfers),
+        [nameof(RaftConfiguration.ReplicaCountDeadband)] = nameof(KahunaCommandLineOptions.RaftReplicaCountDeadband),
+        [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone)
     };
 
     /// <summary>

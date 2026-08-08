@@ -1750,7 +1750,8 @@ public class GrpcCommunication : IKahunaCommunication
             Priority = TransactionPriorityWire.ToGrpc(txOptions.Priority),
             ReadTimestampNode = txOptions.ReadTimestamp.N,
             ReadTimestampPhysical = txOptions.ReadTimestamp.L,
-            ReadTimestampCounter = txOptions.ReadTimestamp.C
+            ReadTimestampCounter = txOptions.ReadTimestamp.C,
+            AdmissionWaitMs = txOptions.AdmissionWaitMs
         };
 
         int retries = 0;

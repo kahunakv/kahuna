@@ -149,6 +149,21 @@ public sealed class EmbeddedKahunaOptions
     public int MaxTransactionTimeout { get; set; } = 300_000;
 
     /// <summary>
+    /// Default milliseconds a caller queues for an admission slot when it does not ask for a specific budget.
+    /// This is the door-wait, not the session lifetime: <see cref="MaxTransactionTimeout"/> bounds how long an
+    /// admitted transaction may live, this bounds how long an unadmitted one waits to begin. Kept short by
+    /// default so a saturated node refuses quickly and the caller can back off.
+    /// </summary>
+    public int DefaultAdmissionWaitMs { get; set; } = 5_000;
+
+    /// <summary>
+    /// Hard upper bound on any admission wait (milliseconds). A caller-supplied budget is clamped to this, so
+    /// no caller can occupy a queue slot for longer than the operator allows. Bounds queue <i>duration</i>,
+    /// complementing <see cref="TransactionPriorityMaxQueued"/>, which bounds only queue <i>depth</i>.
+    /// </summary>
+    public int MaxAdmissionWaitMs { get; set; } = 30_000;
+
+    /// <summary>
     /// Script transactions that may execute concurrently on this node before further ones are queued and
     /// started in priority order. A value &lt;= 0 — the default — disables the gate: every transaction starts
     /// immediately and priority is recorded for observability only.

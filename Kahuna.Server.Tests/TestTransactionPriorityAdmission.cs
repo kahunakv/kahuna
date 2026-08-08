@@ -4,6 +4,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Tests;
@@ -305,7 +306,7 @@ public sealed class TestTransactionPriorityAdmission
             Encoding.UTF8.GetBytes("BEGIN SET `shed/rejected` 'v' COMMIT END"), null, null)
             .WaitAsync(TimeSpan.FromSeconds(10), ct);
 
-        Assert.Equal(KeyValueResponseType.MustRetry, shed.Type);
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, shed.Type);
         Assert.Equal(1, orderer.RejectedQueueFullAt(TransactionPriority.Normal));
 
         Assert.Equal(KeyValueResponseType.Set, (await blocker).Type);
@@ -409,5 +410,363 @@ public sealed class TestTransactionPriorityAdmission
 
         Assert.Equal(KeyValueResponseType.Errored, result.Type);
         Assert.Contains("priority", result.Reason ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ASessionRefusedForAFullQueue_SaysSoDistinctlyFromATransientRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // One session slot and room for a single waiter, so the third Begin has nowhere to go.
+        await using EmbeddedKahunaNode node = new(BaseOptions(maxConcurrentSessions: 1, maxQueued: 1), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("refuse/k", ct);
+
+        TransactionPriorityOrderer orderer = KeyValuesOf(node).sessionOrderer;
+
+        (KeyValueResponseType heldType, Shared.KeyValue.TransactionHandle held) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        Assert.Equal(KeyValueResponseType.Set, heldType);
+
+        // Takes the only queue slot and stays there; it is awaited at the end so nothing is left running.
+        Task<(KeyValueResponseType, Shared.KeyValue.TransactionHandle)> queued = node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000, AdmissionWaitMs = 20_000 }, ct);
+
+        await WaitUntil(() => orderer.Queued == 1, "the second session to take the only queue slot", ct);
+
+        (KeyValueResponseType refusedType, Shared.KeyValue.TransactionHandle refused) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        // The distinction this feature exists for: the node is shedding load, which asks the caller to back
+        // off, and is not the transient MustRetry that asks it to retry promptly.
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, refusedType);
+        Assert.NotEqual(KeyValueResponseType.MustRetry, refusedType);
+        Assert.Equal(HLCTimestamp.Zero, refused.TransactionId);
+        Assert.Equal(1, orderer.RejectedQueueFullAt(TransactionPriority.Normal));
+
+        // A refusal must not cost the node capacity: nothing was started, so nothing was leased.
+        Assert.Equal(1, orderer.InFlight);
+
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(held, ct));
+
+        (KeyValueResponseType queuedType, Shared.KeyValue.TransactionHandle admitted) = await queued;
+        Assert.Equal(KeyValueResponseType.Set, queuedType);
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(admitted, ct));
+
+        await WaitUntil(() => orderer.InFlight == 0, "the node to drain", ct);
+    }
+
+    [Fact]
+    public async Task ALongLivedSession_IsNotTherebyAPatientOne()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // The defect this proves fixed: the admission wait used to be the session timeout, so a caller asking
+        // for a long-lived transaction was also — silently — asking to park at the gate for that whole span.
+        await using EmbeddedKahunaNode node = new(BaseOptions(maxConcurrentSessions: 1), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("patience/k", ct);
+
+        (KeyValueResponseType heldType, Shared.KeyValue.TransactionHandle held) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        Assert.Equal(KeyValueResponseType.Set, heldType);
+
+        // An hour-long session that will wait half a second at the door. Before the split these were one
+        // number, and this Begin would have parked for the session timeout clamped to MaxTransactionTimeout —
+        // five minutes at stock configuration.
+        long startedAt = Environment.TickCount64;
+
+        (KeyValueResponseType refusedType, _) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 3_600_000, AdmissionWaitMs = 500 }, ct);
+
+        long elapsedMs = Environment.TickCount64 - startedAt;
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, refusedType);
+
+        // Generous upper bound: the point is that it returned on the admission clock, orders of magnitude
+        // below the session clock it used to wait on.
+        Assert.True(elapsedMs < 15_000, $"expected the refusal on the admission clock, waited {elapsedMs} ms");
+        Assert.True(elapsedMs >= 400, $"expected the caller to actually wait its budget, returned after {elapsedMs} ms");
+
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(held, ct));
+    }
+
+    [Fact]
+    public async Task TheAdmissionBudget_FallsBackToTheServerDefaultAndIsCappedByIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        EmbeddedKahunaOptions options = BaseOptions(maxConcurrentSessions: 1);
+        options.DefaultAdmissionWaitMs = 500;
+        options.MaxAdmissionWaitMs = 1_000;
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("budget/k", ct);
+
+        (KeyValueResponseType heldType, Shared.KeyValue.TransactionHandle held) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        Assert.Equal(KeyValueResponseType.Set, heldType);
+
+        // Asks for nothing: served by the server default rather than waiting indefinitely.
+        long startedAt = Environment.TickCount64;
+
+        (KeyValueResponseType defaultedType, _) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        long defaultedMs = Environment.TickCount64 - startedAt;
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, defaultedType);
+        Assert.True(defaultedMs >= 400, $"expected the default budget to be honoured, returned after {defaultedMs} ms");
+        Assert.True(defaultedMs < 10_000, $"expected the default budget to bound the wait, waited {defaultedMs} ms");
+
+        // Asks for a minute: clamped to the operator's ceiling, so one patient caller cannot hold a queue slot
+        // for as long as it likes. TransactionPriorityMaxQueued bounds queue depth; this bounds its duration.
+        startedAt = Environment.TickCount64;
+
+        (KeyValueResponseType clampedType, _) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000, AdmissionWaitMs = 60_000 }, ct);
+
+        long clampedMs = Environment.TickCount64 - startedAt;
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, clampedType);
+        Assert.True(clampedMs < 30_000, $"expected the request to be clamped to MaxAdmissionWaitMs, waited {clampedMs} ms");
+
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(held, ct));
+    }
+
+    [Fact]
+    public async Task TheTwoRefusalReasons_StayDistinctInMetricsEvenThoughTheyShareAResponseCode()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // The response code says what the caller should do; the counters say why it happened. Collapsing the
+        // two refusals onto one code must not collapse the two counters, or an operator loses the ability to
+        // tell "the ceiling is too low" from "callers are giving up at the door".
+        EmbeddedKahunaOptions options = BaseOptions(maxConcurrentSessions: 1, maxQueued: 1);
+        options.DefaultAdmissionWaitMs = 500;
+        options.MaxAdmissionWaitMs = 1_000;
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("metrics/k", ct);
+
+        TransactionPriorityOrderer orderer = KeyValuesOf(node).sessionOrderer;
+
+        (KeyValueResponseType heldType, Shared.KeyValue.TransactionHandle held) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        Assert.Equal(KeyValueResponseType.Set, heldType);
+
+        // Waits its budget out and gives up: abandoned, not rejected.
+        (KeyValueResponseType abandonedType, _) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000, AdmissionWaitMs = 300 }, ct);
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, abandonedType);
+        Assert.Equal(1, orderer.AbandonedWhileWaitingAt(TransactionPriority.Normal));
+        Assert.Equal(0, orderer.RejectedQueueFullAt(TransactionPriority.Normal));
+
+        // Now fill the single queue slot and turn one away at the door: rejected, not abandoned.
+        Task<(KeyValueResponseType, Shared.KeyValue.TransactionHandle)> queued = node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000, AdmissionWaitMs = 20_000 }, ct);
+
+        await WaitUntil(() => orderer.Queued == 1, "the waiter to take the only queue slot", ct);
+
+        (KeyValueResponseType rejectedType, _) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, rejectedType);
+        Assert.Equal(1, orderer.RejectedQueueFullAt(TransactionPriority.Normal));
+
+        // The same response code twice, but the counters told two different stories.
+        Assert.Equal(1, orderer.AbandonedWhileWaitingAt(TransactionPriority.Normal));
+
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(held, ct));
+
+        (KeyValueResponseType queuedType, Shared.KeyValue.TransactionHandle admitted) = await queued;
+        Assert.Equal(KeyValueResponseType.Set, queuedType);
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(admitted, ct));
+    }
+
+    [Fact]
+    public async Task TheAdmissionBudget_DoesNotLeakIntoTheSessionLifetime()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // The reaper reclaims on the session clock. If the two clocks had been conflated in the other
+        // direction, a session would inherit the short admission budget as its lifetime and be reaped early,
+        // taking live range locks with it.
+        EmbeddedKahunaOptions options = BaseOptions(maxConcurrentSessions: 2);
+        options.DefaultAdmissionWaitMs = 500;
+        options.MaxAdmissionWaitMs = 1_000;
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("lifetime/k", ct);
+
+        KeyValuesManager keyValues = KeyValuesOf(node);
+
+        (KeyValueResponseType startedType, Shared.KeyValue.TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { Timeout = 45_000, AdmissionWaitMs = 500 }, ct);
+
+        Assert.Equal(KeyValueResponseType.Set, startedType);
+
+        // The session records the session timeout, not the admission budget it happened to be admitted under.
+        Assert.Equal(45_000, keyValues.GetRecordedSessionTimeout(handle.TransactionId));
+
+        Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(handle, ct));
+    }
+
+    [Fact]
+    public async Task WithNoCeilingConfigured_NoCallerIsEverRefusedAdmission()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // AdmissionRefused must be producible only by a gate an operator switched on. A node in the default
+        // configuration has no ceiling, so every Begin is admitted immediately and the new code never appears
+        // — including on the script path, whose refusals previously used two other codes.
+        await using EmbeddedKahunaNode node = new(BaseOptions(), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("nogate/k", ct);
+
+        for (int i = 0; i < 5; i++)
+        {
+            (KeyValueResponseType type, Shared.KeyValue.TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions { Timeout = 30_000 }, ct);
+
+            Assert.Equal(KeyValueResponseType.Set, type);
+            Assert.NotEqual(KeyValueResponseType.AdmissionRefused, type);
+
+            Assert.Equal(KeyValueResponseType.RolledBack, await node.Kahuna.LocateAndRollbackTransaction(handle, ct));
+        }
+
+        KeyValueTransactionResult script = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SET `nogate/k` 'v' COMMIT END"), null, null)
+            .WaitAsync(TimeSpan.FromSeconds(20), ct);
+
+        Assert.Equal(KeyValueResponseType.Set, script.Type);
+    }
+
+    [Fact]
+    public async Task AScriptRefusedAtTheDoor_IsNotReportedAsAnAbortedTransaction()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        EmbeddedKahunaOptions options = BaseOptions(maxConcurrentTransactions: 1);
+        options.DefaultAdmissionWaitMs = 500;
+        options.MaxAdmissionWaitMs = 1_000;
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("scriptrefuse/k", ct);
+
+        TransactionPriorityOrderer orderer = KeyValuesOf(node).scriptOrderer;
+
+        Task<KeyValueTransactionResult> blocker = node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SLEEP 3000 SET `scriptrefuse/blocker` 'v' COMMIT END"), null, null);
+
+        await WaitUntil(() => orderer.InFlight == 1, "the blocking transaction to occupy the only slot", ct);
+
+        // Waits its admission budget and is turned away. Aborted would say this transaction conflicted and
+        // failed; in fact it never started — nothing was minted, locked, or written.
+        KeyValueTransactionResult refused = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SET `scriptrefuse/k` 'v' COMMIT END"), null, null)
+            .WaitAsync(TimeSpan.FromSeconds(20), ct);
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, refused.Type);
+        Assert.NotEqual(KeyValueResponseType.Aborted, refused.Type);
+
+        Assert.Equal(KeyValueResponseType.Set, (await blocker).Type);
+    }
+
+    [Fact]
+    public async Task AScriptThatQueued_StillGetsItsFullExecutionTimeout()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // One slot, and a generous door-wait so the contender queues rather than being refused.
+        EmbeddedKahunaOptions options = BaseOptions(maxConcurrentTransactions: 1);
+        options.DefaultAdmissionWaitMs = 30_000;
+        options.MaxAdmissionWaitMs = 30_000;
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("queuedclock/k", ct);
+
+        TransactionPriorityOrderer orderer = KeyValuesOf(node).scriptOrderer;
+
+        // Holds the only slot for two seconds.
+        Task<KeyValueTransactionResult> blocker = node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SLEEP 2000 SET `queuedclock/blocker` 'v' COMMIT END"), null, null);
+
+        await WaitUntil(() => orderer.InFlight == 1, "the blocking transaction to occupy the only slot", ct);
+
+        // Declares a 3s execution timeout and then spends ~2s queued. When admission and execution shared one
+        // clock, the queue wait was deducted from that 3s and the SLEEP below overran what remained, so this
+        // came back "aborted by timeout" having never had its full budget to run.
+        KeyValueTransactionResult queued = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (timeout=3000) SLEEP 2000 SET `queuedclock/k` 'v' COMMIT END"), null, null)
+            .WaitAsync(TimeSpan.FromSeconds(30), ct);
+
+        Assert.Equal(KeyValueResponseType.Set, queued.Type);
+        Assert.Equal(KeyValueResponseType.Set, (await blocker).Type);
+    }
+
+    [Fact]
+    public async Task AScriptsAdmissionWaitOption_BoundsItsQueueingAndIsCapped()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        EmbeddedKahunaOptions options = BaseOptions(maxConcurrentTransactions: 1);
+        options.DefaultAdmissionWaitMs = 20_000;
+        options.MaxAdmissionWaitMs = 20_000;
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("scriptwait/k", ct);
+
+        TransactionPriorityOrderer orderer = KeyValuesOf(node).scriptOrderer;
+
+        Task<KeyValueTransactionResult> blocker = node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SLEEP 4000 SET `scriptwait/blocker` 'v' COMMIT END"), null, null);
+
+        await WaitUntil(() => orderer.InFlight == 1, "the blocking transaction to occupy the only slot", ct);
+
+        // An impatient script against a node whose default would have had it wait 20s.
+        long startedAt = Environment.TickCount64;
+
+        KeyValueTransactionResult impatient = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (admissionWait=500) SET `scriptwait/k` 'v' COMMIT END"), null, null)
+            .WaitAsync(TimeSpan.FromSeconds(20), ct);
+
+        long elapsedMs = Environment.TickCount64 - startedAt;
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, impatient.Type);
+        Assert.True(elapsedMs < 15_000, $"expected the inline budget to bound the wait, waited {elapsedMs} ms");
+
+        Assert.Equal(KeyValueResponseType.Set, (await blocker).Type);
+    }
+
+    [Fact]
+    public async Task AnUnparsableAdmissionWaitOption_IsRejectedAsMalformedScript()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(BaseOptions(), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("badwait/k", ct);
+
+        KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (admissionWait=\"soon\") SET `badwait/k` 'v' COMMIT END"), null, null);
+
+        Assert.Equal(KeyValueResponseType.Errored, result.Type);
+        Assert.Contains("admissionWait", result.Reason ?? "", StringComparison.OrdinalIgnoreCase);
+
+        // The message names the offending text rather than the parse result, so an operator reading a log can
+        // see what was actually written.
+        Assert.Contains("soon", result.Reason ?? "", StringComparison.Ordinal);
     }
 }

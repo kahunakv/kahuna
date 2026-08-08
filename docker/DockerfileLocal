@@ -44,15 +44,27 @@ ENV KAHUNA_HTTP_PORTS="$KAHUNA_HTTP_PORTS"
 ENV KAHUNA_HTTPS_PORTS="$KAHUNA_HTTPS_PORTS"
 ENV KAHUNA_INITIAL_CLUSTER="$KAHUNA_INITIAL_CLUSTER"
 
-COPY --chmod=755 <<EOT /app/entrypoint.sh
+# Extra server flags, appended verbatim to the command line and word-split by the shell. Empty by default,
+# so a stock cluster is byte-for-byte what it was. Set it per service in the compose file (a runtime
+# environment variable, so changing it needs only a container restart, not an image rebuild) to exercise
+# behaviour that is off by default — e.g. KAHUNA_EXTRA_ARGS="--max-concurrent-sessions 1" to make the
+# transaction admission gate reachable.
+ENV KAHUNA_EXTRA_ARGS=""
+
+# The heredoc delimiter is quoted so BuildKit does not expand these variables while baking the script.
+# Left unquoted, every value is frozen at build time — which silently pins KAHUNA_EXTRA_ARGS to whatever
+# it was during the build (empty), making it look like a runtime knob that does nothing. Quoted, the
+# script keeps the variable references and the shell resolves them from the image's ENV at startup, so
+# overriding one in compose takes effect on a container restart with no rebuild.
+COPY --chmod=755 <<'EOT' /app/entrypoint.sh
 #!/usr/bin/env bash
 
 mkdir -p /storage/data
 mkdir -p /storage/wal
 
-echo "kahuna --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation"
+echo "kahuna --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation $KAHUNA_EXTRA_ARGS"
 
-dotnet /app/Kahuna.Server.dll --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation
+dotnet /app/Kahuna.Server.dll --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation $KAHUNA_EXTRA_ARGS
 EOT
 
 # when starting the container, run dotnet with the built dll

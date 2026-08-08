@@ -235,6 +235,7 @@ internal sealed class ScriptTransactionExecutor
     {
         bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
+        int admissionWaitMs = 0;
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         HLCTimestamp readTimestamp = HLCTimestamp.Zero;
 
@@ -284,6 +285,15 @@ internal sealed class ScriptTransactionExecutor
                     throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
             }
 
+            // How long this script will queue for an admission slot, as distinct from the timeout above, which
+            // is how long it may run once started. A script that expects to do a lot of work is not thereby
+            // willing to wait a long time for its turn.
+            if (options.TryGetValue("admissionWait", out optionValue))
+            {
+                if (!int.TryParse(optionValue, out admissionWaitMs))
+                    throw new KahunaScriptException("Invalid admissionWait option: " + optionValue, optionsAst.yyline);
+            }
+
             if (options.TryGetValue("snapshot", out optionValue))
             {
                 if (!long.TryParse(optionValue, out long snapshotMs) || snapshotMs == 0)
@@ -307,9 +317,11 @@ internal sealed class ScriptTransactionExecutor
             }
         }
 
-        using CancellationTokenSource cts = new();
-
-        cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
+        // The door-wait, deliberately separate from the execution timeout below. Clamped so no script can hold
+        // a queue slot longer than the operator allows.
+        int admissionWait = Math.Min(
+            admissionWaitMs <= 0 ? configuration.DefaultAdmissionWaitMs : admissionWaitMs,
+            configuration.MaxAdmissionWaitMs);
 
         // Wait for a slot before minting the transaction's identity. A transaction that queued behind a
         // saturated node must carry the HLC of when it actually started, not of when it was submitted, or its
@@ -317,20 +329,32 @@ internal sealed class ScriptTransactionExecutor
         // synchronously and costs nothing.
         AdmissionLease? lease;
 
-        try
+        using (CancellationTokenSource admissionCts = new(TimeSpan.FromMilliseconds(admissionWait)))
         {
-            lease = await orderer.AdmitAsync(priority, cts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Timed out while still waiting to start, so nothing was minted, locked, or written.
-            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted by timeout" };
+            try
+            {
+                lease = await orderer.AdmitAsync(priority, admissionCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // The admission budget expired while queued. Nothing was minted, locked, or written, so this is
+                // not an aborted transaction — it is a transaction that never started, and the node is shedding
+                // load, so the caller should back off rather than resubmit immediately.
+                return new() { Type = KeyValueResponseType.AdmissionRefused, Reason = "Timed out waiting for an admission slot" };
+            }
         }
 
-        // Refused outright because the admission queue is already full. Nothing was started, so this is
-        // retryable backpressure rather than a failure of the transaction itself.
+        // Refused outright because the admission queue is already full. Same contract as a budget expiry:
+        // nothing was started, so resubmitting is safe, but it should follow a back-off.
         if (lease is null)
-            return new() { Type = KeyValueResponseType.MustRetry, Reason = "Node is at its transaction admission limit" };
+            return new() { Type = KeyValueResponseType.AdmissionRefused, Reason = "Node is at its transaction admission limit" };
+
+        // The execution deadline starts here rather than at submission, so a script that queued behind a
+        // saturated node still gets the full time it asked for to do its work. It is measured from the same
+        // point as the transaction's identity below, for the same reason.
+        using CancellationTokenSource cts = new();
+
+        cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
 
         HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
 

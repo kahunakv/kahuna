@@ -219,6 +219,8 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     RocksDbDirectReads = opts.GetRocksDbDirectReads(),
     RocksDbStatistics = opts.RocksDbStatistics,
     DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
+    DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
+    MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,
     MaxConcurrentTransactions = opts.MaxConcurrentTransactions,
     MaxConcurrentSessions = opts.MaxConcurrentSessions,
     TransactionPriorityReservedSlots = opts.TransactionPriorityReservedSlots,
@@ -378,6 +380,8 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     BackendWriteIOThreads = opts.BackendWriteIOThreads,
     BackendReadQueueDepth = opts.BackendReadQueueDepth,
     DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
+    DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
+    MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,
     MaxConcurrentTransactions = opts.MaxConcurrentTransactions,
     MaxConcurrentSessions = opts.MaxConcurrentSessions,
     TransactionPriorityReservedSlots = opts.TransactionPriorityReservedSlots,
@@ -518,6 +522,12 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxConcurrentTransfers = opts.RaftMaxConcurrentTransfers,
         LeaderBalancerOpsWeight = opts.RaftLeaderBalancerOpsWeight,
         LeaderBalancerQueueWeight = opts.RaftLeaderBalancerQueueWeight,
-        SuggestionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuggestionTimeout)
+        SuggestionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuggestionTimeout),
+        ReplicationFactor = opts.RaftReplicationFactor,
+        EnablePlacementRebalancer = opts.RaftEnablePlacementRebalancer,
+        MaxReplicaMovesPerPass = opts.RaftMaxReplicaMovesPerPass,
+        MaxConcurrentReplicaTransfers = opts.RaftMaxConcurrentReplicaTransfers,
+        ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
+        Zone = opts.RaftZone
     };
 }

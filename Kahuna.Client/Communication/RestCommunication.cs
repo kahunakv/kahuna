@@ -1461,7 +1461,8 @@ public class RestCommunication : IKahunaCommunication
             ReadValidation = txOptions.ReadValidation,
             DecisionDurability = txOptions.DecisionDurability,
             Priority = txOptions.Priority,
-            ReadTimestamp = txOptions.ReadTimestamp
+            ReadTimestamp = txOptions.ReadTimestamp,
+            AdmissionWaitMs = txOptions.AdmissionWaitMs
         };
 
         KahunaStartTransactionResponse response = await PostWithMustRetry<KahunaStartTransactionRequest, KahunaStartTransactionResponse>(

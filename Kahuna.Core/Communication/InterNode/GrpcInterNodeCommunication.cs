@@ -1442,6 +1442,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampNode = options.ReadTimestamp.N,
             ReadTimestampPhysical = options.ReadTimestamp.L,
             ReadTimestampCounter = options.ReadTimestamp.C,
+            // Carried across the hop so a Begin that lands on a follower keeps the caller's own door-wait
+            // instead of silently falling back to the leader's server default.
+            AdmissionWaitMs = options.AdmissionWaitMs,
         };
 
         GrpcServerBatcherResponse response;
