@@ -34,8 +34,8 @@ internal sealed class KeyValueRevisionHistory
     /// <summary>
     /// Archives <paramref name="value"/> at revision <paramref name="key"/>. Since callers
     /// always archive in ascending revision order the common path is a tail-append. An
-    /// overwrite of the same key (idempotent archive after a delete→re-set cycle) replaces
-    /// the existing entry in place.
+    /// overwrite of the same key (an idempotent re-archive of an already-archived revision,
+    /// e.g. on a re-delivered commit) replaces the existing entry in place.
     /// </summary>
     public KeyValueRevisionEntry this[long key]
     {

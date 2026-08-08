@@ -2052,10 +2052,24 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
         GrpcServerBatcherResponse batchResponse;
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            if (cancellationToken == CancellationToken.None)
+                batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+            else
+                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            // The floor read is side-effect free, so a transport failure mid-forward is unconditionally
+            // safe to answer with the endpoint's own typed refusal — the caller re-resolves the meta
+            // leader and asks again — instead of escaping as an exception the external surfaces would
+            // report as an unclassifiable server error.
+            LogTransactionForwardingFailed(logger, "GetSnapshotFloor", node, ex.StatusCode);
+
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
+        }
 
         GrpcGetSnapshotFloorResponse r = batchResponse.GetSnapshotFloor!;
 
@@ -2242,7 +2256,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     /// Other status codes (e.g. an application error on the remote) still propagate as exceptions.
     /// </summary>
     private static bool IsRetryableTransportFailure(RpcException ex) =>
-        ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded or StatusCode.Cancelled;
+        InterNodeTransportFailure.IsRetryable(ex);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "{Operation} forwarding to {Node} failed with transport status {StatusCode}, returning MustRetry")]
     private static partial void LogTransactionForwardingFailed(ILogger<GrpcInterNodeCommunication> logger, string operation, string node, StatusCode statusCode);

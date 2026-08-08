@@ -1,5 +1,6 @@
 
 using Grpc.Core;
+using Kahuna.Server.Communication.Internode;
 using Kommander;
 
 namespace Kahuna.Communication.External.Rest;
@@ -51,15 +52,37 @@ public static class RetryableExceptionMapping
     /// <summary>
     /// Retryable = the request never produced a definitive answer: any Raft resolution failure
     /// (missing partition, undecided leader, node not initialized) or an inter-node transport
-    /// failure whose status says the remote was unreachable or stopped answering. Cancellation is
+    /// failure — the remote unreachable or no longer answering, including a dead pooled HTTP/2
+    /// connection that reports StatusCode.Internal with a transport-layer cause. Cancellation is
     /// deliberately not mapped — the client gave up, there is nobody to answer.
+    ///
+    /// <para>Wrappers are unwrapped before classifying: a retryable failure that arrives inside an
+    /// <see cref="AggregateException"/> or as another exception's <c>InnerException</c> is still
+    /// retryable — it is the same "no definitive answer" condition wearing a different shell.</para>
     /// </summary>
-    public static bool IsRetryable(Exception ex) => ex switch
+    public static bool IsRetryable(Exception ex)
     {
-        RaftException => true,
-        RpcException rpc => rpc.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded or StatusCode.Cancelled,
-        _ => false,
-    };
+        switch (ex)
+        {
+            case RaftException:
+                return true;
+
+            case RpcException rpc:
+                return InterNodeTransportFailure.IsRetryable(rpc);
+
+            case AggregateException aggregate:
+                foreach (Exception inner in aggregate.InnerExceptions)
+                {
+                    if (IsRetryable(inner))
+                        return true;
+                }
+
+                return false;
+
+            default:
+                return ex.InnerException is { } wrapped && IsRetryable(wrapped);
+        }
+    }
 
     /// <summary>Returns the MustRetry response body for the request's surface, or null for
     /// unmapped surfaces (whose exceptions must keep propagating).</summary>

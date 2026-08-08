@@ -73,6 +73,23 @@ public sealed class TestInterNodeTransportMustRetry
         Assert.Equal(KeyValueResponseType.MustRetry, type);
     }
 
+    /// <summary>
+    /// The routed snapshot-floor read is the one exit of <c>KeyValuesManager.GetSnapshotFloor</c>
+    /// that crosses the network; a transport failure there must come back as the endpoint's own
+    /// typed MustRetry (with a floor that means nothing), never escape as an exception the REST
+    /// surface would answer 500 with.
+    /// </summary>
+    [Fact]
+    public async Task GetSnapshotFloor_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, HLCTimestamp floor, int liveHolds) = await BuildTransport().GetSnapshotFloor(
+            UnreachableNode, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(HLCTimestamp.Zero, floor);
+        Assert.Equal(0, liveHolds);
+    }
+
     // ── REST last-resort mapping ─────────────────────────────────────────────
 
     [Fact]
@@ -88,6 +105,59 @@ public sealed class TestInterNodeTransportMustRetry
         Assert.False(RetryableExceptionMapping.IsRetryable(new RpcException(new Status(StatusCode.Internal, "server fault"))));
         Assert.False(RetryableExceptionMapping.IsRetryable(new InvalidOperationException("bug")));
         Assert.False(RetryableExceptionMapping.IsRetryable(new OperationCanceledException()));
+    }
+
+    /// <summary>
+    /// A dead pooled HTTP/2 connection (e.g. a keep-alive ping timeout after a partition) surfaces
+    /// as StatusCode.Internal with the transport exception as the status's debug exception —
+    /// "no definitive answer was produced", so it must classify as retryable. A plain Internal
+    /// (remote application error) must not; that distinction is what keeps genuine server faults
+    /// visible as 500s.
+    /// </summary>
+    [Fact]
+    public void RestMapping_ClassifiesInternalByTransportCause()
+    {
+        RpcException deadConnection = new(new Status(
+            StatusCode.Internal,
+            "Error starting gRPC call. HttpRequestException: The HTTP/2 server didn't respond to a ping request.",
+            new HttpRequestException("The HTTP/2 server didn't respond to a ping request within the configured KeepAlivePingDelay.")));
+
+        Assert.True(RetryableExceptionMapping.IsRetryable(deadConnection));
+
+        RpcException brokenPipe = new(new Status(
+            StatusCode.Internal, "request aborted", new IOException("connection reset by peer")));
+
+        Assert.True(RetryableExceptionMapping.IsRetryable(brokenPipe));
+
+        // Same detail text but no transport cause: still a remote application error.
+        Assert.False(RetryableExceptionMapping.IsRetryable(
+            new RpcException(new Status(StatusCode.Internal, "Error starting gRPC call."))));
+    }
+
+    /// <summary>
+    /// Retryable failures often arrive wrapped — an AggregateException from task plumbing, or as
+    /// another exception's InnerException. The classification must unwrap before deciding, or a
+    /// genuinely retryable transport failure escapes as an unclassifiable 500.
+    /// </summary>
+    [Fact]
+    public void RestMapping_UnwrapsWrappedRetryableExceptions()
+    {
+        RpcException unavailable = new(new Status(StatusCode.Unavailable, "response ended prematurely"));
+
+        Assert.True(RetryableExceptionMapping.IsRetryable(
+            new AggregateException("One or more errors occurred.", unavailable)));
+        Assert.True(RetryableExceptionMapping.IsRetryable(
+            new AggregateException(new InvalidOperationException("bug"), unavailable)));
+        Assert.True(RetryableExceptionMapping.IsRetryable(
+            new InvalidOperationException("forward failed", unavailable)));
+        Assert.True(RetryableExceptionMapping.IsRetryable(
+            new AggregateException(new InvalidOperationException("outer", new RaftException("Invalid partition: 3")))));
+
+        // Wrapping must not manufacture retryability where none exists.
+        Assert.False(RetryableExceptionMapping.IsRetryable(
+            new AggregateException(new InvalidOperationException("bug"))));
+        Assert.False(RetryableExceptionMapping.IsRetryable(
+            new InvalidOperationException("outer", new InvalidOperationException("inner"))));
     }
 
     [Fact]

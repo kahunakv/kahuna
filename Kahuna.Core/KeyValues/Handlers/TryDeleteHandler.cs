@@ -64,11 +64,16 @@ internal sealed class TryDeleteHandler : BaseHandler
         // Operation type is always TryDelete here. Use the literal rather than message.Type so the proposal the
         // aggregator carries records a TryDelete, which is what CompleteProposal and the replicated log record
         // expect.
+        //
+        // The tombstone is a first-class revision (entry.Revision + 1), mirroring how a set allocates one.
+        // Reusing the live revision number would make the flushed tombstone record overwrite the last live
+        // value's persisted revision record (backends key one record per revision number), destroying the
+        // key's history and breaking as-of/PITR reads at pre-delete snapshots.
         KeyValueProposal proposal = new(
             KeyValueRequestType.TryDelete,
             message.Key,
             null,
-            entry.Revision,
+            entry.Revision + 1,
             false,
             entry.Expires,
             currentTime,
@@ -198,6 +203,10 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (entry.State == KeyValueState.Deleted)
             return new(KeyValueResponseType.DoesNotExist, mvccEntry.Revision);
 
+        // The staged tombstone takes a new revision, exactly as a staged set does. Keeping the live
+        // revision number would commit the tombstone over the last live value's persisted revision
+        // record, erasing the history that as-of/PITR reads of the deleted key depend on.
+        mvccEntry.Revision++;
         mvccEntry.State = KeyValueState.Deleted;
         mvccEntry.LastModified = currentTime;
 
