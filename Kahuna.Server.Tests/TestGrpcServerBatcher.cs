@@ -38,6 +38,14 @@ public sealed class TestGrpcServerBatcher
             .GetMethod("FailPendingRequests", BindingFlags.NonPublic | BindingFlags.Static)!
             .Invoke(null, [streamId, ex]);
 
+    private static Task InvokeReadKeyValueMessages(
+        long streamId,
+        AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming,
+        ILogger logger)
+        => (Task)BatcherType
+            .GetMethod("ReadKeyValueMessages", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [streamId, streaming, logger])!;
+
     private static Task InvokeReadLockMessages(
         long streamId,
         AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming,
@@ -123,6 +131,77 @@ public sealed class TestGrpcServerBatcher
         Assert.IsType<RpcException>(pending.Task.Exception!.InnerException);
         Assert.False(RequestRefs().ContainsKey(requestId));
         Assert.False(RequestStreamRefs().ContainsKey(requestId));
+    }
+
+    /// <summary>
+    /// A peer that could not answer a request whose payload has no outcome field refuses it with the
+    /// envelope's None type rather than fabricating a Found=false. The reader must turn that into a
+    /// retryable failure for that request alone: anything else either hangs the caller or reports a
+    /// definitive answer the peer never produced.
+    /// </summary>
+    [Fact]
+    public async Task ReadKeyValueMessages_NoneTypedResponse_FailsThatRequestRetryably()
+    {
+        const long streamId = 9_400_001;
+        const int requestId = 9_500_001;
+
+        TaskCompletionSource<GrpcServerBatcherResponse> pending = SeedPendingKeyValue(requestId, streamId);
+
+        AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> call = new(
+            new NoopClientStreamWriter<GrpcBatchServerKeyValueRequest>(),
+            new ListAsyncStreamReader<GrpcBatchServerKeyValueResponse>([
+                new GrpcBatchServerKeyValueResponse
+                {
+                    Type = GrpcServerBatchType.ServerTypeNone,
+                    RequestId = requestId
+                }
+            ]),
+            Task.FromResult(new Metadata()),
+            static () => Status.DefaultSuccess,
+            static () => [],
+            static () => { });
+
+        await InvokeReadKeyValueMessages(streamId, call, NullLogger.Instance);
+
+        Assert.True(pending.Task.IsFaulted);
+
+        RpcException failure = Assert.IsType<RpcException>(pending.Task.Exception!.InnerException);
+        Assert.Equal(StatusCode.Unavailable, failure.StatusCode);
+
+        // An unrecognized type is a different condition — a protocol mismatch — and must not be
+        // retried, so only None maps to a retryable failure.
+        Assert.False(RequestRefs().ContainsKey(requestId));
+        Assert.False(RequestStreamRefs().ContainsKey(requestId));
+    }
+
+    private static TaskCompletionSource<GrpcServerBatcherResponse> SeedPendingKeyValue(int requestId, long streamId)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem item = new(
+            GrpcServerBatcherItemType.KeyValues,
+            requestId,
+            new GrpcServerBatcherRequest(new GrpcLookupTransactionRecordRequest()),
+            promise);
+
+        RequestRefs()[requestId] = item;
+        RequestStreamRefs()[requestId] = streamId;
+
+        return promise;
+    }
+
+    /// <summary>Feeds a fixed list of responses to the read loop, then closes the stream.</summary>
+    private sealed class ListAsyncStreamReader<T> : IAsyncStreamReader<T>
+    {
+        private readonly IReadOnlyList<T> items;
+
+        private int index = -1;
+
+        public ListAsyncStreamReader(IReadOnlyList<T> items) => this.items = items;
+
+        public T Current => items[index];
+
+        public Task<bool> MoveNext(CancellationToken cancellationToken) => Task.FromResult(++index < items.Count);
     }
 
     private sealed class EmptyAsyncStreamReader<T> : IAsyncStreamReader<T>

@@ -3,6 +3,7 @@ using System.Text.Json;
 
 using Grpc.Core;
 
+using Kahuna.Client.Communication;
 using Kahuna.Communication.External.Rest;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Server.Communication.Internode;
@@ -91,6 +92,55 @@ public sealed class TestInterNodeTransportMustRetry
     }
 
     // ── REST last-resort mapping ─────────────────────────────────────────────
+
+    /// <summary>
+    /// The REST middleware must not carry a classification rule of its own: every surface answers
+    /// retryable failures with its own typed MustRetry, so they all have to agree on what retryable
+    /// means. Pinning the delegation keeps a future surface-local copy from drifting.
+    /// </summary>
+    [Fact]
+    public void RestMapping_DelegatesToTheSharedClassifier()
+    {
+        Exception[] cases =
+        [
+            new RaftException("Invalid partition: 3"),
+            new RpcException(new Status(StatusCode.Unavailable, "response ended prematurely")),
+            new RpcException(new Status(StatusCode.Internal, "dead pool", new HttpRequestException("ping timeout"))),
+            new AggregateException(new RpcException(new Status(StatusCode.Cancelled, "stream reset"))),
+            new RpcException(new Status(StatusCode.Internal, "server fault")),
+            new InvalidOperationException("bug"),
+            new OperationCanceledException()
+        ];
+
+        foreach (Exception ex in cases)
+            Assert.Equal(RetryableFailureClassifier.IsRetryable(ex), RetryableExceptionMapping.IsRetryable(ex));
+    }
+
+    /// <summary>
+    /// The SDK cannot reference the server assembly, so it carries its own copy of the transport rule
+    /// for the servers that predate the typed-refusal contract. A copy is only safe while it agrees
+    /// with the original — this pins the two together so a change to one that is not mirrored in the
+    /// other fails here rather than in production, where the SDK would stop retrying a dead pooled
+    /// connection (or start retrying a genuine server fault forever).
+    /// </summary>
+    [Fact]
+    public void ClientTransportClassifier_AgreesWithTheServerClassifier()
+    {
+        RpcException[] cases =
+        [
+            new(new Status(StatusCode.Unavailable, "response ended prematurely")),
+            new(new Status(StatusCode.DeadlineExceeded, "too slow")),
+            new(new Status(StatusCode.Cancelled, "stream reset")),
+            new(new Status(StatusCode.Internal, "dead pool", new HttpRequestException("ping timeout"))),
+            new(new Status(StatusCode.Internal, "request aborted", new IOException("connection reset by peer"))),
+            new(new Status(StatusCode.Internal, "server fault")),
+            new(new Status(StatusCode.NotFound, "missing")),
+            new(new Status(StatusCode.InvalidArgument, "bad request"))
+        ];
+
+        foreach (RpcException ex in cases)
+            Assert.Equal(RetryableFailureClassifier.IsRetryable(ex), RetryableTransportFailure.IsRetryable(ex));
+    }
 
     [Fact]
     public void RestMapping_ClassifiesRetryableExceptions()

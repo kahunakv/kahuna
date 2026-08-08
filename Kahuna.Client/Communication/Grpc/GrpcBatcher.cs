@@ -513,7 +513,7 @@ internal sealed class GrpcBatcher
 
                     return;
                 }
-                catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
+                catch (RpcException ex) when (RetryableTransportFailure.IsRetryable(ex))
                 {
                     InvalidateSharedConnections(MakeCacheKey(url, securityOptions));
                     RemoveRequestRefs(requests);
@@ -797,7 +797,7 @@ internal sealed class GrpcBatcher
             InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
         }
-        catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
+        catch (RpcException ex) when (RetryableTransportFailure.IsRetryable(ex))
         {
             InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
@@ -849,7 +849,7 @@ internal sealed class GrpcBatcher
             InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);
         }
-        catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
+        catch (RpcException ex) when (RetryableTransportFailure.IsRetryable(ex))
         {
             InvalidateSharedConnections(cacheKey);
             FailPendingRequests(sharedStreamingId, ex);

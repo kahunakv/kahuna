@@ -928,7 +928,7 @@ public class GrpcCommunication : IKahunaCommunication
                     
                 throw new KahunaException("Failed to get key/value:" + (KeyValueResponseType)response.Type, (KeyValueResponseType)response.Type);
             }
-            catch (RpcException ex) when (ex.StatusCode == StatusCode.Unavailable && !cancellationToken.IsCancellationRequested && unavailableRetries == 0)
+            catch (RpcException ex) when (RetryableTransportFailure.IsRetryable(ex) && !cancellationToken.IsCancellationRequested && unavailableRetries == 0)
             {
                 logger?.LogDebug(ex, "Retrying get key/value after gRPC stream became unavailable");
                 await Task.Delay(25, cancellationToken).ConfigureAwait(false);

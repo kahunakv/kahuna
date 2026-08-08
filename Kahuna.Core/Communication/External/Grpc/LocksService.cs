@@ -1,7 +1,10 @@
 
 using Kommander;
 using Google.Protobuf;
+using System.Runtime.CompilerServices;
+
 using Grpc.Core;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
 using Kahuna.Shared.Locks;
@@ -50,7 +53,7 @@ public sealed class LocksService : Locker.LockerBase
         return await TryLockInternal(request, context);
     }
 
-    private async Task<GrpcTryLockResponse> TryLockInternal(GrpcTryLockRequest request, ServerCallContext context)
+    private async Task<GrpcTryLockResponse> TryLockCore(GrpcTryLockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
             return new()
@@ -86,7 +89,7 @@ public sealed class LocksService : Locker.LockerBase
         return await TryExtendLockInternal(request, context);
     }
 
-    private async Task<GrpcExtendLockResponse> TryExtendLockInternal(GrpcExtendLockRequest request, ServerCallContext context)
+    private async Task<GrpcExtendLockResponse> TryExtendLockCore(GrpcExtendLockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
             return new()
@@ -122,7 +125,7 @@ public sealed class LocksService : Locker.LockerBase
         return await UnlockInternal(request, context);
     }
 
-    private async Task<GrpcUnlockResponse> UnlockInternal(GrpcUnlockRequest request, ServerCallContext context)
+    private async Task<GrpcUnlockResponse> UnlockCore(GrpcUnlockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Resource) || request.Owner is null)
             return new()
@@ -156,7 +159,7 @@ public sealed class LocksService : Locker.LockerBase
         return await GetLockInternal(request, context);
     }
 
-    private async Task<GrpcGetLockResponse> GetLockInternal(GrpcGetLockRequest request, ServerCallContext context)
+    private async Task<GrpcGetLockResponse> GetLockCore(GrpcGetLockRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Resource))
             return new()
@@ -197,25 +200,48 @@ public sealed class LocksService : Locker.LockerBase
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        void Track(Task task)
+        using SemaphoreSlim semaphore = new(1, 1);
+
+        void Track(GrpcBatchClientLockRequest request, Task task)
         {
             Interlocked.Increment(ref inFlight);
-            _ = task.ContinueWith(completed =>
-            {
-                if (completed.IsFaulted)
-                {
-                    Exception? e = completed.Exception?.InnerException;
-                    if (e is IOException or OperationCanceledException)
-                        logger.LogCommunicationIoException(e);
-                    else
-                        logger.LogError(completed.Exception, "Batch lock client handler faulted");
-                }
-                if (Interlocked.Decrement(ref inFlight) == 0)
-                    drain.TrySetResult();
-            }, TaskScheduler.Default);
+            _ = Observe(request, task);
         }
 
-        using SemaphoreSlim semaphore = new(1, 1);
+        // A handler that throws must still answer its own RequestId: the SDK matches responses by id,
+        // so an unanswered request hangs until its deadline while every other request on the shared
+        // stream keeps flowing. Refusing just that one request with MustRetry leaves the stream and
+        // its neighbours untouched.
+        async Task Observe(GrpcBatchClientLockRequest request, Task task)
+        {
+            try
+            {
+                await task;
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException)
+            {
+                // The stream is already gone or the client left; there is nobody left to answer.
+                logger.LogCommunicationIoException(ex);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Batch lock client handler faulted");
+
+                try
+                {
+                    await WriteResponseToStream(semaphore, responseStream, BatchRefusalResponses.ForClientLock(request), context);
+                }
+                catch (Exception writeEx)
+                {
+                    logger.LogCommunicationIoException(writeEx);
+                }
+            }
+            finally
+            {
+                if (Interlocked.Decrement(ref inFlight) == 0)
+                    drain.TrySetResult();
+            }
+        }
 
         try
         {
@@ -227,7 +253,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcTryLockRequest? lockRequest = request.TryLock;
 
-                        Track(TryLockDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
+                        Track(request, TryLockDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
                     }
                     break;
                     
@@ -235,7 +261,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcUnlockRequest? unlockRequest = request.Unlock;
 
-                        Track(TryUnlockDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
+                        Track(request, TryUnlockDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
                     }
                     break;
                     
@@ -243,7 +269,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
 
-                        Track(TryExtendLockDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                        Track(request, TryExtendLockDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -251,7 +277,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcGetLockRequest? getLockRequest = request.GetLock;
 
-                        Track(TryGetLockDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                        Track(request, TryGetLockDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
                     }
                     break;
 
@@ -273,9 +299,52 @@ public sealed class LocksService : Locker.LockerBase
         }
     }
 
+    /// <summary>Serializes a write onto the shared client response stream: gRPC allows only one
+    /// write at a time, and batched handlers complete out of order.</summary>
+    private static async Task WriteResponseToStream(
+        SemaphoreSlim semaphore,
+        IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
+        GrpcBatchClientLockResponse response,
+        ServerCallContext context
+    )
+    {
+        bool acquired = false;
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+            acquired = true;
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            if (acquired) semaphore.Release();
+        }
+    }
+
+    /// <summary>Serializes a write onto the shared inter-node response stream.</summary>
+    private static async Task WriteResponseToStream(
+        SemaphoreSlim semaphore,
+        IServerStreamWriter<GrpcBatchServerLockResponse> responseStream,
+        GrpcBatchServerLockResponse response,
+        ServerCallContext context
+    )
+    {
+        bool acquired = false;
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+            acquired = true;
+            await responseStream.WriteAsync(response);
+        }
+        finally
+        {
+            if (acquired) semaphore.Release();
+        }
+    }
+
     private async Task TryLockDelayed(
-        SemaphoreSlim semaphore, 
-        int requestId, 
+        SemaphoreSlim semaphore,
+        int requestId,
         GrpcTryLockRequest lockRequest, 
         IServerStreamWriter<GrpcBatchClientLockResponse> responseStream,
         ServerCallContext context
@@ -402,25 +471,48 @@ public sealed class LocksService : Locker.LockerBase
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        void Track(Task task)
+        using SemaphoreSlim semaphore = new(1, 1);
+
+        void Track(GrpcBatchServerLockRequest request, Task task)
         {
             Interlocked.Increment(ref inFlight);
-            _ = task.ContinueWith(completed =>
-            {
-                if (completed.IsFaulted)
-                {
-                    Exception? e = completed.Exception?.InnerException;
-                    if (e is IOException or OperationCanceledException)
-                        logger.LogCommunicationIoException(e);
-                    else
-                        logger.LogError(completed.Exception, "Batch lock server handler faulted");
-                }
-                if (Interlocked.Decrement(ref inFlight) == 0)
-                    drain.TrySetResult();
-            }, TaskScheduler.Default);
+            _ = Observe(request, task);
         }
 
-        using SemaphoreSlim semaphore = new(1, 1);
+        // A handler that throws must still answer its own RequestId: the caller matches responses by id,
+        // so an unanswered request hangs until its deadline while every other request on the shared
+        // stream keeps flowing. Refusing just that one request with MustRetry leaves the stream and
+        // its neighbours untouched.
+        async Task Observe(GrpcBatchServerLockRequest request, Task task)
+        {
+            try
+            {
+                await task;
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException)
+            {
+                // The stream is already gone or the caller left; there is nobody left to answer.
+                logger.LogCommunicationIoException(ex);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Batch lock server handler faulted");
+
+                try
+                {
+                    await WriteResponseToStream(semaphore, responseStream, BatchRefusalResponses.ForServerLock(request), context);
+                }
+                catch (Exception writeEx)
+                {
+                    logger.LogCommunicationIoException(writeEx);
+                }
+            }
+            finally
+            {
+                if (Interlocked.Decrement(ref inFlight) == 0)
+                    drain.TrySetResult();
+            }
+        }
 
         try
         {
@@ -432,7 +524,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcTryLockRequest? lockRequest = request.TryLock;
 
-                        Track(TryLockServerDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
+                        Track(request, TryLockServerDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
                     }
                     break;
                     
@@ -440,7 +532,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcUnlockRequest? unlockRequest = request.Unlock;
 
-                        Track(TryUnlockServerDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
+                        Track(request, TryUnlockServerDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
                     }
                     break;
                     
@@ -448,7 +540,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
 
-                        Track(ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                        Track(request, ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -456,7 +548,7 @@ public sealed class LocksService : Locker.LockerBase
                     {
                         GrpcGetLockRequest? getLockRequest = request.GetLock;
 
-                        Track(GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                        Track(request, GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
                     }
                     break;
 
@@ -597,4 +689,47 @@ public sealed class LocksService : Locker.LockerBase
             if (acquired) semaphore.Release();
         }
     }
+
+    // ── Retryable-failure guards ────────────────────────────────────────────────────────────────
+    //
+    // A retry loop must always receive a classifiable answer. A Raft resolution failure or an
+    // inter-node transport failure means no definitive answer was produced; left unguarded it
+    // reaches a unary caller as gRPC status Unknown (which clients do not retry) and leaves a
+    // batched caller waiting for a response that never comes. Both entry points — the unary
+    // overrides and the batchers' delayed handlers — go through these guards. Genuine bugs are not
+    // retryable and keep propagating.
+
+    private async Task<TResponse> Guard<TRequest, TResponse>(
+        TRequest request,
+        ServerCallContext context,
+        Func<LocksService, TRequest, ServerCallContext, Task<TResponse>> handler,
+        Func<TRequest, TResponse> refusal,
+        [CallerMemberName] string handlerName = ""
+    )
+    {
+        try
+        {
+            return await handler(this, request, context);
+        }
+        catch (Exception ex) when (RetryableFailureClassifier.IsRetryable(ex))
+        {
+            logger.LogWarning(
+                "Mapping retryable {ExceptionType} on {Handler} to MustRetry: {Message}",
+                ex.GetType().Name, handlerName, ex.Message);
+
+            return refusal(request);
+        }
+    }
+
+    private Task<GrpcTryLockResponse> TryLockInternal(GrpcTryLockRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.TryLockCore(r, c), static _ => LockMustRetry.TryLock());
+
+    private Task<GrpcExtendLockResponse> TryExtendLockInternal(GrpcExtendLockRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.TryExtendLockCore(r, c), static _ => LockMustRetry.ExtendLock());
+
+    private Task<GrpcUnlockResponse> UnlockInternal(GrpcUnlockRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.UnlockCore(r, c), static _ => LockMustRetry.Unlock());
+
+    private Task<GrpcGetLockResponse> GetLockInternal(GrpcGetLockRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.GetLockCore(r, c), static _ => LockMustRetry.GetLock());
 }

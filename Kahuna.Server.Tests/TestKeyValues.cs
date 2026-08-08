@@ -130,8 +130,9 @@ public class TestKeyValues : BaseCluster
         
             (response, revision, _) = await kahuna2.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keyName, durability, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Deleted, response);
-            Assert.Equal(0, revision);
-        
+            // The tombstone is a first-class revision on top of the live revision 0.
+            Assert.Equal(1, revision);
+
             result = await kahuna1.LocateAndGetByBucket(HLCTimestamp.Zero, prefix, HLCTimestamp.Zero, durability, TestContext.Current.CancellationToken);
             Assert.Equal(4, result.Items.Count);
 
@@ -207,8 +208,9 @@ public class TestKeyValues : BaseCluster
         
             (response, revision, _) = await kahuna2.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keyName, durability, TestContext.Current.CancellationToken);
             Assert.Equal(KeyValueResponseType.Deleted, response);
-            Assert.Equal(0, revision);
-        
+            // The tombstone is a first-class revision on top of the live revision 0.
+            Assert.Equal(1, revision);
+
             result = await kahuna3.ScanAllByPrefix(prefix, HLCTimestamp.Zero, durability, TestContext.Current.CancellationToken);
             Assert.Equal(4, result.Items.Count);
         

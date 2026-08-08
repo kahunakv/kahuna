@@ -1,6 +1,9 @@
 using Google.Protobuf;
 using Grpc.Core;
 
+using Microsoft.Extensions.Logging.Abstractions;
+
+using Kahuna;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Shared.Sequences;
 
@@ -42,7 +45,7 @@ public sealed class TestSequenceAllocationGrpcWire
     [MemberData(nameof(NonSuccessCases))]
     public async Task NextSequenceValue_NonSuccess_ReturnsItsTypeOverTheWire(SequenceResponseType type, bool forwarded)
     {
-        SequencesService service = new(new FixedSequenceResultKahuna(type, default));
+        SequencesService service = new(new FixedSequenceResultKahuna(type, default), NullLogger<IKahuna>.Instance);
 
         GrpcSequenceAllocationResponse response = await service.NextSequenceValue(
             new GrpcNextSequenceRequest { Name = "missing" }, Context(forwarded));
@@ -57,7 +60,7 @@ public sealed class TestSequenceAllocationGrpcWire
     [MemberData(nameof(NonSuccessCases))]
     public async Task ReserveSequenceRange_NonSuccess_ReturnsItsTypeOverTheWire(SequenceResponseType type, bool forwarded)
     {
-        SequencesService service = new(new FixedSequenceResultKahuna(type, default));
+        SequencesService service = new(new FixedSequenceResultKahuna(type, default), NullLogger<IKahuna>.Instance);
 
         GrpcSequenceAllocationResponse response = await service.ReserveSequenceRange(
             new GrpcReserveSequenceRangeRequest { Name = "missing", Count = 5 }, Context(forwarded));
@@ -72,7 +75,7 @@ public sealed class TestSequenceAllocationGrpcWire
     public async Task Success_CarriesTheWholeAllocationOverTheWire()
     {
         SequenceAllocation allocation = new("orders", 41, 50, 10, 7);
-        SequencesService service = new(new FixedSequenceResultKahuna(SequenceResponseType.Success, allocation));
+        SequencesService service = new(new FixedSequenceResultKahuna(SequenceResponseType.Success, allocation), NullLogger<IKahuna>.Instance);
 
         GrpcSequenceAllocationResponse response = await service.ReserveSequenceRange(
             new GrpcReserveSequenceRangeRequest { Name = "orders", Count = 10 }, Context(forwarded: true));

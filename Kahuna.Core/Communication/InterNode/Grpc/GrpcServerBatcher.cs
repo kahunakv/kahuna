@@ -939,7 +939,13 @@ internal sealed class GrpcServerBatcher
                         item.Promise.TrySetResult(new(response.GetLock));
                         break;
 
+                    // The peer answered the request but could not express an outcome in its payload:
+                    // it produced no definitive answer, which is exactly the retryable condition.
                     case GrpcLockServerBatchType.ServerTypeNone:
+                        item.Promise.TrySetException(new RpcException(new(
+                            StatusCode.Unavailable, "The remote node could not answer the lock request.")));
+                        break;
+
                     default:
                         item.Promise.TrySetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;
@@ -1165,7 +1171,15 @@ internal sealed class GrpcServerBatcher
                         item.Promise.TrySetResult(new(response.GetSnapshotFloor));
                         break;
 
+                    // The peer answered the request but could not express an outcome in its payload
+                    // (several inter-node payloads carry only a Success/Found flag, where a false
+                    // would be indistinguishable from a real negative answer): no definitive answer
+                    // was produced, which is exactly the retryable condition.
                     case GrpcServerBatchType.ServerTypeNone:
+                        item.Promise.TrySetException(new RpcException(new(
+                            StatusCode.Unavailable, "The remote node could not answer the key-value request.")));
+                        break;
+
                     default:
                         item.Promise.TrySetException(new KahunaServerException("Unknown response type: " + response.Type));
                         break;

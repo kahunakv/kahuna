@@ -5,8 +5,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
+
 using Grpc.Core;
 using Kahuna.Server.Communication;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Shared.Sequences;
 using Kommander.Diagnostics;
 
@@ -25,12 +28,18 @@ public sealed class SequencesService : Sequencer.SequencerBase
 {
     private readonly IKahuna sequences;
 
-    public SequencesService(IKahuna sequences)
+    private readonly ILogger<IKahuna> logger;
+
+    public SequencesService(IKahuna sequences, ILogger<IKahuna> logger)
     {
         this.sequences = sequences;
+        this.logger = logger;
     }
 
-    public override async Task<GrpcSequenceResponse> CreateSequence(GrpcCreateSequenceRequest request, ServerCallContext context)
+    public override Task<GrpcSequenceResponse> CreateSequence(GrpcCreateSequenceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.CreateSequenceCore(r, c), static _ => SequenceMustRetry.Sequence());
+
+    private async Task<GrpcSequenceResponse> CreateSequenceCore(GrpcCreateSequenceRequest request, ServerCallContext context)
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -61,7 +70,10 @@ public sealed class SequencesService : Sequencer.SequencerBase
         };
     }
 
-    public override async Task<GrpcSequenceResponse> GetSequence(GrpcGetSequenceRequest request, ServerCallContext context)
+    public override Task<GrpcSequenceResponse> GetSequence(GrpcGetSequenceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.GetSequenceCore(r, c), static _ => SequenceMustRetry.Sequence());
+
+    private async Task<GrpcSequenceResponse> GetSequenceCore(GrpcGetSequenceRequest request, ServerCallContext context)
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -85,7 +97,10 @@ public sealed class SequencesService : Sequencer.SequencerBase
         return grpcResponse;
     }
 
-    public override async Task<GrpcSequenceAllocationResponse> NextSequenceValue(GrpcNextSequenceRequest request, ServerCallContext context)
+    public override Task<GrpcSequenceAllocationResponse> NextSequenceValue(GrpcNextSequenceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.NextSequenceValueCore(r, c), static _ => SequenceMustRetry.Allocation());
+
+    private async Task<GrpcSequenceAllocationResponse> NextSequenceValueCore(GrpcNextSequenceRequest request, ServerCallContext context)
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -107,7 +122,10 @@ public sealed class SequencesService : Sequencer.SequencerBase
         return BuildAllocationResponse(response, allocation, stopwatch);
     }
 
-    public override async Task<GrpcSequenceAllocationResponse> ReserveSequenceRange(GrpcReserveSequenceRangeRequest request, ServerCallContext context)
+    public override Task<GrpcSequenceAllocationResponse> ReserveSequenceRange(GrpcReserveSequenceRangeRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.ReserveSequenceRangeCore(r, c), static _ => SequenceMustRetry.Allocation());
+
+    private async Task<GrpcSequenceAllocationResponse> ReserveSequenceRangeCore(GrpcReserveSequenceRangeRequest request, ServerCallContext context)
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -131,7 +149,10 @@ public sealed class SequencesService : Sequencer.SequencerBase
         return BuildAllocationResponse(response, allocation, stopwatch);
     }
 
-    public override async Task<GrpcSequenceResponse> DeleteSequence(GrpcDeleteSequenceRequest request, ServerCallContext context)
+    public override Task<GrpcSequenceResponse> DeleteSequence(GrpcDeleteSequenceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.DeleteSequenceCore(r, c), static _ => SequenceMustRetry.Sequence());
+
+    private async Task<GrpcSequenceResponse> DeleteSequenceCore(GrpcDeleteSequenceRequest request, ServerCallContext context)
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -204,5 +225,34 @@ public sealed class SequencesService : Sequencer.SequencerBase
             Count = allocation.Count,
             Revision = allocation.Revision
         };
+    }
+
+    // ── Retryable-failure guards ────────────────────────────────────────────────────────────────
+    //
+    // A retry loop must always receive a classifiable answer. A Raft resolution failure or an
+    // inter-node transport failure means no definitive answer was produced; left unguarded it
+    // reaches the caller as gRPC status Unknown, which clients do not retry. Genuine bugs are not
+    // retryable and keep propagating.
+
+    private async Task<TResponse> Guard<TRequest, TResponse>(
+        TRequest request,
+        ServerCallContext context,
+        Func<SequencesService, TRequest, ServerCallContext, Task<TResponse>> handler,
+        Func<TRequest, TResponse> refusal,
+        [CallerMemberName] string handlerName = ""
+    )
+    {
+        try
+        {
+            return await handler(this, request, context);
+        }
+        catch (Exception ex) when (RetryableFailureClassifier.IsRetryable(ex))
+        {
+            logger.LogWarning(
+                "Mapping retryable {ExceptionType} on {Handler} to MustRetry: {Message}",
+                ex.GetType().Name, handlerName, ex.Message);
+
+            return refusal(request);
+        }
     }
 }

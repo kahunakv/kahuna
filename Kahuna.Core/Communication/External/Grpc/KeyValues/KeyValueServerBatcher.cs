@@ -40,25 +40,48 @@ internal sealed class KeyValueServerBatcher
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        void Track(Task task)
+        using SemaphoreSlim semaphore = new(1, 1);
+
+        void Track(GrpcBatchServerKeyValueRequest request, Task task)
         {
             Interlocked.Increment(ref inFlight);
-            _ = task.ContinueWith(completed =>
-            {
-                if (completed.IsFaulted)
-                {
-                    Exception? e = completed.Exception?.InnerException;
-                    if (e is IOException or OperationCanceledException)
-                        logger.LogCommunicationIoException(e);
-                    else
-                        logger.LogError(completed.Exception, "Batch key-value server handler faulted");
-                }
-                if (Interlocked.Decrement(ref inFlight) == 0)
-                    drain.TrySetResult();
-            }, TaskScheduler.Default);
+            _ = Observe(request, task);
         }
 
-        using SemaphoreSlim semaphore = new(1, 1);
+        // A handler that throws must still answer its own RequestId: the caller matches responses by
+        // id, so an unanswered request hangs until its deadline while every other request on the
+        // shared stream keeps flowing. Refusing just that one request with MustRetry leaves the
+        // stream and its neighbours untouched.
+        async Task Observe(GrpcBatchServerKeyValueRequest request, Task task)
+        {
+            try
+            {
+                await task;
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException)
+            {
+                // The stream is already gone or the caller left; there is nobody left to answer.
+                logger.LogCommunicationIoException(ex);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Batch key-value server handler faulted");
+
+                try
+                {
+                    await WriteResponseToStream(semaphore, responseStream, BatchRefusalResponses.ForServerKeyValue(request), context);
+                }
+                catch (Exception writeEx)
+                {
+                    logger.LogCommunicationIoException(writeEx);
+                }
+            }
+            finally
+            {
+                if (Interlocked.Decrement(ref inFlight) == 0)
+                    drain.TrySetResult();
+            }
+        }
 
         try
         {
@@ -70,7 +93,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
 
-                        Track(TrySetKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
+                        Track(request, TrySetKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
                     }
                     break;
                     
@@ -78,7 +101,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTrySetManyKeyValueRequest? setKeyRequest = request.TrySetManyKeyValue;
 
-                        Track(TrySetManyKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
+                        Track(request, TrySetManyKeyValueServerDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -86,7 +109,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryDeleteManyKeyValueRequest? deleteManyKeyRequest = request.TryDeleteManyKeyValue;
 
-                        Track(TryDeleteManyKeyValueServerDelayed(semaphore, request.RequestId, deleteManyKeyRequest, responseStream, context));
+                        Track(request, TryDeleteManyKeyValueServerDelayed(semaphore, request.RequestId, deleteManyKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -94,7 +117,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
 
-                        Track(TryGetKeyValueServerDelayed(semaphore, request.RequestId, getKeyRequest, responseStream, context));
+                        Track(request, TryGetKeyValueServerDelayed(semaphore, request.RequestId, getKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -102,7 +125,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryGetManyValuesRequest? getManyValuesRequest = request.TryGetManyValues;
 
-                        Track(TryGetManyValuesDelayed(semaphore, request.RequestId, getManyValuesRequest, responseStream, context));
+                        Track(request, TryGetManyValuesDelayed(semaphore, request.RequestId, getManyValuesRequest, responseStream, context));
                     }
                     break;
 
@@ -110,7 +133,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
 
-                        Track(TryDeleteKeyValueServerDelayed(semaphore, request.RequestId, deleteKeyRequest, responseStream, context));
+                        Track(request, TryDeleteKeyValueServerDelayed(semaphore, request.RequestId, deleteKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -118,7 +141,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryExtendKeyValueRequest? extendKeyRequest = request.TryExtendKeyValue;
 
-                        Track(TryExtendKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
+                        Track(request, TryExtendKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -126,7 +149,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
 
-                        Track(TryExistsKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
+                        Track(request, TryExistsKeyValueServerDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -134,7 +157,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryExistsManyValuesRequest? existsManyValuesRequest = request.TryExistsManyValues;
 
-                        Track(TryExistsManyValuesDelayed(semaphore, request.RequestId, existsManyValuesRequest, responseStream, context));
+                        Track(request, TryExistsManyValuesDelayed(semaphore, request.RequestId, existsManyValuesRequest, responseStream, context));
                     }
                     break;
 
@@ -142,7 +165,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryCheckWriteIntentRequest? checkWriteIntentRequest = request.TryCheckWriteIntent;
 
-                        Track(TryCheckWriteIntentServerDelayed(semaphore, request.RequestId, checkWriteIntentRequest, responseStream, context));
+                        Track(request, TryCheckWriteIntentServerDelayed(semaphore, request.RequestId, checkWriteIntentRequest, responseStream, context));
                     }
                     break;
 
@@ -150,7 +173,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryCheckManyWriteIntentsRequest? checkManyWriteIntentsRequest = request.TryCheckManyWriteIntents;
 
-                        Track(TryCheckManyWriteIntentsServerDelayed(semaphore, request.RequestId, checkManyWriteIntentsRequest, responseStream, context));
+                        Track(request, TryCheckManyWriteIntentsServerDelayed(semaphore, request.RequestId, checkManyWriteIntentsRequest, responseStream, context));
                     }
                     break;
 
@@ -158,7 +181,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
 
-                        Track(TryExecuteTransactionServerDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
+                        Track(request, TryExecuteTransactionServerDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
                     }
                     break;
                     
@@ -166,7 +189,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryAcquireExclusiveLockRequest? tryAcquireExclusiveLockRequest = request.TryAcquireExclusiveLock;
 
-                        Track(TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
+                        Track(request, TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -174,7 +197,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryAcquireExclusivePrefixLockRequest? tryAcquireExclusivePrefixLockRequest = request.TryAcquireExclusivePrefixLock;
 
-                        Track(TryAcquireExclusivePrefixLockDelayed(semaphore, request.RequestId, tryAcquireExclusivePrefixLockRequest, responseStream, context));
+                        Track(request, TryAcquireExclusivePrefixLockDelayed(semaphore, request.RequestId, tryAcquireExclusivePrefixLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -182,7 +205,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryAcquireManyExclusiveLocksRequest? tryAcquireManyExclusiveLocksRequest = request.TryAcquireManyExclusiveLocks;
 
-                        Track(TryAcquireManyExclusiveLocksDelayed(semaphore, request.RequestId, tryAcquireManyExclusiveLocksRequest, responseStream, context));
+                        Track(request, TryAcquireManyExclusiveLocksDelayed(semaphore, request.RequestId, tryAcquireManyExclusiveLocksRequest, responseStream, context));
                     }
                     break;
                     
@@ -190,7 +213,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryReleaseExclusiveLockRequest? tryReleaseExclusiveLockRequest = request.TryReleaseExclusiveLock;
 
-                        Track(TryReleaseExclusiveLockDelayed(semaphore, request.RequestId, tryReleaseExclusiveLockRequest, responseStream, context));
+                        Track(request, TryReleaseExclusiveLockDelayed(semaphore, request.RequestId, tryReleaseExclusiveLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -198,70 +221,70 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryReleaseExclusivePrefixLockRequest? tryReleaseExclusivePrefixLockRequest = request.TryReleaseExclusivePrefixLock;
 
-                        Track(TryReleaseExclusivePrefixLockDelayed(semaphore, request.RequestId, tryReleaseExclusivePrefixLockRequest, responseStream, context));
+                        Track(request, TryReleaseExclusivePrefixLockDelayed(semaphore, request.RequestId, tryReleaseExclusivePrefixLockRequest, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock:
                     {
                         GrpcTryAcquireExclusiveRangeLockRequest? req = request.TryAcquireExclusiveRangeLock;
-                        Track(TryAcquireExclusiveRangeLockDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, TryAcquireExclusiveRangeLockDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock:
                     {
                         GrpcTryReleaseExclusiveRangeLockRequest? req = request.TryReleaseExclusiveRangeLock;
-                        Track(TryReleaseExclusiveRangeLockDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, TryReleaseExclusiveRangeLockDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
                     {
                         GrpcEnsureKeyRangeSeededRequest? req = request.EnsureKeyRangeSeeded;
-                        Track(EnsureKeyRangeSeededDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, EnsureKeyRangeSeededDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
                     {
                         GrpcEnsureKeyRangeRemovedRequest? req = request.EnsureKeyRangeRemoved;
-                        Track(EnsureKeyRangeRemovedDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, EnsureKeyRangeRemovedDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryGetRangeLocks:
                     {
                         GrpcGetRangeLocksRequest? req = request.GetRangeLocks;
-                        Track(GetRangeLocksDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, GetRangeLocksDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryImportRangeLocks:
                     {
                         GrpcImportRangeLocksRequest? req = request.ImportRangeLocks;
-                        Track(ImportRangeLocksDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, ImportRangeLocksDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerImportCompletionReceipts:
                     {
                         GrpcImportCompletionReceiptsRequest? req = request.ImportCompletionReceipts;
-                        Track(ImportCompletionReceiptsDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, ImportCompletionReceiptsDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerDurableOperation:
                     {
                         GrpcDurableOperationRequest? req = request.DurableOperation;
-                        Track(DurableOperationDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, DurableOperationDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerLookupTransactionRecord:
                     {
                         GrpcLookupTransactionRecordRequest? req = request.LookupTransactionRecord;
-                        Track(LookupTransactionRecordDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, LookupTransactionRecordDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
@@ -269,7 +292,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryReleaseManyExclusiveLocksRequest? tryReleaseManyExclusiveLocksRequest = request.TryReleaseManyExclusiveLocks;
 
-                        Track(TryReleaseManyExclusiveLocksDelayed(semaphore, request.RequestId, tryReleaseManyExclusiveLocksRequest, responseStream, context));
+                        Track(request, TryReleaseManyExclusiveLocksDelayed(semaphore, request.RequestId, tryReleaseManyExclusiveLocksRequest, responseStream, context));
                     }
                     break;
                     
@@ -277,7 +300,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryPrepareMutationsRequest? tryPrepareMutationsRequest = request.TryPrepareMutations;
 
-                        Track(TryPrepareMutationsDelayed(semaphore, request.RequestId, tryPrepareMutationsRequest, responseStream, context));
+                        Track(request, TryPrepareMutationsDelayed(semaphore, request.RequestId, tryPrepareMutationsRequest, responseStream, context));
                     }
                     break;
                     
@@ -285,7 +308,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryPrepareManyMutationsRequest? tryPrepareManyMutationsRequest = request.TryPrepareManyMutations;
 
-                        Track(TryPrepareManyMutationsDelayed(semaphore, request.RequestId, tryPrepareManyMutationsRequest, responseStream, context));
+                        Track(request, TryPrepareManyMutationsDelayed(semaphore, request.RequestId, tryPrepareManyMutationsRequest, responseStream, context));
                     }
                     break;
                     
@@ -293,7 +316,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryCommitMutationsRequest? tryCommitMutationsRequest = request.TryCommitMutations;
 
-                        Track(TryCommitMutationsDelayed(semaphore, request.RequestId, tryCommitMutationsRequest, responseStream, context));
+                        Track(request, TryCommitMutationsDelayed(semaphore, request.RequestId, tryCommitMutationsRequest, responseStream, context));
                     }
                     break;
                     
@@ -301,7 +324,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryCommitManyMutationsRequest? tryCommitManyMutationsRequest = request.TryCommitManyMutations;
 
-                        Track(TryCommitManyMutationsDelayed(semaphore, request.RequestId, tryCommitManyMutationsRequest, responseStream, context));
+                        Track(request, TryCommitManyMutationsDelayed(semaphore, request.RequestId, tryCommitManyMutationsRequest, responseStream, context));
                     }
                     break;
                     
@@ -309,7 +332,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryRollbackMutationsRequest? tryRollbackMutationsRequest = request.TryRollbackMutations;
 
-                        Track(TryRollbackMutationsDelayed(semaphore, request.RequestId, tryRollbackMutationsRequest, responseStream, context));
+                        Track(request, TryRollbackMutationsDelayed(semaphore, request.RequestId, tryRollbackMutationsRequest, responseStream, context));
                     }
                     break;
                     
@@ -317,7 +340,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcTryRollbackManyMutationsRequest? tryRollbackManyMutationsRequest = request.TryRollbackManyMutations;
 
-                        Track(TryRollbackManyMutationsDelayed(semaphore, request.RequestId, tryRollbackManyMutationsRequest, responseStream, context));
+                        Track(request, TryRollbackManyMutationsDelayed(semaphore, request.RequestId, tryRollbackManyMutationsRequest, responseStream, context));
                     }
                     break;
                     
@@ -325,7 +348,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcGetByBucketRequest? tryGetByBucketRequest = request.GetByBucket;
 
-                        Track(GetByBucketDelayed(semaphore, request.RequestId, tryGetByBucketRequest, responseStream, context));
+                        Track(request, GetByBucketDelayed(semaphore, request.RequestId, tryGetByBucketRequest, responseStream, context));
                     }
                     break;
 
@@ -333,7 +356,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcGetByRangeRequest? getByRangeRequest = request.GetByRange;
 
-                        Track(GetByRangeDelayed(semaphore, request.RequestId, getByRangeRequest, responseStream, context));
+                        Track(request, GetByRangeDelayed(semaphore, request.RequestId, getByRangeRequest, responseStream, context));
                     }
                     break;
                     
@@ -341,7 +364,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcScanByPrefixRequest? tryScanByPrefixRequest = request.ScanByPrefix;
 
-                        Track(ScanByPrefixDelayed(semaphore, request.RequestId, tryScanByPrefixRequest, responseStream, context));
+                        Track(request, ScanByPrefixDelayed(semaphore, request.RequestId, tryScanByPrefixRequest, responseStream, context));
                     }
                     break;
                     
@@ -349,7 +372,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcStartTransactionRequest? startTransactionRequest = request.StartTransaction;
 
-                        Track(StartTransactionDelayed(semaphore, request.RequestId, startTransactionRequest, responseStream, context));
+                        Track(request, StartTransactionDelayed(semaphore, request.RequestId, startTransactionRequest, responseStream, context));
                     }
                     break;
                     
@@ -357,7 +380,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcCommitTransactionRequest? commitTransactionRequest = request.CommitTransaction;
 
-                        Track(CommitTransactionDelayed(semaphore, request.RequestId, commitTransactionRequest, responseStream, context));
+                        Track(request, CommitTransactionDelayed(semaphore, request.RequestId, commitTransactionRequest, responseStream, context));
                     }
                     break;
                     
@@ -365,7 +388,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcRollbackTransactionRequest? rollbackTransactionRequest = request.RollbackTransaction;
 
-                        Track(RollbackTransactionDelayed(semaphore, request.RequestId, rollbackTransactionRequest, responseStream, context));
+                        Track(request, RollbackTransactionDelayed(semaphore, request.RequestId, rollbackTransactionRequest, responseStream, context));
                     }
                     break;
 
@@ -373,7 +396,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcBeginOperationRequest? beginOperationRequest = request.BeginOperation;
 
-                        Track(BeginOperationDelayed(semaphore, request.RequestId, beginOperationRequest, responseStream, context));
+                        Track(request, BeginOperationDelayed(semaphore, request.RequestId, beginOperationRequest, responseStream, context));
                     }
                     break;
 
@@ -381,7 +404,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcCompleteOperationRequest? completeOperationRequest = request.CompleteOperation;
 
-                        Track(CompleteOperationDelayed(semaphore, request.RequestId, completeOperationRequest, responseStream, context));
+                        Track(request, CompleteOperationDelayed(semaphore, request.RequestId, completeOperationRequest, responseStream, context));
                     }
                     break;
 
@@ -389,7 +412,7 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcGetTransactionWorkingSetRequest? getWorkingSetRequest = request.GetTransactionWorkingSet;
 
-                        Track(GetTransactionWorkingSetDelayed(semaphore, request.RequestId, getWorkingSetRequest, responseStream, context));
+                        Track(request, GetTransactionWorkingSetDelayed(semaphore, request.RequestId, getWorkingSetRequest, responseStream, context));
                     }
                     break;
 
@@ -397,35 +420,35 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcCloseTransactionRequest? closeTransactionRequest = request.CloseTransaction;
 
-                        Track(CloseTransactionDelayed(semaphore, request.RequestId, closeTransactionRequest, responseStream, context));
+                        Track(request, CloseTransactionDelayed(semaphore, request.RequestId, closeTransactionRequest, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryAcquireSnapshotHold:
                     {
                         GrpcAcquireSnapshotHoldRequest? req = request.AcquireSnapshotHold;
-                        Track(AcquireSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, AcquireSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryRenewSnapshotHold:
                     {
                         GrpcRenewSnapshotHoldRequest? req = request.RenewSnapshotHold;
-                        Track(RenewSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, RenewSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryReleaseSnapshotHold:
                     {
                         GrpcReleaseSnapshotHoldRequest? req = request.ReleaseSnapshotHold;
-                        Track(ReleaseSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, ReleaseSnapshotHoldDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
                     case GrpcServerBatchType.ServerTryGetSnapshotFloor:
                     {
                         GrpcGetSnapshotFloorRequest? req = request.GetSnapshotFloor;
-                        Track(GetSnapshotFloorDelayed(semaphore, request.RequestId, req, responseStream, context));
+                        Track(request, GetSnapshotFloorDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 

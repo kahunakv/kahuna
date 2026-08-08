@@ -28,25 +28,48 @@ internal sealed class KeyValueClientBatcher
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        void Track(Task task)
+        using SemaphoreSlim semaphore = new(1, 1);
+
+        void Track(GrpcBatchClientKeyValueRequest request, Task task)
         {
             Interlocked.Increment(ref inFlight);
-            _ = task.ContinueWith(completed =>
-            {
-                if (completed.IsFaulted)
-                {
-                    Exception? e = completed.Exception?.InnerException;
-                    if (e is IOException or OperationCanceledException)
-                        logger.LogCommunicationIoException(e);
-                    else
-                        logger.LogError(completed.Exception, "Batch key-value client handler faulted");
-                }
-                if (Interlocked.Decrement(ref inFlight) == 0)
-                    drain.TrySetResult();
-            }, TaskScheduler.Default);
+            _ = Observe(request, task);
         }
 
-        using SemaphoreSlim semaphore = new(1, 1);
+        // A handler that throws must still answer its own RequestId: the SDK matches responses by id,
+        // so an unanswered request hangs until its deadline while every other request on the shared
+        // stream keeps flowing. Refusing just that one request with MustRetry leaves the stream and
+        // its neighbours untouched, and gives the SDK's retry loop something it can classify.
+        async Task Observe(GrpcBatchClientKeyValueRequest request, Task task)
+        {
+            try
+            {
+                await task;
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException)
+            {
+                // The stream is already gone or the client left; there is nobody left to answer.
+                logger.LogCommunicationIoException(ex);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Batch key-value client handler faulted");
+
+                try
+                {
+                    await WriteResponseToStream(semaphore, responseStream, BatchRefusalResponses.ForClientKeyValue(request), context);
+                }
+                catch (Exception writeEx)
+                {
+                    logger.LogCommunicationIoException(writeEx);
+                }
+            }
+            finally
+            {
+                if (Interlocked.Decrement(ref inFlight) == 0)
+                    drain.TrySetResult();
+            }
+        }
 
         try
         {
@@ -58,7 +81,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
 
-                        Track(TrySetKeyValueDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
+                        Track(request, TrySetKeyValueDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
                     }
                     break;
                     
@@ -66,7 +89,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTrySetManyKeyValueRequest? setKeyRequest = request.TrySetManyKeyValue;
 
-                        Track(TrySetManyKeyValueDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
+                        Track(request, TrySetManyKeyValueDelayed(semaphore, request.RequestId, setKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -74,7 +97,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryDeleteManyKeyValueRequest? deleteManyKeyRequest = request.TryDeleteManyKeyValue;
 
-                        Track(TryDeleteManyKeyValueDelayed(semaphore, request.RequestId, deleteManyKeyRequest, responseStream, context));
+                        Track(request, TryDeleteManyKeyValueDelayed(semaphore, request.RequestId, deleteManyKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -82,7 +105,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
 
-                        Track(TryGetKeyValueDelayed(semaphore, request.RequestId, getKeyRequest, responseStream, context));
+                        Track(request, TryGetKeyValueDelayed(semaphore, request.RequestId, getKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -90,7 +113,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
 
-                        Track(TryDeleteKeyValueDelayed(semaphore, request.RequestId, deleteKeyRequest, responseStream, context));
+                        Track(request, TryDeleteKeyValueDelayed(semaphore, request.RequestId, deleteKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -98,7 +121,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryExtendKeyValueRequest? extendKeyRequest = request.TryExtendKeyValue;
 
-                        Track(TryExtendKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
+                        Track(request, TryExtendKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
                     }
                     break;
 
@@ -106,7 +129,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
 
-                        Track(TryExistsKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
+                        Track(request, TryExistsKeyValueDelayed(semaphore, request.RequestId, extendKeyRequest, responseStream, context));
                     }
                     break;
                     
@@ -114,7 +137,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
 
-                        Track(TryExecuteTransactionScriptDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
+                        Track(request, TryExecuteTransactionScriptDelayed(semaphore, request.RequestId, tryExecuteTransactionScriptRequest, responseStream, context));
                     }
                     break;
                     
@@ -122,7 +145,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcTryAcquireExclusiveLockRequest? tryAcquireExclusiveLockRequest = request.TryAcquireExclusiveLock;
 
-                        Track(TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
+                        Track(request, TryAcquireExclusiveLockDelayed(semaphore, request.RequestId, tryAcquireExclusiveLockRequest, responseStream, context));
                     }
                     break;
                     
@@ -130,7 +153,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcGetByBucketRequest? GetByBucketRequest = request.GetByBucket;
 
-                        Track(TryGetByBucketDelayed(semaphore, request.RequestId, GetByBucketRequest, responseStream, context));
+                        Track(request, TryGetByBucketDelayed(semaphore, request.RequestId, GetByBucketRequest, responseStream, context));
                     }
                     break;
                     
@@ -138,7 +161,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcScanAllByPrefixRequest? scanByPrefixRequest = request.ScanByPrefix;
 
-                        Track(TryScanAllByPrefixDelayed(semaphore, request.RequestId, scanByPrefixRequest, responseStream, context));
+                        Track(request, TryScanAllByPrefixDelayed(semaphore, request.RequestId, scanByPrefixRequest, responseStream, context));
                     }
                     break;
                     
@@ -146,7 +169,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcStartTransactionRequest? startTransactionRequest = request.StartTransaction;
 
-                        Track(TryStartTransactionDelayed(semaphore, request.RequestId, startTransactionRequest, responseStream, context));
+                        Track(request, TryStartTransactionDelayed(semaphore, request.RequestId, startTransactionRequest, responseStream, context));
                     }
                     break;
                     
@@ -154,7 +177,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcCommitTransactionRequest? commitTransactionRequest = request.CommitTransaction;
 
-                        Track(TryCommitTransactionDelayed(semaphore, request.RequestId, commitTransactionRequest, responseStream, context));
+                        Track(request, TryCommitTransactionDelayed(semaphore, request.RequestId, commitTransactionRequest, responseStream, context));
                     }
                     break;
                     
@@ -162,7 +185,7 @@ internal sealed class KeyValueClientBatcher
                     {
                         GrpcRollbackTransactionRequest? rollbackTransactionRequest = request.RollbackTransaction;
 
-                        Track(TryRollbackTransactionDelayed(semaphore, request.RequestId, rollbackTransactionRequest, responseStream, context));
+                        Track(request, TryRollbackTransactionDelayed(semaphore, request.RequestId, rollbackTransactionRequest, responseStream, context));
                     }
                     break;
 
