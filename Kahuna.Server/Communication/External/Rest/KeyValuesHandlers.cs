@@ -365,14 +365,33 @@ public static class KeyValuesHandlers
             
             KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(request.Script, request.Hash, request.Parameters, request.Priority);
 
+            // Carry the per-value results (key, value, revision, timestamps) with the same fidelity
+            // as the gRPC script wire; the legacy scalar fields carry the first value for older clients.
+            List<KahunaTxKeyValueResponseItem>? values = null;
+
+            if (result.Values is { Count: > 0 })
+            {
+                values = new(result.Values.Count);
+
+                foreach (KeyValueTransactionResultValue value in result.Values)
+                    values.Add(new()
+                    {
+                        Key = value.Key,
+                        Value = value.Value,
+                        Revision = value.Revision,
+                        Expires = value.Expires,
+                        LastModified = value.LastModified
+                    });
+            }
+
             return new KahunaTxKeyValueResponse
             {
                 ServedFrom = result.ServedFrom,
                 Type = result.Type,
-                //Value = result.Value,
-                //Revision = result.Revision,
-                //Expires = result.Expires,
-                Reason = result.Reason
+                Value = result.Value,
+                Revision = result.Revision,
+                Reason = result.Reason,
+                Values = values
             };
         });
 

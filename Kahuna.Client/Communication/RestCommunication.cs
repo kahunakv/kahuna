@@ -1186,8 +1186,7 @@ public class RestCommunication : IKahunaCommunication
                 return new()
                 {
                     Type = response.Type,
-                    //Value = response.Values,
-                    //Revision = response.Revision
+                    Values = GetTransactionValues(response.Values)
                 };
             
             if (response.Type == KeyValueResponseType.MustRetry)
@@ -1210,6 +1209,28 @@ public class RestCommunication : IKahunaCommunication
             throw new KahunaException("Transaction aborted", response.Type);
 
         throw new KahunaException("Failed to execute key/value transaction:" + response.Type, response.Type);
+    }
+
+    /// <summary>Maps the REST script response's per-value items into the client result shape,
+    /// mirroring the gRPC path's mapping. Null in, null out.</summary>
+    private static List<KahunaKeyValueTransactionResultValue>? GetTransactionValues(List<KahunaTxKeyValueResponseItem>? responseValues)
+    {
+        if (responseValues is null)
+            return null;
+
+        List<KahunaKeyValueTransactionResultValue> values = new(responseValues.Count);
+
+        foreach (KahunaTxKeyValueResponseItem response in responseValues)
+            values.Add(new()
+            {
+                Key = response.Key,
+                Value = response.Value,
+                Revision = response.Revision,
+                Expires = response.Expires,
+                LastModified = response.LastModified
+            });
+
+        return values;
     }
 
     public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)

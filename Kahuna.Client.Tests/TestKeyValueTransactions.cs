@@ -137,9 +137,12 @@ public class TestKeyValueTransactions
             "DELETE `" + keyName + "`",
             cancellationToken: TestContext.Current.CancellationToken
         );
-        
+
         Assert.Equal(KeyValueResponseType.Deleted, response.Type);
-        Assert.Equal(0, response.FirstRevision);
+
+        // The delete's tombstone is a first-class revision (live revision + 1); both the gRPC
+        // and REST script wires carry the per-value revision.
+        Assert.Equal(1, response.FirstRevision);
     }
     
     [Theory, CombinatorialData]

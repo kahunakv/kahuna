@@ -725,22 +725,25 @@ public class TestKeyValues
         
         Assert.Equal("some-value", result.ValueAsString());
         
+        // The delete's tombstone is a first-class revision (live revision + 1), preserving the
+        // deleted value's own revision record for as-of reads.
         result = await client.DeleteKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
-        Assert.Equal(0, result.Revision);
-        
+        Assert.Equal(1, result.Revision);
+
         result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
-        
+
+        // Re-setting after the delete continues the monotonic sequence past the tombstone.
         result = await client.SetKeyValue(keyName, "some-value-2", 10000, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
-        Assert.Equal(1, result.Revision);
-        
+        Assert.Equal(2, result.Revision);
+
         result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(result.Value);
-        Assert.Equal(1, result.Revision);
-        
+        Assert.Equal(2, result.Revision);
+
         Assert.Equal("some-value-2", result.ValueAsString());
     }
     
@@ -810,17 +813,19 @@ public class TestKeyValues
         
         Assert.Equal("some-value", result.ValueAsString());
         
+        // The delete's tombstone is a first-class revision (live revision + 1).
         result = await client.DeleteKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(result.Success);
-        Assert.Equal(0, result.Revision);
-        
+        Assert.Equal(1, result.Revision);
+
         result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
         Assert.Equal(0, result.Revision);
-        
+
+        // The rejected conditional write reports the key's current (tombstone) revision.
         result = await client.SetKeyValue(keyName, "some-value-2", 10000, flags: KeyValueFlags.SetIfExists, durability: durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(result.Success);
-        Assert.Equal(0, result.Revision);
+        Assert.Equal(1, result.Revision);
         
         result = await client.GetKeyValue(keyName, durability, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Null(result.Value);
