@@ -601,6 +601,63 @@ internal sealed class KeyValueLocator
         return responses;
     }
 
+    /// <summary>
+    /// Staged-base variant of <see cref="LocateAndTryExistsManyValues"/> for the commit-time
+    /// write-side compare-and-set: keys whose partition this node believes it leads are answered
+    /// from local committed state <b>without</b> a read-index confirmation round or a per-key
+    /// leader wait; keys this node does not believe it leads fall back to the ordinary confirmed
+    /// path. On a leader under commit load this removes two partition-executor round-trips from
+    /// every durable finalize, which otherwise serialize all committing sessions through one actor.
+    ///
+    /// <para><b>Why skipping the read-index is safe here and for no other caller.</b> The results
+    /// only decide whether the finalizer drives its durable decision proposal. A
+    /// minority-partitioned leader that has not heard of its own deposition can serve stale
+    /// committed state from this path — but the decision proposal it would then make cannot
+    /// replicate on that same deposed node, so a stale "base unchanged" can never become a durably
+    /// wrong outcome: it becomes a failed proposal and a retryable answer. A stale mismatch merely
+    /// aborts a transaction whose proposal was going to fail anyway. Ordinary reads return state to
+    /// clients as an authoritative success and MUST keep the read-index gate
+    /// (<see cref="ConfirmLeadershipForRead"/>).</para>
+    /// </summary>
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValuesUnconfirmed(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (keys.Count == 0)
+            return [(KeyValueResponseType.InvalidInput, string.Empty, KeyValueDurability.Persistent, null)];
+
+        List<(string key, long revision, KeyValueDurability durability)>? localKeys = null;
+        List<(string key, long revision, KeyValueDurability durability)>? fallbackKeys = null;
+
+        foreach ((string key, long revision, KeyValueDurability durability) item in keys)
+        {
+            if (string.IsNullOrEmpty(item.key))
+                return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
+
+            // Belief check only (no ack round): its fast path is a field comparison. A false
+            // negative just routes the key through the confirmed path, which is always correct.
+            if (await raft.AmILeaderQuick(RouteKey(item.key)))
+                (localKeys ??= new(keys.Count)).Add(item);
+            else
+                (fallbackKeys ??= []).Add(item);
+        }
+
+        if (fallbackKeys is null)
+            return await manager.TryExistsManyValues(transactionId, readTimestamp, localKeys!);
+
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
+
+        if (localKeys is not null)
+            responses.AddRange(await manager.TryExistsManyValues(transactionId, readTimestamp, localKeys));
+
+        responses.AddRange(await LocateAndTryExistsManyValues(transactionId, readTimestamp, fallbackKeys, cancellationToken));
+
+        return responses;
+    }
+
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,

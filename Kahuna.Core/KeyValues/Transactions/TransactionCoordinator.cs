@@ -2012,8 +2012,13 @@ internal sealed class TransactionCoordinator : IDisposable
         if (probes.Count == 0)
             return StagedBaseValidation.Valid;
 
+        // The unconfirmed variant reads locally-led keys without a read-index round: this check only
+        // decides whether to drive the durable decision proposal, and that proposal's own
+        // replication fences a deposed leader — a stale answer here can produce a failed proposal
+        // or a conservative abort, never a durably wrong outcome. See the variant's contract before
+        // pointing any other caller at it.
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
-            await manager.LocateAndTryExistsManyValues(HLCTimestamp.Zero, HLCTimestamp.Zero, probes, cancellationToken);
+            await manager.LocateAndTryExistsManyValuesUnconfirmed(HLCTimestamp.Zero, HLCTimestamp.Zero, probes, cancellationToken);
 
         Dictionary<string, (KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> byKey = new(results.Count);
         foreach ((KeyValueResponseType type, string key, KeyValueDurability _, ReadOnlyKeyValueEntry? entry) in results)

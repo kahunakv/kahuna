@@ -2126,6 +2126,23 @@ internal sealed class KeyValuesManager : IDisposable
         return RegisterAndTryReadManyValues(OperationKind.ExistsMany, transactionId, coordinatorKey, operationId, readTimestamp, keys, cancellationToken);
     }
 
+    /// <summary>
+    /// Staged-base variant of <see cref="LocateAndTryExistsManyValues"/> — see
+    /// <see cref="KeyValueLocator.LocateAndTryExistsManyValuesUnconfirmed"/> for the leadership
+    /// contract that makes the unconfirmed local read safe for the commit-time write-side
+    /// compare-and-set and for no other caller. Never registers the reads: the probe is a commit
+    /// guard, not part of any transaction's read set.
+    /// </summary>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValuesUnconfirmed(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryExistsManyValuesUnconfirmed(transactionId, readTimestamp, keys, cancellationToken);
+    }
+
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,

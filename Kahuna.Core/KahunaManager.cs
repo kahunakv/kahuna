@@ -1472,6 +1472,18 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// </summary>
     internal Task ReapAbandonedSessions() => keyValues.ReapAbandonedSessions();
 
+    /// <summary>
+    /// Staged-base variant of <c>LocateAndTryExistsManyValues</c> used by the commit-time write-side
+    /// compare-and-set; see <see cref="Server.KeyValues.KeyValueLocator.LocateAndTryExistsManyValuesUnconfirmed"/>
+    /// for the leadership contract restricting its callers. Diagnostic/test access.
+    /// </summary>
+    internal Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValuesUnconfirmed(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken
+    ) => keyValues.LocateAndTryExistsManyValuesUnconfirmed(transactionId, readTimestamp, keys, cancellationToken);
+
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => keyValues.CompletionReceiptStore;
 

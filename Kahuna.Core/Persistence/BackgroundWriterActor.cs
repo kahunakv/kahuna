@@ -287,7 +287,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await CheckpointPartitions();
                 await FlushLocks();
                 await FlushKeyValues();
-                await AdvanceDurabilityFloors();
+                await AdvanceDurabilityFloors(forceSnapshotCapture: false);
                 await RunTargetedRevisionCleanup();
                 await RunFullRevisionSweep();
                 UpdatePitrHorizon();
@@ -308,7 +308,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 {
                     bool locksFlushed = await FlushLocks(drainFully: true);
                     bool keyValuesFlushed = await FlushKeyValues(drainFully: true);
-                    await AdvanceDurabilityFloors();
+                    await AdvanceDurabilityFloors(forceSnapshotCapture: true);
                     await RunTargetedRevisionCleanup();
                     if (locksFlushed && keyValuesFlushed)
                         message.CompletionSource?.TrySetResult(true);
@@ -435,6 +435,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     }
 
     /// <summary>
+    /// Monotonic timestamp (<see cref="Environment.TickCount64"/>) of the last snapshot-channel
+    /// capture pass started from <see cref="AdvanceDurabilityFloors"/>; negative means "never".
+    /// Capture rewrites each store's entire per-partition snapshot file, and under sustained
+    /// durable-2PC load the stores mutate continuously while retaining minutes of settled outcomes
+    /// — so a capture per flush tick rewrites a monotonically growing file every tick, an
+    /// allocation and I/O cost that grows with the retention window and stalls the flush pipeline.
+    /// This stamp throttles the periodic path to checkpoint cadence.
+    /// </summary>
+    private long lastSnapshotCaptureTicks = -1;
+
+    /// <summary>
     /// Advances the application-durability floors after a flush cycle. Two steps:
     /// <para>
     /// <b>Snapshot-channel resolution.</b> Partitions whose floor is blocked on unresolved
@@ -442,28 +453,48 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// here — on followers as well as leaders. The leader's checkpoint gate also captures these
     /// snapshots, but only for partitions it leads; without this pass a follower's floor (and
     /// therefore its WAL retention) would freeze on the first durable-2PC entry it applies.
+    /// Because each capture is a full-store snapshot rewrite whose cost scales with the retained
+    /// record/receipt count, the periodic flush path
+    /// (<paramref name="forceSnapshotCapture"/> = <c>false</c>) captures at most once per
+    /// <see cref="KahunaConfiguration.CheckpointInterval"/> rather than on every flush tick. The
+    /// floor merely lags by that bounded interval, which only widens restart replay by the same
+    /// bounded amount — the exposure a checkpoint-cadence capture always had. An explicit flush
+    /// (<paramref name="forceSnapshotCapture"/> = <c>true</c>: backup, node close) always
+    /// captures, because its completion signal promises the durable state is as advanced as it can
+    /// be made.
     /// </para>
     /// <para>
     /// <b>Floor persistence.</b> Every partition whose watermark advanced past its last persisted
     /// floor gets the new floor written to the backend — strictly after the flush batches it
     /// certifies, so the persisted floor can never lead the data it vouches for. The floor read at
-    /// the next startup is what Kommander uses to widen restart replay.
+    /// the next startup is what Kommander uses to widen restart replay. This step is never
+    /// throttled: it only writes floors that actually advanced, which is cheap.
     /// </para>
     /// </summary>
-    private async ValueTask AdvanceDurabilityFloors()
+    private async ValueTask AdvanceDurabilityFloors(bool forceSnapshotCapture)
     {
         if (durabilityTracker is null)
             return;
 
-        foreach (int partitionId in durabilityTracker.ObservedPartitions)
-        {
-            if (!durabilityTracker.HasPendingSnapshotWork(partitionId))
-                continue;
+        long nowTicks = Environment.TickCount64;
+        bool captureSnapshots = forceSnapshotCapture
+            || lastSnapshotCaptureTicks < 0
+            || (nowTicks - lastSnapshotCaptureTicks) >= (long)configuration.CheckpointInterval.TotalMilliseconds;
 
-            if (!TryCaptureCheckpointSnapshots(partitionId))
-                logger.LogWarning(
-                    "Durability floor of partition #{PartitionId} is blocked on a store snapshot that could not be persisted; WAL retention cannot advance past it until a snapshot succeeds",
-                    partitionId);
+        if (captureSnapshots)
+        {
+            lastSnapshotCaptureTicks = nowTicks;
+
+            foreach (int partitionId in durabilityTracker.ObservedPartitions)
+            {
+                if (!durabilityTracker.HasPendingSnapshotWork(partitionId))
+                    continue;
+
+                if (!TryCaptureCheckpointSnapshots(partitionId))
+                    logger.LogWarning(
+                        "Durability floor of partition #{PartitionId} is blocked on a store snapshot that could not be persisted; WAL retention cannot advance past it until a snapshot succeeds",
+                        partitionId);
+            }
         }
 
         List<(int PartitionId, long Floor)>? floorsToPersist = null;
