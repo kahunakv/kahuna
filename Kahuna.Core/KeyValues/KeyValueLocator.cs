@@ -65,6 +65,10 @@ internal sealed class KeyValueLocator
     public (int PartitionId, long Generation) LocateRange(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
 
+    /// <summary>Routes a key and reports its routing mode in the same single classification pass.</summary>
+    private (int PartitionId, long Generation, bool IsKeyRange) LocateRangeWithMode(string key) =>
+        RangeRouting.LocateWithMode(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
+
     /// <summary>Routes a per-key operation via <see cref="RangeRouting.Locate"/>.</summary>
     private int RouteKey(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key).PartitionId;
@@ -101,6 +105,29 @@ internal sealed class KeyValueLocator
     }
 
     /// <summary>
+    /// Memoizing variant of <see cref="TryWaitForLeader(int, CancellationToken)"/> for batch
+    /// planning loops: resolves each distinct partition's leader once per call instead of once
+    /// per key. The memo must stay call-local — leader identity is inherently racy, but it must
+    /// never be cached across requests. Failed resolutions are not memoized so a later key on
+    /// the same partition can still observe a leader elected mid-loop.
+    /// </summary>
+    private async ValueTask<string?> TryWaitForLeader(
+        int partitionId,
+        Dictionary<int, string> leaderByPartition,
+        CancellationToken cancellationToken
+    )
+    {
+        if (leaderByPartition.TryGetValue(partitionId, out string? cached))
+            return cached;
+
+        string? leader = await TryWaitForLeader(partitionId, cancellationToken);
+        if (leader is not null)
+            leaderByPartition[partitionId] = leader;
+
+        return leader;
+    }
+
+    /// <summary>
     /// Gates an authoritative local read on a quorum-confirmed leadership check (Raft read-index).
     /// Local belief (<see cref="IRaft.AmILeader"/>) is not enough for reads: a minority-partitioned
     /// leader keeps believing it leads until it receives a higher-term message, and a belief-gated
@@ -115,40 +142,21 @@ internal sealed class KeyValueLocator
     /// <see cref="ConfirmLeadershipForRead"/> for a locally-led key group: confirms every distinct
     /// partition the group's keys route to. A group is served locally only when this node believes
     /// it leads all of them, so all must confirm before any key in the group is answered from
-    /// local state.
+    /// local state. The planning loop that grouped the keys already resolved each partition's
+    /// leader into <paramref name="leaderByPartition"/>, so the group's partitions are recovered
+    /// by filtering that map instead of re-routing every key.
     /// </summary>
     private async ValueTask<bool> ConfirmLeadershipForGroupRead(
-        List<(string key, long revision, KeyValueDurability durability)> xkeys,
+        string leader,
+        Dictionary<int, string> leaderByPartition,
         CancellationToken cancellationToken
     )
     {
-        HashSet<int> partitions = [];
-
-        foreach ((string key, _, _) in xkeys)
-            partitions.Add(RouteKey(key));
-
-        foreach (int partitionId in partitions)
+        foreach ((int partitionId, string partitionLeader) in leaderByPartition)
         {
-            if (!await ConfirmLeadershipForRead(partitionId, cancellationToken))
-                return false;
-        }
+            if (partitionLeader != leader)
+                continue;
 
-        return true;
-    }
-
-    /// <inheritdoc cref="ConfirmLeadershipForGroupRead(List{ValueTuple{string, long, KeyValueDurability}}, CancellationToken)"/>
-    private async ValueTask<bool> ConfirmLeadershipForGroupRead(
-        List<(string key, KeyValueDurability durability)> xkeys,
-        CancellationToken cancellationToken
-    )
-    {
-        HashSet<int> partitions = [];
-
-        foreach ((string key, _) in xkeys)
-            partitions.Add(RouteKey(key));
-
-        foreach (int partitionId in partitions)
-        {
             if (!await ConfirmLeadershipForRead(partitionId, cancellationToken))
                 return false;
         }
@@ -190,11 +198,9 @@ internal sealed class KeyValueLocator
         // generation is preserved so the remote fence checks against the coordinator's view, catching the
         // case where the coordinator is fresher (split applied there but not yet here) or staler (split
         // applied here but not there — fence fails → MustRetry → coordinator re-resolves).
-        int partitionId;
-        if (RangeRouting.IsKeyRange(keySpaceRegistry, key))
+        (int partitionId, long freshGeneration, bool isKeyRange) = LocateRangeWithMode(key);
+        if (isKeyRange)
         {
-            long freshGeneration;
-            (partitionId, freshGeneration) = LocateRange(key);
             if (routedGeneration == 0)
                 routedGeneration = freshGeneration;
 
@@ -203,10 +209,6 @@ internal sealed class KeyValueLocator
             // commit; clients retry after cutover and the locator resolves the new partition.
             if (quiesceStore.IsQuiesced(key))
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
-        }
-        else
-        {
-            partitionId = dataPartitionRouter.Locate(key);
         }
 
         if (!raft.Joined)
@@ -270,28 +272,21 @@ internal sealed class KeyValueLocator
         
         Dictionary<string, List<KahunaSetKeyValueRequestItem>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach (KahunaSetKeyValueRequestItem key in setManyItems)
         {
             if (string.IsNullOrEmpty(key.Key))
                 return [new KahunaSetKeyValueResponseItem { Key = key.Key, Type = KeyValueResponseType.InvalidInput, Durability = key.Durability }];
 
-            int partitionId;
-            if (RangeRouting.IsKeyRange(keySpaceRegistry, key.Key))
-            {
-                long freshGeneration;
-                (partitionId, freshGeneration) = LocateRange(key.Key);
-                // Preserve a coordinator-supplied generation (non-zero = already redirected once);
-                // on the first call resolve fresh and stamp it so the remote fence can check it.
-                if (key.RoutedGeneration == 0)
-                    key.RoutedGeneration = freshGeneration;
-            }
-            else
-            {
-                partitionId = dataPartitionRouter.Locate(key.Key);
-                // Hash path: no generation fence, RoutedGeneration stays 0.
-            }
+            (int partitionId, long freshGeneration, bool isKeyRange) = LocateRangeWithMode(key.Key);
+            // Preserve a coordinator-supplied generation (non-zero = already redirected once);
+            // on the first call resolve fresh and stamp it so the remote fence can check it.
+            // Hash path: no generation fence, RoutedGeneration stays 0.
+            if (isKeyRange && key.RoutedGeneration == 0)
+                key.RoutedGeneration = freshGeneration;
 
-            string? leader = await TryWaitForLeader(partitionId, cancellationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. setManyItems.Select(static i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry, Durability = i.Durability })];
 
@@ -348,6 +343,8 @@ internal sealed class KeyValueLocator
         Dictionary<string, List<KahunaDeleteKeyValueRequestItem>> acquisitionPlan = [];
         List<KahunaDeleteKeyValueResponseItem> responses = new(deleteManyItems.Count);
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach (KahunaDeleteKeyValueRequestItem item in deleteManyItems)
         {
             if (string.IsNullOrEmpty(item.Key))
@@ -362,7 +359,7 @@ internal sealed class KeyValueLocator
             }
 
             int partitionId = RouteKey(item.Key);
-            string? leader = await TryWaitForLeader(partitionId, cancellationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. deleteManyItems.Select(static i => new KahunaDeleteKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry, Durability = i.Durability })];
 
@@ -573,13 +570,15 @@ internal sealed class KeyValueLocator
         string localNode = raft.GetLocalEndpoint();
         Dictionary<string, List<(string key, long revision, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, long revision, KeyValueDurability durability) item in keys)
         {
             if (string.IsNullOrEmpty(item.key))
                 return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
 
             int partitionId = RouteKey(item.key);
-            string? leader = await TryWaitForLeader(partitionId, cancellationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))];
 
@@ -594,7 +593,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
 
         foreach ((string leader, List<(string key, long revision, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryExistsManyNodeValues(transactionId, readTimestamp, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+            tasks.Add(TryExistsManyNodeValues(transactionId, readTimestamp, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
 
@@ -671,13 +670,15 @@ internal sealed class KeyValueLocator
         string localNode = raft.GetLocalEndpoint();
         Dictionary<string, List<(string key, long revision, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, long revision, KeyValueDurability durability) item in keys)
         {
             if (string.IsNullOrEmpty(item.key))
                 return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
 
             int partitionId = RouteKey(item.key);
-            string? leader = await TryWaitForLeader(partitionId, cancellationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))];
 
@@ -692,7 +693,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(keys.Count);
 
         foreach ((string leader, List<(string key, long revision, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryGetManyNodeValues(transactionId, readTimestamp, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+            tasks.Add(TryGetManyNodeValues(transactionId, readTimestamp, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
 
@@ -704,6 +705,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp readTimestamp,
         string leader,
         string localNode,
+        Dictionary<int, string> leaderByPartition,
         List<(string key, long revision, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
@@ -714,7 +716,7 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
-            if (!await ConfirmLeadershipForGroupRead(xkeys, cancellationToken))
+            if (!await ConfirmLeadershipForGroupRead(leader, leaderByPartition, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -745,6 +747,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp readTimestamp,
         string leader,
         string localNode,
+        Dictionary<int, string> leaderByPartition,
         List<(string key, long revision, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses,
@@ -755,7 +758,7 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
-            if (!await ConfirmLeadershipForGroupRead(xkeys, cancellationToken))
+            if (!await ConfirmLeadershipForGroupRead(leader, leaderByPartition, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -846,6 +849,8 @@ internal sealed class KeyValueLocator
         Dictionary<string, List<(string key, KeyValueDurability durability)>> probePlan = [];
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(keys.Count);
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, KeyValueDurability durability) item in keys)
         {
             // A malformed key is reported against that key alone; the rest of the set is still probed, so one
@@ -857,7 +862,7 @@ internal sealed class KeyValueLocator
             }
 
             int partitionId = RouteKey(item.key);
-            string? leader = await TryWaitForLeader(partitionId, cancellationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return BuildManyWriteIntentRejection(keys, KeyValueResponseType.MustRetry);
 
@@ -871,7 +876,7 @@ internal sealed class KeyValueLocator
         List<Task> tasks = new(probePlan.Count);
 
         foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in probePlan)
-            tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
+            tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
 
@@ -882,6 +887,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp transactionId,
         string leader,
         string localNode,
+        Dictionary<int, string> leaderByPartition,
         List<(string key, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
@@ -893,7 +899,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> nodeResponses;
 
         if (leader == localNode)
-            nodeResponses = await ConfirmLeadershipForGroupRead(xkeys, cancellationToken)
+            nodeResponses = await ConfirmLeadershipForGroupRead(leader, leaderByPartition, cancellationToken)
                 ? await manager.TryCheckManyWriteIntentValues(transactionId, xkeys)
                 : BuildManyWriteIntentRejection(xkeys, KeyValueResponseType.MustRetry);
         else
@@ -1021,13 +1027,15 @@ internal sealed class KeyValueLocator
 
         Dictionary<string, List<(string key, int expiresMs, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, key.durability, HLCTimestamp.Zero)];
 
             int partitionId = RouteKey(key.key);
-            string? leader = await TryWaitForLeader(partitionId, cancelationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancelationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero))];
 
@@ -1447,13 +1455,15 @@ internal sealed class KeyValueLocator
         
         Dictionary<string, List<(string key, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, key.durability)];
 
             int partitionId = RouteKey(key.key);
-            string? leader = await TryWaitForLeader(partitionId, cancelationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancelationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability))];
 
@@ -1566,13 +1576,15 @@ internal sealed class KeyValueLocator
         
         Dictionary<string, List<(string key, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, HLCTimestamp.Zero, key.key, key.durability)];
 
             int partitionId = RouteKey(key.key);
-            string? leader = await TryWaitForLeader(partitionId, cancelationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancelationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, k.key, k.durability))];
 
@@ -1670,13 +1682,15 @@ internal sealed class KeyValueLocator
         
         Dictionary<string, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, 0, key.durability)];
 
             int partitionId = RouteKey(key.key);
-            string? leader = await TryWaitForLeader(partitionId, cancelationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancelationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, 0L, k.durability))];
 
@@ -1772,13 +1786,15 @@ internal sealed class KeyValueLocator
         
         Dictionary<string, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>> acquisitionPlan = [];
 
+        Dictionary<int, string> leaderByPartition = [];
+        
         foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
                 return [(KeyValueResponseType.InvalidInput, key.key, 0, key.durability)];
 
             int partitionId = RouteKey(key.key);
-            string? leader = await TryWaitForLeader(partitionId, cancelationToken);
+            string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancelationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, 0L, k.durability))];
 

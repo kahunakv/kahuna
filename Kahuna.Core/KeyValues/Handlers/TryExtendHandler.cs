@@ -21,7 +21,7 @@ internal sealed class TryExtendHandler : BaseHandler
         
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 

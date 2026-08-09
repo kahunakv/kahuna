@@ -22,17 +22,17 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
     public TryGetByRangeHandler(KeyValueContext context) : base(context) { }
 
-    public Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.Durability == KeyValueDurability.Ephemeral)
             return GetByRangeEphemeral(message);
 
-        return Task.FromResult(GetByRangePersistentStage1(message));
+        return ValueTask.FromResult(GetByRangePersistentStage1(message));
     }
 
     // ── Ephemeral (in-memory only) ────────────────────────────────────────────
 
-    private async Task<KeyValueResponse> GetByRangeEphemeral(KeyValueRequest message)
+    private async ValueTask<KeyValueResponse> GetByRangeEphemeral(KeyValueRequest message)
     {
         string prefix = message.Key;
         int limit = message.Limit;

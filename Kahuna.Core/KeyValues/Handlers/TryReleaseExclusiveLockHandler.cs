@@ -18,7 +18,7 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;

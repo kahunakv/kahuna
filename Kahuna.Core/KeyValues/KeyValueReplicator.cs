@@ -12,6 +12,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -83,7 +84,8 @@ internal sealed class KeyValueReplicator
             transactionId,
             keyValueMessage.Key,
             keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
-            KeyValueDurability.Persistent);
+            KeyValueDurability.Persistent
+        );
     }
 
     /// <summary>
@@ -107,8 +109,18 @@ internal sealed class KeyValueReplicator
     {
         persistentRouter.Send(
             KeyValueRequest.ForInvalidateOrApply(
-                key, revision, value, expires, lastUsed, lastModified, state,
-                transactionId: transactionId, partitionId: partitionId, noRevision: noRevision));
+                key, 
+                revision, 
+                value, 
+                expires, 
+                lastUsed, 
+                lastModified, 
+                state,
+                transactionId: transactionId, 
+                partitionId: partitionId, 
+                noRevision: noRevision
+            )
+        );
     }
 
     /// <summary>
@@ -121,9 +133,19 @@ internal sealed class KeyValueReplicator
     public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)
     {
         KeyValueRequest request = KeyValueRequestPool.RentInvalidateOrApply(
-            intent.Key, intent.Revision, intent.Value,
-            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
-            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: false);
+            intent.Key, 
+            intent.Revision, 
+            intent.Value,
+            intent.Expires, 
+            intent.CommitTimestamp, 
+            intent.CommitTimestamp, 
+            intent.State,
+            forceResident: true, 
+            transactionId: intent.TransactionId, 
+            partitionId: partitionId, 
+            noRevision: intent.NoRevision, 
+            isRollback: false
+        );
 
         try
         {
@@ -149,9 +171,19 @@ internal sealed class KeyValueReplicator
     public async Task<bool> ApplyDurableRollback(int partitionId, PreparedIntent intent)
     {
         KeyValueRequest request = KeyValueRequestPool.RentInvalidateOrApply(
-            intent.Key, intent.Revision, intent.Value,
-            intent.Expires, intent.CommitTimestamp, intent.CommitTimestamp, intent.State,
-            forceResident: true, transactionId: intent.TransactionId, partitionId: partitionId, noRevision: intent.NoRevision, isRollback: true);
+            intent.Key, 
+            intent.Revision, 
+            intent.Value,
+            intent.Expires, 
+            intent.CommitTimestamp, 
+            intent.CommitTimestamp, 
+            intent.State,
+            forceResident: true, 
+            transactionId: intent.TransactionId, 
+            partitionId: partitionId, 
+            noRevision: intent.NoRevision, 
+            isRollback: true
+        );
 
         try
         {
@@ -189,10 +221,7 @@ internal sealed class KeyValueReplicator
                 {
                     byte[]? messageValue;
 
-                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
-                        messageValue = segment.Array;
-                    else
-                        messageValue = keyValueMessage.Value.ToByteArray();
+                    messageValue = ByteStringPayload.GetArray(keyValueMessage.Value);
 
                     HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
@@ -206,11 +235,19 @@ internal sealed class KeyValueReplicator
 
                     // Record before enqueueing so a read that misses the actor cache observes this
                     // committed write even before the background flush lands it in the backend.
-                    unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
+                    unflushedWrites?.Record(
+                        keyValueMessage.Key, 
+                        messageValue, 
+                        keyValueMessage.Revision,
+                        expires, 
+                        lastUsed, 
+                        lastModified, 
+                        KeyValueState.Set, 
+                        keyValueMessage.NoRevision
+                    );
 
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-            BackgroundWriteType.QueueStoreKeyValue,
+                        BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
@@ -223,10 +260,18 @@ internal sealed class KeyValueReplicator
                         logIndex: log.Id
                     ));
 
-                    SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set,
+                    SendInvalidateOrApply(
+                        partitionId, 
+                        keyValueMessage.Key, 
+                        messageValue, 
+                        keyValueMessage.Revision,
+                        expires, 
+                        lastUsed, 
+                        lastModified, 
+                        KeyValueState.Set,
                         new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-                        keyValueMessage.NoRevision);
+                        keyValueMessage.NoRevision
+                    );
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -246,10 +291,7 @@ internal sealed class KeyValueReplicator
                 {
                     byte[]? messageValue;
 
-                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
-                        messageValue = segment.Array;
-                    else
-                        messageValue = keyValueMessage.Value.ToByteArray();
+                    messageValue = ByteStringPayload.GetArray(keyValueMessage.Value);
 
                     HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
@@ -261,7 +303,7 @@ internal sealed class KeyValueReplicator
                         expires, lastUsed, lastModified, KeyValueState.Deleted, keyValueMessage.NoRevision);
 
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-            BackgroundWriteType.QueueStoreKeyValue,
+                        BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
@@ -274,10 +316,18 @@ internal sealed class KeyValueReplicator
                         logIndex: log.Id
                     ));
 
-                    SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Deleted,
+                    SendInvalidateOrApply(
+                        partitionId, 
+                        keyValueMessage.Key, 
+                        messageValue, 
+                        keyValueMessage.Revision,
+                        expires, 
+                        lastUsed, 
+                        lastModified, 
+                        KeyValueState.Deleted,
                         new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-                        keyValueMessage.NoRevision);
+                        keyValueMessage.NoRevision
+                    );
 
                     RecordCompletionReceipt(keyValueMessage);
 
@@ -291,10 +341,7 @@ internal sealed class KeyValueReplicator
                 {
                     byte[]? messageValue;
 
-                    if (MemoryMarshal.TryGetArray(keyValueMessage.Value.Memory, out ArraySegment<byte> segment))
-                        messageValue = segment.Array;
-                    else
-                        messageValue = keyValueMessage.Value.ToByteArray();
+                    messageValue = ByteStringPayload.GetArray(keyValueMessage.Value);
 
                     HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
@@ -306,7 +353,7 @@ internal sealed class KeyValueReplicator
                         expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
 
                     backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-            BackgroundWriteType.QueueStoreKeyValue,
+                        BackgroundWriteType.QueueStoreKeyValue,
                         partitionId,
                         keyValueMessage.Key,
                         messageValue,
@@ -319,10 +366,18 @@ internal sealed class KeyValueReplicator
                         logIndex: log.Id
                     ));
 
-                    SendInvalidateOrApply(partitionId, keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set,
+                    SendInvalidateOrApply(
+                        partitionId, 
+                        keyValueMessage.Key, 
+                        messageValue, 
+                        keyValueMessage.Revision,
+                        expires,
+                        lastUsed,
+                        lastModified,
+                        KeyValueState.Set,
                         new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-                        keyValueMessage.NoRevision);
+                        keyValueMessage.NoRevision
+                    );
 
                     RecordCompletionReceipt(keyValueMessage);
 

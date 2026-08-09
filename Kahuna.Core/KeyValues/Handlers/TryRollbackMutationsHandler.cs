@@ -32,7 +32,7 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
 
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero)
         {

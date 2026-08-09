@@ -15,6 +15,7 @@ using Kahuna.Server.Persistence.Pitr;
 using Kommander.System;
 using Kommander.Time;
 using Polly.Contrib.WaitAndRetry;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.Persistence;
 
@@ -628,13 +629,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 }
             }
 
-            IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
-                medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
-                retryCount: WriteRetries
-            );
+            LazyRetryDelays backoffDelays = new(TimeSpan.FromMilliseconds(1000), WriteRetries);
 
             bool success = false;
-            foreach (TimeSpan timeSpan in backoffDelays)
+            for (int retryAttempt = 0; retryAttempt < WriteRetries; retryAttempt++)
             {
                 try
                 {
@@ -650,7 +648,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     break;
 
                 logger.LogWarning("Coundn't store batch of {Count} locks. Waiting...", items.Count);
-                await Task.Delay(timeSpan);
+                if (backoffDelays.TryNext(out TimeSpan timeSpan)) await Task.Delay(timeSpan);
             }
 
             if (!success)
@@ -767,13 +765,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 }
             }
 
-            IEnumerable<TimeSpan> backoffDelays = Backoff.DecorrelatedJitterBackoffV2(
-                medianFirstRetryDelay: TimeSpan.FromMilliseconds(1000),
-                retryCount: WriteRetries
-            );
+            LazyRetryDelays backoffDelays = new(TimeSpan.FromMilliseconds(1000), WriteRetries);
 
             bool success = false;
-            foreach (TimeSpan timeSpan in backoffDelays)
+            for (int retryAttempt = 0; retryAttempt < WriteRetries; retryAttempt++)
             {
                 try
                 {
@@ -789,7 +784,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     break;
 
                 logger.LogWarning("Coundn't store batch of {Count} key-values. Waiting...", items.Count);
-                await Task.Delay(timeSpan);
+                if (backoffDelays.TryNext(out TimeSpan timeSpan)) await Task.Delay(timeSpan);
             }
 
             if (!success)

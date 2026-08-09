@@ -6,6 +6,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.WAL.IO;
 using Polly.Contrib.WaitAndRetry;
+using Kahuna.Utils;
 
 using Kahuna.Shared.Locks;
 using Kahuna.Server.Configuration;
@@ -343,7 +344,8 @@ internal sealed class LockManager
             null
         );
 
-        foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+        for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
         {
             LockResponse? response;
 
@@ -358,7 +360,7 @@ internal sealed class LockManager
             if (response.Type != LockResponseType.WaitingForReplication)
                 return (response.Type, response.FencingToken);
 
-            await Task.Delay(delay);
+            if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
         }
 
         return (LockResponseType.MustRetry, 0);
@@ -391,7 +393,8 @@ internal sealed class LockManager
             null
         );
 
-        foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+        for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
         {
             LockResponse? response;
 
@@ -406,7 +409,7 @@ internal sealed class LockManager
             if (response.Type != LockResponseType.WaitingForReplication)
                 return (response.Type, response.FencingToken);
 
-            await Task.Delay(delay);
+            if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
         }
 
         return (LockResponseType.MustRetry, 0);
@@ -438,7 +441,8 @@ internal sealed class LockManager
             null
         );
 
-        foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+        for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
         {
             LockResponse? response;
 
@@ -453,7 +457,7 @@ internal sealed class LockManager
             if (response.Type != LockResponseType.WaitingForReplication)
                 return response.Type;
 
-            await Task.Delay(delay);
+            if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
         }
 
         return LockResponseType.MustRetry;

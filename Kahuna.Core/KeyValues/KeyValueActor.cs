@@ -474,7 +474,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TrySet(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TrySet(KeyValueRequest message)
     {
         return trySetHandler.Execute(message);
     }
@@ -484,7 +484,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryExtend(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryExtend(KeyValueRequest message)
     {
         return tryExtendHandler.Execute(message);
     }
@@ -494,7 +494,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryDelete(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryDelete(KeyValueRequest message)
     {
         return tryDeleteHandler.Execute(message);
     }
@@ -504,7 +504,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryGet(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryGet(KeyValueRequest message)
     {
         return tryGetHandler.Execute(message);
     }
@@ -514,7 +514,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> ScanByPrefix(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> ScanByPrefix(KeyValueRequest message)
     {
         return tryScanByPrefixHandler.Execute(message);
     }
@@ -524,7 +524,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> ScanByPrefixFromDisk(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> ScanByPrefixFromDisk(KeyValueRequest message)
     {
         return tryScanByPrefixFromDiskHandler.Execute(message);
     }
@@ -534,7 +534,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> GetByBucket(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> GetByBucket(KeyValueRequest message)
     {
         return tryGetByBucketHandler.Execute(message);
     }
@@ -544,7 +544,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> GetByRange(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> GetByRange(KeyValueRequest message)
     {
         return tryGetByRangeHandler.Execute(message);
     }
@@ -554,12 +554,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryExists(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryExists(KeyValueRequest message)
     {
         return tryExistsHandler.Execute(message);
     }
 
-    private Task<KeyValueResponse> TryCheckWriteIntent(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryCheckWriteIntent(KeyValueRequest message)
     {
         return tryCheckWriteIntentHandler.Execute(message);
     }
@@ -569,7 +569,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryAcquireExclusiveLock(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryAcquireExclusiveLock(KeyValueRequest message)
     {
         return tryAcquireExclusiveLockHandler.Execute(message);
     }
@@ -589,7 +589,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryReleaseExclusiveLock(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryReleaseExclusiveLock(KeyValueRequest message)
     {
         return tryReleaseExclusiveLockHandler.Execute(message);
     }
@@ -629,7 +629,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryPrepareMutations(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryPrepareMutations(KeyValueRequest message)
     {
         return tryPrepareMutationsHandler.Execute(message);
     }
@@ -639,7 +639,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryCommitMutations(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryCommitMutations(KeyValueRequest message)
     {
         return tryCommitMutationsHandler.Execute(message);
     }
@@ -649,7 +649,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private Task<KeyValueResponse> TryRollbackMutations(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> TryRollbackMutations(KeyValueRequest message)
     {
         return tryRollbackMutationsHandler.Execute(message);
     }

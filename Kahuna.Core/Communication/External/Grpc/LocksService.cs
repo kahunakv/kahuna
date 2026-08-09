@@ -7,6 +7,7 @@ using Grpc.Core;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Locks;
 using System.Runtime.InteropServices;
 using Kahuna.Server.Locks.Data;
@@ -63,10 +64,7 @@ public sealed class LocksService : Locker.LockerBase
 
         byte[] owner;
 
-        if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
-            owner = segment.Array ?? request.Owner.ToByteArray();
-        else
-            owner = request.Owner.ToByteArray();
+        owner = ByteStringPayload.GetArray(request.Owner);
         
         (LockResponseType response, long fencingToken)  = await locks.LocateAndTryLock(
             request.Resource, 
@@ -99,10 +97,7 @@ public sealed class LocksService : Locker.LockerBase
 
         byte[] owner;
 
-        if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
-            owner = segment.Array ?? request.Owner.ToByteArray();
-        else
-            owner = request.Owner.ToByteArray();
+        owner = ByteStringPayload.GetArray(request.Owner);
         
         (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
             request.Resource, 
@@ -135,10 +130,7 @@ public sealed class LocksService : Locker.LockerBase
 
         byte[] owner;
 
-        if (MemoryMarshal.TryGetArray(request.Owner.Memory, out ArraySegment<byte> segment))
-            owner = segment.Array ?? request.Owner.ToByteArray();
-        else
-            owner = request.Owner.ToByteArray();
+        owner = ByteStringPayload.GetArray(request.Owner);
         
         LockResponseType response = await locks.LocateAndTryUnlock(
             request.Resource, 

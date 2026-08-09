@@ -25,7 +25,7 @@ internal sealed class TryDeleteHandler : BaseHandler
 
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         // Transactional delete (a transaction id is present) stages an MVCC tombstone and returns without a
         // Raft proposal — a different lifecycle from the non-transactional direct delete below.
@@ -51,7 +51,7 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// proposal (the key is missing or already deleted → DoesNotExist, a live replication intent →
     /// WaitingForReplication, a conflicting lock → MustRetry); otherwise the entry/proposal/currentTime are set.
     /// </summary>
-    private async Task<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal, HLCTimestamp CurrentTime)>
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal, HLCTimestamp CurrentTime)>
         BuildNonTransactionalDelete(KeyValueRequest message)
     {
         (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime) = await LoadAndValidateEntry(message);
@@ -90,7 +90,7 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// replication intent (retry), a foreign exclusive/prefix/range lock (MustRetry). Returns a terminal
     /// response when the caller must not proceed; otherwise fills the entry and the resolved current time.
     /// </summary>
-    private async Task<(KeyValueResponse? Terminal, KeyValueEntry? Entry, HLCTimestamp CurrentTime)> LoadAndValidateEntry(KeyValueRequest message)
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, HLCTimestamp CurrentTime)> LoadAndValidateEntry(KeyValueRequest message)
     {
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
 
@@ -172,7 +172,7 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// Transactional delete (an MVCC-staged tombstone under an open transaction). Preserved verbatim from the
     /// original handler; shares only the entry load + lock/intent validation with the non-transactional path.
     /// </summary>
-    private async Task<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
+    private async ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
     {
         (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime) = await LoadAndValidateEntry(message);
         if (terminal is not null)

@@ -31,7 +31,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         (KeyValueResponse? terminal, KeyValueEntry? entryOrNull, KeyValueProposal? proposalOrNull,
             HLCTimestamp currentTime, string? recordAnchorKey)
@@ -74,7 +74,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
     /// on malformed/conflicting state); otherwise <c>Terminal</c> is null and the entry/proposal/anchor are
     /// handed back for <see cref="Execute"/> to apply the committed head.
     /// </summary>
-    private async Task<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal,
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal,
         HLCTimestamp CurrentTime, string? RecordAnchorKey)>
         ValidateAndBuildCommit(KeyValueRequest message)
     {

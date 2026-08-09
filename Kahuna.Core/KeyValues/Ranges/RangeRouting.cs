@@ -40,22 +40,82 @@ internal static class RangeRouting
         DataPartitionRouter dataPartitionRouter,
         string key)
     {
-        // Mode check first without allocating the key-space substring; only the key-range branch
-        // materializes it (the hash-routed fast path never needs a key-space string).
-        if (registry.GetModeForKey(key) == RoutingMode.KeyRange)
+        (int partitionId, long generation, _) = LocateWithMode(registry, rangeMap, dataPartitionRouter, key);
+        return (partitionId, generation);
+    }
+
+    /// <summary>
+    /// As <see cref="Locate"/>, additionally reporting whether the key belongs to a key-range
+    /// space. Classifies the key exactly once (a single scan for the key-space boundary and one
+    /// span-keyed registry probe), so callers that branch on the routing mode don't pay a second
+    /// classification through <see cref="IsKeyRange"/>. Nothing is allocated on either branch.
+    /// </summary>
+    public static (int PartitionId, long Generation, bool IsKeyRange) LocateWithMode(
+        KeySpaceRegistry registry,
+        RangeMap rangeMap,
+        DataPartitionRouter dataPartitionRouter,
+        string key)
+    {
+        int separator = key.LastIndexOf('/');
+        ReadOnlySpan<char> keySpace = separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
+
+        if (registry.GetMode(keySpace) == RoutingMode.KeyRange)
         {
-            string keySpace = KeySpaceRegistry.ExtractKeySpace(key);
             RangeDescriptor? descriptor = rangeMap.Find(keySpace, key);
 
             if (descriptor is null)
                 throw new KahunaServerException(
-                    $"No range descriptor covers key '{key}' in key-range space '{keySpace}'.");
+                    $"No range descriptor covers key '{key}' in key-range space '{keySpace.ToString()}'.");
 
-            return (descriptor.PartitionId, descriptor.Generation);
+            return (descriptor.PartitionId, descriptor.Generation, true);
         }
 
         // Hash-routed: Kahuna's own assignment over the data partitions (2..N); no generation fence.
-        return (dataPartitionRouter.Locate(key), 0L);
+        return (dataPartitionRouter.Locate(key), 0L, false);
+    }
+
+    /// <summary>
+    /// Single-pass classification + resolution + fence for a leader-side direct write; the shape of
+    /// <c>BaseHandler.TryResolveDirectWritePartition</c> lives here so it funnels through the same
+    /// module as <see cref="Locate"/> and cannot drift from it. A key-range key resolves its live
+    /// descriptor and fences it against <paramref name="routedGeneration"/> (zero = the request
+    /// carried none — route without fencing, but still report the live generation so a deferred
+    /// flush can re-fence). A hash key resolves through <paramref name="dataPartitionRouter"/> and
+    /// is never fenced. Returns false (⇒ caller surfaces MustRetry) when the range moved or split
+    /// since routing.
+    /// </summary>
+    public static bool TryResolveForDirectWrite(
+        KeySpaceRegistry registry,
+        RangeMap rangeMap,
+        DataPartitionRouter dataPartitionRouter,
+        string key,
+        long routedGeneration,
+        out int partitionId,
+        out long fenceGeneration)
+    {
+        int separator = key.LastIndexOf('/');
+        ReadOnlySpan<char> keySpace = separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
+
+        if (registry.GetMode(keySpace) == RoutingMode.KeyRange)
+        {
+            RangeDescriptor? descriptor = rangeMap.Find(keySpace, key);
+
+            if (descriptor is null)
+            {
+                partitionId = 0;
+                fenceGeneration = 0;
+                return false;
+            }
+
+            partitionId = descriptor.PartitionId;
+            fenceGeneration = descriptor.Generation;
+
+            return routedGeneration == 0 || descriptor.Generation == routedGeneration;
+        }
+
+        partitionId = dataPartitionRouter.Locate(key);
+        fenceGeneration = 0; // hash space: never fenced at flush.
+        return true;
     }
 
     /// <summary>True when <paramref name="key"/> belongs to a key-range-routed space.</summary>
@@ -104,7 +164,7 @@ internal static class RangeRouting
     /// </summary>
     public static bool TryFenceKeyRange(RangeMap rangeMap, string key, long routedGeneration, out int partitionId, out long generation)
     {
-        RangeDescriptor? descriptor = rangeMap.Find(KeySpaceRegistry.ExtractKeySpace(key), key);
+        RangeDescriptor? descriptor = rangeMap.FindCovering(key);
 
         if (descriptor is null)
         {
@@ -133,7 +193,7 @@ internal static class RangeRouting
     /// </summary>
     public static bool HasKeyRangeMovedSinceAdmission(RangeMap rangeMap, string key, long admittedGeneration, int admittedPartitionId)
     {
-        RangeDescriptor? descriptor = rangeMap.Find(KeySpaceRegistry.ExtractKeySpace(key), key);
+        RangeDescriptor? descriptor = rangeMap.FindCovering(key);
 
         if (descriptor is null)
             return true;

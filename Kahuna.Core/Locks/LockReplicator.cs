@@ -3,6 +3,7 @@ using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Locks;
 using Kommander;
 using Kommander.Data;
@@ -135,10 +136,7 @@ internal sealed class LockReplicator
                     
                     byte[] owner;
 
-                    if (MemoryMarshal.TryGetArray(lockMessage.Owner.Memory, out ArraySegment<byte> segment))
-                        owner = segment.Array ?? lockMessage.Owner.ToByteArray();
-                    else
-                        owner = lockMessage.Owner.ToByteArray();
+                    owner = ByteStringPayload.GetArray(lockMessage.Owner);
                     
                     // Register before enqueueing: the partition's durability floor must not pass
                     // this entry until its flush lands. Applies run in log-id order here, so the
@@ -198,10 +196,7 @@ internal sealed class LockReplicator
                     
                     byte[] owner;
 
-                    if (MemoryMarshal.TryGetArray(lockMessage.Owner.Memory, out ArraySegment<byte> segment))
-                        owner = segment.Array ?? lockMessage.Owner.ToByteArray();
-                    else
-                        owner = lockMessage.Owner.ToByteArray();
+                    owner = ByteStringPayload.GetArray(lockMessage.Owner);
                     
                     // Register before enqueueing: the partition's durability floor must not pass
                     // this entry until its flush lands. Applies run in log-id order here, so the
@@ -263,10 +258,7 @@ internal sealed class LockReplicator
                     
                     byte[] owner;
 
-                    if (MemoryMarshal.TryGetArray(lockMessage.Owner.Memory, out ArraySegment<byte> segment))
-                        owner = segment.Array ?? lockMessage.Owner.ToByteArray();
-                    else
-                        owner = lockMessage.Owner.ToByteArray();
+                    owner = ByteStringPayload.GetArray(lockMessage.Owner);
                     
                     // Register before enqueueing: the partition's durability floor must not pass
                     // this entry until its flush lands. Applies run in log-id order here, so the

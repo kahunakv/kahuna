@@ -76,7 +76,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcTryLockResponse remoteResponse = response.TryLock!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
     }
@@ -113,7 +112,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcExtendLockResponse remoteResponse = response.ExtendLock!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((LockResponseType)remoteResponse.Type, remoteResponse.FencingToken);
     }
@@ -147,7 +145,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcUnlockResponse remoteResponse = response.Unlock!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return (LockResponseType)remoteResponse.Type;
     }
@@ -183,10 +180,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         byte[]? owner;
             
-        if (MemoryMarshal.TryGetArray(remoteResponse.Owner.Memory, out ArraySegment<byte> segment))
-            owner = segment.Array;
-        else
-            owner = remoteResponse.Owner.ToByteArray();
+        owner = ByteStringPayload.GetArray(remoteResponse.Owner);
 
         return ((LockResponseType)remoteResponse.Type,
             new(
@@ -249,7 +243,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTrySetKeyValueResponse remoteResponse = response.TrySetKeyValue!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return (
             (KeyValueResponseType)remoteResponse.Type, 
@@ -406,7 +399,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryDeleteKeyValueResponse remoteResponse = response.TryDeleteKeyValue!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return (
             (KeyValueResponseType)remoteResponse.Type, 
@@ -449,7 +441,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryExtendKeyValueResponse remoteResponse = response.TryExtendKeyValue!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return (
             (KeyValueResponseType)remoteResponse.Type, 
@@ -496,14 +487,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryGetKeyValueResponse remoteResponse = response.TryGetKeyValue!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         byte[]? value;
             
-        if (MemoryMarshal.TryGetArray(remoteResponse.Value.Memory, out ArraySegment<byte> segment))
-            value = segment.Array;
-        else
-            value = remoteResponse.Value.ToByteArray();
+        value = ByteStringPayload.GetArray(remoteResponse.Value);
         
         return ((KeyValueResponseType)remoteResponse.Type, new(
             value,
@@ -553,7 +540,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryExistsKeyValueResponse remoteResponse = response.TryExistsKeyValue!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((KeyValueResponseType)remoteResponse.Type, new(
             null,
@@ -780,7 +766,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
 
-        remoteResponse.ServedFrom = $"https://{node}";
 
         HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
         return ((KeyValueResponseType)remoteResponse.Type, key, durability, holder);
@@ -821,7 +806,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireExclusivePrefixLockResponse remoteResponse = response.TryAcquireExclusivePrefixLock!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
 
         return (KeyValueResponseType)remoteResponse.Type;
     }
@@ -902,7 +886,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryReleaseExclusiveLockResponse remoteResponse = response.TryReleaseExclusiveLock!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((KeyValueResponseType)remoteResponse.Type, key);
     }
@@ -939,7 +922,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryReleaseExclusivePrefixLockResponse remoteResponse = response.TryReleaseExclusivePrefixLock!;
 
-        remoteResponse.ServedFrom = $"https://{node}";
 
         return (KeyValueResponseType)remoteResponse.Type;
     }
@@ -976,7 +958,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireExclusiveRangeLockResponse remoteResponse = response.TryAcquireExclusiveRangeLock!;
-        remoteResponse.ServedFrom = $"https://{node}";
         HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
         return ((KeyValueResponseType)remoteResponse.Type, holder);
     }
@@ -1020,7 +1001,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryReleaseExclusiveRangeLockResponse remoteResponse = response.TryReleaseExclusiveRangeLock!;
-        remoteResponse.ServedFrom = $"https://{node}";
         return (KeyValueResponseType)remoteResponse.Type;
     }
 
@@ -1107,7 +1087,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return (
             (KeyValueResponseType)remoteResponse.Type, 
@@ -1189,7 +1168,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryCommitMutationsResponse remoteResponse = response.TryCommitMutations!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
     }
@@ -1249,7 +1227,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryRollbackMutationsResponse remoteResponse = response.TryRollbackMutations!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.ProposalIndex);
     }
@@ -1324,7 +1301,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
        
         GrpcGetByBucketResponse remoteResponse = batchResponse.GetByBucket!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
     }
@@ -1381,7 +1357,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
 
         GrpcGetByRangeResponse remoteResponse = batchResponse.GetByRange!;
-        remoteResponse.ServedFrom = $"https://{node}";
 
         return new(
             (KeyValueResponseType)remoteResponse.Type,
@@ -1413,7 +1388,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
        
         GrpcScanByPrefixResponse remoteResponse = batchResponse.ScanByPrefix!;
         
-        remoteResponse.ServedFrom = $"https://{node}";
         
         return new((KeyValueResponseType)remoteResponse.Type, GetReadOnlyItem(remoteResponse.Items));
     }
@@ -1465,7 +1439,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcStartTransactionResponse remoteResponse = response.StartTransaction!;
 
-        remoteResponse.ServedFrom = $"https://{node}";
 
         HLCTimestamp transactionId = new(remoteResponse.TransactionIdNode, remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter);
         return (
@@ -1510,7 +1483,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
 
-        remoteResponse.ServedFrom = $"https://{node}";
 
         return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
     }
@@ -1549,7 +1521,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
 
-        remoteResponse.ServedFrom = $"https://{node}";
 
         return (KeyValueResponseType)remoteResponse.Type;
     }
@@ -1764,10 +1735,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             byte[]? value;
             
-            if (MemoryMarshal.TryGetArray(kv.Value.Memory, out ArraySegment<byte> segment))
-                value = segment.Array;
-            else
-                value = kv.Value.ToByteArray();
+            value = ByteStringPayload.GetArray(kv.Value);
             
             responses.Add((kv.Key, new(
                 value, 

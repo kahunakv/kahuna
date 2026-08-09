@@ -69,6 +69,10 @@ internal sealed class KeySpaceRegistry
     public RoutingMode GetMode(string keySpace) =>
         modes.TryGetValue(keySpace, out RoutingMode mode) ? mode : RoutingMode.Hash;
 
+    /// <summary>Span variant of <see cref="GetMode(string)"/> — no key-space substring needed.</summary>
+    public RoutingMode GetMode(ReadOnlySpan<char> keySpace) =>
+        modesBySpan.TryGetValue(keySpace, out RoutingMode mode) ? mode : RoutingMode.Hash;
+
     /// <summary>The routing mode for the key space that <paramref name="key"/> belongs to. Resolves
     /// without allocating the key-space substring — the common (unregistered ⇒ Hash) key touches no
     /// heap.</summary>

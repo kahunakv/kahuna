@@ -22,15 +22,15 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.Durability == KeyValueDurability.Ephemeral)
             return GetByBucketEphemeral(message);
 
-        return Task.FromResult(GetByBucketPersistent(message));
+        return ValueTask.FromResult(GetByBucketPersistent(message));
     }
 
-    private async Task<KeyValueResponse> GetByBucketEphemeral(KeyValueRequest message)
+    private async ValueTask<KeyValueResponse> GetByBucketEphemeral(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
@@ -177,6 +177,11 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         bool isSnapshotScan = !message.ReadTimestamp.IsNull();
         HLCTimestamp capturedReadTs = message.ReadTimestamp;
 
+        // Copy into a local before capturing: the deadline can resolve the continuation (and
+        // complete the caller, which returns the pooled request) before the scheduler runs the
+        // closure — capturing the request itself would read a cleared or re-rented message.
+        string bucketKey = message.Key;
+
         Task<(List<(string, ReadOnlyKeyValueEntry)>, Dictionary<string, ReadOnlyKeyValueEntry>?)> readTask;
         try
         {
@@ -187,7 +192,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             // the partition the same way.
             readTask = context.BackendReadScheduler.EnqueueTask(
                 ResolvePartition(message.Key),
-                () => ProjectBucketPage(context.PersistenceBackend.GetKeyValueByPrefix(message.Key),
+                () => ProjectBucketPage(context.PersistenceBackend.GetKeyValueByPrefix(bucketKey),
                     isSnapshotScan, capturedReadTs, currentTime, context.PersistenceBackend));
         }
         catch (Exception ex)

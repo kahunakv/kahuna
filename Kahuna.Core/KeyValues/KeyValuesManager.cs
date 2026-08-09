@@ -5,6 +5,7 @@ using Nixie;
 using Nixie.Routers;
 
 using Polly.Contrib.WaitAndRetry;
+using Kahuna.Utils;
 
 using Kommander;
 using Kommander.Data;
@@ -3772,7 +3773,8 @@ internal sealed class KeyValuesManager : IDisposable
         try
         {
             bool attemptedRoutedResolve = false;
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -3787,7 +3789,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TrySetKeyValue_3609");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -3917,7 +3919,8 @@ internal sealed class KeyValuesManager : IDisposable
 
             try
             {
-                foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+                LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+                for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
                 {
                     KeyValueResponse? response;
 
@@ -3939,7 +3942,7 @@ internal sealed class KeyValuesManager : IDisposable
                     if (response.Type == KeyValueResponseType.WaitingForReplication)
                     {
                         Transactions.DurableTransactionMetrics.AddKvRetryWait("DeleteManyNodeKeyValue_3760");
-                        await Task.Delay(delay);
+                        if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                         continue;
                     }
 
@@ -4005,7 +4008,8 @@ internal sealed class KeyValuesManager : IDisposable
         {
             bool attemptedRoutedResolve = false;
 
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4020,7 +4024,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryExtendKeyValue_3840");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -4080,7 +4084,8 @@ internal sealed class KeyValuesManager : IDisposable
         {
             bool attemptedRoutedResolve = false;
             
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4095,7 +4100,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryDeleteKeyValue_3914");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -4612,7 +4617,8 @@ internal sealed class KeyValuesManager : IDisposable
         
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4627,7 +4633,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryAcquireExclusivePrefixLock_4442");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -4727,7 +4733,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4742,7 +4749,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryReleaseExclusiveLock_4556");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -4785,7 +4792,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4800,7 +4808,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryReleaseExclusivePrefixLock_4613");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -4859,7 +4867,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4874,7 +4883,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryAcquireRangeLock_4686");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -4921,7 +4930,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -4936,7 +4946,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryReleaseExclusiveRangeLock_4747");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -5696,7 +5706,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -5711,7 +5722,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryPrepareMutations_5521");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -5842,7 +5853,8 @@ internal sealed class KeyValuesManager : IDisposable
         
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -5857,7 +5869,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryCommitMutations_5666");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
@@ -6315,7 +6327,8 @@ internal sealed class KeyValuesManager : IDisposable
 
         try
         {
-            foreach (TimeSpan delay in Backoff.DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: MaxRetries))
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
                 KeyValueResponse? response;
 
@@ -6330,7 +6343,7 @@ internal sealed class KeyValuesManager : IDisposable
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("GetByRange_6135");
-                    await Task.Delay(delay);
+                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 

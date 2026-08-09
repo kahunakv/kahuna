@@ -28,9 +28,9 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        return Task.FromResult(ExecuteCore(message));
+        return ValueTask.FromResult(ExecuteCore(message));
     }
 
     private KeyValueResponse ExecuteCore(KeyValueRequest message)
@@ -73,6 +73,11 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 
         bool includeTombstones = message.IncludeTombstones;
 
+        // Copy into a local before capturing: the deadline can resolve the continuation (and
+        // complete the caller, which returns the pooled request) before the scheduler runs the
+        // closure — capturing the request itself would read a cleared or re-rented message.
+        string prefixKey = message.Key;
+
         Task<List<(string, ReadOnlyKeyValueEntry)>> readTask;
         try
         {
@@ -84,7 +89,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
                 () =>
                 {
                     List<(string, ReadOnlyKeyValueEntry)> scanned =
-                        context.PersistenceBackend.GetKeyValueByPrefix(message.Key);
+                        context.PersistenceBackend.GetKeyValueByPrefix(prefixKey);
 
                     if (readTimestamp.IsNull())
                         return scanned;

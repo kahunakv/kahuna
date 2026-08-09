@@ -84,17 +84,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         byte[]? value;
         
-        if (MemoryMarshal.TryGetArray(request.Value.Memory, out ArraySegment<byte> segment))
-            value = segment.Array;
-        else
-            value = request.Value.ToByteArray();
+        value = ByteStringPayload.GetArray(request.Value);
         
         byte[]? compareValue;
         
-        if (MemoryMarshal.TryGetArray(request.CompareValue.Memory, out segment))
-            compareValue = segment.Array;
-        else
-            compareValue = request.CompareValue.ToByteArray();
+        compareValue = ByteStringPayload.GetArray(request.CompareValue);
         
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
@@ -242,17 +236,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         {
             byte[]? value;
         
-            if (MemoryMarshal.TryGetArray(item.Value.Memory, out ArraySegment<byte> segment))
-                value = segment.Array;
-            else
-                value = item.Value.ToByteArray();
+            value = ByteStringPayload.GetArray(item.Value);
             
             byte[]? compareValue;
             
-            if (MemoryMarshal.TryGetArray(item.CompareValue.Memory, out segment))
-                compareValue = segment.Array;
-            else
-                compareValue = item.CompareValue.ToByteArray();
+            compareValue = ByteStringPayload.GetArray(item.CompareValue);
             
             requestItems.Add(new()
             {

@@ -27,7 +27,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         // Only ephemeral participants reach this handler: a crash-atomic (persistent) mutation prepares
         // through the durable-intent canonical-record path, and the manual persistent prepare is rejected at

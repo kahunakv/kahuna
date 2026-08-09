@@ -25,7 +25,7 @@ internal sealed class TrySetHandler : BaseHandler
 
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         // Transactional set (a transaction id is present) stages an MVCC entry and returns without a Raft
         // proposal — a different lifecycle from the non-transactional direct write below.
@@ -51,7 +51,7 @@ internal sealed class TrySetHandler : BaseHandler
     /// a proposal (WaitingForReplication on a live replication intent, MustRetry on a conflicting lock, NotSet
     /// on a failed conditional); otherwise <c>Terminal</c> is null and the entry/proposal/currentTime are set.
     /// </summary>
-    private async Task<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal, HLCTimestamp CurrentTime)>
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal, HLCTimestamp CurrentTime)>
         BuildNonTransactionalSet(KeyValueRequest message)
     {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
@@ -96,7 +96,7 @@ internal sealed class TrySetHandler : BaseHandler
     /// foreign exclusive/prefix/range lock (MustRetry). Returns a terminal response when the caller must not
     /// proceed; otherwise fills the entry and whether it currently exists.
     /// </summary>
-    private async Task<(KeyValueResponse? Terminal, KeyValueEntry Entry, bool Exists)> LoadAndValidateEntry(
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry Entry, bool Exists)> LoadAndValidateEntry(
         KeyValueRequest message, HLCTimestamp currentTime)
     {
         bool exists = true;
@@ -229,7 +229,7 @@ internal sealed class TrySetHandler : BaseHandler
     /// Transactional set (an MVCC-staged write under an open transaction). Preserved verbatim from the
     /// original handler; shares only the entry load + lock/intent validation with the non-transactional path.
     /// </summary>
-    private async Task<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
+    private async ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
     {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 

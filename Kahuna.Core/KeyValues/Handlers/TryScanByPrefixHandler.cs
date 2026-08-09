@@ -29,7 +29,7 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());

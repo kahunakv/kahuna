@@ -2,6 +2,7 @@
 using System.Runtime.InteropServices;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.Replication;
@@ -33,10 +34,7 @@ internal static class KeyValueMessageDecoder
             return (KeyValueState.Undefined, null);
 
         byte[]? value;
-        if (MemoryMarshal.TryGetArray(msg.Value.Memory, out ArraySegment<byte> seg))
-            value = seg.Array;
-        else
-            value = msg.Value.ToByteArray();
+        value = ByteStringPayload.GetArray(msg.Value);
 
         return (state, value);
     }

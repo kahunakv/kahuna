@@ -72,27 +72,34 @@ internal abstract class BaseHandler
     /// </summary>
     protected bool TryResolveDirectWritePartition(KeyValueRequest message, out int partitionId, out long fenceGeneration)
     {
-        if (RangeRouting.IsKeyRange(context.KeySpaceRegistry, message.Key))
-            // Capture the live descriptor generation even when the inbound write carried none (delete/extend
-            // route with no routed generation): the deferred flush fence needs the real admission-time
-            // generation to detect a range move during linger, not the zero that would disable it.
-            return RangeRouting.TryFenceKeyRange(context.RangeMapStore.Current, message.Key, message.RoutedGeneration, out partitionId, out fenceGeneration);
-
-        partitionId = ResolvePartition(message.Key);
-        fenceGeneration = 0; // hash space: never fenced at flush.
-        return true;
+        // Capture the live descriptor generation even when the inbound write carried none (delete/extend
+        // route with no routed generation): the deferred flush fence needs the real admission-time
+        // generation to detect a range move during linger, not the zero that would disable it.
+        return RangeRouting.TryResolveForDirectWrite(
+            context.KeySpaceRegistry,
+            context.RangeMapStore.Current,
+            dataPartitionRouter,
+            message.Key,
+            message.RoutedGeneration,
+            out partitionId,
+            out fenceGeneration);
     }
-    
+
     /// <summary>
     /// Represents the background writer actor reference.
     /// </summary>
     protected readonly KeyValueContext context;
-    
+
+    /// <summary>Stateless hash router over the Raft partitions, constructed once per handler
+    /// instead of per resolution.</summary>
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     private readonly HashSet<long> revisionsToRemove = [];
-    
+
     protected BaseHandler(KeyValueContext context)
     {
         this.context = context;
+        dataPartitionRouter = new(context.Raft);
     }
 
     /// <summary>
@@ -118,7 +125,7 @@ internal abstract class BaseHandler
         (int partitionId, _) = RangeRouting.Locate(
             context.KeySpaceRegistry,
             context.RangeMapStore.Current,
-            new DataPartitionRouter(context.Raft),
+            dataPartitionRouter,
             key);
         return partitionId;
     }

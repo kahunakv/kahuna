@@ -19,10 +19,10 @@ internal sealed class GetSafeTimestampHandler : BaseHandler
 {
     public GetSafeTimestampHandler(KeyValueContext context) : base(context) { }
 
-    public Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         HLCTimestamp min = FindMinInFlightCommitTimestamp(context.Store, context.LocksByPrefix);
-        return Task.FromResult(new KeyValueResponse(KeyValueResponseType.SafeTimestamp, min));
+        return ValueTask.FromResult(new KeyValueResponse(KeyValueResponseType.SafeTimestamp, min));
     }
 
     /// <summary>

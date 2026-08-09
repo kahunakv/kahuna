@@ -17,6 +17,10 @@ internal sealed class RangeMap
     /// <summary>Per key space, descriptors sorted ascending by <c>StartKey</c> (null first).</summary>
     private readonly Dictionary<string, RangeDescriptor[]> bySpace;
 
+    /// <summary>Span keyed view of <see cref="bySpace"/> so a key's descriptor set can be looked up
+    /// without allocating the key-space substring (the ordinal comparer supports span lookups).</summary>
+    private readonly Dictionary<string, RangeDescriptor[]>.AlternateLookup<ReadOnlySpan<char>> bySpaceSpan;
+
     /// <summary>Pre-flattened view across all key spaces, built once in the constructor.</summary>
     private readonly RangeDescriptor[] _descriptors;
 
@@ -28,6 +32,8 @@ internal sealed class RangeMap
                 static g => g.Key,
                 static g => g.OrderBy(static d => d.StartKey, StartKeyComparer.Instance).ToArray(),
                 StringComparer.Ordinal);
+
+        bySpaceSpan = bySpace.GetAlternateLookup<ReadOnlySpan<char>>();
 
         _descriptors = [.. bySpace.Values.SelectMany(static r => r)];
     }
@@ -48,7 +54,38 @@ internal sealed class RangeMap
     /// </summary>
     public RangeDescriptor? Find(string keySpace, string key)
     {
-        if (!bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges) || ranges.Length == 0)
+        if (!bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges))
+            return null;
+
+        return FindInRanges(ranges, key);
+    }
+
+    /// <summary>
+    /// As <see cref="Find(string, string)"/>, with the key space given as a span so callers that
+    /// derive it from the key (prefix before the last <c>'/'</c>) need not allocate a substring.
+    /// </summary>
+    public RangeDescriptor? Find(ReadOnlySpan<char> keySpace, string key)
+    {
+        if (!bySpaceSpan.TryGetValue(keySpace, out RangeDescriptor[]? ranges))
+            return null;
+
+        return FindInRanges(ranges, key);
+    }
+
+    /// <summary>
+    /// Resolves the descriptor covering <paramref name="key"/> within the key's own key space
+    /// (its prefix before the last <c>'/'</c>), without allocating the key-space substring.
+    /// </summary>
+    public RangeDescriptor? FindCovering(string key)
+    {
+        int separator = key.LastIndexOf('/');
+        ReadOnlySpan<char> keySpace = separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
+        return Find(keySpace, key);
+    }
+
+    private static RangeDescriptor? FindInRanges(RangeDescriptor[] ranges, string key)
+    {
+        if (ranges.Length == 0)
             return null;
 
         // Rightmost descriptor whose StartKey <= key (null StartKey = -inf, always <= key).

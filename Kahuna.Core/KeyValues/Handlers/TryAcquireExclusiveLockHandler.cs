@@ -22,7 +22,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         
     }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         if (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0)
             return KeyValueStaticResponses.ErroredResponse;

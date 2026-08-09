@@ -15,7 +15,7 @@ internal sealed class TryGetHandler : BaseHandler
 {
     public TryGetHandler(KeyValueContext context) : base(context) { }
 
-    public async Task<KeyValueResponse> Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         // ── By-revision path ─────────────────────────────────────────────────────────────
         // Requires an entry loaded from cache/disk before checking; detached via the async resumable-read path.
@@ -388,12 +388,18 @@ internal sealed class TryGetHandler : BaseHandler
         context.PendingReads[revKey] = cont;
         int partitionId = ResolvePartition(message.Key);
 
+        // Copy into locals before capturing: the deadline can resolve the continuation (and
+        // complete the caller, which returns the pooled request) before the scheduler runs the
+        // closure — capturing the request itself would read a cleared or re-rented message.
+        string key = message.Key;
+        long compareRevision = message.CompareRevision;
+
         Task<KeyValueEntry?> readTask;
         try
         {
             readTask = context.BackendReadScheduler.EnqueueTask(
                 partitionId,
-                () => context.PersistenceBackend.GetKeyValueRevision(message.Key, message.CompareRevision));
+                () => context.PersistenceBackend.GetKeyValueRevision(key, compareRevision));
         }
         catch (Exception ex)
         {
