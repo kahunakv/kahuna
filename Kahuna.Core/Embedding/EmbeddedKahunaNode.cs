@@ -77,6 +77,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         {
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
+            // This constructor builds the whole Raft group in-process (phantom witnesses over an
+            // in-process transport, no inter-node listener), so no proposal can outlive the process
+            // and no remote replica can ever join — the topological guarantee the one-phase
+            // read-carrying fast path relies on. The cluster constructor never sets this.
+            SingleProcessRaftGroup = true,
             LocksWorkers = options.LocksWorkers,
             KeyValueWorkers = options.KeyValueWorkers,
             BackgroundWriterWorkers = options.BackgroundWriterWorkers,

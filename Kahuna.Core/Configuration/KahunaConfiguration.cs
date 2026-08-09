@@ -555,6 +555,31 @@ public sealed class KahunaConfiguration
     public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// Declares that the entire Raft group — every voter, witness, and transport — lives inside this
+    /// process for the lifetime of the deployment, so no replication proposal can outlive the process:
+    /// an in-flight proposal that was not durably committed in the local WAL at a crash is gone forever
+    /// (there is no remote replica to resurrect it), and a committed one replays during restore, before
+    /// the node serves new work.
+    ///
+    /// <para><b>What it unlocks.</b> The one-phase durable-commit fast path validates the transaction's
+    /// read set <em>before</em> proposing the bundled [record init + prepare + commit decision]; at
+    /// apply time only the written keys are re-checked. On a multi-node cluster a stalled bundle can
+    /// surface after a leader change with its read validation long out of date — so a read set that
+    /// reaches beyond the written keys forces the standard 2PC flow there. In a single-process group
+    /// that stall cannot exist: the bundle either applies within the same process incarnation that
+    /// validated it (the in-memory write intents that fence the validation window are still live) or it
+    /// was already durably committed and replays in log order ahead of any later conflicting write.
+    /// With this flag set, read-carrying transactions stay eligible for the one-phase fast path.</para>
+    ///
+    /// <para><b>Set it only when the topology guarantees the property permanently.</b> The embedded
+    /// standalone node (in-process phantom witnesses, no inter-node transport) sets it automatically.
+    /// It must stay false for any deployment a remote replica can ever join: the guarantee is
+    /// topological, not operational, and a group that grows a real peer while a bundle is in flight
+    /// would reopen the stalled-bundle window this flag assumes away.</para>
+    /// </summary>
+    public bool SingleProcessRaftGroup { get; set; }
+
+    /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
     /// </summary>

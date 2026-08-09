@@ -1624,7 +1624,15 @@ internal sealed class TransactionCoordinator : IDisposable
                 },
                 opId,
                 cancellationToken,
-                readSetExtendsBeyondWrites: HasReadDependenciesBeyondWrites(context)).ConfigureAwait(false);
+                // A read set reaching beyond the written keys disqualifies the one-phase bundle because
+                // apply-time re-checks cover only written keys — a stalled bundle surfacing after a
+                // leader change would decide on a long-stale read validation. In a single-process Raft
+                // group that stall cannot exist (no remote replica can resurrect an in-flight proposal;
+                // a committed bundle replays during restore ahead of any later conflicting write), so
+                // read-carrying transactions stay one-phase eligible there. See
+                // <see cref="KahunaConfiguration.SingleProcessRaftGroup"/> for the full argument.
+                readSetExtendsBeyondWrites: !configuration.SingleProcessRaftGroup
+                    && HasReadDependenciesBeyondWrites(context)).ConfigureAwait(false);
         }
         catch (Exception)
         {
