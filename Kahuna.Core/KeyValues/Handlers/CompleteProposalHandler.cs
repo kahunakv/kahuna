@@ -56,13 +56,29 @@ internal sealed class CompleteProposalHandler : BaseHandler
         
         ApplyCommittedHead(entry, proposal, HLCTimestamp.Zero);
 
-        // Persistence is deliberately NOT enqueued here. Kommander delivers every committed entry —
-        // including the leader's own proposals — to the consumer-apply path exactly once
-        // (KeyValueReplicator.Replicate), which records the unflushed write and enqueues the
-        // background flush carrying the real log index the durability floor resolves against.
-        // Enqueueing here as well would persist every leader write twice. Local reads stay safe in
-        // the window before the consumer apply runs: the head applied above keeps the entry
-        // resident and dirty (Revision > FlushedRevision), and dirty entries are never evicted.
+        // This enqueue duplicates the consumer-apply path's (Kommander also delivers the leader's
+        // own committed entries to KeyValueReplicator.Replicate), but it cannot be dropped: the
+        // proposal waiter completes BEFORE the consumer apply runs, so this is the only enqueue
+        // ordered ahead of the client's acknowledgement. Callers that flush immediately after an
+        // acked write (checkpoints, FlushPersistenceAsync) rely on the write already being queued.
+
+        // Record before enqueueing so a read that misses the actor cache (e.g. on a later promoted
+        // leader) observes this committed write even before the background flush lands it.
+        context.UnflushedWrites?.Record(proposal.Key, proposal.Value, proposal.Revision,
+            proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State, proposal.NoRevision);
+
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
+            message.PartitionId,
+            proposal.Key,
+            proposal.Value,
+            proposal.Revision,
+            proposal.Expires,
+            proposal.LastUsed,
+            proposal.LastModified,
+            (int)proposal.State,
+            proposal.NoRevision
+        ));
 
         entry.ReplicationIntent = null;
         context.Proposals.Remove(message.ProposalId);
