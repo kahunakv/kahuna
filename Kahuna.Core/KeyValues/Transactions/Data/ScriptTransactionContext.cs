@@ -22,6 +22,17 @@ internal sealed class ScriptTransactionContext : TransactionContext
     public List<KeyValueParameter>? Parameters { get; init; }
 
     /// <summary>
+    /// The statement-list subtree the current descent should execute as one batched
+    /// set-many/delete-many. Resolved by a single probe at the top of a statement-list spine
+    /// (instead of re-scanning the prefix at every recursion level) and consumed — nulled —
+    /// when the descent reaches it.
+    /// </summary>
+    internal NodeAst? BatchBoundary { get; set; }
+
+    /// <summary>True when <see cref="BatchBoundary"/> batches as set-many; false for delete-many.</summary>
+    internal bool BatchBoundaryIsSetMany { get; set; }
+
+    /// <summary>
     /// Local-scope variables allocated during script execution; released when the script finishes.
     /// </summary>
     private Dictionary<string, KeyValueExpressionResult>? Variables { get; set; }

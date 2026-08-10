@@ -91,16 +91,21 @@ internal sealed class TryExistsHandler : BaseHandler
             }
         }
 
-        string? bucket = entry is not null ? entry.Bucket : GetBucket(message.Key);
-
-        if (bucket is not null && context.LocksByPrefix.TryGetValue(bucket, out KeyValueWriteIntent? intent))
+        // Prefix lock check. The empty-table guard also skips deriving the bucket substring —
+        // prefix locks are rare, and the common workload never pays for the probe.
+        if (context.LocksByPrefix.Count > 0)
         {
-            if (intent.TransactionId != message.TransactionId)
-            {
-                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
-                    return KeyValueStaticResponses.MustRetryResponse;
+            string? bucket = entry is not null ? entry.Bucket : GetBucket(message.Key);
 
-                context.LocksByPrefix.Remove(bucket);
+            if (bucket is not null && context.LocksByPrefix.TryGetValue(bucket, out KeyValueWriteIntent? intent))
+            {
+                if (intent.TransactionId != message.TransactionId)
+                {
+                    if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
+                        return KeyValueStaticResponses.MustRetryResponse;
+
+                    context.LocksByPrefix.Remove(bucket);
+                }
             }
         }
 

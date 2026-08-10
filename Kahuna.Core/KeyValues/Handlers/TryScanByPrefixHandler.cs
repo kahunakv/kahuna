@@ -70,7 +70,7 @@ internal sealed class TryScanByPrefixHandler : BaseHandler
 
     private async Task<KeyValueResponse> Get(HLCTimestamp currentTime, string key, KeyValueDurability durability, bool includeTombstones, HLCTimestamp readTimestamp = default, ReadOnlyKeyValueEntry? keyValueEntry = null)
     {
-        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry);
+        KeyValueEntry? entry = await GetKeyValueEntry(key, durability, keyValueEntry, currentTime: currentTime);
 
         // Non-transactional snapshot visibility: serve the revision at-or-before readTimestamp.
         if (!readTimestamp.IsNull() && entry is not null && entry.LastModified > readTimestamp)

@@ -103,8 +103,12 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 break;
         }
 
-        return Task.FromResult<PartitionWriteAck?>(PartitionWriteAck.Instance);
+        return AckTask;
     }
+
+    // Every mailbox turn returns the same acknowledgement; caching the completed task avoids a
+    // Task allocation per aggregated message (>=2 per coalesced write: Submit + BatchComplete).
+    private static readonly Task<PartitionWriteAck?> AckTask = Task.FromResult<PartitionWriteAck?>(PartitionWriteAck.Instance);
 
     private void OnSubmit(IProposalSubmission item)
     {

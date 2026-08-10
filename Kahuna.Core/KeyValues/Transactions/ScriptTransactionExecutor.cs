@@ -612,23 +612,28 @@ internal sealed class ScriptTransactionExecutor
     /// <summary>
     /// Recursively executes the script AST.
     /// </summary>
-    private async Task ExecuteTransactionInternal(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
+    /// <param name="spineProbed">
+    /// True when this call descends the left spine of a statement list whose batch probe already
+    /// ran at the top. The probe is O(statements) and the spine has one level per statement, so
+    /// re-probing every level would make batch detection quadratic in script length.
+    /// </param>
+    private async Task ExecuteTransactionInternal(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken, bool spineProbed = false)
     {
         if (ast.nodeType == NodeType.StmtList)
         {
-            HashSet<(string, KeyValueDurability)> keys = [];
+            if (!spineProbed)
+                ProbeBatchablePrefix(context, ast);
 
-            if (CanBatchBeSetMany(context, ast, keys))
+            // The probe stashed the largest batchable prefix subtree; the descent executes nothing
+            // until it reaches that exact node, so batching here is equivalent to the per-level
+            // detection it replaces.
+            if (ReferenceEquals(context.BatchBoundary, ast))
             {
-                context.Result = await SetManyCommand.Execute(manager, context, ast, cancellationToken);
-                return;
-            }
+                context.BatchBoundary = null;
 
-            keys.Clear();
-
-            if (CanBatchBeDeleteMany(context, ast, keys))
-            {
-                context.Result = await DeleteManyCommand.Execute(manager, context, ast, cancellationToken);
+                context.Result = context.BatchBoundaryIsSetMany
+                    ? await SetManyCommand.Execute(manager, context, ast, cancellationToken)
+                    : await DeleteManyCommand.Execute(manager, context, ast, cancellationToken);
                 return;
             }
         }
@@ -645,7 +650,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.StmtList:
                 {
                     if (ast.leftAst is not null)
-                        await ExecuteTransactionInternal(context, ast.leftAst, cancellationToken);
+                        await ExecuteTransactionInternal(context, ast.leftAst, cancellationToken, spineProbed: true);
 
                     if (ast.rightAst is not null)
                     {
@@ -852,139 +857,124 @@ internal sealed class ScriptTransactionExecutor
         }
     }
 
-    private static bool CanBatchBeSetMany(ScriptTransactionContext context, NodeAst ast, HashSet<(string, KeyValueDurability)> keys)
+    /// <summary>
+    /// Locates the largest batchable prefix of a statement list in one pass and stashes its
+    /// subtree on the context. Statements execute in left-spine order, so the subtree covering
+    /// statements [0..k-1] is the spine node at depth n-k; when the first k statements are
+    /// homogeneous set/eset (or delete/edelete) commands over distinct keys, that node runs as a
+    /// single set-many/delete-many. Probing once at the spine's top replaces re-scanning the
+    /// prefix at every recursion level, which was quadratic in script length. The descent
+    /// executes nothing before reaching the boundary, so context state (variables, parameters)
+    /// at probe time matches what per-level detection observed.
+    /// </summary>
+    private static void ProbeBatchablePrefix(ScriptTransactionContext context, NodeAst ast)
     {
-        bool areSets = false;
+        context.BatchBoundary = null;
 
-        while (true)
+        // Collect the left spine top-down: spine[i] covers statements [0 .. (n-1) - i], where
+        // n = spine.Count + 1 statements. The deepest left leaf is statement 0.
+        List<NodeAst> spine = [];
+
+        NodeAst node = ast;
+        while (node.nodeType == NodeType.StmtList)
         {
-            switch (ast.nodeType)
-            {
-                case NodeType.StmtList:
-                {
-                    if (ast.leftAst is not null)
-                    {
-                        if (!CanBatchBeSetMany(context, ast.leftAst, keys))
-                            return false;
-                    }
+            spine.Add(node);
 
-                    if (ast.rightAst is not null)
-                    {
-                        ast = ast.rightAst!;
-                        continue;
-                    }
+            if (node.leftAst is null)
+                return;
 
-                    break;
-                }
-
-                case NodeType.Set:
-                    if (ast.leftAst?.yytext is null)
-                        return false;
-
-                    if (!keys.Add((ast.leftAst.yytext!, KeyValueDurability.Persistent)))
-                        return false;
-
-                    areSets = true;
-                    break;
-
-                case NodeType.Eset:
-                    if (ast.leftAst?.yytext is null)
-                        return false;
-
-                    if (!keys.Add((ast.leftAst.yytext!, KeyValueDurability.Ephemeral)))
-                        return false;
-
-                    areSets = true;
-                    break;
-
-                default:
-                    return false;
-            }
-
-            break;
+            node = node.leftAst;
         }
 
-        return areSets;
-    }
-
-    private static bool CanBatchBeDeleteMany(ScriptTransactionContext context, NodeAst ast, HashSet<(string, KeyValueDurability)> keys)
-    {
-        bool areDeletes = false;
-
-        while (true)
+        // The first statement fixes the batch kind; anything else is not batchable.
+        bool isSetMany;
+        switch (node.nodeType)
         {
-            switch (ast.nodeType)
-            {
-                case NodeType.StmtList:
-                {
-                    if (ast.leftAst is not null)
-                    {
-                        if (!CanBatchBeDeleteMany(context, ast.leftAst, keys))
-                            return false;
-                    }
+            case NodeType.Set or NodeType.Eset:
+                isSetMany = true;
+                break;
 
-                    if (ast.rightAst is not null)
-                    {
-                        ast = ast.rightAst!;
-                        continue;
-                    }
+            case NodeType.Delete or NodeType.Edelete:
+                isSetMany = false;
+                break;
 
-                    break;
-                }
-
-                case NodeType.Delete:
-                {
-                    if (ast.leftAst is null)
-                        return false;
-
-                    string keyName;
-
-                    try
-                    {
-                        keyName = BaseCommand.GetKeyName(context, ast.leftAst);
-                    }
-                    catch (KahunaScriptException)
-                    {
-                        return false;
-                    }
-
-                    if (!keys.Add((keyName, KeyValueDurability.Persistent)))
-                        return false;
-
-                    areDeletes = true;
-                    break;
-                }
-
-                case NodeType.Edelete:
-                {
-                    if (ast.leftAst is null)
-                        return false;
-
-                    string keyName;
-
-                    try
-                    {
-                        keyName = BaseCommand.GetKeyName(context, ast.leftAst);
-                    }
-                    catch (KahunaScriptException)
-                    {
-                        return false;
-                    }
-
-                    if (!keys.Add((keyName, KeyValueDurability.Ephemeral)))
-                        return false;
-
-                    areDeletes = true;
-                    break;
-                }
-
-                default:
-                    return false;
-            }
-
-            break;
+            default:
+                return;
         }
 
-        return areDeletes;
+        int n = spine.Count + 1;
+        HashSet<(string, KeyValueDurability)> keys = [];
+        int k = 0;
+
+        // Statements in execution order: the deepest left leaf, then each spine node's right
+        // statement bottom-up. Stop at the first statement that breaks the batch shape.
+        for (int i = 0; i < n; i++)
+        {
+            NodeAst? stmt = i == 0 ? node : spine[n - 1 - i].rightAst;
+
+            if (stmt is null || !IsBatchableStatement(context, stmt, isSetMany, keys))
+                break;
+
+            k++;
+        }
+
+        // A batch needs at least two statements; the subtree covering [0..k-1] is spine[n - k].
+        if (k < 2)
+            return;
+
+        context.BatchBoundary = spine[n - k];
+        context.BatchBoundaryIsSetMany = isSetMany;
     }
+
+    /// <summary>
+    /// True when <paramref name="stmt"/> fits the batch being probed: a set/eset (or
+    /// delete/edelete) over a key not already claimed by an earlier statement of the batch.
+    /// Mirrors the per-statement rules of the previous per-level detectors, including delete's
+    /// parameter resolution (an unresolvable key simply ends the batchable prefix).
+    /// </summary>
+    private static bool IsBatchableStatement(
+        ScriptTransactionContext context,
+        NodeAst stmt,
+        bool isSetMany,
+        HashSet<(string, KeyValueDurability)> keys)
+    {
+        if (isSetMany)
+        {
+            if (stmt.nodeType is not (NodeType.Set or NodeType.Eset))
+                return false;
+
+            if (stmt.leftAst?.yytext is null)
+                return false;
+
+            KeyValueDurability durability = stmt.nodeType == NodeType.Set
+                ? KeyValueDurability.Persistent
+                : KeyValueDurability.Ephemeral;
+
+            return keys.Add((stmt.leftAst.yytext!, durability));
+        }
+
+        if (stmt.nodeType is not (NodeType.Delete or NodeType.Edelete))
+            return false;
+
+        if (stmt.leftAst is null)
+            return false;
+
+        string keyName;
+
+        try
+        {
+            keyName = BaseCommand.GetKeyName(context, stmt.leftAst);
+        }
+        catch (KahunaScriptException)
+        {
+            return false;
+        }
+
+        KeyValueDurability deleteDurability = stmt.nodeType == NodeType.Delete
+            ? KeyValueDurability.Persistent
+            : KeyValueDurability.Ephemeral;
+
+        return keys.Add((keyName, deleteDurability));
+    }
+
 }

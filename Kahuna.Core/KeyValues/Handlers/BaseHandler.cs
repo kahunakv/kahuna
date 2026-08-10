@@ -210,7 +210,13 @@ internal abstract class BaseHandler
     /// lazily, and inserting during that enumeration mutates the BTree mid-iteration (leaf
     /// splits invalidate the live cursor) and pollutes the cache with the entire scanned range.
     /// </param>
-    protected async ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null, bool populateCache = true)
+    /// <param name="currentTime">
+    /// The caller's already-minted HLC timestamp, stamped as the loaded entry's LastUsed. Handlers
+    /// that mint one per message should pass it so a cache-miss load does not mint a second event —
+    /// each mint is an interlocked update on the single process-wide clock. Default (zero) mints
+    /// one here for callers that have none.
+    /// </param>
+    protected async ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null, bool populateCache = true, HLCTimestamp currentTime = default)
     {
         if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
         {
@@ -234,7 +240,9 @@ internal abstract class BaseHandler
                 if (entry is not null)
                 {
                     entry.FlushedRevision = entry.Revision; // already on disk
-                    entry.LastUsed = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+                    entry.LastUsed = currentTime != default
+                        ? currentTime
+                        : context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
                     if (populateCache)
                         context.InsertStoreEntry(key, entry);
                     return entry;

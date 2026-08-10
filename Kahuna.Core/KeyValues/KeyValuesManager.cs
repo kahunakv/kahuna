@@ -38,6 +38,15 @@ internal sealed class KeyValuesManager : IDisposable
 {
     private const int MaxRetries = 3;
 
+    // The consumer-apply and restore paths return a Task<bool> per committed log entry;
+    // Task.FromResult(bool) has no cached instances, so these two singletons keep the
+    // per-entry apply from allocating a fresh task cluster-wide.
+    private static readonly Task<bool> TrueTask = Task.FromResult(true);
+
+    private static readonly Task<bool> FalseTask = Task.FromResult(false);
+
+    private static Task<bool> BoolTask(bool value) => value ? TrueTask : FalseTask;
+
     /// <summary>
     /// How long a point-lock acquire waits out a transient holder (an in-flight replication intent, or a write
     /// intent left by a durably decided transaction whose resolution has not run yet) before reporting MustRetry.
@@ -1404,7 +1413,7 @@ internal sealed class KeyValuesManager : IDisposable
                 SyncKeySpaceRegistryFromRangeMap();
                 durabilityTracker?.Resolve(partitionId, log.Id);
             }
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
@@ -1413,7 +1422,7 @@ internal sealed class KeyValuesManager : IDisposable
             bool result = snapshotFloorStore.Restore(partitionId, log);
             if (result)
                 durabilityTracker?.Resolve(partitionId, log.Id);
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
         if (log.LogType == ReplicationTypes.TransactionRecord)
@@ -1422,7 +1431,7 @@ internal sealed class KeyValuesManager : IDisposable
             bool result = transactionRecordStore.Restore(partitionId, log);
             if (result)
                 durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
         if (log.LogType == ReplicationTypes.PreparedIntent)
@@ -1431,7 +1440,7 @@ internal sealed class KeyValuesManager : IDisposable
             bool result = preparedIntentStore.Restore(partitionId, log);
             if (result)
                 durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.PreparedIntents);
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
@@ -1440,10 +1449,10 @@ internal sealed class KeyValuesManager : IDisposable
             bool result = completionReceiptStore.Restore(partitionId, log);
             if (result)
                 durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.Receipts);
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
-        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
+        return BoolTask(log.LogType != ReplicationTypes.KeyValues || restorer.Restore(partitionId, log));
     }
 
     /// <summary>
@@ -1476,7 +1485,7 @@ internal sealed class KeyValuesManager : IDisposable
                 SyncKeySpaceRegistryFromRangeMap();
                 durabilityTracker?.Resolve(partitionId, log.Id);
             }
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
         if (log.LogType == ReplicationTypes.SnapshotFloor)
@@ -1485,7 +1494,7 @@ internal sealed class KeyValuesManager : IDisposable
             bool result = snapshotFloorStore.Replicate(partitionId, log);
             if (result)
                 durabilityTracker?.Resolve(partitionId, log.Id);
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
         // Durable records apply here, in Raft commit order, on every node. On the leader the write scheduler's
@@ -1500,14 +1509,14 @@ internal sealed class KeyValuesManager : IDisposable
             {
                 if (recorded)
                     durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
-                return Task.FromResult(recorded);
+                return BoolTask(recorded);
             }
 
             bool applied = transactionRecordStore.Replicate(partitionId, log);
             durableApplyResults.RecordApplied(partitionId, log.Id, applied);
             if (applied)
                 durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
-            return Task.FromResult(applied);
+            return BoolTask(applied);
         }
 
         if (log.LogType == ReplicationTypes.PreparedIntent)
@@ -1523,7 +1532,7 @@ internal sealed class KeyValuesManager : IDisposable
             // snapshot that covers this apply certifies it either way.
             durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.PreparedIntents);
 
-            return Task.FromResult(true);
+            return TrueTask;
         }
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
@@ -1532,10 +1541,10 @@ internal sealed class KeyValuesManager : IDisposable
             bool result = completionReceiptStore.Replicate(partitionId, log);
             if (result)
                 durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.Receipts);
-            return Task.FromResult(result);
+            return BoolTask(result);
         }
 
-        return Task.FromResult(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
+        return BoolTask(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
     }
 
     /// <summary>

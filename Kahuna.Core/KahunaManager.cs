@@ -1622,35 +1622,40 @@ public sealed class KahunaManager : IKahuna, IDisposable
         return sequencer.DeleteSequence(name, durability, cancellationToken);
     }
     
-    public async Task<bool> OnLogRestored(int partitionId, RaftLog log)
+    // Both apply callbacks run once per committed log entry; delegating the inner task directly
+    // (no async wrapper) avoids a state-machine allocation per entry, and the unknown-type arm
+    // reuses one cached task.
+    private static readonly Task<bool> TrueTask = Task.FromResult(true);
+
+    public Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
         return log.LogType switch
         {
-            ReplicationTypes.KeyValues => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.RangeMap => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.SnapshotFloor => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.CoordinatorDecision => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.TransactionRecord => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.PreparedIntent => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.CompletionReceipt => await keyValues.OnLogRestored(partitionId, log),
-            ReplicationTypes.Locks => await locks.OnLogRestored(partitionId, log),
-            _ => true
+            ReplicationTypes.KeyValues
+                or ReplicationTypes.RangeMap
+                or ReplicationTypes.SnapshotFloor
+                or ReplicationTypes.CoordinatorDecision
+                or ReplicationTypes.TransactionRecord
+                or ReplicationTypes.PreparedIntent
+                or ReplicationTypes.CompletionReceipt => keyValues.OnLogRestored(partitionId, log),
+            ReplicationTypes.Locks => locks.OnLogRestored(partitionId, log),
+            _ => TrueTask
         };
     }
 
-    public async Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
+    public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
         return log.LogType switch
         {
-            ReplicationTypes.KeyValues => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.RangeMap => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.SnapshotFloor => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.CoordinatorDecision => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.TransactionRecord => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.PreparedIntent => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.CompletionReceipt => await keyValues.OnReplicationReceived(partitionId, log),
-            ReplicationTypes.Locks => await locks.OnReplicationReceived(partitionId, log),
-            _ => true
+            ReplicationTypes.KeyValues
+                or ReplicationTypes.RangeMap
+                or ReplicationTypes.SnapshotFloor
+                or ReplicationTypes.CoordinatorDecision
+                or ReplicationTypes.TransactionRecord
+                or ReplicationTypes.PreparedIntent
+                or ReplicationTypes.CompletionReceipt => keyValues.OnReplicationReceived(partitionId, log),
+            ReplicationTypes.Locks => locks.OnReplicationReceived(partitionId, log),
+            _ => TrueTask
         };
     }
 

@@ -23,7 +23,16 @@ internal sealed class TryExtendHandler : BaseHandler
 
     public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
+        // Minted before the entry load so a cache-miss disk read does not mint a second HLC event;
+        // the ReceiveEvent branch keeps the clock ahead of the transaction id exactly as before.
+        HLCTimestamp currentTime;
+
+        if (message.TransactionId == HLCTimestamp.Zero)
+            currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        else
+            currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
+
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
         // committed value not yet materialized locally, so an intent-only committed key is not really missing.
@@ -37,14 +46,7 @@ internal sealed class TryExtendHandler : BaseHandler
 
         if (entry is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
-        
-        HLCTimestamp currentTime;
-        
-        if (message.TransactionId == HLCTimestamp.Zero)
-            currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        else
-            currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
-        
+
         // Validate if there's an active replication enty on the key/value entry
         // clients must retry operations to make sure the entry is fully replicated
         // before modifying the entry
@@ -71,7 +73,7 @@ internal sealed class TryExtendHandler : BaseHandler
         
         // Validate if there's a prefix lock acquired on the bucket
         // if we find expired write intents we can remove it to allow new transactions to proceed
-        if (entry.Bucket is not null && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
+        if (entry.Bucket is not null && context.LocksByPrefix.Count > 0 && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
         {
             if (intent.TransactionId != message.TransactionId)
             {

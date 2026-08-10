@@ -95,11 +95,15 @@ internal sealed class SetCommand : BaseCommand
         }
 
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
-        
+
+        // Serialized once and shared by the write, the staged mutation, and the modified result —
+        // value arrays are never mutated downstream, and each ToBytes call allocates a fresh copy.
+        byte[]? valueBytes = result.ToBytes();
+
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTrySetKeyValue(
             context.TransactionId,
             key: keyName,
-            value: result.ToBytes(),
+            value: valueBytes,
             compareValue,
             compareRevision,
             flags,
@@ -115,7 +119,7 @@ internal sealed class SetCommand : BaseCommand
                 // Stage the value for the durable-intent path, carrying the relative TTL (0 = none). The freeze
                 // resolves it to an absolute expiry of commitTimestamp + expiresMs, so a TTL set is durable-atomic
                 // rather than falling back to the ticket path.
-                context.StageMutation(keyName, result.ToBytes(), revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0);
+                context.StageMutation(keyName, valueBytes, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0);
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
@@ -134,7 +138,7 @@ internal sealed class SetCommand : BaseCommand
                 new()
                 {
                     Key = keyName,
-                    Value = result.ToBytes(),
+                    Value = valueBytes,
                     Revision = revision,
                     LastModified = lastModified
                 }

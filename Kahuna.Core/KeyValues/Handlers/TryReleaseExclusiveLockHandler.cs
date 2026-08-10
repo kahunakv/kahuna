@@ -23,12 +23,12 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
         
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
-        
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
+
         if (entry is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
-        
-        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         if (entry.MvccEntries is null)
             context.Logger.LogReleaseExclusiveLockMvccNull(message.Key);

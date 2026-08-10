@@ -95,7 +95,7 @@ internal sealed class TryCommitMutationsHandler : BaseHandler
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         if (entry is null)
         {

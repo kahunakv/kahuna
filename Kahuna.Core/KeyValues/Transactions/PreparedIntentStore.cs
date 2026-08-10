@@ -114,13 +114,17 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    /// <summary>The current intent at <paramref name="key"/>, or null.</summary>
+    /// <summary>The current intent at <paramref name="key"/>, or null. The emptiness pre-check is
+    /// deliberate: this runs on every point read/write in the actor hot path, and on workloads with
+    /// no durable transactions it skips hashing the key into the shared map entirely (an empty map
+    /// can only ever answer null).</summary>
     public PreparedIntent? Get(string key) =>
-        intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
+        !intents.IsEmpty && intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
 
     /// <summary>The intent at <paramref name="key"/> only when it belongs to the given transaction attempt.</summary>
     public PreparedIntent? GetByIdentity(HLCTimestamp transactionId, long epoch, string key) =>
-        intents.TryGetValue(key, out PreparedIntent? intent)
+        !intents.IsEmpty
+        && intents.TryGetValue(key, out PreparedIntent? intent)
         && intent.TransactionId == transactionId
         && intent.Epoch == epoch
             ? intent

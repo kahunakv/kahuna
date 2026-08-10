@@ -22,7 +22,10 @@ internal static class RangeLockChecks
         HLCTimestamp txId,
         HLCTimestamp currentTime)
     {
-        if (bucket is null || !context.LocksByRange.TryGetValue(bucket, out List<KeyValueRangeLock>? rangeLocks))
+        // Count guard first: range locks are rare, and an empty table answers false without
+        // hashing the bucket. Runs on every write, so the common workload skips the probe.
+        if (context.LocksByRange.Count == 0 || bucket is null
+            || !context.LocksByRange.TryGetValue(bucket, out List<KeyValueRangeLock>? rangeLocks))
             return false;
 
         foreach (KeyValueRangeLock rangeLock in rangeLocks)

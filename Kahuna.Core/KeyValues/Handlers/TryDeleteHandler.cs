@@ -92,12 +92,12 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// </summary>
     private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, HLCTimestamp CurrentTime)> LoadAndValidateEntry(KeyValueRequest message)
     {
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
-
         // Make sure the current time is ahead of the transactionId
         HLCTimestamp currentTime = message.TransactionId == HLCTimestamp.Zero
             ? context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId())
             : context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
+
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
         // committed value not yet materialized locally, so the key is not really missing. Resolve its canonical
@@ -138,7 +138,7 @@ internal sealed class TryDeleteHandler : BaseHandler
 
         // Validate if there's a prefix lock acquired on the bucket
         // if we find expired write intents we can remove it to allow new transactions to proceed
-        if (entry.Bucket is not null && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
+        if (entry.Bucket is not null && context.LocksByPrefix.Count > 0 && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
         {
             if (intent.TransactionId != message.TransactionId)
             {

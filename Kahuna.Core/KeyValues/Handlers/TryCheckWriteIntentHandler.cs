@@ -33,9 +33,9 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
 
     public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability);
-
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         // Live in-memory write intent from a different transaction — signal conflict to the caller.
         if (entry?.WriteIntent is not null && entry.WriteIntent.TransactionId != message.TransactionId)

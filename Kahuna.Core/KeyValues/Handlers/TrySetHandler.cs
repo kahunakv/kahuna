@@ -195,7 +195,7 @@ internal sealed class TrySetHandler : BaseHandler
 
         // Validate if there's a prefix lock acquired on the bucket
         // if we find expired write intents we can remove it to allow new transactions to proceed
-        if (entry.Bucket is not null && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
+        if (entry.Bucket is not null && context.LocksByPrefix.Count > 0 && context.LocksByPrefix.TryGetValue(entry.Bucket, out KeyValueWriteIntent? intent))
         {
             if (intent.TransactionId != message.TransactionId)
             {
