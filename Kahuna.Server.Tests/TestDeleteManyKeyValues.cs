@@ -104,13 +104,8 @@ public class TestDeleteManyKeyValues : BaseCluster
         {
             KahunaManager km1 = (KahunaManager)kahuna1;
 
-            string existingKey = await GetKeyLedByNode(node1, km1);
-            string missingKey;
-
-            do
-            {
-                missingKey = await GetKeyLedByNode(node1, km1);
-            } while (missingKey == existingKey);
+            (IKahuna leader, string existingKey, string missingKey) = await KeysLedByOneNode(
+                [(node1, kahuna1), (node2, kahuna2), (node3, kahuna3)], km1);
 
             (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero,
@@ -126,7 +121,7 @@ public class TestDeleteManyKeyValues : BaseCluster
 
             Assert.Equal(KeyValueResponseType.Set, setType);
 
-            List<KahunaDeleteKeyValueResponseItem> responses = await kahuna1.DeleteManyNodeKeyValue(
+            List<KahunaDeleteKeyValueResponseItem> responses = await leader.DeleteManyNodeKeyValue(
             [
                 new() { TransactionId = HLCTimestamp.Zero, Key = existingKey, Durability = KeyValueDurability.Persistent },
                 new() { TransactionId = HLCTimestamp.Zero, Key = missingKey, Durability = KeyValueDurability.Persistent }
@@ -320,15 +315,39 @@ END
         return $"srv-delete-many-{Guid.NewGuid():N}";
     }
 
-    private static async Task<string> GetKeyLedByNode(IRaft raft, KahunaManager kahuna)
+    /// <summary>
+    /// Picks a random key and resolves which node currently leads its partition, then derives a
+    /// second key routed to the same partition. Demanding leadership from one specific node can
+    /// never be satisfied when that node happens to lead no partition, and polling AmILeader
+    /// without a delay starves the election machinery it is waiting on, so this iterates all
+    /// nodes and backs off between rounds.
+    /// </summary>
+    private static async Task<(IKahuna Leader, string ExistingKey, string MissingKey)> KeysLedByOneNode(
+        (IRaft Raft, IKahuna Kahuna)[] nodes, KahunaManager router)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string existingKey = GetRandomKeyName();
+        int partitionId = router.GetDataPartitionForKey(existingKey);
+
         while (true)
         {
-            string key = GetRandomKeyName();
-            int partitionId = kahuna.GetDataPartitionForKey(key);
+            foreach ((IRaft raft, IKahuna kahuna) in nodes)
+            {
+                if (await raft.AmILeader(partitionId, ct))
+                {
+                    string missingKey;
 
-            if (await raft.AmILeader(partitionId, TestContext.Current.CancellationToken))
-                return key;
+                    do
+                    {
+                        missingKey = GetRandomKeyName();
+                    } while (router.GetDataPartitionForKey(missingKey) != partitionId);
+
+                    return (kahuna, existingKey, missingKey);
+                }
+            }
+
+            await Task.Delay(50, ct);
         }
     }
 }
