@@ -55,13 +55,26 @@ public sealed class KahunaBackupInfo
     public string? SubstitutionReason { get; set; }
 
     /// <summary>
-    /// Set when this entry represents a manifest that could not be read/parsed. When true the entry
-    /// is a placeholder (only <see cref="BackupId"/> is meaningful) and <see cref="InvalidReason"/>
-    /// explains the problem; the backup must not be used.
+    /// Set when this entry must not be used: a manifest that could not be read/parsed, or a backup whose
+    /// artifacts exist without a manifest (see <see cref="IsIncomplete"/>). When true the entry is a
+    /// placeholder — only <see cref="BackupId"/> is meaningful — and <see cref="InvalidReason"/> explains
+    /// the problem.
     /// </summary>
     public bool IsInvalid { get; set; }
 
-    /// <summary>Human-readable reason this entry is invalid; null when the entry is valid.</summary>
+    /// <summary>
+    /// Set when artifacts exist for this backup id but no manifest does, meaning the backup never
+    /// completed: the artifacts are published before the manifest, so a missing manifest is the signature
+    /// of an upload or write that was interrupted — or of one still in flight.
+    /// <para>
+    /// Entries flagged this way also carry <see cref="IsInvalid"/>, so a caller that only checks the
+    /// older flag still correctly refuses to use them; this one exists to distinguish "started and never
+    /// finished" from "finished but the manifest is corrupt", which need different operator responses.
+    /// </para>
+    /// </summary>
+    public bool IsIncomplete { get; set; }
+
+    /// <summary>Human-readable reason this entry is invalid or incomplete; null when the entry is valid.</summary>
     public string? InvalidReason { get; set; }
 
     /// <summary>

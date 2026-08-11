@@ -14,50 +14,36 @@ internal sealed class BackupCatalog
         _target = target;
     }
 
-    public void Put(BackupManifest manifest) => _target.Put(manifest);
+    public Task PutAsync(BackupManifest manifest, CancellationToken ct = default) =>
+        _target.PutAsync(manifest, ct);
 
     /// <summary>
-    /// Removes a backup: the manifest first (tombstone), then its artifact directory
-    /// <c>{backupDir}/{id:N}/</c>. Manifest-first ordering means a crash between the two steps leaves at
-    /// worst an orphan artifact directory with no manifest — which the orphan sweep reclaims — never a
-    /// manifest resolving to absent artifacts. The artifact directory is removed without following a
-    /// symlink: if the directory itself is a reparse point only the link is unlinked, so a swapped-in
-    /// symlink can never redirect the delete outside the backup directory. Idempotent.
+    /// Removes a backup: the manifest first (tombstone), then its artifacts. Manifest-first ordering
+    /// means a crash between the two steps leaves at worst an orphan artifact set with no manifest —
+    /// which the orphan sweep reclaims — never a manifest resolving to absent artifacts.
+    /// <para>
+    /// Idempotent in both halves, which matters because artifact deletion is not atomic on every store:
+    /// a store that deletes object-by-object can fail part-way, and re-running this must finish the job
+    /// rather than throw or skip. The manifest is already gone by then, so the backup stays tombstoned
+    /// throughout.
+    /// </para>
     /// </summary>
-    public void Delete(Guid backupId, string backupDir)
+    public async Task DeleteAsync(Guid backupId, IBackupArtifactStore artifacts, CancellationToken ct = default)
     {
-        _target.Delete(backupId);
-        RemoveArtifactDirectory(Path.Combine(backupDir, backupId.ToString("N")));
+        await _target.DeleteAsync(backupId, ct).ConfigureAwait(false);
+        await artifacts.DeleteAllAsync(backupId, ct).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Removes a leftover artifact directory (or staging/quarantine remnant) at <paramref name="path"/>
-    /// without following a top-level symlink. Idempotent — a no-op when the path does not exist.
-    /// </summary>
-    internal static void RemoveArtifactDirectory(string path)
-    {
-        if (!Directory.Exists(path))
-            return;
+    public Task<BackupManifest?> GetAsync(Guid backupId, CancellationToken ct = default) =>
+        _target.GetAsync(backupId, ct);
 
-        // A reparse point (symlink/junction) as the directory itself must be unlinked, not recursed
-        // into — a recursive delete through it would reclaim the link target's contents outside the
-        // backup directory. Recursive delete of a real directory does not descend into reparse-point
-        // subdirectories on this runtime, so inner links are removed as links, never followed.
-        if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
-            Directory.Delete(path, recursive: false);
-        else
-            Directory.Delete(path, recursive: true);
-    }
+    public Task<IReadOnlyList<BackupManifest>> ListAsync(CancellationToken ct = default) => _target.ListAsync(ct);
 
-    public BackupManifest? Get(Guid backupId) => _target.Get(backupId);
+    public Task<IReadOnlyList<(Guid backupId, string reason)>> ListCorruptAsync(CancellationToken ct = default) =>
+        _target.ListCorruptAsync(ct);
 
-    public IReadOnlyList<BackupManifest> List(CancellationToken ct = default) => _target.List(ct);
-
-    public IReadOnlyList<(Guid backupId, string reason)> ListCorrupt(CancellationToken ct = default) =>
-        _target.ListCorrupt(ct);
-
-    public IReadOnlyList<Guid> ListManifestIds(CancellationToken ct = default) =>
-        _target.ListManifestIds(ct);
+    public Task<IReadOnlyList<Guid>> ListManifestIdsAsync(CancellationToken ct = default) =>
+        _target.ListManifestIdsAsync(ct);
 
     /// <summary>
     /// Resolves the backup chain ending at <paramref name="leafBackupId"/> by walking
@@ -67,7 +53,7 @@ internal sealed class BackupCatalog
     /// <exception cref="BackupChainException">
     /// Thrown when a manifest in the chain is missing from the catalog.
     /// </exception>
-    public IReadOnlyList<BackupManifest> ResolveChain(Guid leafBackupId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<BackupManifest>> ResolveChainAsync(Guid leafBackupId, CancellationToken ct = default)
     {
         List<BackupManifest> reversed = [];
         HashSet<Guid> seen = [];
@@ -81,7 +67,7 @@ internal sealed class BackupCatalog
                 throw new BackupChainException(
                     $"Cycle detected in backup chain at {current.Value:N} while resolving from {leafBackupId:N}.");
 
-            BackupManifest? manifest = _target.Get(current.Value);
+            BackupManifest? manifest = await _target.GetAsync(current.Value, ct).ConfigureAwait(false);
             if (manifest is null)
                 throw new BackupChainException(
                     $"Manifest {current.Value:N} not found in catalog while resolving chain from {leafBackupId:N}.");
@@ -96,11 +82,11 @@ internal sealed class BackupCatalog
 
     /// <summary>
     /// Resolves the chain and immediately validates it.
-    /// Equivalent to <c>Validate(ResolveChain(leafBackupId))</c>.
+    /// Equivalent to <c>Validate(await ResolveChainAsync(leafBackupId))</c>.
     /// </summary>
-    public IReadOnlyList<BackupManifest> ResolveAndValidate(Guid leafBackupId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<BackupManifest>> ResolveAndValidateAsync(Guid leafBackupId, CancellationToken ct = default)
     {
-        IReadOnlyList<BackupManifest> chain = ResolveChain(leafBackupId, ct);
+        IReadOnlyList<BackupManifest> chain = await ResolveChainAsync(leafBackupId, ct).ConfigureAwait(false);
         Validate(chain);
         return chain;
     }

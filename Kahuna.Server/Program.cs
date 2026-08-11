@@ -406,6 +406,8 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
     BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
     BackupDir = opts.PitrBackupDir,
+    BackupTarget = opts.PitrBackupTarget,
+    BackupScratchDir = opts.PitrBackupScratchDir,
     BackupClusterId = opts.PitrBackupClusterId,
     BackupMacKeyFile = opts.PitrBackupMacKeyFile,
     RestoreRoot = opts.PitrRestoreRoot,

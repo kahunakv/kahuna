@@ -72,6 +72,8 @@ public sealed class TestBackupService : IDisposable
             raft,
             backend,
             BackupDir(tag),
+            BackupTestStores.Manifests(BackupDir(tag)),
+            BackupTestStores.Artifacts(BackupDir(tag)),
             storageType: "memory",
             storageRevision: "",
             flushBeforeCheckpoint: flush ?? (() => Task.CompletedTask),
@@ -143,7 +145,7 @@ public sealed class TestBackupService : IDisposable
         // A second full backup creates a newer chain; MaxChains:1 retention (run inline) removes the first.
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo second = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
 
-        List<Guid> ids = svc.ListBackups(ct: TestContext.Current.CancellationToken).Select(b => b.BackupId).ToList();
+        List<Guid> ids = (await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken)).Select(b => b.BackupId).ToList();
         Assert.DoesNotContain(first.BackupId, ids);
         Assert.Contains(second.BackupId, ids);
         // The deleted backup's artifact directory is gone too.
@@ -215,7 +217,7 @@ public sealed class TestBackupService : IDisposable
         BackupGcInventory inventory = await svc.RunGarbageCollectionAsync(TestContext.Current.CancellationToken);
 
         Assert.False(Directory.Exists(orphan));
-        Assert.Contains(inventory.OrphanReclamations, o => Path.GetFileName(o.Path) == Path.GetFileName(orphan));
+        Assert.Contains(inventory.OrphanReclamations, o => Path.GetFileName(o.Name) == Path.GetFileName(orphan));
     }
 
     [Fact]
@@ -243,7 +245,7 @@ public sealed class TestBackupService : IDisposable
         Assert.True(Directory.Exists(artifactDir),
             "artifact directory of a corrupt-manifest backup must survive GC");
         Assert.DoesNotContain(inventory.OrphanReclamations,
-            o => Path.GetFileName(o.Path) == full.BackupId.ToString("N"));
+            o => Path.GetFileName(o.Name) == full.BackupId.ToString("N"));
     }
 
     private static void Put(MemoryPersistenceBackend b, string key, byte[] value, long rev) =>
@@ -308,8 +310,8 @@ public sealed class TestBackupService : IDisposable
 
     // ── coordinated backup: coordinator fence + identity stamping ─────────────────────────────
 
-    private BackupManifest? ReadManifest(string tag, Guid backupId) =>
-        new BackupCatalog(new LocalDirectoryStorageTarget(BackupDir(tag))).Get(backupId);
+    private Task<BackupManifest?> ReadManifestAsync(string tag, Guid backupId) =>
+        new BackupCatalog(new LocalDirectoryStorageTarget(BackupDir(tag))).GetAsync(backupId);
 
     [Fact]
     public async Task TakeCoordinated_OnFollower_ThrowsNotBackupCoordinator()
@@ -324,7 +326,7 @@ public sealed class TestBackupService : IDisposable
 
         Assert.Equal(Kahuna.Shared.Communication.Rest.KahunaBackupOutcome.NotBackupCoordinator, ex.Outcome);
         // Nothing was published.
-        Assert.Empty(svc.ListBackups(ct: TestContext.Current.CancellationToken));
+        Assert.Empty(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -339,7 +341,7 @@ public sealed class TestBackupService : IDisposable
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto =
             await svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken);
 
-        BackupManifest? m = ReadManifest("coord_leader", dto.BackupId);
+        BackupManifest? m = await ReadManifestAsync("coord_leader", dto.BackupId);
         Assert.NotNull(m);
         Assert.Equal("cluster-x", m!.ClusterId);
         Assert.Equal("stub", m.CoordinatorNode);
@@ -354,7 +356,7 @@ public sealed class TestBackupService : IDisposable
 
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
 
-        BackupManifest? m = ReadManifest("cluster_stamp", dto.BackupId);
+        BackupManifest? m = await ReadManifestAsync("cluster_stamp", dto.BackupId);
         Assert.NotNull(m);
         Assert.Equal("cluster-y", m!.ClusterId);
     }
@@ -367,7 +369,7 @@ public sealed class TestBackupService : IDisposable
         await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
 
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo info =
-            Assert.Single(svc.ListBackups(ct: TestContext.Current.CancellationToken));
+            Assert.Single(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken));
         Assert.Equal("cluster-z", info.ClusterId);
         Assert.Equal("stub", info.CoordinatorNode);
     }
@@ -380,7 +382,7 @@ public sealed class TestBackupService : IDisposable
 
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
 
-        BackupManifest? m = ReadManifest("cluster_unset", dto.BackupId);
+        BackupManifest? m = await ReadManifestAsync("cluster_unset", dto.BackupId);
         Assert.NotNull(m);
         Assert.Null(m!.ClusterId);
     }
@@ -459,7 +461,7 @@ public sealed class TestBackupService : IDisposable
         BackupService svc = MakeService("mac_none", wal, new MemoryPersistenceBackend());
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
 
-        Assert.Null(ReadManifest("mac_none", full.BackupId)!.Mac);
+        Assert.Null((await ReadManifestAsync("mac_none", full.BackupId))!.Mac);
     }
 
     [Fact]
@@ -473,7 +475,7 @@ public sealed class TestBackupService : IDisposable
         BackupService svc = MakeService("mac_ok", wal, backend, flush: Flush, macKeyFile: key);
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
 
-        Assert.False(string.IsNullOrEmpty(ReadManifest("mac_ok", full.BackupId)!.Mac));
+        Assert.False(string.IsNullOrEmpty((await ReadManifestAsync("mac_ok", full.BackupId))!.Mac));
 
         // A signed manifest restores cleanly (the MAC verifies against the same key).
         string target = Path.Combine(_tempRoot, "mac_ok_restore");
@@ -528,7 +530,7 @@ public sealed class TestBackupService : IDisposable
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc = await svc.TakeIncrementalAsync(full.BackupId, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> all = svc.ListBackups(ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> all = await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken);
         Assert.Equal(2, all.Count);
         Assert.Contains(all, b => b.BackupId == full.BackupId);
         Assert.Contains(all, b => b.BackupId == inc.BackupId);
@@ -557,7 +559,7 @@ public sealed class TestBackupService : IDisposable
 
         MutateManifest(BackupDir("list_ver"), full.BackupId, m => m.FormatVersion = BackupManifest.CurrentFormatVersion + 1);
 
-        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(svc.ListBackups(ct: TestContext.Current.CancellationToken), full.BackupId);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken), full.BackupId);
         Assert.True(e.IsInvalid);
         Assert.Contains("version", e.InvalidReason!, StringComparison.OrdinalIgnoreCase);
     }
@@ -571,7 +573,7 @@ public sealed class TestBackupService : IDisposable
 
         MutateManifest(BackupDir("list_dup"), full.BackupId, m => m.PartitionRanges.Add(m.PartitionRanges[0]));
 
-        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(svc.ListBackups(ct: TestContext.Current.CancellationToken), full.BackupId);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken), full.BackupId);
         Assert.True(e.IsInvalid);
         Assert.Contains("duplicate", e.InvalidReason!, StringComparison.OrdinalIgnoreCase);
     }
@@ -585,7 +587,7 @@ public sealed class TestBackupService : IDisposable
 
         MutateManifest(BackupDir("list_size"), full.BackupId, m => m.Sizes.Remove(m.Sizes.Keys.First()));
 
-        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(svc.ListBackups(ct: TestContext.Current.CancellationToken), full.BackupId);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo e = Entry(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken), full.BackupId);
         Assert.True(e.IsInvalid);
         Assert.Contains("size", e.InvalidReason!, StringComparison.OrdinalIgnoreCase);
     }
@@ -601,7 +603,7 @@ public sealed class TestBackupService : IDisposable
 
         MutateManifest(BackupDir("list_mixed"), full.BackupId, m => m.PartitionRanges.Add(m.PartitionRanges[0]));
 
-        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> all = svc.ListBackups(ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> all = await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken);
         Assert.Equal(2, all.Count); // both entries still present
         Assert.True(Entry(all, full.BackupId).IsInvalid);
         Assert.False(Entry(all, inc.BackupId).IsInvalid);
@@ -619,10 +621,10 @@ public sealed class TestBackupService : IDisposable
         File.AppendAllText(storeJson, "corruption");
 
         // Cheap structural listing does not read artifacts, so the entry is not marked invalid.
-        Assert.False(Entry(svc.ListBackups(ct: TestContext.Current.CancellationToken), full.BackupId).IsInvalid);
+        Assert.False(Entry(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken), full.BackupId).IsInvalid);
 
         // Full artifact verification catches the byte-level corruption.
-        Kahuna.Shared.Communication.Rest.KahunaBackupInfo verified = Entry(svc.ListBackups(verifyArtifacts: true, ct: TestContext.Current.CancellationToken), full.BackupId);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo verified = Entry(await svc.ListBackupsAsync(verifyArtifacts: true, ct: TestContext.Current.CancellationToken), full.BackupId);
         Assert.True(verified.IsInvalid);
     }
 
@@ -637,8 +639,8 @@ public sealed class TestBackupService : IDisposable
         File.Delete(storeJson);
 
         // Structural listing passes (no files read); full verification flags the missing artifact.
-        Assert.False(Entry(svc.ListBackups(ct: TestContext.Current.CancellationToken), full.BackupId).IsInvalid);
-        Assert.True(Entry(svc.ListBackups(verifyArtifacts: true, ct: TestContext.Current.CancellationToken), full.BackupId).IsInvalid);
+        Assert.False(Entry(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken), full.BackupId).IsInvalid);
+        Assert.True(Entry(await svc.ListBackupsAsync(verifyArtifacts: true, ct: TestContext.Current.CancellationToken), full.BackupId).IsInvalid);
     }
 
     [Fact]
@@ -651,7 +653,7 @@ public sealed class TestBackupService : IDisposable
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc = await svc.TakeIncrementalAsync(full.BackupId, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> chain = svc.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> chain = await svc.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
         Assert.Equal(2, chain.Count);
         Assert.Equal("Full", chain[0].Type);
         Assert.Equal("Incremental", chain[1].Type);
@@ -815,6 +817,8 @@ public sealed class TestBackupService : IDisposable
             raft,
             new MemoryPersistenceBackend(),
             BackupDir("subst"),
+            BackupTestStores.Manifests(BackupDir("subst")),
+            BackupTestStores.Artifacts(BackupDir("subst")),
             storageType: "memory",
             storageRevision: "",
             flushBeforeCheckpoint: () => Task.CompletedTask,
@@ -907,7 +911,7 @@ public sealed class TestBackupService : IDisposable
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) }])]);
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc = await svc.TakeIncrementalAsync(full.BackupId, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> chain = svc.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> chain = await svc.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
 
         // Head (Full) carries the recoverable window; base cut = 100, chain tip = 300.
         Assert.Equal(100, chain[0].MinRecoverablePhysicalMs);
@@ -930,9 +934,9 @@ public sealed class TestBackupService : IDisposable
         // Simulate a pre-hardening (legacy) manifest sitting in the same backup directory.
         BackupManifest legacy = BackupManifest.CreateFull([]);
         legacy.FormatVersion = 0;
-        new LocalDirectoryStorageTarget(BackupDir("legacy_list")).Put(legacy);
+        await new LocalDirectoryStorageTarget(BackupDir("legacy_list")).PutAsync(legacy);
 
-        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> listed = svc.ListBackups(ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> listed = await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken);
 
         Kahuna.Shared.Communication.Rest.KahunaBackupInfo legacyEntry =
             listed.Single(b => b.BackupId == legacy.BackupId);

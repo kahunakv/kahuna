@@ -8,7 +8,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// the contiguous range of committed log indices captured by this backup,
 /// together with the HLC timestamps at both ends.
 /// </summary>
-internal sealed class PartitionBackupRange
+public sealed class PartitionBackupRange
 {
     public int PartitionId { get; set; }
 

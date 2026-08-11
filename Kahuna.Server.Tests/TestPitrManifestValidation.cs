@@ -54,7 +54,7 @@ public sealed class TestPitrManifestValidation : IDisposable
         string artifacts = ArtifactsDir(tag);
         MemoryPersistenceBackend backend = new();
         Put(backend, "k1", 1);
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog);
         return (artifacts, full);
     }
 
@@ -65,9 +65,9 @@ public sealed class TestPitrManifestValidation : IDisposable
         string artifacts = ArtifactsDir(tag);
         MemoryPersistenceBackend backend = new();
         Put(backend, "k1", 1);
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog);
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog);
         return (artifacts, full, inc);
     }
 
@@ -78,7 +78,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("future_ver");
         full.FormatVersion = BackupManifest.CurrentFormatVersion + 1;
-        Assert.Throws<BackupUnsupportedFormatException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupUnsupportedFormatException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("legacy_ver");
         full.FormatVersion = 0;
-        Assert.Throws<BackupUnsupportedFormatException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupUnsupportedFormatException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── size keyset ────────────────────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("missing_size");
         full.Sizes.Remove(full.Sizes.Keys.First());
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -104,7 +104,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("extra_size");
         full.Sizes["checkpoint/ghost.json"] = 10;
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── partition ranges ───────────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("dup_range");
         inc.PartitionRanges.Add(PartitionBackupRange.Create(1, 3, new HLCTimestamp(0, 300, 0), 3, new HLCTimestamp(0, 300, 0), 0));
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("badbounds");
         inc.PartitionRanges[0].ToIndex = inc.PartitionRanges[0].FromIndex - 1;
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── type / parent / base-cut ─────────────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("full_parent");
         full.ParentBackupId = Guid.NewGuid();
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public sealed class TestPitrManifestValidation : IDisposable
         full.BaseCutNode = null;
         full.BaseCutPhysical = null;
         full.BaseCutCounter = null;
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -150,7 +150,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("inc_basecut");
         inc.SetBaseCut(new HLCTimestamp(0, 50, 0));
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── required artifact names ──────────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("full_badname");
         full.Checksums["partition_1.wal"] = new string('a', 64);
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -168,7 +168,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("inc_extra");
         inc.Checksums["partition_9.wal"] = new string('a', 64);
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── semantic content ─────────────────────────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ public sealed class TestPitrManifestValidation : IDisposable
         (string artifacts, BackupManifest full) = await BuildFull("sidecar_mismatch");
         // A BaseCut that no longer matches the sidecar's recorded applied time.
         full.SetBaseCut(new HLCTimestamp(0, 99999, 0));
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -188,7 +188,7 @@ public sealed class TestPitrManifestValidation : IDisposable
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("seg_toindex");
         // Declared ToIndex no longer matches the segment's last entry index.
         inc.PartitionRanges[0].ToIndex += 5;
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -197,7 +197,7 @@ public sealed class TestPitrManifestValidation : IDisposable
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("seg_fromhlc");
         // Declared FromHlc no longer matches the segment's first entry HLC.
         inc.PartitionRanges[0].FromHlcPhysical += 1;
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── symlinked per-backup artifact root ───────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, BackupManifest full) = await BuildFull("full_symroot");
         SymlinkBackupRoot(artifacts, full.BackupId);
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -224,7 +224,7 @@ public sealed class TestPitrManifestValidation : IDisposable
     {
         (string artifacts, _, BackupManifest inc) = await BuildFullPlusIncremental("inc_symroot");
         SymlinkBackupRoot(artifacts, inc.BackupId);
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -233,11 +233,11 @@ public sealed class TestPitrManifestValidation : IDisposable
         // The per-backup root is re-checked on every verification, so a swap to a symlink between a
         // prior validation and a later copy/replay is caught rather than silently followed.
         (string artifacts, BackupManifest full) = await BuildFull("swap_root");
-        BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken); // first pass: real directory, OK
+        await BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken); // first pass: real directory, OK
 
         SymlinkBackupRoot(artifacts, full.BackupId);     // attacker swaps the root for a symlink
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -258,6 +258,6 @@ public sealed class TestPitrManifestValidation : IDisposable
         inc.Checksums["partition_1.wal"] = BackupArtifactVerifier.ComputeSha256(segPath);
         inc.Sizes["partition_1.wal"] = new FileInfo(segPath).Length;
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 }

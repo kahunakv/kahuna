@@ -463,6 +463,12 @@ public sealed class KahunaCommandLineOptions
     [Option("pitr-backup-dir", Required = false, HelpText = "Root directory for PITR backup artifacts and catalog manifests. Required when --pitr-bootstrap-from is set; also used by the backup service to store new backups.", Default = "")]
     public string PitrBackupDir { get; set; } = "";
 
+    [Option("pitr-backup-target", Required = false, HelpText = "Which storage target holds backups. 'local' (the default) keeps them under --pitr-backup-dir on this host. Any other value requires the host to register a backup storage provider, since object-storage targets ship as separate packages.", Default = "local")]
+    public string PitrBackupTarget { get; set; } = "local";
+
+    [Option("pitr-backup-scratch-dir", Required = false, HelpText = "Local directory backup bytes transit when the target cannot be written to directly by the storage engine. Mandatory for such a target: a checkpoint is written through the filesystem before upload. Size it for one whole full backup, which transits it in its entirety.", Default = "")]
+    public string PitrBackupScratchDir { get; set; } = "";
+
     [Option("pitr-backup-cluster-id", Required = false, HelpText = "Operator-assigned cluster identity stamped into every backup manifest; set the SAME value on every node. Gates backup-chain resolution so a foreign cluster's artifacts cannot be chained or restored here. Empty = unset (guard dormant).", Default = "")]
     public string PitrBackupClusterId { get; set; } = "";
 

@@ -96,17 +96,17 @@ internal sealed class BackupDriver
     /// <summary>
     /// Flushes all pending writes to the storage engine, snapshots it, captures per-partition
     /// WAL coverage, writes a Full <see cref="BackupManifest"/> to <paramref name="catalog"/>,
-    /// and returns the manifest.  Artifact files land in <c>{artifactsDir}/{backupId}/</c>.
+    /// and returns the manifest.  Artifacts are written to <paramref name="artifacts"/> under the new backup's id.
     /// When <paramref name="snapshotT"/> is supplied each partition's coverage is capped at the
     /// last committed entry with <c>Time ≤ T</c> and T is recorded in the manifest as the
     /// cluster-wide consistent-cut timestamp.
     /// </summary>
-    public Task<BackupManifest> TakeFullBackupAsync(string artifactsDir, BackupCatalog catalog,
+    public Task<BackupManifest> TakeFullBackupAsync(IBackupArtifactStore artifacts, BackupCatalog catalog,
         HLCTimestamp? snapshotT = null, BackupOwnerIdentity identity = default,
         Func<CancellationToken, Task<bool>>? verifyCoordinator = null, Action<BackupManifest>? signManifest = null,
         CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
-            artifactsDir, catalog, _flushBeforeCheckpoint, snapshotT,
+            artifacts, catalog, _flushBeforeCheckpoint, snapshotT,
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
             verifyCoordinator: verifyCoordinator, signManifest: signManifest, ct: ct);
@@ -117,15 +117,15 @@ internal sealed class BackupDriver
     /// <paramref name="catalog"/>, and returns the manifest.
     /// Throws <see cref="BackupDriverException"/> when the parent range starts below the WAL
     /// compaction floor (a new full backup is required in that case).
-    /// Artifact files land in <c>{artifactsDir}/{backupId}/</c>.
+    /// Artifacts are written to <paramref name="artifacts"/> under the new backup's id.
     /// When <paramref name="snapshotT"/> is supplied each partition's segment is capped at the
     /// first entry whose <c>Time > T</c> and T is recorded in the manifest.
     /// </summary>
-    public BackupManifest TakeIncrementalBackup(Guid parentBackupId, string artifactsDir,
+    public Task<BackupManifest> TakeIncrementalBackupAsync(Guid parentBackupId, IBackupArtifactStore artifacts,
         BackupCatalog catalog, HLCTimestamp? snapshotT = null,
         Func<int, long, IDisposable>? acquireRetentionHold = null, BackupOwnerIdentity identity = default,
         Action<BackupManifest>? signManifest = null, CancellationToken ct = default) =>
-        RunIncremental(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifactsDir, catalog, snapshotT,
+        RunIncrementalAsync(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifacts, catalog, snapshotT,
             acquireRetentionHold, identity, ComposeTopologyGeneration, signManifest, ct);
 
     /// <summary>
@@ -189,7 +189,7 @@ internal sealed class BackupDriver
         IWAL wal,
         IReadOnlyList<RaftPartitionRange> partitions,
         IPersistenceBackend persistenceBackend,
-        string artifactsDir,
+        IBackupArtifactStore artifacts,
         BackupCatalog catalog,
         Func<Task>? flushBeforeCheckpoint = null,
         HLCTimestamp? snapshotT = null,
@@ -212,8 +212,6 @@ internal sealed class BackupDriver
         long? capturedTopologyGeneration = topologyGenerationProbe?.Invoke();
 
         Guid backupId = Guid.NewGuid();
-        string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
-        BackupFilePermissions.CreateDirectory(artifactPath);
 
         string? snapshotHoldId = null;
 
@@ -347,17 +345,31 @@ internal sealed class BackupDriver
                         $"base cut {cut}; refusing to publish an inconsistent full backup.");
             }
 
-            string checkpointPath = Path.Combine(artifactPath, "checkpoint");
-            persistenceBackend.CreateCheckpointAsOf(checkpointPath, maxAppliedIndex, cut, workCt);
+            // The backend can only write a checkpoint to a local directory, so the store decides where
+            // that is: its own artifact directory when it is local, otherwise a scratch area it uploads
+            // from on commit.
+            Dictionary<string, string> checksums;
+            Dictionary<string, long> sizes;
+            await using (IBackupCheckpointStagingArea staging =
+                         await artifacts.BeginCheckpointAsync(backupId, workCt).ConfigureAwait(false))
+            {
+                persistenceBackend.CreateCheckpointAsOf(staging.LocalPath, maxAppliedIndex, cut, workCt);
 
-            // Hash every file the checkpoint produced (data files AND the sidecar), not just the
-            // sidecar, so a truncated or altered checkpoint is caught before replay.
-            (Dictionary<string, string> checksums, Dictionary<string, long> sizes) =
-                BackupArtifactVerifier.HashDirectory(checkpointPath, "checkpoint/", workCt);
+                // Hash every file the checkpoint produced (data files AND the sidecar), not just the
+                // sidecar, so a truncated or altered checkpoint is caught before replay. Hashing happens
+                // on the staged bytes, which is also the last point they are guaranteed to be local.
+                (checksums, sizes) =
+                    BackupArtifactVerifier.HashDirectory(staging.LocalPath, "checkpoint/", workCt);
 
-            // The backend created the checkpoint files at the process umask; lock the whole tree down to
-            // owner-only (0600 files / 0700 dirs) before it is verified and published.
-            BackupFilePermissions.RestrictTree(artifactPath);
+                // The backend created the checkpoint files at the process umask; lock the staged tree down
+                // to owner-only (0600 files / 0700 dirs) before it is published. Backup bytes sit on local
+                // disk in cleartext while they transit this directory, whatever the eventual target is.
+                BackupFilePermissions.RestrictTree(staging.LocalPath);
+
+                // Publish the artifacts. This must precede the manifest so manifest presence remains the
+                // existence predicate for a complete backup.
+                await staging.CommitAsync(workCt).ConfigureAwait(false);
+            }
 
             BackupManifest manifest = BackupManifest.CreateFull(ranges);
             manifest.BackupId = backupId;
@@ -370,8 +382,10 @@ internal sealed class BackupDriver
             if (snapshotT.HasValue)
                 manifest.SetClusterSnapshotTime(snapshotT.Value);
 
-            // Fail closed: never publish a manifest whose artifacts don't verify.
-            BackupArtifactVerifier.Verify(manifest, artifactsDir, workCt);
+            // Fail closed: never publish a manifest whose artifacts don't verify. Verification reads back
+            // through the store, so it checks what a restore would actually get rather than what was
+            // staged locally.
+            await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, workCt).ConfigureAwait(false);
 
             // Final gate before publishing: if renewal was lost at any point the hold may have
             // expired and pruning may have reclaimed the as-of history, so the checkpoint we just
@@ -410,7 +424,7 @@ internal sealed class BackupDriver
             // final step before publish, so the tag covers everything recorded above.
             signManifest?.Invoke(manifest);
 
-            catalog.Put(manifest);
+            await catalog.PutAsync(manifest, ct).ConfigureAwait(false);
             return manifest;
         }
         catch (OperationCanceledException) when (
@@ -418,7 +432,7 @@ internal sealed class BackupDriver
         {
             // The work was aborted specifically by renewal loss (not by the caller's cancellation).
             // Surface it as a fail-closed backup error rather than a bare cancellation.
-            TryDeleteDirectory(artifactPath);
+            await TryDeleteArtifactsAsync(artifacts, backupId).ConfigureAwait(false);
             throw new BackupDriverException(
                 "The snapshot-history hold could not be renewed during the backup; the base image " +
                 "may have been pruned, so the backup was not published.")
@@ -428,7 +442,7 @@ internal sealed class BackupDriver
         }
         catch
         {
-            TryDeleteDirectory(artifactPath);
+            await TryDeleteArtifactsAsync(artifacts, backupId).ConfigureAwait(false);
             throw;
         }
         finally
@@ -443,7 +457,7 @@ internal sealed class BackupDriver
 
             // Release the snapshot-history hold after the manifest is published (or the attempt
             // failed) so pruning is fenced across the whole checkpoint + verification window. This is
-            // best-effort cleanup: once catalog.Put has committed, a release failure must NOT turn a
+            // best-effort cleanup: once the manifest has been published, a release failure must NOT turn a
             // published, successful backup into a reported failure (that would provoke a duplicate
             // retry). The hold's lease expires on its own if the release never lands.
             if (snapshotHoldId is not null && releaseSnapshotHold is not null)
@@ -610,11 +624,11 @@ internal sealed class BackupDriver
         return max;
     }
 
-    internal static BackupManifest RunIncremental(
+    internal static async Task<BackupManifest> RunIncrementalAsync(
         IWAL wal,
         IReadOnlyList<RaftPartitionRange> partitions,
         Guid parentBackupId,
-        string artifactsDir,
+        IBackupArtifactStore artifacts,
         BackupCatalog catalog,
         HLCTimestamp? snapshotT = null,
         Func<int, long, IDisposable>? acquireRetentionHold = null,
@@ -627,14 +641,12 @@ internal sealed class BackupDriver
 
         long? capturedTopologyGeneration = topologyGenerationProbe?.Invoke();
 
-        BackupManifest? parentManifest = catalog.Get(parentBackupId);
+        BackupManifest? parentManifest = await catalog.GetAsync(parentBackupId, ct).ConfigureAwait(false);
         if (parentManifest is null)
             throw new BackupDriverException(
                 $"Parent backup {parentBackupId:N} not found in catalog.") { ParentMissing = true };
 
         Guid backupId = Guid.NewGuid();
-        string artifactPath = Path.Combine(artifactsDir, backupId.ToString("N"));
-        BackupFilePermissions.CreateDirectory(artifactPath);
 
         // Retention holds keep the WAL prefix each partition starts at from being compacted while we
         // page the log and until the manifest is published. Released in the finally.
@@ -647,7 +659,8 @@ internal sealed class BackupDriver
             // parent that omitted an unchanged partition must not make this incremental treat that
             // partition as new (which would restart at the WAL floor/1 — silently skipping entries
             // after compaction, or duplicating the whole WAL without it).
-            IReadOnlyList<BackupManifest> ancestors = catalog.ResolveChain(parentBackupId, ct);
+            IReadOnlyList<BackupManifest> ancestors =
+                await catalog.ResolveChainAsync(parentBackupId, ct).ConfigureAwait(false);
             Dictionary<int, PartitionBackupRange> parentRanges = BuildHighWaterMarks(ancestors);
 
             List<PartitionBackupRange> ranges = [];
@@ -710,14 +723,22 @@ internal sealed class BackupDriver
                 // commit HLC, not by truncating the segment here (which would tear straddling
                 // multi-partition transactions).
                 string relPath = $"partition_{partitionId}.wal";
-                string walFile = Path.Combine(artifactPath, relPath);
 
-                WalSegmentEntry.SegmentWriteResult seg = WalSegmentEntry.WriteSegmentStreaming(
-                    walFile, StreamSegmentEntries(wal, partitionId, fromIndex, ct), ct);
+                WalSegmentEntry.SegmentWriteResult seg;
+                await using (IBackupArtifactWriter writer =
+                             await artifacts.OpenWriteAsync(backupId, relPath, ct).ConfigureAwait(false))
+                {
+                    seg = await WalSegmentEntry.WriteSegmentStreamingAsync(
+                        writer.Stream, StreamSegmentEntries(wal, partitionId, fromIndex, ct), ct)
+                        .ConfigureAwait(false);
 
-                // No committed entries in this partition's range — nothing was published; skip it.
-                if (seg.EntryCount == 0)
-                    continue;
+                    // No committed entries in this partition's range: abandon the write rather than
+                    // publishing an empty segment, and leave the partition out of the manifest.
+                    if (seg.EntryCount == 0)
+                        continue;
+
+                    await writer.CompleteAsync(ct).ConfigureAwait(false);
+                }
 
                 checksums[relPath] = seg.Sha256Hex;
                 sizes[relPath] = seg.ByteLength;
@@ -736,12 +757,11 @@ internal sealed class BackupDriver
             if (snapshotT.HasValue)
                 manifest.SetClusterSnapshotTime(snapshotT.Value);
 
-            // Lock the segment tree down to owner-only before verify/publish.
-            BackupFilePermissions.RestrictTree(artifactPath);
-
             // Fail closed: never publish a manifest whose artifacts don't verify. The verifier
-            // treats a genuinely empty incremental (no ranges, no segments) as valid.
-            BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
+            // treats a genuinely empty incremental (no ranges, no segments) as valid. Each segment was
+            // already restricted to owner-only as the store published it, so there is no separate
+            // permission-tightening step here.
+            await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, ct).ConfigureAwait(false);
 
             // Fail closed if the cluster topology moved while capturing this incremental: the segment set
             // would not correspond to one partition layout. Stamping the current generation also lets the
@@ -757,12 +777,12 @@ internal sealed class BackupDriver
             // Authenticate the manifest with the server-held key as the final step before publish.
             signManifest?.Invoke(manifest);
 
-            catalog.Put(manifest);
+            await catalog.PutAsync(manifest, ct).ConfigureAwait(false);
             return manifest;
         }
         catch
         {
-            TryDeleteDirectory(artifactPath);
+            await TryDeleteArtifactsAsync(artifacts, backupId).ConfigureAwait(false);
             throw;
         }
         finally
@@ -795,17 +815,17 @@ internal sealed class BackupDriver
         return highWater;
     }
 
-    private static void TryDeleteDirectory(string path)
+    private static async Task TryDeleteArtifactsAsync(IBackupArtifactStore artifacts, Guid backupId)
     {
         try
         {
-            if (Directory.Exists(path))
-                Directory.Delete(path, recursive: true);
+            await artifacts.DeleteAllAsync(backupId).ConfigureAwait(false);
         }
         catch
         {
-            // Best-effort cleanup of a partial artifact directory; a leftover dir with no manifest
-            // is swept by the orphan-cleanup path and never chained (it has no catalog entry).
+            // Best-effort cleanup of a partial artifact set; leftovers with no manifest are swept by the
+            // orphan-cleanup path and can never be chained (they have no catalog entry). A store that
+            // cannot delete atomically may leave some objects behind here — the sweep converges on them.
         }
     }
 

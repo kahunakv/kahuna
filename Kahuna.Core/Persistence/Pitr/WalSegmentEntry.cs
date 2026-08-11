@@ -62,22 +62,23 @@ internal sealed class WalSegmentEntry
         HLCTimestamp FromHlc);
 
     /// <summary>
-    /// Streams entries from <paramref name="entries"/> straight to a temp file as JSON Lines — one
-    /// compact record per line — hashing the exact bytes as they are written and capturing the segment's
-    /// endpoint metadata (first/last id, term, HLC) on the fly, then atomically renames the temp into
-    /// place. Peak memory is a single entry plus one line buffer, never the whole segment, so capture is
-    /// bounded no matter how large the WAL range is. Cancellation is observed between records; a cancelled
-    /// or failed write removes the temp file and never publishes a partial segment. When the source yields
-    /// no entries, nothing is published and <see cref="SegmentWriteResult.EntryCount"/> is 0.
+    /// Streams entries from <paramref name="entries"/> straight into <paramref name="destination"/> as
+    /// JSON Lines — one compact record per line — hashing the exact bytes as they are written and
+    /// capturing the segment's endpoint metadata (first/last id, term, HLC) on the fly. Peak memory is a
+    /// single entry plus one line buffer, never the whole segment, so capture is bounded no matter how
+    /// large the WAL range is. Cancellation is observed between records.
     ///
-    /// <para>The digest is computed over the same bytes the file contains, so it matches an independent
-    /// <c>SHA256</c> of the published file (what the verifier recomputes) exactly.</para>
+    /// <para>Publication is the caller's decision and deliberately not done here: when the source yields
+    /// no entries the result's <see cref="SegmentWriteResult.EntryCount"/> is 0 and the caller abandons
+    /// the write rather than publishing an empty segment. The byte length is counted as it is written
+    /// rather than stat-ed afterwards, since the destination is not necessarily a file.</para>
+    ///
+    /// <para>The digest is computed over the same bytes the destination receives, so it matches an
+    /// independent <c>SHA256</c> of the published artifact (what the verifier recomputes) exactly.</para>
     /// </summary>
-    public static SegmentWriteResult WriteSegmentStreaming(
-        string path, IEnumerable<WalSegmentEntry> entries, CancellationToken ct = default)
+    public static async Task<SegmentWriteResult> WriteSegmentStreamingAsync(
+        Stream destination, IEnumerable<WalSegmentEntry> entries, CancellationToken ct = default)
     {
-        string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
-
         long count = 0;
         long toId = 0;
         long toTerm = 0;
@@ -85,22 +86,23 @@ internal sealed class WalSegmentEntry
         HLCTimestamp fromHlc = default;
         bool first = true;
         byte[] hash;
+        long byteLength;
 
-        try
+        await using (CountingStream counter = new(destination))
         {
-            using (FileStream fs = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536))
             using (SHA256 sha = SHA256.Create())
-            using (CryptoStream cs = new(fs, sha, CryptoStreamMode.Write, leaveOpen: true))
+            await using (CryptoStream cs = new(counter, sha, CryptoStreamMode.Write, leaveOpen: true))
             {
                 // StreamWriter defaults to UTF-8 without a BOM and NewLine "\n" — byte-identical to the
-                // previous list-based writer, so existing manifests/digests stay compatible.
-                using (StreamWriter writer = new(cs, leaveOpen: true) { NewLine = "\n" })
+                // previous file-based writer, so existing manifests/digests stay compatible.
+                await using (StreamWriter writer = new(cs, leaveOpen: true) { NewLine = "\n" })
                 {
                     foreach (WalSegmentEntry entry in entries)
                     {
                         ct.ThrowIfCancellationRequested();
 
-                        writer.WriteLine(JsonSerializer.Serialize(entry, SegmentJsonOptions));
+                        await writer.WriteLineAsync(JsonSerializer.Serialize(entry, SegmentJsonOptions))
+                            .ConfigureAwait(false);
 
                         count++;
                         if (first)
@@ -118,22 +120,13 @@ internal sealed class WalSegmentEntry
                 hash = sha.Hash!;
             }
 
-            if (count == 0)
-            {
-                TryDelete(tmp);
-                return default;
-            }
-
-            File.Move(tmp, path, overwrite: true);
-        }
-        catch
-        {
-            TryDelete(tmp);
-            throw;
+            byteLength = counter.BytesWritten;
         }
 
-        long length = new FileInfo(path).Length;
-        return new SegmentWriteResult(count, length, Convert.ToHexString(hash).ToLowerInvariant(),
+        if (count == 0)
+            return default;
+
+        return new SegmentWriteResult(count, byteLength, Convert.ToHexString(hash).ToLowerInvariant(),
             toId, toHlc, toTerm, fromHlc);
     }
 
@@ -142,16 +135,18 @@ internal sealed class WalSegmentEntry
     /// segments are JSON Lines; a legacy segment written as one JSON array (first non-whitespace byte
     /// <c>[</c>) is streamed too, via a bounded incremental parser — never a whole-file load.
     /// </summary>
-    public static IEnumerable<WalSegmentEntry> ReadSegment(string path)
+    public static IEnumerable<WalSegmentEntry> ReadSegment(Stream source)
     {
-        if (IsJsonArray(path))
+        if (StartsJsonArray(source))
         {
-            foreach (WalSegmentEntry entry in ReadJsonArrayStreaming(path))
+            foreach (WalSegmentEntry entry in ReadJsonArrayStreaming(source))
                 yield return entry;
             yield break;
         }
 
-        foreach (string line in File.ReadLines(path))
+        using StreamReader reader = new(source, leaveOpen: true);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
         {
             if (line.Length == 0)
                 continue;
@@ -169,14 +164,12 @@ internal sealed class WalSegmentEntry
     /// so a multi-gigabyte legacy array is bounded to the deserializer's internal buffer, not the whole file.
     /// </summary>
     public static async IAsyncEnumerable<WalSegmentEntry> ReadSegmentAsync(
-        string path, [EnumeratorCancellation] CancellationToken ct = default)
+        Stream source, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        if (IsJsonArray(path))
+        if (StartsJsonArray(source))
         {
-            await using FileStream arrayStream = new(
-                path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536, useAsync: true);
             await foreach (WalSegmentEntry? entry in JsonSerializer
-                .DeserializeAsyncEnumerable<WalSegmentEntry>(arrayStream, SegmentJsonOptions, ct)
+                .DeserializeAsyncEnumerable<WalSegmentEntry>(source, SegmentJsonOptions, ct)
                 .ConfigureAwait(false))
             {
                 if (entry is not null)
@@ -185,9 +178,7 @@ internal sealed class WalSegmentEntry
             yield break;
         }
 
-        await using FileStream fs = new(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536, useAsync: true);
-        using StreamReader reader = new(fs);
+        using StreamReader reader = new(source, leaveOpen: true);
         string? line;
         while ((line = await reader.ReadLineAsync(ct).ConfigureAwait(false)) is not null)
         {
@@ -205,10 +196,8 @@ internal sealed class WalSegmentEntry
     /// file. The buffer is refilled as tokens are consumed; a record straddling a buffer boundary is left
     /// unconsumed and re-read after the next refill.
     /// </summary>
-    private static IEnumerable<WalSegmentEntry> ReadJsonArrayStreaming(string path)
+    private static IEnumerable<WalSegmentEntry> ReadJsonArrayStreaming(Stream stream)
     {
-        using FileStream stream = File.OpenRead(path);
-
         byte[] buffer = new byte[32 * 1024];
         int bytesInBuffer = 0;
         JsonReaderState state = new(new JsonReaderOptions());
@@ -283,30 +272,81 @@ internal sealed class WalSegmentEntry
         return (entries, (int)reader.BytesConsumed, reader.CurrentState);
     }
 
-    private static void TryDelete(string path)
+    /// <summary>
+    /// True when the segment's first non-whitespace byte is <c>[</c> — a legacy JSON-array segment.
+    /// <para>
+    /// Sniffing consumes bytes, and an artifact store's read stream is forward-only in general, so the
+    /// stream is rewound afterwards. A non-seekable source therefore cannot be sniffed; callers hand in
+    /// a seekable stream (the local store returns one, and a remote store buffers or re-opens), and a
+    /// non-seekable one is treated as the current JSON-Lines format rather than silently misparsed.
+    /// </para>
+    /// </summary>
+    private static bool StartsJsonArray(Stream source)
     {
+        if (!source.CanSeek)
+            return false;
+
+        long origin = source.Position;
         try
         {
-            if (File.Exists(path))
-                File.Delete(path);
+            int b;
+            while ((b = source.ReadByte()) != -1)
+            {
+                if (b is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')
+                    continue;
+                return b == '[';
+            }
+            return false; // empty segment — treat as an empty JSON-Lines stream
         }
-        catch
+        finally
         {
-            // Best-effort cleanup of a temp artifact; a leftover .tmp_ file is reclaimed by the orphan sweep.
+            source.Position = origin;
         }
     }
 
-    /// <summary>True when the file's first non-whitespace byte is <c>[</c> — a legacy JSON-array segment.</summary>
-    private static bool IsJsonArray(string path)
+    /// <summary>
+    /// Passes writes through while counting them, so a segment's byte length is known without stat-ing
+    /// a file the destination may not be. Disposal does not dispose the wrapped stream — the artifact
+    /// writer owns its own lifetime.
+    /// </summary>
+    private sealed class CountingStream(Stream inner) : Stream
     {
-        using FileStream stream = File.OpenRead(path);
-        int b;
-        while ((b = stream.ReadByte()) != -1)
+        internal long BytesWritten { get; private set; }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => BytesWritten;
+        public override long Position { get => BytesWritten; set => throw new NotSupportedException(); }
+
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken ct) => inner.FlushAsync(ct);
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
         {
-            if (b is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')
-                continue;
-            return b == '[';
+            inner.Write(buffer, offset, count);
+            BytesWritten += count;
         }
-        return false; // empty file — treat as an empty JSON-Lines stream
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            inner.Write(buffer);
+            BytesWritten += buffer.Length;
+        }
+
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            await inner.WriteAsync(buffer.AsMemory(offset, count), ct).ConfigureAwait(false);
+            BytesWritten += count;
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            await inner.WriteAsync(buffer, ct).ConfigureAwait(false);
+            BytesWritten += buffer.Length;
+        }
     }
 }

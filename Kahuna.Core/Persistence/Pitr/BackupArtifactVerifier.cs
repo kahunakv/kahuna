@@ -41,29 +41,37 @@ internal static class BackupArtifactVerifier
     }
 
     /// <summary>
-    /// Verifies that the artifact directory for <paramref name="manifest"/> under
-    /// <paramref name="artifactsDir"/> contains exactly the files recorded in the manifest, each with
-    /// the recorded length and digest — no missing, extra, altered, unsafe-path, or symlinked file.
-    /// A manifest below <see cref="BackupManifest.CurrentFormatVersion"/> is rejected as unsupported
-    /// (legacy) rather than corrupt. Always safe to call, including for a genuinely empty incremental.
+    /// Verifies that <paramref name="store"/> holds exactly the artifacts recorded in
+    /// <paramref name="manifest"/>, each with the recorded length and digest — no missing, extra,
+    /// altered, or unsafe-path artifact. A manifest below
+    /// <see cref="BackupManifest.CurrentFormatVersion"/> is rejected as unsupported (legacy) rather than
+    /// corrupt. Always safe to call, including for a genuinely empty incremental.
+    /// <para>
+    /// Path-safety rules that are meaningful for any store (no absolute or traversing keys, no two keys
+    /// that normalize to the same artifact) are enforced here. Filesystem-specific rules — symlink and
+    /// reparse-point rejection, containment under the artifact root — belong to the store and are
+    /// enforced by it as it lists and opens artifacts.
+    /// </para>
     /// </summary>
     /// <exception cref="BackupUnsupportedFormatException">Legacy/unsupported manifest format.</exception>
     /// <exception cref="BackupArtifactException">On any integrity discrepancy.</exception>
-    internal static void Verify(BackupManifest manifest, string artifactsDir, CancellationToken ct = default)
+    internal static async Task VerifyAsync(
+        BackupManifest manifest, IBackupArtifactStore store, CancellationToken ct = default)
     {
         EnsureSupportedVersion(manifest);
 
         // Manifest-level schema: type/parent/base-cut consistency, no duplicate partition ranges,
         // valid index/HLC bounds, and the artifact-name set required by the type. Checked before any
-        // filesystem work so a structurally invalid manifest fails fast.
+        // store access so a structurally invalid manifest fails fast.
         ValidateManifestSchema(manifest);
-
-        string artifactPath = Path.Combine(artifactsDir, manifest.BackupId.ToString("N"));
 
         // A Full always has a checkpoint; an Incremental has a segment per range. A manifest that
         // should have artifacts but records none is corrupt. A truly empty incremental (no ranges)
         // legitimately has none.
         bool expectsArtifacts = manifest.Type == BackupType.Full || manifest.PartitionRanges.Count > 0;
+
+        IReadOnlyList<BackupArtifactEntry> present =
+            await store.ListAsync(manifest.BackupId, ct).ConfigureAwait(false);
 
         if (manifest.Checksums.Count == 0)
         {
@@ -71,33 +79,23 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N} records no artifact checksums but should have artifacts.");
 
-            // Empty incremental: nothing to verify, but the directory must not contain stray files
-            // and must not itself be a symlinked root.
-            if (Directory.Exists(artifactPath))
-            {
-                EnsureDirectoryNotReparsePoint(artifactPath,
-                    $"Backup {manifest.BackupId:N}: artifact root is a symlink/reparse point.");
-                foreach (string _ in EnumerateRegularFiles(artifactPath))
-                    throw new BackupArtifactException(
-                        $"Backup {manifest.BackupId:N}: unexpected files present for an empty incremental.");
-            }
+            // Empty incremental: nothing to verify, but no stray artifact may be present either.
+            if (present.Count > 0)
+                throw new BackupArtifactException(
+                    $"Backup {manifest.BackupId:N}: unexpected files present for an empty incremental.");
             return;
         }
 
-        if (!Directory.Exists(artifactPath))
+        if (present.Count == 0)
             throw new BackupArtifactException(
-                $"Artifact directory for backup {manifest.BackupId:N} is missing.");
+                $"Artifacts for backup {manifest.BackupId:N} are missing.");
 
-        // Reject a reparse point AT the per-backup root itself, not only on the path between a file
-        // and the root: a symlinked {backupId} directory would otherwise pass every child check while
-        // redirecting verification/copy/replay to a tree outside the configured backup directory.
-        EnsureDirectoryNotReparsePoint(artifactPath,
-            $"Backup {manifest.BackupId:N}: artifact root is a symlink/reparse point.");
+        Dictionary<string, long> actualLengths = new(StringComparer.Ordinal);
+        foreach (BackupArtifactEntry entry in present)
+            actualLengths[entry.RelativePath] = entry.Length;
 
-        // Validate + normalize the declared keys before touching the filesystem.
         HashSet<string> expected = new(StringComparer.Ordinal);
         HashSet<string> normalizedSeen = new(StringComparer.OrdinalIgnoreCase);
-        string rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(artifactPath));
 
         foreach ((string key, string expectedDigest) in manifest.Checksums)
         {
@@ -107,28 +105,17 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: unsafe artifact path '{key}'.");
 
-            string filePath = Path.Combine(artifactPath, key.Replace('/', Path.DirectorySeparatorChar));
-            string fullResolved = Path.GetFullPath(filePath);
-
-            // Containment: the resolved path must stay under the artifact root.
-            if (!(fullResolved.Equals(rootFull, StringComparison.OrdinalIgnoreCase)
-                  || fullResolved.StartsWith(rootFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
-                throw new BackupArtifactException(
-                    $"Backup {manifest.BackupId:N}: artifact '{key}' escapes the artifact root.");
-
-            // Duplicate-normalized keys (e.g. case variants on a case-insensitive filesystem).
-            if (!normalizedSeen.Add(fullResolved))
+            // Two keys that differ only by case would address one artifact on a case-insensitive store,
+            // making the declared set ambiguous — reject rather than pick a winner.
+            if (!normalizedSeen.Add(key))
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: duplicate artifact path '{key}'.");
 
             expected.Add(key);
 
-            if (!File.Exists(filePath))
+            if (!actualLengths.TryGetValue(key, out long actualSize))
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: declared artifact '{key}' is missing.");
-
-            // No symlinked artifact — a reparse point could redirect reads/copies outside the root.
-            EnsureNoReparsePointOnPath(rootFull, filePath, manifest.BackupId);
 
             // A size is required for every declared artifact (current-version manifests always record
             // one); a missing size is a corrupt manifest, not a digest-only fallback.
@@ -136,12 +123,13 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: artifact '{key}' has no recorded size.");
 
-            long actualSize = new FileInfo(filePath).Length;
+            // Length is checked before the digest so a truncated or padded artifact is rejected without
+            // paying for a full hash.
             if (actualSize != expectedSize)
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: artifact '{key}' has size {actualSize}, expected {expectedSize}.");
 
-            string actualDigest = ComputeSha256(filePath);
+            string actualDigest = await ComputeSha256Async(store, manifest.BackupId, key, ct).ConfigureAwait(false);
             if (!string.Equals(actualDigest, expectedDigest, StringComparison.OrdinalIgnoreCase))
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: artifact '{key}' failed digest verification.");
@@ -155,16 +143,16 @@ internal static class BackupArtifactVerifier
                     $"Backup {manifest.BackupId:N}: size recorded for '{sizeKey}' with no matching checksum.");
         }
 
-        // No unexpected extra file may sit in the artifact directory (also rejects symlinks).
-        foreach (string actual in EnumerateRegularFiles(artifactPath))
+        // No unexpected extra artifact may be present.
+        foreach (BackupArtifactEntry entry in present)
         {
-            if (!expected.Contains(actual))
+            if (!expected.Contains(entry.RelativePath))
                 throw new BackupArtifactException(
-                    $"Backup {manifest.BackupId:N}: unexpected extra artifact '{actual}' not present in the manifest.");
+                    $"Backup {manifest.BackupId:N}: unexpected extra artifact '{entry.RelativePath}' not present in the manifest.");
         }
 
         // Artifacts are now byte-verified; validate their semantic content against the manifest.
-        ValidateArtifactContent(manifest, artifactPath, ct);
+        await ValidateArtifactContentAsync(manifest, store, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -356,15 +344,15 @@ internal static class BackupArtifactVerifier
     /// HLC-monotonic, within the declared index range, and whose endpoints match the range's
     /// From/To HLC, ToIndex, and ToTerm — so replay cannot silently skip or misclassify data.
     /// </summary>
-    private static void ValidateArtifactContent(BackupManifest m, string artifactPath, CancellationToken ct)
+    private static async Task ValidateArtifactContentAsync(
+        BackupManifest m, IBackupArtifactStore store, CancellationToken ct)
     {
         if (m.Type == BackupType.Full)
         {
-            string checkpointDir = Path.Combine(artifactPath, "checkpoint");
             CheckpointManifest sidecar;
             try
             {
-                sidecar = CheckpointManifest.ReadFrom(checkpointDir);
+                sidecar = await CheckpointManifest.ReadFromStoreAsync(store, m.BackupId, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not BackupArtifactException)
             {
@@ -380,18 +368,20 @@ internal static class BackupArtifactVerifier
         foreach (PartitionBackupRange r in m.PartitionRanges)
         {
             ct.ThrowIfCancellationRequested();
-            string segPath = Path.Combine(artifactPath, $"partition_{r.PartitionId}.wal");
+            string segKey = $"partition_{r.PartitionId}.wal";
 
             // Stream the segment: validation only needs sequential access plus the first/last entry, so
             // the whole segment never has to be resident. A read/parse failure surfaces during iteration
             // (the reader is lazy) and is mapped to an "unreadable" error here.
             try
             {
-                ValidateSegment(m.BackupId, r, WalSegmentEntry.ReadSegment(segPath));
+                await using Stream segment =
+                    await store.OpenReadAsync(m.BackupId, segKey, ct: ct).ConfigureAwait(false);
+                ValidateSegment(m.BackupId, r, WalSegmentEntry.ReadSegment(segment));
             }
             catch (Exception ex) when (ex is not BackupArtifactException)
             {
-                throw new BackupArtifactException($"Backup {m.BackupId:N}: WAL segment 'partition_{r.PartitionId}.wal' is unreadable.", ex);
+                throw new BackupArtifactException($"Backup {m.BackupId:N}: WAL segment '{segKey}' is unreadable.", ex);
             }
         }
     }
@@ -532,6 +522,18 @@ internal static class BackupArtifactVerifier
     {
         using FileStream stream = File.OpenRead(filePath);
         byte[] hash = SHA256.HashData(stream);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Hashes one artifact by streaming it out of the store, so a multi-gigabyte object is never
+    /// resident and the bytes hashed are the bytes the store would serve to a reader.
+    /// </summary>
+    private static async Task<string> ComputeSha256Async(
+        IBackupArtifactStore store, Guid backupId, string relativePath, CancellationToken ct)
+    {
+        await using Stream stream = await store.OpenReadAsync(backupId, relativePath, ct: ct).ConfigureAwait(false);
+        byte[] hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 }

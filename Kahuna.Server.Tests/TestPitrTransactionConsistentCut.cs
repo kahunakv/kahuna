@@ -133,7 +133,7 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
         string artifacts = ArtifactsDir(name);
 
         BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, partitions.Select(Part).ToArray(), backend, artifacts, catalog);
+            wal, partitions.Select(Part).ToArray(), backend, BackupTestStores.Artifacts(artifacts), catalog);
 
         return (full, wal, backend, catalog, artifacts);
     }
@@ -160,11 +160,11 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
         wal.Write([(1, [KvLog(2, walTimeMs: 240, commitMs: 250, "txA", "va", 1)])]);
         wal.Write([(2, [KvLog(2, walTimeMs: 260, commitMs: 250, "txB", "vb", 1)])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1), Part(2)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(restoreMs), restored, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(restoreMs), restored, ct: TestContext.Current.CancellationToken);
 
         // Both halves share the same fate at every T — never one present and the other absent.
         string? a = GetValue(restored, "txA");
@@ -187,15 +187,15 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
         wal.Write([(1, [KvLog(2, walTimeMs: 240, commitMs: 250, "txA", "va", 1)])]);
         wal.Write([(2, [KvLog(2, walTimeMs: 260, commitMs: 250, "txB", "vb", 1)])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog, snapshotT: T(250), ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1), Part(2)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, snapshotT: T(250), ct: TestContext.Current.CancellationToken);
 
         // The full contiguous range is captured even though shard 2's WAL Time exceeds the cut.
         PartitionBackupRange p2 = inc.PartitionRanges.Single(r => r.PartitionId == 2);
         Assert.Equal(2L, p2.ToIndex);
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(250), restored, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(250), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("va", GetValue(restored, "txA"));
         Assert.Equal("vb", GetValue(restored, "txB"));
@@ -217,11 +217,11 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
             KvLog(3, walTimeMs: 420, commitMs: 200, "early", "ve", 1)
         ])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(300), restored, ct: TestContext.Current.CancellationToken);
 
         // The past-cut entry at index 2 (commit 400) is excluded; the before-cut entry at index 3
         // (commit 200) is still applied despite sitting after it in the log.
@@ -247,11 +247,11 @@ public sealed class TestPitrTransactionConsistentCut : IDisposable
             KvLog(3, walTimeMs: 500, commitMs: 500, "c3", "v3", 1, commitCounter: 3)
         ])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         MemoryPersistenceBackend restored = OpenBase(artifacts, full);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
-        await RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 500, targetCounter), restored, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), new HLCTimestamp(0, 500, targetCounter), restored, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal("v0", GetValue(restored, "c0"));                 // always at or before the cut
         Assert.Equal(bothIncluded ? "v3" : null, GetValue(restored, "c3"));

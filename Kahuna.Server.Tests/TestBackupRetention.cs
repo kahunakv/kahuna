@@ -151,7 +151,7 @@ public sealed class TestBackupRetention : IDisposable
     // ── orphan sweep ─────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void OrphanSweep_FlagsUnbackedDirsAndLeftovers_KeepsValidAndReserved()
+    public async Task OrphanSweep_FlagsUnbackedDirsAndLeftovers_KeepsValidAndReserved()
     {
         Directory.CreateDirectory(_tempRoot);
         Guid valid = G(1), orphan = G(2), reserved = G(3);
@@ -162,9 +162,9 @@ public sealed class TestBackupRetention : IDisposable
         Directory.CreateDirectory(Path.Combine(_tempRoot, "not-a-backup-dir"));
         File.WriteAllText(Path.Combine(_tempRoot, valid.ToString("N") + ".manifest.tmp_deadbeef"), "x");
 
-        IReadOnlyList<OrphanSweepCandidate> plan = BackupRetention.PlanOrphanSweep(_tempRoot, validManifestIds: new HashSet<Guid> { valid }, reservedIds: new HashSet<Guid> { reserved }, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<OrphanSweepCandidate> plan = await BackupRetention.PlanOrphanSweepAsync(BackupTestStores.Artifacts(_tempRoot), validManifestIds: new HashSet<Guid> { valid }, reservedIds: new HashSet<Guid> { reserved }, ct: TestContext.Current.CancellationToken);
 
-        HashSet<string> names = plan.Select(c => Path.GetFileName(c.Path)).ToHashSet();
+        HashSet<string> names = plan.Select(c => Path.GetFileName(c.Name)).ToHashSet();
         Assert.Contains(orphan.ToString("N"), names);                      // no manifest → orphan
         Assert.Contains(orphan.ToString("N") + ".staging_abcd1234", names); // staging leftover
         Assert.Contains(valid.ToString("N") + ".manifest.tmp_deadbeef", names); // temp manifest file
@@ -174,80 +174,81 @@ public sealed class TestBackupRetention : IDisposable
     }
 
     [Fact]
-    public void OrphanSweep_CorruptManifest_ArtifactDirectoryIsProtected()
+    public async Task OrphanSweep_CorruptManifest_ArtifactDirectoryIsProtected()
     {
         Directory.CreateDirectory(_tempRoot);
         BackupCatalog catalog = new(new LocalDirectoryStorageTarget(_tempRoot));
 
         Guid id = G(7);
-        catalog.Put(Full(id, Base));                                              // writes {id}.manifest
+        await catalog.PutAsync(Full(id, Base));                                              // writes {id}.manifest
         Directory.CreateDirectory(Path.Combine(_tempRoot, id.ToString("N")));     // its artifact directory
 
         // Corrupt the manifest file so the parsed listing can no longer read it.
         File.WriteAllText(Path.Combine(_tempRoot, id.ToString("N") + ".manifest"), "{ broken ");
 
         // The parsed listing loses the id, but the filename-only scan still owns it.
-        Assert.DoesNotContain(id, catalog.List(TestContext.Current.CancellationToken).Select(m => m.BackupId));
-        Assert.Contains(id, catalog.ListManifestIds(TestContext.Current.CancellationToken));
+        Assert.DoesNotContain(id, (await catalog.ListAsync(TestContext.Current.CancellationToken)).Select(m => m.BackupId));
+        Assert.Contains(id, await catalog.ListManifestIdsAsync(TestContext.Current.CancellationToken));
 
-        HashSet<Guid> valid = catalog.List(TestContext.Current.CancellationToken).Select(m => m.BackupId).ToHashSet();
-        HashSet<Guid> protectedIds = catalog.ListManifestIds(TestContext.Current.CancellationToken).ToHashSet();
+        HashSet<Guid> valid = (await catalog.ListAsync(TestContext.Current.CancellationToken)).Select(m => m.BackupId).ToHashSet();
+        HashSet<Guid> protectedIds = (await catalog.ListManifestIdsAsync(TestContext.Current.CancellationToken)).ToHashSet();
 
         // Protected by manifest presence → the directory is NOT swept.
         IReadOnlyList<OrphanSweepCandidate> plan =
-            BackupRetention.PlanOrphanSweep(_tempRoot, valid, protectedIds, TestContext.Current.CancellationToken);
-        Assert.DoesNotContain(id.ToString("N"), plan.Select(c => Path.GetFileName(c.Path)));
+            await BackupRetention.PlanOrphanSweepAsync(BackupTestStores.Artifacts(_tempRoot), valid, protectedIds, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(id.ToString("N"), plan.Select(c => Path.GetFileName(c.Name)));
 
         // Without that protection (the pre-fix behavior) the same directory WOULD have been destroyed.
         IReadOnlyList<OrphanSweepCandidate> unprotected =
-            BackupRetention.PlanOrphanSweep(_tempRoot, valid, new HashSet<Guid>(), TestContext.Current.CancellationToken);
-        Assert.Contains(id.ToString("N"), unprotected.Select(c => Path.GetFileName(c.Path)));
+            await BackupRetention.PlanOrphanSweepAsync(BackupTestStores.Artifacts(_tempRoot), valid, new HashSet<Guid>(), TestContext.Current.CancellationToken);
+        Assert.Contains(id.ToString("N"), unprotected.Select(c => Path.GetFileName(c.Name)));
     }
 
     // ── delete primitives (on disk) ──────────────────────────────────────────────────────────
 
     [Fact]
-    public void CatalogDelete_RemovesManifestAndArtifacts_Idempotently()
+    public async Task CatalogDelete_RemovesManifestAndArtifacts_Idempotently()
     {
         Directory.CreateDirectory(_tempRoot);
         BackupCatalog catalog = new(new LocalDirectoryStorageTarget(_tempRoot));
         Guid id = G(1);
-        catalog.Put(Full(id, Base));
+        await catalog.PutAsync(Full(id, Base));
         string artifactDir = Path.Combine(_tempRoot, id.ToString("N"));
         Directory.CreateDirectory(artifactDir);
         File.WriteAllText(Path.Combine(artifactDir, "checkpoint"), "data");
 
-        catalog.Delete(id, _tempRoot);
+        await catalog.DeleteAsync(id, BackupTestStores.Artifacts(_tempRoot));
 
-        Assert.Null(catalog.Get(id));
+        Assert.Null(await catalog.GetAsync(id));
         Assert.False(Directory.Exists(artifactDir));
 
         // Idempotent: a second delete of an absent backup is a no-op, not an error.
-        catalog.Delete(id, _tempRoot);
+        await catalog.DeleteAsync(id, BackupTestStores.Artifacts(_tempRoot));
     }
 
     [Fact]
-    public void CatalogDelete_ManifestFirst_CrashAfterTombstoneLeavesReclaimableOrphan()
+    public async Task CatalogDelete_ManifestFirst_CrashAfterTombstoneLeavesReclaimableOrphan()
     {
         Directory.CreateDirectory(_tempRoot);
         LocalDirectoryStorageTarget target = new(_tempRoot);
         BackupCatalog catalog = new(target);
         Guid id = G(1);
-        catalog.Put(Full(id, Base));
+        await catalog.PutAsync(Full(id, Base));
         string artifactDir = Path.Combine(_tempRoot, id.ToString("N"));
         Directory.CreateDirectory(artifactDir);
 
         // Simulate a crash after the manifest tombstone but before the artifact dir is removed.
-        target.Delete(id);
+        await target.DeleteAsync(id);
 
         // No manifest resolves to the (still-present) artifacts — the invariant holds — and the orphan
         // sweep now reclaims the directory.
-        Assert.Null(catalog.Get(id));
+        Assert.Null(await catalog.GetAsync(id));
         IReadOnlyList<OrphanSweepCandidate> sweep =
-            BackupRetention.PlanOrphanSweep(_tempRoot, new HashSet<Guid>(), new HashSet<Guid>(), TestContext.Current.CancellationToken);
-        Assert.Contains(id.ToString("N"), sweep.Select(c => Path.GetFileName(c.Path)));
+            await BackupRetention.PlanOrphanSweepAsync(BackupTestStores.Artifacts(_tempRoot), new HashSet<Guid>(), new HashSet<Guid>(), TestContext.Current.CancellationToken);
+        Assert.Contains(id.ToString("N"), sweep.Select(c => Path.GetFileName(c.Name)));
 
-        BackupRetention.ApplyOrphanSweep(sweep, TestContext.Current.CancellationToken);
+        await BackupRetention.ApplyOrphanSweepAsync(
+            sweep, BackupTestStores.Artifacts(_tempRoot), TestContext.Current.CancellationToken);
         Assert.False(Directory.Exists(artifactDir));
     }
 }

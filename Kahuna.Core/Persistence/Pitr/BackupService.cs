@@ -19,6 +19,7 @@ internal sealed class BackupService : IDisposable
 {
     private readonly BackupDriver _driver;
     private readonly BackupCatalog _catalog;
+    private readonly IBackupArtifactStore _artifacts;
     private readonly IRaft _raft;
     private readonly string _backupDir;
     private readonly string _storageType;
@@ -46,6 +47,8 @@ internal sealed class BackupService : IDisposable
         IRaft raft,
         IPersistenceBackend persistenceBackend,
         string backupDir,
+        IBackupStorageTarget manifestTarget,
+        IBackupArtifactStore artifactStore,
         string storageType,
         string storageRevision,
         Func<Task> flushBeforeCheckpoint,
@@ -81,7 +84,8 @@ internal sealed class BackupService : IDisposable
         _logger = logger;
         _driver = new BackupDriver(raft, persistenceBackend, flushBeforeCheckpoint,
             acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe);
-        _catalog = new BackupCatalog(new LocalDirectoryStorageTarget(backupDir));
+        _catalog = new BackupCatalog(manifestTarget);
+        _artifacts = artifactStore;
         _queryMinInFlight = queryMinInFlight;
         _retentionPolicy = retentionPolicy;
         _copyThrottleBytesPerSec = copyThrottleBytesPerSec;
@@ -128,10 +132,10 @@ internal sealed class BackupService : IDisposable
         try
         {
             BackupManifest manifest = await _driver.TakeFullBackupAsync(
-                _backupDir, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
+                _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
             RecordBackupSuccess(manifest, start);
             KahunaBackupInfo dto = ToDto(manifest);
-            TryRunGcLocked(ct);
+            await TryRunGcLockedAsync(ct).ConfigureAwait(false);
             return dto;
         }
         catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
@@ -170,9 +174,9 @@ internal sealed class BackupService : IDisposable
             KahunaBackupInfo dto;
             try
             {
-                BackupManifest manifest = _driver.TakeIncrementalBackup(
-                    parentBackupId, _backupDir, _catalog, snapshotT, _acquireRetentionHold, BuildOwnerIdentity(),
-                    signManifest: ManifestSigner, ct: ct);
+                BackupManifest manifest = await _driver.TakeIncrementalBackupAsync(
+                    parentBackupId, _artifacts, _catalog, snapshotT, _acquireRetentionHold, BuildOwnerIdentity(),
+                    signManifest: ManifestSigner, ct: ct).ConfigureAwait(false);
                 RecordBackupSuccess(manifest, start);
                 dto = ToDto(manifest);
                 dto.RequestedKind = BackupType.Incremental.ToString();
@@ -185,7 +189,7 @@ internal sealed class BackupService : IDisposable
                     parentBackupId, ex.Message);
 
                 BackupManifest full = await _driver.TakeFullBackupAsync(
-                    _backupDir, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
+                    _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
                 RecordBackupSuccess(full, start);
                 dto = ToDto(full);
                 // Make the substitution observable: the caller asked for an incremental and got a full.
@@ -195,7 +199,7 @@ internal sealed class BackupService : IDisposable
                     "could not be produced; a full backup was taken instead.";
             }
 
-            TryRunGcLocked(ct);
+            await TryRunGcLockedAsync(ct).ConfigureAwait(false);
             return dto;
         }
         catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
@@ -227,11 +231,11 @@ internal sealed class BackupService : IDisposable
             HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
                 _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
             BackupManifest manifest = await _driver.TakeFullBackupAsync(
-                _backupDir, _catalog, snapshotT, BuildOwnerIdentity(), StillCoordinator,
+                _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), StillCoordinator,
                 signManifest: ManifestSigner, ct: ct);
             RecordBackupSuccess(manifest, start);
             KahunaBackupInfo dto = ToDto(manifest);
-            TryRunGcLocked(ct);
+            await TryRunGcLockedAsync(ct).ConfigureAwait(false);
             return dto;
         }
         catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
@@ -261,20 +265,21 @@ internal sealed class BackupService : IDisposable
     /// operator needs to diagnose or repair. Deriving protection from manifest <i>presence</i> (a
     /// filename scan that never reads contents) fails closed regardless of manifest health.
     /// </summary>
-    private HashSet<Guid> ProtectedManifestIds(CancellationToken ct) =>
-        _catalog.ListManifestIds(ct).ToHashSet();
+    private async Task<HashSet<Guid>> ProtectedManifestIdsAsync(CancellationToken ct) =>
+        (await _catalog.ListManifestIdsAsync(ct).ConfigureAwait(false)).ToHashSet();
 
     /// <summary>
     /// Dry-run inventory: what a garbage-collection pass would reclaim right now — orphaned/leftover
     /// artifacts and, when a retention policy is configured, whole chains beyond its bounds — each with
     /// a reason. Read-only; deletes nothing.
     /// </summary>
-    internal BackupGcInventory PlanGarbageCollection(CancellationToken ct = default)
+    internal async Task<BackupGcInventory> PlanGarbageCollectionAsync(CancellationToken ct = default)
     {
-        IReadOnlyList<BackupManifest> manifests = _catalog.List(ct);
+        IReadOnlyList<BackupManifest> manifests = await _catalog.ListAsync(ct).ConfigureAwait(false);
         HashSet<Guid> validIds = manifests.Select(m => m.BackupId).ToHashSet();
-        IReadOnlyList<OrphanSweepCandidate> orphans =
-            BackupRetention.PlanOrphanSweep(_backupDir, validIds, ProtectedManifestIds(ct), ct);
+        IReadOnlyList<OrphanSweepCandidate> orphans = await BackupRetention.PlanOrphanSweepAsync(
+            _artifacts, validIds, await ProtectedManifestIdsAsync(ct).ConfigureAwait(false), ct)
+            .ConfigureAwait(false);
         IReadOnlyList<BackupGcCandidate> retention = _retentionPolicy.IsEnabled
             ? BackupRetention.PlanRetention(manifests, _retentionPolicy, DateTime.UtcNow)
             : [];
@@ -288,25 +293,26 @@ internal sealed class BackupService : IDisposable
     internal async Task<BackupGcInventory> RunGarbageCollectionAsync(CancellationToken ct = default)
     {
         await _gcGate.WaitAsync(ct).ConfigureAwait(false);
-        try { return RunGarbageCollectionLocked(ct); }
+        try { return await RunGarbageCollectionLockedAsync(ct).ConfigureAwait(false); }
         finally { _gcGate.Release(); }
     }
 
     // Must be called while _gcGate is held. Sweeps orphans first (always), then applies retention (only
     // when a policy is configured), deleting whole chains descendants-first.
-    private BackupGcInventory RunGarbageCollectionLocked(CancellationToken ct)
+    private async Task<BackupGcInventory> RunGarbageCollectionLockedAsync(CancellationToken ct)
     {
-        IReadOnlyList<BackupManifest> manifests = _catalog.List(ct);
+        IReadOnlyList<BackupManifest> manifests = await _catalog.ListAsync(ct).ConfigureAwait(false);
         HashSet<Guid> validIds = manifests.Select(m => m.BackupId).ToHashSet();
 
-        IReadOnlyList<OrphanSweepCandidate> orphans =
-            BackupRetention.PlanOrphanSweep(_backupDir, validIds, ProtectedManifestIds(ct), ct);
-        BackupRetention.ApplyOrphanSweep(orphans, ct);
+        IReadOnlyList<OrphanSweepCandidate> orphans = await BackupRetention.PlanOrphanSweepAsync(
+            _artifacts, validIds, await ProtectedManifestIdsAsync(ct).ConfigureAwait(false), ct)
+            .ConfigureAwait(false);
+        await BackupRetention.ApplyOrphanSweepAsync(orphans, _artifacts, ct).ConfigureAwait(false);
 
         IReadOnlyList<BackupGcCandidate> retention = _retentionPolicy.IsEnabled
             ? BackupRetention.PlanRetention(manifests, _retentionPolicy, DateTime.UtcNow)
             : [];
-        BackupRetention.ApplyRetention(retention, _catalog, _backupDir, ct);
+        await BackupRetention.ApplyRetentionAsync(retention, _catalog, _artifacts, ct).ConfigureAwait(false);
 
         long bytesReclaimed = 0;
         foreach (BackupGcCandidate c in retention)
@@ -331,9 +337,9 @@ internal sealed class BackupService : IDisposable
 
     // Best-effort GC after a successful backup (gate already held). A GC failure must never fail the
     // backup that just succeeded, so everything is swallowed and logged.
-    private void TryRunGcLocked(CancellationToken ct)
+    private async Task TryRunGcLockedAsync(CancellationToken ct)
     {
-        try { RunGarbageCollectionLocked(ct); }
+        try { await RunGarbageCollectionLockedAsync(ct).ConfigureAwait(false); }
         catch (Exception ex) { _logger?.LogWarning(ex, "Post-backup GC pass failed; the backup itself succeeded."); }
     }
 
@@ -345,13 +351,14 @@ internal sealed class BackupService : IDisposable
     /// A single malformed entry never fails the whole list; manifests that fail to deserialize are
     /// surfaced as explicit invalid entries.
     /// </summary>
-    public IReadOnlyList<KahunaBackupInfo> ListBackups(bool verifyArtifacts = false, CancellationToken ct = default)
+    public async Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(
+        bool verifyArtifacts = false, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
         List<KahunaBackupInfo> result = [];
 
-        foreach (BackupManifest manifest in _catalog.List(ct))
+        foreach (BackupManifest manifest in await _catalog.ListAsync(ct).ConfigureAwait(false))
         {
             ct.ThrowIfCancellationRequested();
 
@@ -370,7 +377,7 @@ internal sealed class BackupService : IDisposable
                     {
                         // Authenticate first when a MAC key is configured, then verify artifacts.
                         BackupManifestMac.Verify(manifest, _macKey);
-                        BackupArtifactVerifier.Verify(manifest, _backupDir, ct);
+                        await BackupArtifactVerifier.VerifyAsync(manifest, _artifacts, ct).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (ex is BackupArtifactException or BackupUnsupportedFormatException)
                     {
@@ -394,17 +401,22 @@ internal sealed class BackupService : IDisposable
         }
 
         // Surface corrupt/unreadable (non-deserializable) manifests as explicit invalid entries too.
-        foreach ((Guid backupId, string reason) in _catalog.ListCorrupt(ct))
+        foreach ((Guid backupId, string reason) in await _catalog.ListCorruptAsync(ct).ConfigureAwait(false))
             result.Add(new KahunaBackupInfo { BackupId = backupId, IsInvalid = true, InvalidReason = reason });
+
+        foreach (KahunaBackupInfo incomplete in await ListIncompleteAsync(ct).ConfigureAwait(false))
+            result.Add(incomplete);
 
         return result;
     }
 
-    public IReadOnlyList<KahunaBackupInfo> ResolveAndValidate(Guid leafBackupId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<KahunaBackupInfo>> ResolveAndValidateAsync(
+        Guid leafBackupId, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
-        IReadOnlyList<BackupManifest> chain = _catalog.ResolveAndValidate(leafBackupId, ct);
+        IReadOnlyList<BackupManifest> chain =
+            await _catalog.ResolveAndValidateAsync(leafBackupId, ct).ConfigureAwait(false);
         (HLCTimestamp? min, HLCTimestamp max) = BackupChainCoverage.Compute(chain);
 
         List<KahunaBackupInfo> dtos = chain.Select(ToDto).ToList();
@@ -421,8 +433,55 @@ internal sealed class BackupService : IDisposable
         return dtos;
     }
 
-    public IReadOnlyList<KahunaBackupInfo> ValidateChain(Guid leafBackupId, CancellationToken ct = default) =>
-        ResolveAndValidate(leafBackupId, ct);
+    /// <summary>
+    /// Backups whose artifacts exist but whose manifest does not — the signature of a backup that never
+    /// completed. Artifacts are published before the manifest, so manifest presence is the commit point:
+    /// bytes without one mean the write or upload was interrupted.
+    /// <para>
+    /// A backup being taken <b>right now</b> is indistinguishable from a failed one by this test, because
+    /// it is in exactly the same state until its manifest lands. Backup creation and garbage collection
+    /// serialize on <c>_gcGate</c>, but listing deliberately does not take it — an operator asking what
+    /// exists should not block behind a running backup — and on a target shared by several nodes no local
+    /// gate could settle the question anyway. The reason string therefore says "or still in progress"
+    /// rather than claiming a failure it cannot prove.
+    /// </para>
+    /// <para>
+    /// Entries are marked <see cref="KahunaBackupInfo.IsInvalid"/> as well as
+    /// <see cref="KahunaBackupInfo.IsIncomplete"/>: they cannot be resolved or restored (chain resolution
+    /// needs the manifest), so a caller that only knows the older flag must still refuse them.
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<KahunaBackupInfo>> ListIncompleteAsync(CancellationToken ct)
+    {
+        HashSet<Guid> withManifest =
+            (await _catalog.ListManifestIdsAsync(ct).ConfigureAwait(false)).ToHashSet();
+
+        List<KahunaBackupInfo> incomplete = [];
+
+        foreach (Guid backupId in await _artifacts.ListBackupIdsAsync(ct).ConfigureAwait(false))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (withManifest.Contains(backupId))
+                continue;
+
+            incomplete.Add(new KahunaBackupInfo
+            {
+                BackupId = backupId,
+                IsInvalid = true,
+                IsIncomplete = true,
+                InvalidReason =
+                    "Artifacts exist but no manifest does: the backup did not complete (or is still in " +
+                    "progress). It cannot be restored; a garbage-collection pass reclaims its artifacts."
+            });
+        }
+
+        return incomplete;
+    }
+
+    public Task<IReadOnlyList<KahunaBackupInfo>> ValidateChainAsync(
+        Guid leafBackupId, CancellationToken ct = default) =>
+        ResolveAndValidateAsync(leafBackupId, ct);
 
     /// <summary>
     /// Offline restore: produces a populated storage-engine directory at <paramref name="targetDir"/>
@@ -443,7 +502,8 @@ internal sealed class BackupService : IDisposable
         {
         ct.ThrowIfCancellationRequested();
 
-        IReadOnlyList<BackupManifest> chain = _catalog.ResolveAndValidate(leafBackupId, ct);
+        IReadOnlyList<BackupManifest> chain =
+            await _catalog.ResolveAndValidateAsync(leafBackupId, ct).ConfigureAwait(false);
 
         // Verify every artifact (size + digest, safe paths, no missing/extra/symlinked files) up
         // front — before copying anything into targetDir — so a corrupt or legacy chain fails closed
@@ -455,16 +515,18 @@ internal sealed class BackupService : IDisposable
             // Authenticate the manifest first (when a MAC key is configured): a tampered digest map,
             // coverage bound, or identity — or a stripped tag — fails here before any bytes are read.
             BackupManifestMac.Verify(m, _macKey);
-            BackupArtifactVerifier.Verify(m, _backupDir, ct);
+            await BackupArtifactVerifier.VerifyAsync(m, _artifacts, ct).ConfigureAwait(false);
         }
 
         // Full backup is always chain[0]; its checkpoint is the base image.
         BackupManifest fullBackup = chain[0];
-        string checkpointSrc = Path.Combine(_backupDir, fullBackup.BackupId.ToString("N"), "checkpoint");
 
-        if (!Directory.Exists(checkpointSrc))
+        // The sidecar is written into every checkpoint, so its presence is the cheapest proof the base
+        // image exists in the store at all — checked before any destination path is touched.
+        string sidecarKey = LocalDirectoryArtifactStore.CheckpointDirectoryName + "/" + CheckpointManifest.FileName;
+        if (!await _artifacts.ExistsAsync(fullBackup.BackupId, sidecarKey, ct).ConfigureAwait(false))
             throw new BackupDriverException(
-                $"Checkpoint directory not found for full backup {fullBackup.BackupId:N}: {checkpointSrc}");
+                $"Checkpoint not found for full backup {fullBackup.BackupId:N}.");
 
         // Validate the target against the chain's exact coverage (fails closed on an unknown lower
         // bound or an out-of-range target), resolving Zero to the natural end. Wall-clock age is
@@ -495,10 +557,21 @@ internal sealed class BackupService : IDisposable
                 : staging;
 
             Directory.CreateDirectory(checkpointDest);
-            await CopyDirectoryAsync(checkpointSrc, checkpointDest, _copyThrottleBytesPerSec, ct).ConfigureAwait(false);
+
+            // Materialise the base image onto local disk: a backend can only open a filesystem path, so
+            // the checkpoint has to be here whether it came from a local directory or a bucket. Relative
+            // paths are preserved exactly — the layout above is what the backend expects to find.
+            await _artifacts.MaterializeAsync(
+                fullBackup.BackupId,
+                LocalDirectoryArtifactStore.CheckpointDirectoryName,
+                checkpointDest,
+                _copyThrottleBytesPerSec,
+                ct).ConfigureAwait(false);
 
             // Verify the bytes actually staged (and about to be opened) against the manifest — closes
-            // the verify-then-use gap for the base image even if the source changed after the check.
+            // the verify-then-use gap for the base image even if the source changed after the check, and
+            // for a remote store it is also what catches a truncated or corrupted transfer before a
+            // backend ever opens it.
             BackupArtifactVerifier.VerifyCheckpointCopy(fullBackup, checkpointDest, ct);
 
             IPersistenceBackend targetBackend = OpenBackendAt(staging);
@@ -508,7 +581,7 @@ internal sealed class BackupService : IDisposable
                 // before replaying it (point-of-use), minimizing the verify-then-use window on WAL
                 // segments read from the source artifacts.
                 result = await RestoreEngine.RestoreAsync(
-                    chain, _backupDir, targetTime, targetBackend, pitrWindow, nowUtc: null, alreadyVerified: false, ct: ct).ConfigureAwait(false);
+                    chain, _artifacts, targetTime, targetBackend, pitrWindow, nowUtc: null, alreadyVerified: false, ct: ct).ConfigureAwait(false);
 
                 // For memory backends, StoreKeyValues only updates the in-memory object; the files in
                 // staging are still the Full backup's state. Flush the merged result back to disk so a

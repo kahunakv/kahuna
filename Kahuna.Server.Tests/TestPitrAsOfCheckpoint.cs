@@ -87,7 +87,7 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         PutAt(backend, "atcut", "v", 1, physicalMs: 100);   // == cut → kept
         PutAt(backend, "future", "v", 1, physicalMs: 200);  // > cut  → excluded
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(new HLCTimestamp(0, 100, 0), full.BaseCut);
 
@@ -108,7 +108,7 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         PutAt(backend, "k", "alive", 1, physicalMs: 50);                          // ≤ cut, Set
         PutAt(backend, "k", "gone", 2, physicalMs: 200, state: KeyValueState.Deleted); // > cut, Deleted
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         // As-of the cut the key was still alive; the later delete must not be reflected.
         MemoryPersistenceBackend image = MemoryPersistenceBackend.OpenCheckpoint(CheckpointPath(artifacts, full));
@@ -129,7 +129,7 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         PutAt(backend, "out", "v", 1, physicalMs: 250);
 
         // snapshotT overrides the WAL max as the cut.
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 150, 0), ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 150, 0), ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(new HLCTimestamp(0, 150, 0), full.BaseCut);
 
@@ -151,7 +151,7 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         PutAt(backend, "p1key", "v", 1, physicalMs: 110);
         PutAt(backend, "p2key", "v", 1, physicalMs: 500);
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(new HLCTimestamp(0, 500, 0), full.BaseCut);
 
@@ -175,7 +175,7 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         BackupDriver.AcquireSnapshotHoldDelegate acquire = (cut, _) => { pinnedAt = cut; return Task.FromResult<string?>("hold-1"); };
         BackupDriver.ReleaseSnapshotHoldDelegate release = (id, _) => { releasedId = id; return Task.CompletedTask; };
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release);
 
         Assert.Equal(new HLCTimestamp(0, 100, 0), pinnedAt); // pinned at the declared cut
         Assert.Equal("hold-1", releasedId);                  // released after publish
@@ -197,10 +197,10 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         BackupDriver.ReleaseSnapshotHoldDelegate release = (_, _) => { released = true; return Task.CompletedTask; };
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, acquireSnapshotHold: acquire, releaseSnapshotHold: release));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await catalog.ListAsync(TestContext.Current.CancellationToken));
         Assert.False(released); // nothing to release — the hold was never acquired
         if (Directory.Exists(artifacts))
             Assert.Empty(Directory.GetDirectories(artifacts));
@@ -216,10 +216,10 @@ public sealed class TestPitrAsOfCheckpoint : IDisposable
         using NonExactBackend backend = new(new MemoryPersistenceBackend());
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, ct: TestContext.Current.CancellationToken));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await catalog.ListAsync(TestContext.Current.CancellationToken));
         if (Directory.Exists(artifacts))
             Assert.Empty(Directory.GetDirectories(artifacts));
     }

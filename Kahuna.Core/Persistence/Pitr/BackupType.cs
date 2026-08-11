@@ -1,7 +1,7 @@
 
 namespace Kahuna.Server.Persistence.Pitr;
 
-internal enum BackupType
+public enum BackupType
 {
     Full = 0,
     Incremental = 1

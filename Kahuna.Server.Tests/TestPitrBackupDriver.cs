@@ -76,7 +76,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_empty");
         string artifacts = ArtifactsDir("full_empty");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(BackupType.Full, manifest.Type);
         Assert.Empty(manifest.PartitionRanges);
@@ -93,7 +93,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_range");
         string artifacts = ArtifactsDir("full_range");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Single(manifest.PartitionRanges);
         PartitionBackupRange r = manifest.PartitionRanges[0];
@@ -114,7 +114,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_mixed");
         string artifacts = ArtifactsDir("full_mixed");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(3L, manifest.PartitionRanges[0].ToIndex);
         Assert.Equal(new HLCTimestamp(0, 300, 0), manifest.PartitionRanges[0].ToHlc);
@@ -127,7 +127,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_disk");
         string artifacts = ArtifactsDir("full_disk");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         string checkpointDir = Path.Combine(artifacts, manifest.BackupId.ToString("N"), "checkpoint");
         Assert.True(Directory.Exists(checkpointDir));
@@ -141,9 +141,9 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_catalog");
         string artifacts = ArtifactsDir("full_catalog");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
-        BackupManifest? stored = catalog.Get(manifest.BackupId);
+        BackupManifest? stored = await catalog.GetAsync(manifest.BackupId);
         Assert.NotNull(stored);
         Assert.Equal(manifest.BackupId, stored!.BackupId);
     }
@@ -155,7 +155,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_checksum");
         string artifacts = ArtifactsDir("full_checksum");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         string key = "checkpoint/" + CheckpointManifest.FileName;
         Assert.True(manifest.Checksums.ContainsKey(key));
@@ -173,7 +173,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("full_drained");
         string artifacts = ArtifactsDir("full_drained");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1), draining], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1), draining], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Single(manifest.PartitionRanges);
         Assert.Equal(1, manifest.PartitionRanges[0].PartitionId);
@@ -193,7 +193,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("buried_committed");
         string artifacts = ArtifactsDir("buried_committed");
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         // Partition must not be dropped; ToIndex must be the committed entry at index 1.
         Assert.Single(manifest.PartitionRanges);
@@ -222,7 +222,7 @@ public sealed class TestPitrBackupDriver : IDisposable
             return Task.CompletedTask;
         }
 
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, Flush, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, Flush, ct: TestContext.Current.CancellationToken);
 
         Assert.True(flushCalled, "flush delegate must be called");
 
@@ -243,7 +243,7 @@ public sealed class TestPitrBackupDriver : IDisposable
         string artifacts = ArtifactsDir("no_flush");
 
         // Do NOT populate the backend — simulates unflushed in-memory state.
-        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
+        BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
 
         // Manifest claims ToIndex = 1, but the checkpoint is empty.
         Assert.Equal(1L, manifest.PartitionRanges[0].ToIndex);
@@ -266,14 +266,14 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("inc_contiguous");
         string artifacts = ArtifactsDir("inc_contiguous");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [
             new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) },
             new RaftLog { Id = 4, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 400, 0) }
         ])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(BackupType.Incremental, inc.Type);
         Assert.Equal(full.BackupId, inc.ParentBackupId);
@@ -289,22 +289,22 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("inc_empty");
         string artifacts = ArtifactsDir("inc_empty");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         Assert.Empty(inc.PartitionRanges);
     }
 
     [Fact]
-    public void TakeIncrementalBackup_MissingParent_Throws()
+    public async Task TakeIncrementalBackup_MissingParent_Throws()
     {
         InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
         BackupCatalog catalog = NewCatalog("inc_missing");
         string artifacts = ArtifactsDir("inc_missing");
 
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            BackupDriver.RunIncremental(wal, [Part(1)], Guid.NewGuid(), artifacts, catalog, ct: TestContext.Current.CancellationToken));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], Guid.NewGuid(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken));
 
         Assert.Contains("not found", ex.Message);
     }
@@ -324,10 +324,10 @@ public sealed class TestPitrBackupDriver : IDisposable
         string artifacts = ArtifactsDir("inc_new_partition");
 
         // Full backup covers only partition 1.
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         // Incremental includes partition 2 (newly joined).
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1), Part(2)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1), Part(2)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         PartitionBackupRange? p2 = inc.PartitionRanges.FirstOrDefault(r => r.PartitionId == 2);
         Assert.NotNull(p2);
@@ -336,7 +336,7 @@ public sealed class TestPitrBackupDriver : IDisposable
     }
 
     [Fact]
-    public void TakeIncrementalBackup_WalFloorExceeded_Throws()
+    public async Task TakeIncrementalBackup_WalFloorExceeded_Throws()
     {
         // Parent covers up to index 5; WAL floor is at index 10.
         InMemoryWAL inner = BuildWal((1, 1, 100, RaftLogType.Committed));
@@ -347,10 +347,10 @@ public sealed class TestPitrBackupDriver : IDisposable
 
         BackupManifest parentManifest = BackupManifest.CreateFull(
             [PartitionBackupRange.Create(1, 1, default, 5, new HLCTimestamp(0, 500, 0))]);
-        catalog.Put(parentManifest);
+        await catalog.PutAsync(parentManifest);
 
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            BackupDriver.RunIncremental(wal, [Part(1)], parentManifest.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], parentManifest.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken));
 
         Assert.Contains("compaction floor", ex.Message);
     }
@@ -362,11 +362,11 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("inc_files");
         string artifacts = ArtifactsDir("inc_files");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         string walFile = Path.Combine(artifacts, inc.BackupId.ToString("N"), "partition_1.wal");
         Assert.True(File.Exists(walFile));
@@ -383,13 +383,13 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("chain");
         string artifacts = ArtifactsDir("chain");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) }])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, chain.Count);
         Assert.Equal(BackupType.Full, chain[0].Type);
@@ -409,16 +409,16 @@ public sealed class TestPitrBackupDriver : IDisposable
         BackupCatalog catalog = NewCatalog("sparse");
         string artifacts = ArtifactsDir("sparse");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         // No new WAL entries → empty incremental, P1 omitted.
-        BackupManifest inc1 = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc1 = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
         Assert.Empty(inc1.PartitionRanges);
 
         // A new entry appears after inc1.
         wal.Write([(1, [new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) }])]);
 
-        BackupManifest inc2 = BackupDriver.RunIncremental(wal, [Part(1)], inc1.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc2 = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], inc1.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         PartitionBackupRange? p1 = inc2.PartitionRanges.FirstOrDefault(r => r.PartitionId == 1);
         Assert.NotNull(p1);
@@ -501,11 +501,11 @@ public sealed class TestPitrBackupDriver : IDisposable
         string artifacts = ArtifactsDir("topo_stable");
 
         BackupManifest manifest = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
             topologyGenerationProbe: () => 12345L, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(12345L, manifest.TopologyGeneration);
-        Assert.NotNull(catalog.Get(manifest.BackupId));
+        Assert.NotNull(await catalog.GetAsync(manifest.BackupId));
     }
 
     [Fact]
@@ -520,12 +520,12 @@ public sealed class TestPitrBackupDriver : IDisposable
         long Probe() => calls++ == 0 ? 111L : 222L;
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
                 topologyGenerationProbe: Probe, ct: TestContext.Current.CancellationToken));
 
         Assert.True(ex.TopologyChanged);
         // Nothing published and the half-written artifact directory was swept.
-        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await catalog.ListAsync(TestContext.Current.CancellationToken));
         Assert.True(!Directory.Exists(artifacts) || Directory.GetDirectories(artifacts).Length == 0);
     }
 
@@ -538,7 +538,7 @@ public sealed class TestPitrBackupDriver : IDisposable
 
         // Full backup at a stable topology.
         BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
             topologyGenerationProbe: () => 999L, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
@@ -546,14 +546,14 @@ public sealed class TestPitrBackupDriver : IDisposable
         int calls = 0;
         long Probe() => calls++ == 0 ? 111L : 222L;
 
-        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
-            BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog,
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog,
                 snapshotT: null, acquireRetentionHold: null, identity: default,
                 topologyGenerationProbe: Probe, ct: TestContext.Current.CancellationToken));
 
         Assert.True(ex.TopologyChanged);
         // Only the full remains; the incremental was not published and its directory was swept.
-        Assert.Single(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Single(await catalog.ListAsync(TestContext.Current.CancellationToken));
         Assert.Single(Directory.GetDirectories(artifacts)); // only the full's artifact dir
     }
 
@@ -567,12 +567,12 @@ public sealed class TestPitrBackupDriver : IDisposable
         string artifacts = ArtifactsDir("coord_lost");
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
                 verifyCoordinator: _ => Task.FromResult(false), ct: TestContext.Current.CancellationToken));
 
         Assert.True(ex.RetryableLeadershipLoss);
         // Nothing published; the half-written artifact directory was swept.
-        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await catalog.ListAsync(TestContext.Current.CancellationToken));
         Assert.True(!Directory.Exists(artifacts) || Directory.GetDirectories(artifacts).Length == 0);
     }
 
@@ -584,10 +584,10 @@ public sealed class TestPitrBackupDriver : IDisposable
         string artifacts = ArtifactsDir("coord_ok");
 
         BackupManifest m = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
             verifyCoordinator: _ => Task.FromResult(true), ct: TestContext.Current.CancellationToken);
 
-        Assert.NotNull(catalog.Get(m.BackupId));
+        Assert.NotNull(await catalog.GetAsync(m.BackupId));
     }
 
     // ── test helpers ────────────────────────────────────────────────────────────────────────

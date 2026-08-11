@@ -32,13 +32,13 @@ public sealed class TestPitrCatalog : IDisposable
     // ── storage target round-trip ─────────────────────────────────────────────────
 
     [Fact]
-    public void StorageTarget_PutAndGet_Roundtrip()
+    public async Task StorageTarget_PutAndGet_Roundtrip()
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest m = BackupManifest.CreateFull([Range(1, 1, 10)]);
-        cat.Put(m);
+        await cat.PutAsync(m);
 
-        BackupManifest? got = cat.Get(m.BackupId);
+        BackupManifest? got = await cat.GetAsync(m.BackupId);
         Assert.NotNull(got);
         Assert.Equal(m.BackupId, got!.BackupId);
         Assert.Equal(BackupType.Full, got.Type);
@@ -48,36 +48,36 @@ public sealed class TestPitrCatalog : IDisposable
     }
 
     [Fact]
-    public void StorageTarget_Get_MissingId_ReturnsNull()
+    public async Task StorageTarget_Get_MissingId_ReturnsNull()
     {
         BackupCatalog cat = NewCatalog();
-        Assert.Null(cat.Get(Guid.NewGuid()));
+        Assert.Null(await cat.GetAsync(Guid.NewGuid()));
     }
 
     [Fact]
-    public void StorageTarget_List_ReturnsAllManifests()
+    public async Task StorageTarget_List_ReturnsAllManifests()
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 5)]);
         BackupManifest inc = BackupManifest.CreateIncremental(full.BackupId, [Range(1, 6, 10)]);
-        cat.Put(full);
-        cat.Put(inc);
+        await cat.PutAsync(full);
+        await cat.PutAsync(inc);
 
-        IReadOnlyList<BackupManifest> all = cat.List(TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> all = await cat.ListAsync(TestContext.Current.CancellationToken);
         Assert.Equal(2, all.Count);
     }
 
     [Fact]
-    public void Manifest_HlcTimestamps_RoundtripViaStorageTarget()
+    public async Task Manifest_HlcTimestamps_RoundtripViaStorageTarget()
     {
         BackupCatalog cat = NewCatalog();
         HLCTimestamp fromHlc = new(1, 999_000, 7);
         HLCTimestamp toHlc = new(1, 1_000_000, 3);
         PartitionBackupRange r = PartitionBackupRange.Create(1, 1, fromHlc, 50, toHlc);
         BackupManifest m = BackupManifest.CreateFull([r]);
-        cat.Put(m);
+        await cat.PutAsync(m);
 
-        BackupManifest? got = cat.Get(m.BackupId);
+        BackupManifest? got = await cat.GetAsync(m.BackupId);
         PartitionBackupRange rr = got!.PartitionRanges[0];
         Assert.Equal(fromHlc, rr.FromHlc);
         Assert.Equal(toHlc, rr.ToHlc);
@@ -86,29 +86,29 @@ public sealed class TestPitrCatalog : IDisposable
     // ── chain resolution ──────────────────────────────────────────────────────────
 
     [Fact]
-    public void ResolveChain_FullOnly_ReturnsSingleEntry()
+    public async Task ResolveChain_FullOnly_ReturnsSingleEntry()
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
-        cat.Put(full);
+        await cat.PutAsync(full);
 
-        IReadOnlyList<BackupManifest> chain = cat.ResolveChain(full.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await cat.ResolveChainAsync(full.BackupId, TestContext.Current.CancellationToken);
         Assert.Single(chain);
         Assert.Equal(full.BackupId, chain[0].BackupId);
     }
 
     [Fact]
-    public void ResolveChain_FullIncInc_ReturnsChronologicalOrder()
+    public async Task ResolveChain_FullIncInc_ReturnsChronologicalOrder()
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
         BackupManifest inc1 = BackupManifest.CreateIncremental(full.BackupId, [Range(1, 11, 20)]);
         BackupManifest inc2 = BackupManifest.CreateIncremental(inc1.BackupId, [Range(1, 21, 30)]);
-        cat.Put(full);
-        cat.Put(inc1);
-        cat.Put(inc2);
+        await cat.PutAsync(full);
+        await cat.PutAsync(inc1);
+        await cat.PutAsync(inc2);
 
-        IReadOnlyList<BackupManifest> chain = cat.ResolveChain(inc2.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await cat.ResolveChainAsync(inc2.BackupId, TestContext.Current.CancellationToken);
 
         Assert.Equal(3, chain.Count);
         Assert.Equal(full.BackupId, chain[0].BackupId);
@@ -117,42 +117,42 @@ public sealed class TestPitrCatalog : IDisposable
     }
 
     [Fact]
-    public void ResolveChain_MissingParent_Throws()
+    public async Task ResolveChain_MissingParent_Throws()
     {
         BackupCatalog cat = NewCatalog();
         // Store only the incremental — its parent is absent from the catalog.
         BackupManifest inc = BackupManifest.CreateIncremental(Guid.NewGuid(), [Range(1, 11, 20)]);
-        cat.Put(inc);
+        await cat.PutAsync(inc);
 
-        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(inc.BackupId, TestContext.Current.CancellationToken));
+        BackupChainException ex = await Assert.ThrowsAsync<BackupChainException>(async () => await cat.ResolveChainAsync(inc.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("not found", ex.Message);
     }
 
     [Fact]
-    public void ResolveChain_SelfParent_Throws()
+    public async Task ResolveChain_SelfParent_Throws()
     {
         BackupCatalog cat = NewCatalog();
         // A manifest that points to itself as its own parent.
         BackupManifest m = BackupManifest.CreateFull([Range(1, 1, 10)]);
         m.ParentBackupId = m.BackupId;
-        cat.Put(m);
+        await cat.PutAsync(m);
 
-        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(m.BackupId, TestContext.Current.CancellationToken));
+        BackupChainException ex = await Assert.ThrowsAsync<BackupChainException>(async () => await cat.ResolveChainAsync(m.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("Cycle", ex.Message);
     }
 
     [Fact]
-    public void ResolveChain_TwoNodeCycle_Throws()
+    public async Task ResolveChain_TwoNodeCycle_Throws()
     {
         BackupCatalog cat = NewCatalog();
         // A → B → A
         BackupManifest a = BackupManifest.CreateFull([Range(1, 1, 10)]);
         BackupManifest b = BackupManifest.CreateIncremental(a.BackupId, [Range(1, 11, 20)]);
         a.ParentBackupId = b.BackupId; // close the cycle
-        cat.Put(a);
-        cat.Put(b);
+        await cat.PutAsync(a);
+        await cat.PutAsync(b);
 
-        BackupChainException ex = Assert.Throws<BackupChainException>(() => cat.ResolveChain(b.BackupId, TestContext.Current.CancellationToken));
+        BackupChainException ex = await Assert.ThrowsAsync<BackupChainException>(async () => await cat.ResolveChainAsync(b.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("Cycle", ex.Message);
     }
 
@@ -223,17 +223,17 @@ public sealed class TestPitrCatalog : IDisposable
     }
 
     [Fact]
-    public void ResolveAndValidate_ContiguousChain_Passes()
+    public async Task ResolveAndValidate_ContiguousChain_Passes()
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
         BackupManifest inc1 = BackupManifest.CreateIncremental(full.BackupId, [Range(1, 11, 20)]);
         BackupManifest inc2 = BackupManifest.CreateIncremental(inc1.BackupId, [Range(1, 21, 30)]);
-        cat.Put(full);
-        cat.Put(inc1);
-        cat.Put(inc2);
+        await cat.PutAsync(full);
+        await cat.PutAsync(inc1);
+        await cat.PutAsync(inc2);
 
-        IReadOnlyList<BackupManifest> chain = cat.ResolveAndValidate(inc2.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await cat.ResolveAndValidateAsync(inc2.BackupId, TestContext.Current.CancellationToken);
 
         Assert.Equal(3, chain.Count);
         Assert.Equal(BackupType.Full, chain[0].Type);
@@ -263,15 +263,15 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest.CreateIncremental(parent, [Range(1, from, to)]);
 
     [Fact]
-    public void Manifest_Identity_RoundtripViaStorageTarget()
+    public async Task Manifest_Identity_RoundtripViaStorageTarget()
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest m = FullWithRange(1, 10);
         const string cluster = "cluster-a";
         m.ApplyOwnerIdentity(new BackupOwnerIdentity(cluster, "node-a:8001", 7, "sqlite", "rev-3", 42));
-        cat.Put(m);
+        await cat.PutAsync(m);
 
-        BackupManifest? got = cat.Get(m.BackupId);
+        BackupManifest? got = await cat.GetAsync(m.BackupId);
         Assert.NotNull(got);
         Assert.Equal(cluster, got!.ClusterId);
         Assert.Equal("node-a:8001", got.CoordinatorNode);

@@ -25,7 +25,21 @@ internal readonly record struct BackupGcCandidate(Guid BackupId, BackupType Type
 /// A leftover directory or file under the backup directory that no valid manifest accounts for, with
 /// why it is reclaimable. Returned by <see cref="BackupRetention.PlanOrphanSweep"/>.
 /// </summary>
-internal readonly record struct OrphanSweepCandidate(string Path, bool IsDirectory, string Reason);
+/// <summary>
+/// One thing the orphan sweep would reclaim. Exactly one of <paramref name="OrphanedBackupId"/> and
+/// <paramref name="Leftover"/> is set: the first for a backup whose artifacts exist with no manifest to
+/// own them, the second for store debris that belongs to no backup at all.
+/// <para>
+/// <paramref name="Name"/> is a display name only — never an absolute server path — because it is
+/// surfaced to operators over the network.
+/// </para>
+/// </summary>
+internal readonly record struct OrphanSweepCandidate(
+    string Name,
+    bool IsDirectory,
+    string Reason,
+    Guid? OrphanedBackupId = null,
+    BackupArtifactLeftover? Leftover = null);
 
 /// <summary>
 /// The result of a garbage-collection pass (or its dry-run): the backups deleted by the retention
@@ -48,8 +62,6 @@ internal static class BackupRetention
     /// Markers a backup writes into transient directory/file names while staging an artifact, a
     /// manifest, or a restore. A leftover carrying any of these is an interrupted operation's remnant.
     /// </summary>
-    private static readonly string[] LeftoverMarkers = [".tmp_", ".staging_", ".quarantine_", ".merge_"];
-
     /// <summary>
     /// Sums a manifest's recorded artifact bytes. Uses <see cref="BackupManifest.Sizes"/> so no
     /// filesystem access is needed; a manifest with no recorded sizes contributes 0.
@@ -175,50 +187,47 @@ internal static class BackupRetention
     }
 
     /// <summary>
-    /// Lists leftover directories/files under <paramref name="backupDir"/> that no valid manifest
-    /// accounts for: artifact directories named for a backup id with no manifest (orphaned by a failed
-    /// or interrupted backup), and staging/tmp/quarantine remnants of an interrupted publish, delete,
-    /// or restore. Directories whose id is <paramref name="reservedIds"/> — every backup that has a
-    /// manifest file, including corrupt/unreadable ones, plus any in-flight reservation — are left
-    /// alone, so a directory backed by a manifest that merely failed to parse is never destroyed as an
-    /// orphan. A top-level entry that is a symlink/reparse point is reported for unlinking but never
-    /// recursed into. Entries whose name is neither a backup id nor a marked remnant are left untouched
-    /// (they are not ours to remove).
+    /// Lists everything in <paramref name="artifacts"/> that no valid manifest accounts for: artifacts
+    /// belonging to a backup id with no manifest (orphaned by a failed or interrupted backup), and
+    /// store-specific debris from an interrupted publish, delete, or restore.
+    /// <para>
+    /// Backups in <paramref name="reservedIds"/> — every backup that has a manifest entry, including
+    /// corrupt/unreadable ones, plus any in-flight reservation — are left alone, so artifacts backed by a
+    /// manifest that merely failed to parse are never destroyed as orphans. That set is derived from
+    /// manifest <i>presence</i>, so it fails closed regardless of manifest health.
+    /// </para>
+    /// <para>
+    /// Both listings propagate their failures rather than degrading to empty. An unreadable listing must
+    /// never be interpreted as "nothing is here, so nothing is owned" — on a remote store that is a
+    /// transient network error, and treating it as authoritative would reclaim live backups.
+    /// </para>
     /// </summary>
-    internal static IReadOnlyList<OrphanSweepCandidate> PlanOrphanSweep(
-        string backupDir, ISet<Guid> validManifestIds, ISet<Guid> reservedIds, CancellationToken ct = default)
+    internal static async Task<IReadOnlyList<OrphanSweepCandidate>> PlanOrphanSweepAsync(
+        IBackupArtifactStore artifacts,
+        ISet<Guid> validManifestIds,
+        ISet<Guid> reservedIds,
+        CancellationToken ct = default)
     {
         List<OrphanSweepCandidate> candidates = [];
-        if (!Directory.Exists(backupDir))
-            return candidates;
 
-        foreach (string dir in Directory.GetDirectories(backupDir))
+        foreach (Guid id in await artifacts.ListBackupIdsAsync(ct).ConfigureAwait(false))
         {
             ct.ThrowIfCancellationRequested();
-            string name = Path.GetFileName(dir);
-
-            if (ContainsLeftoverMarker(name))
-            {
-                candidates.Add(new OrphanSweepCandidate(dir, IsDirectory: true, "interrupted staging/temporary directory"));
+            if (reservedIds.Contains(id) || validManifestIds.Contains(id))
                 continue;
-            }
 
-            if (Guid.TryParseExact(name, "N", out Guid id))
-            {
-                if (reservedIds.Contains(id) || validManifestIds.Contains(id))
-                    continue;
-                candidates.Add(new OrphanSweepCandidate(dir, IsDirectory: true,
-                    "artifact directory with no manifest (orphaned by a failed or interrupted backup)"));
-            }
+            candidates.Add(new OrphanSweepCandidate(
+                id.ToString("N"),
+                IsDirectory: true,
+                "artifacts with no manifest (orphaned by a failed or interrupted backup)",
+                OrphanedBackupId: id));
         }
 
-        // Leftover manifest-write temporaries (e.g. {id}.manifest.tmp_xxxx) are plain files, not caught
-        // by the directory scan above; they never parse as a valid manifest, so reclaim them too.
-        foreach (string file in Directory.GetFiles(backupDir))
+        foreach (BackupArtifactLeftover leftover in await artifacts.ListLeftoversAsync(ct).ConfigureAwait(false))
         {
             ct.ThrowIfCancellationRequested();
-            if (ContainsLeftoverMarker(Path.GetFileName(file)))
-                candidates.Add(new OrphanSweepCandidate(file, IsDirectory: false, "interrupted temporary file"));
+            candidates.Add(new OrphanSweepCandidate(
+                leftover.Name, leftover.IsDirectory, leftover.Description, Leftover: leftover));
         }
 
         return candidates;
@@ -228,41 +237,39 @@ internal static class BackupRetention
     /// Applies a retention plan: deletes each backup (manifest first, then artifacts) in the plan's
     /// order (descendants before ancestors). Idempotent — a candidate already gone is skipped.
     /// </summary>
-    internal static void ApplyRetention(
-        IReadOnlyList<BackupGcCandidate> plan, BackupCatalog catalog, string backupDir, CancellationToken ct = default)
+    internal static async Task ApplyRetentionAsync(
+        IReadOnlyList<BackupGcCandidate> plan,
+        BackupCatalog catalog,
+        IBackupArtifactStore artifacts,
+        CancellationToken ct = default)
     {
         foreach (BackupGcCandidate candidate in plan)
         {
             ct.ThrowIfCancellationRequested();
-            catalog.Delete(candidate.BackupId, backupDir);
+            await catalog.DeleteAsync(candidate.BackupId, artifacts, ct).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Applies an orphan-sweep plan: removes each leftover without following a top-level symlink.
-    /// Idempotent — an entry already gone is skipped.
+    /// Applies an orphan-sweep plan. Idempotent in both branches: an entry already gone is skipped, and a
+    /// partially deleted backup is finished rather than skipped, so a store that cannot delete a whole
+    /// backup atomically converges over successive passes.
     /// </summary>
-    internal static void ApplyOrphanSweep(IReadOnlyList<OrphanSweepCandidate> plan, CancellationToken ct = default)
+    internal static async Task ApplyOrphanSweepAsync(
+        IReadOnlyList<OrphanSweepCandidate> plan, IBackupArtifactStore artifacts, CancellationToken ct = default)
     {
         foreach (OrphanSweepCandidate candidate in plan)
         {
             ct.ThrowIfCancellationRequested();
-            if (candidate.IsDirectory)
-                BackupCatalog.RemoveArtifactDirectory(candidate.Path);
-            else
-                File.Delete(candidate.Path);
+
+            if (candidate.OrphanedBackupId is { } orphanId)
+                await artifacts.DeleteAllAsync(orphanId, ct).ConfigureAwait(false);
+            else if (candidate.Leftover is { } leftover)
+                await artifacts.DeleteLeftoverAsync(leftover, ct).ConfigureAwait(false);
         }
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────
-
-    private static bool ContainsLeftoverMarker(string name)
-    {
-        foreach (string marker in LeftoverMarkers)
-            if (name.Contains(marker, StringComparison.Ordinal))
-                return true;
-        return false;
-    }
 
     /// <summary>The leaf and every transitive parent present in the catalog (cycle-safe).</summary>
     private static List<Guid> AncestorClosure(BackupManifest leaf, Dictionary<Guid, BackupManifest> byId)

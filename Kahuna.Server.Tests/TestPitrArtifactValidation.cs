@@ -68,11 +68,11 @@ public sealed class TestPitrArtifactValidation : IDisposable
         Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
 
         BackupManifest full = await BackupDriver.RunFullAsync(
-            wal, [Part(1)], backend, artifacts, catalog);
+            wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog);
 
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog);
         return (catalog, artifacts, full, inc);
     }
 
@@ -105,7 +105,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         File.WriteAllText(ArtifactFile(artifacts, full, "checkpoint/store.json"), "");
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -119,7 +119,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         bytes[0] ^= 0xFF; // same length, different digest
         File.WriteAllBytes(file, bytes);
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -130,7 +130,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         string wal = ArtifactFile(artifacts, inc, "partition_1.wal");
         File.AppendAllText(wal, "garbage");
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(inc, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(inc, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -140,7 +140,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         File.Delete(ArtifactFile(artifacts, full, "checkpoint/store.json"));
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -150,7 +150,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         File.WriteAllText(Path.Combine(artifacts, full.BackupId.ToString("N"), "stray.bin"), "x");
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -160,7 +160,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         full.FormatVersion = 0; // simulate a pre-hardening manifest
 
-        Assert.Throws<BackupUnsupportedFormatException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupUnsupportedFormatException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -170,7 +170,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         full.Checksums["../escape"] = "deadbeef";
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         full.Checksums[Path.Combine(Path.GetTempPath(), "abs")] = "deadbeef";
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -191,7 +191,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         string link = Path.Combine(artifacts, full.BackupId.ToString("N"), "link");
         File.CreateSymbolicLink(link, Path.GetTempPath());
 
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -202,7 +202,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
         full.Checksums.Clear();
 
         // A Full must have a checkpoint — empty checksums is corrupt, not "skip verification".
-        Assert.Throws<BackupArtifactException>(() => BackupArtifactVerifier.Verify(full, artifacts, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => BackupArtifactVerifier.VerifyAsync(full, BackupTestStores.Artifacts(artifacts), TestContext.Current.CancellationToken));
     }
 
     // ── restore fails closed ─────────────────────────────────────────────────────────────────
@@ -213,11 +213,11 @@ public sealed class TestPitrArtifactValidation : IDisposable
         (BackupCatalog catalog, string artifacts, _, BackupManifest inc) =
             await BuildFullPlusIncremental("restore_missing");
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
         File.Delete(ArtifactFile(artifacts, inc, "partition_1.wal"));
 
         MemoryPersistenceBackend target = new();
-        await Assert.ThrowsAsync<BackupArtifactException>(() => RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 1000, 0), target, ct: TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), new HLCTimestamp(0, 1000, 0), target, ct: TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -226,11 +226,11 @@ public sealed class TestPitrArtifactValidation : IDisposable
         (BackupCatalog catalog, string artifacts, _, BackupManifest inc) =
             await BuildFullPlusIncremental("restore_corrupt");
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
         File.AppendAllText(ArtifactFile(artifacts, inc, "partition_1.wal"), "garbage");
 
         MemoryPersistenceBackend target = new();
-        await Assert.ThrowsAsync<BackupArtifactException>(() => RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 1000, 0), target, ct: TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<BackupArtifactException>(() => RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), new HLCTimestamp(0, 1000, 0), target, ct: TestContext.Current.CancellationToken));
     }
 
     // ── cancellation ─────────────────────────────────────────────────────────────────────────
@@ -246,10 +246,10 @@ public sealed class TestPitrArtifactValidation : IDisposable
         await cts.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), artifacts, catalog,
+            BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
                 flushBeforeCheckpoint: null, snapshotT: null, ct: cts.Token));
 
-        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await catalog.ListAsync(TestContext.Current.CancellationToken));
         if (Directory.Exists(artifacts))
             Assert.Empty(Directory.GetDirectories(artifacts));
     }
@@ -260,19 +260,19 @@ public sealed class TestPitrArtifactValidation : IDisposable
         (BackupCatalog catalog, string artifacts, BackupManifest full, _) =
             await BuildFullPlusIncremental("cancel_inc");
 
-        int before = catalog.List(TestContext.Current.CancellationToken).Count;
+        int before = (await catalog.ListAsync(TestContext.Current.CancellationToken)).Count;
         int dirsBefore = Directory.GetDirectories(artifacts).Length;
 
         using CancellationTokenSource cts = new();
         await cts.CancelAsync();
 
         InMemoryWAL wal = BuildWal((1, 1, 100), (1, 2, 200));
-        Assert.ThrowsAny<OperationCanceledException>(() =>
-            BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog,
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog,
                 snapshotT: null, ct: cts.Token));
 
         // No new catalog entry and no new artifact directory beyond what already existed.
-        Assert.Equal(before, catalog.List(TestContext.Current.CancellationToken).Count);
+        Assert.Equal(before, (await catalog.ListAsync(TestContext.Current.CancellationToken)).Count);
         Assert.Equal(dirsBefore, Directory.GetDirectories(artifacts).Length);
     }
 
@@ -282,13 +282,13 @@ public sealed class TestPitrArtifactValidation : IDisposable
         (BackupCatalog catalog, string artifacts, _, BackupManifest inc) =
             await BuildFullPlusIncremental("cancel_restore");
 
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
 
         using CancellationTokenSource cts = new();
         await cts.CancelAsync();
 
         MemoryPersistenceBackend target = new();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RestoreEngine.RestoreAsync(chain, artifacts, new HLCTimestamp(0, 1000, 0), target, ct: cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), new HLCTimestamp(0, 1000, 0), target, ct: cts.Token));
     }
 
     // ── chain semantic bounds ────────────────────────────────────────────────────────────────
@@ -312,14 +312,14 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         // One valid manifest.
         BackupManifest valid = BackupManifest.CreateFull([]);
-        target.Put(valid);
+        await target.PutAsync(valid);
 
         // One garbage manifest file with a recognizable id in its name.
         Guid badId = Guid.NewGuid();
         await File.WriteAllTextAsync(Path.Combine(catalogDir, badId.ToString("N") + ".manifest"), "{ not json", TestContext.Current.CancellationToken);
 
-        Assert.Single(target.List(TestContext.Current.CancellationToken));
-        IReadOnlyList<(Guid backupId, string reason)> corrupt = target.ListCorrupt(TestContext.Current.CancellationToken);
+        Assert.Single(await target.ListAsync(TestContext.Current.CancellationToken));
+        IReadOnlyList<(Guid backupId, string reason)> corrupt = await target.ListCorruptAsync(TestContext.Current.CancellationToken);
         Assert.Contains(corrupt, c => c.backupId == badId);
     }
 }

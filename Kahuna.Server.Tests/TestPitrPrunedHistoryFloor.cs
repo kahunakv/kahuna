@@ -142,10 +142,10 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
             BackupCatalog catBelow = NewCatalog(storage + "_below");
             string artBelow = ArtifactsDir(storage + "_below");
             BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-                BackupDriver.RunFullAsync(wal, [Part(1)], backend, artBelow, catBelow, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 3000, 0), ct: TestContext.Current.CancellationToken));
+                BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artBelow), catBelow, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 3000, 0), ct: TestContext.Current.CancellationToken));
 
             Assert.True(ex.ExactCheckpointUnavailable);
-            Assert.Empty(catBelow.List(TestContext.Current.CancellationToken));
+            Assert.Empty(await catBelow.ListAsync(TestContext.Current.CancellationToken));
             if (Directory.Exists(artBelow))
                 Assert.Empty(Directory.GetDirectories(artBelow));
 
@@ -153,9 +153,9 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
             BackupCatalog catAbove = NewCatalog(storage + "_above");
             string artAbove = ArtifactsDir(storage + "_above");
             InMemoryWAL walAbove = BuildWal(1, 1, 6000);
-            BackupManifest ok = await BackupDriver.RunFullAsync(walAbove, [Part(1)], backend, artAbove, catAbove, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 6000, 0), ct: TestContext.Current.CancellationToken);
+            BackupManifest ok = await BackupDriver.RunFullAsync(walAbove, [Part(1)], backend, BackupTestStores.Artifacts(artAbove), catAbove, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 6000, 0), ct: TestContext.Current.CancellationToken);
             Assert.NotNull(ok);
-            Assert.Single(catAbove.List(TestContext.Current.CancellationToken));
+            Assert.Single(await catAbove.ListAsync(TestContext.Current.CancellationToken));
         }
         finally { (backend as IDisposable)?.Dispose(); }
     }
@@ -192,9 +192,9 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
             BackupCatalog cat = NewCatalog(storage + "_norev");
             string art = ArtifactsDir(storage + "_norev");
             BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-                BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat, flushBeforeCheckpoint: null, snapshotT: TS(75), ct: TestContext.Current.CancellationToken));
+                BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: TS(75), ct: TestContext.Current.CancellationToken));
             Assert.True(ex.ExactCheckpointUnavailable);
-            Assert.Empty(cat.List(TestContext.Current.CancellationToken));
+            Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
         }
         finally { (backend as IDisposable)?.Dispose(); }
 
@@ -266,9 +266,9 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
         string art = ArtifactsDir("rocks_corrupt");
         InMemoryWAL wal = BuildWal(1, 1, 100_000);
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], reopened, art, cat, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 100_000, 0), ct: TestContext.Current.CancellationToken));
+            BackupDriver.RunFullAsync(wal, [Part(1)], reopened, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 100_000, 0), ct: TestContext.Current.CancellationToken));
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(cat.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -296,9 +296,9 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
         string art = ArtifactsDir("sql_corrupt");
         InMemoryWAL wal = BuildWal(1, 1, 100_000);
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], reopened, art, cat, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 100_000, 0), ct: TestContext.Current.CancellationToken));
+            BackupDriver.RunFullAsync(wal, [Part(1)], reopened, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 100_000, 0), ct: TestContext.Current.CancellationToken));
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(cat.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
     }
 
     // ── memory backend: never prunes, so the floor stays Zero and old cuts are always allowed ──
@@ -319,9 +319,9 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
         BackupCatalog catalog = NewCatalog("mem");
         string artifacts = ArtifactsDir("mem");
         InMemoryWAL wal = BuildWal(1, 1, 2000);
-        BackupManifest ok = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 2500, 0), ct: TestContext.Current.CancellationToken);
+        BackupManifest ok = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 2500, 0), ct: TestContext.Current.CancellationToken);
         Assert.NotNull(ok);
-        Assert.Single(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Single(await catalog.ListAsync(TestContext.Current.CancellationToken));
     }
 
     // ── driver check in isolation, independent of any real prune ───────────────────────────────
@@ -360,9 +360,9 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
         string artifacts = ArtifactsDir("stub");
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], backend, artifacts, catalog, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 3000, 0), ct: TestContext.Current.CancellationToken));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, snapshotT: new HLCTimestamp(0, 3000, 0), ct: TestContext.Current.CancellationToken));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(catalog.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await catalog.ListAsync(TestContext.Current.CancellationToken));
     }
 }

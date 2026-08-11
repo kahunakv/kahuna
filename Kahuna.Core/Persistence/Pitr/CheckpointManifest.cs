@@ -37,4 +37,18 @@ internal sealed record CheckpointManifest(
         return JsonSerializer.Deserialize<CheckpointManifest>(json)
                ?? throw new InvalidDataException($"Empty checkpoint manifest at {file}");
     }
+
+    /// <summary>
+    /// Reads the sidecar out of an artifact store rather than a local directory, for verifying a backup
+    /// whose bytes may not be on this filesystem at all.
+    /// </summary>
+    public static async Task<CheckpointManifest> ReadFromStoreAsync(
+        IBackupArtifactStore store, Guid backupId, CancellationToken ct = default)
+    {
+        string key = LocalDirectoryArtifactStore.CheckpointDirectoryName + "/" + FileName;
+        await using Stream stream = await store.OpenReadAsync(backupId, key, ct: ct).ConfigureAwait(false);
+        return await JsonSerializer.DeserializeAsync<CheckpointManifest>(stream, cancellationToken: ct)
+                   .ConfigureAwait(false)
+               ?? throw new InvalidDataException($"Empty checkpoint manifest for backup {backupId:N}");
+    }
 }

@@ -107,7 +107,7 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
 
             // Take a Full backup from node 1's WAL and backend. No snapshotT cap needed here;
             // we'll derive targetTime from the manifest's partition ranges after the fact.
-            BackupManifest fullManifest = await BackupDriver.RunFullAsync(raft1.WalAdapter, raft1.GetPartitionMap(), km1.PersistenceBackend, artifactsDir, catalog, ct: TestContext.Current.CancellationToken);
+            BackupManifest fullManifest = await BackupDriver.RunFullAsync(raft1.WalAdapter, raft1.GetPartitionMap(), km1.PersistenceBackend, BackupTestStores.Artifacts(artifactsDir), catalog, ct: TestContext.Current.CancellationToken);
 
             // targetTime = max ToHlc across all partition ranges captured by the Full backup.
             HLCTimestamp targetTime = fullManifest.PartitionRanges
@@ -120,11 +120,11 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
             string cpPath = Path.Combine(artifactsDir, fullManifest.BackupId.ToString("N"), "checkpoint");
             MemoryPersistenceBackend seededBackend = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
 
-            IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(fullManifest.BackupId, TestContext.Current.CancellationToken);
+            IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(fullManifest.BackupId, TestContext.Current.CancellationToken);
 
             // 24-hour window ensures the just-taken backup is always within the guard-rail.
             await BootstrapHelper.BootstrapNodeAsync(
-                chain, artifactsDir, targetTime, seededBackend, seededWal,
+                chain, BackupTestStores.Artifacts(artifactsDir), targetTime, seededBackend, seededWal,
                 TimeSpan.FromHours(24), DateTime.UtcNow);
 
             // Build node 4 with the seeded WAL + backend.

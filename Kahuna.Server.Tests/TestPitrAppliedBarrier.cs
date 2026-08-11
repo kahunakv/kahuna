@@ -102,10 +102,10 @@ public sealed class TestPitrAppliedBarrier : IDisposable
 
         // Apply pipeline stuck below the captured ToHlc (100): the barrier must time out and fail closed.
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(50), applyBarrierTimeoutMs: 100));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(50), applyBarrierTimeoutMs: 100));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(cat.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
         if (Directory.Exists(art)) Assert.Empty(Directory.GetDirectories(art));
     }
 
@@ -122,10 +122,10 @@ public sealed class TestPitrAppliedBarrier : IDisposable
         BackupCatalog cat = NewCatalog("axis");
         string art = ArtifactsDir("axis");
 
-        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 500);
+        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 500);
 
         Assert.NotNull(m);
-        Assert.Single(cat.List(TestContext.Current.CancellationToken));
+        Assert.Single(await cat.ListAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -137,10 +137,10 @@ public sealed class TestPitrAppliedBarrier : IDisposable
         BackupCatalog cat = NewCatalog("ok");
         string art = ArtifactsDir("ok");
 
-        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 5000);
+        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 5000);
 
         Assert.NotNull(m);
-        Assert.Single(cat.List(TestContext.Current.CancellationToken));
+        Assert.Single(await cat.ListAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -154,10 +154,10 @@ public sealed class TestPitrAppliedBarrier : IDisposable
 
         // Partition 1 caught up (>=100), partition 2 lagging (<120): the barrier must fail closed.
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, art, cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: p => p == 1 ? T(100) : T(50), applyBarrierTimeoutMs: 100));
+            BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: p => p == 1 ? T(100) : T(50), applyBarrierTimeoutMs: 100));
 
         Assert.True(ex.ExactCheckpointUnavailable);
-        Assert.Empty(cat.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -174,9 +174,9 @@ public sealed class TestPitrAppliedBarrier : IDisposable
         Task FailingFlush() => throw new IOException("background writer could not persist committed key-values");
 
         await Assert.ThrowsAsync<IOException>(() =>
-            BackupDriver.RunFullAsync(wal, [Part(1)], backend, art, cat, flushBeforeCheckpoint: FailingFlush, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 5000));
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: FailingFlush, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(100), applyBarrierTimeoutMs: 5000));
 
-        Assert.Empty(cat.List(TestContext.Current.CancellationToken));
+        Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
         if (Directory.Exists(art)) Assert.Empty(Directory.GetDirectories(art));
     }
 }

@@ -147,15 +147,15 @@ public sealed class TestPitrHardening : IDisposable
         BackupCatalog catalog = NewCatalog(tag);
         string artifacts = ArtifactsDir(tag);
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, BackupTestStores.Artifacts(artifacts), catalog);
 
         List<RaftLog> more = [];
         for (int i = 0; i < entryCount; i++)
             more.Add(KvLog(2 + i, 200 + i, $"k{i}", $"v{i}", 1));
         wal.Write([(1, more)]);
 
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId);
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         return (chain, artifacts, checkpointPath);
     }
@@ -168,7 +168,7 @@ public sealed class TestPitrHardening : IDisposable
         FailingBackend backend = new(MemoryPersistenceBackend.OpenCheckpoint(cp), failOnCall: 2);
 
         await Assert.ThrowsAsync<BackupDriverException>(() =>
-            RestoreEngine.RestoreAsync(chain, artifacts, T(100_000), backend, ct: TestContext.Current.CancellationToken));
+            RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(100_000), backend, ct: TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public sealed class TestPitrHardening : IDisposable
         FailingBackend backend = new(inner, failOnCall: 2);
 
         await Assert.ThrowsAsync<BackupDriverException>(() =>
-            RestoreEngine.RestoreAsync(chain, artifacts, T(100_000), backend, ct: TestContext.Current.CancellationToken));
+            RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(100_000), backend, ct: TestContext.Current.CancellationToken));
 
         // A failed batch aborts the restore even though the first batch was already applied.
         Assert.True(backend.StoreCalls >= 2);
@@ -189,10 +189,13 @@ public sealed class TestPitrHardening : IDisposable
     // ── 9428c12b: streaming, bounded, cancellable incremental capture ────────────────────────────
 
     [Fact]
-    public void StreamingWriter_WritesJsonLines_MetadataAndDigestMatchFile()
+    public async Task StreamingWriter_WritesJsonLines_MetadataAndDigestMatchPublishedArtifact()
     {
         Directory.CreateDirectory(_tempRoot);
-        string path = Path.Combine(_tempRoot, "seg_meta.wal");
+        LocalDirectoryArtifactStore store = new(_tempRoot);
+        Guid backupId = Guid.NewGuid();
+        const string relPath = "partition_1.wal";
+
         List<WalSegmentEntry> entries =
         [
             Seg(10, 100, Encoding.UTF8.GetBytes("first")),
@@ -200,40 +203,78 @@ public sealed class TestPitrHardening : IDisposable
             Seg(12, 300, Encoding.UTF8.GetBytes("third")),
         ];
 
-        WalSegmentEntry.SegmentWriteResult r = WalSegmentEntry.WriteSegmentStreaming(path, entries, TestContext.Current.CancellationToken);
+        WalSegmentEntry.SegmentWriteResult r;
+        await using (IBackupArtifactWriter writer =
+                     await store.OpenWriteAsync(backupId, relPath, TestContext.Current.CancellationToken))
+        {
+            r = await WalSegmentEntry.WriteSegmentStreamingAsync(
+                writer.Stream, entries, TestContext.Current.CancellationToken);
+            await writer.CompleteAsync(TestContext.Current.CancellationToken);
+        }
 
         Assert.Equal(3, r.EntryCount);
-        Assert.Equal(new FileInfo(path).Length, r.ByteLength);
-        Assert.Equal(BackupArtifactVerifier.ComputeSha256(path), r.Sha256Hex);
         Assert.Equal(T(100), r.FromHlc);
         Assert.Equal(T(300), r.ToHlc);
         Assert.Equal(12, r.ToId);
-        Assert.Equal(3, File.ReadAllLines(path).Length);
 
-        // Round-trips through the streaming reader.
-        List<WalSegmentEntry> back = WalSegmentEntry.ReadSegment(path).ToList();
-        Assert.Equal(3, back.Count);
-        Assert.Equal("second", Encoding.UTF8.GetString(back[1].LogData!));
+        // The counted length and the digest computed while writing must describe the bytes the store
+        // actually published — that equality is what makes the manifest verifiable at restore time.
+        IReadOnlyList<BackupArtifactEntry> listed = await store.ListAsync(backupId, TestContext.Current.CancellationToken);
+        BackupArtifactEntry published = Assert.Single(listed);
+        Assert.Equal(relPath, published.RelativePath);
+        Assert.Equal(published.Length, r.ByteLength);
+
+        await using (Stream read = await store.OpenReadAsync(backupId, relPath, ct: TestContext.Current.CancellationToken))
+        {
+            byte[] hash = await System.Security.Cryptography.SHA256.HashDataAsync(
+                read, TestContext.Current.CancellationToken);
+            Assert.Equal(Convert.ToHexString(hash).ToLowerInvariant(), r.Sha256Hex);
+        }
+
+        // Round-trips through the streaming reader, and the format is still one JSON object per line.
+        await using (Stream read = await store.OpenReadAsync(backupId, relPath, ct: TestContext.Current.CancellationToken))
+        {
+            List<WalSegmentEntry> back = WalSegmentEntry.ReadSegment(read).ToList();
+            Assert.Equal(3, back.Count);
+            Assert.Equal("second", Encoding.UTF8.GetString(back[1].LogData!));
+        }
+
+        Assert.Equal(3, (await File.ReadAllLinesAsync(
+            Path.Combine(_tempRoot, backupId.ToString("N"), relPath),
+            TestContext.Current.CancellationToken)).Length);
     }
 
     [Fact]
-    public void StreamingWriter_NoEntries_PublishesNothing()
+    public async Task StreamingWriter_NoEntries_PublishesNothing()
     {
         Directory.CreateDirectory(_tempRoot);
-        string path = Path.Combine(_tempRoot, "seg_empty.wal");
+        LocalDirectoryArtifactStore store = new(_tempRoot);
+        Guid backupId = Guid.NewGuid();
+        const string relPath = "partition_1.wal";
 
-        WalSegmentEntry.SegmentWriteResult r = WalSegmentEntry.WriteSegmentStreaming(path, [], TestContext.Current.CancellationToken);
+        // An empty source is the driver's signal to skip the partition: it abandons the writer rather
+        // than completing it, so nothing may become visible.
+        await using (IBackupArtifactWriter writer =
+                     await store.OpenWriteAsync(backupId, relPath, TestContext.Current.CancellationToken))
+        {
+            WalSegmentEntry.SegmentWriteResult r = await WalSegmentEntry.WriteSegmentStreamingAsync(
+                writer.Stream, [], TestContext.Current.CancellationToken);
+            Assert.Equal(0, r.EntryCount);
+        }
 
-        Assert.Equal(0, r.EntryCount);
-        Assert.False(File.Exists(path));
-        Assert.Empty(Directory.GetFiles(_tempRoot, "seg_empty.wal.tmp_*"));
+        Assert.False(await store.ExistsAsync(backupId, relPath, TestContext.Current.CancellationToken));
+        Assert.Empty(await store.ListAsync(backupId, TestContext.Current.CancellationToken));
+        Assert.Empty(Directory.GetFiles(
+            Path.Combine(_tempRoot, backupId.ToString("N")), relPath + ".tmp_*"));
     }
 
     [Fact]
-    public void StreamingWriter_ConsumesLazily_AndCancels_WithoutPublishingOrLeavingTemp()
+    public async Task StreamingWriter_ConsumesLazily_AndCancels_WithoutPublishingOrLeavingTemp()
     {
         Directory.CreateDirectory(_tempRoot);
-        string path = Path.Combine(_tempRoot, "seg_cancel.wal");
+        LocalDirectoryArtifactStore store = new(_tempRoot);
+        Guid backupId = Guid.NewGuid();
+        const string relPath = "partition_1.wal";
         using CancellationTokenSource cts = new();
 
         int produced = 0;
@@ -248,14 +289,20 @@ public sealed class TestPitrHardening : IDisposable
             }
         }
 
-        Assert.Throws<OperationCanceledException>(() =>
-            WalSegmentEntry.WriteSegmentStreaming(path, Generate(), cts.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+        {
+            await using IBackupArtifactWriter writer = await store.OpenWriteAsync(backupId, relPath, cts.Token);
+            await WalSegmentEntry.WriteSegmentStreamingAsync(writer.Stream, Generate(), cts.Token);
+            await writer.CompleteAsync(cts.Token);
+        });
 
         // Lazy: the writer never pulled all 100k entries into memory before writing.
         Assert.True(produced < 100, $"writer materialized {produced} entries — not streaming");
-        // Fail-safe: no published file and no orphan temp left behind.
-        Assert.False(File.Exists(path));
-        Assert.Empty(Directory.GetFiles(_tempRoot, "seg_cancel.wal.tmp_*"));
+
+        // Fail-safe: the abandoned write published nothing and left no temp behind.
+        Assert.False(await store.ExistsAsync(backupId, relPath, TestContext.Current.CancellationToken));
+        Assert.Empty(Directory.GetFiles(
+            Path.Combine(_tempRoot, backupId.ToString("N")), relPath + ".tmp_*"));
     }
 
     [Fact]
@@ -272,15 +319,23 @@ public sealed class TestPitrHardening : IDisposable
 
         // Write as a modern JSON-Lines segment, then rewrite it as one legacy JSON array.
         string jsonl = Path.Combine(_tempRoot, "legacy_src.wal");
-        WalSegmentEntry.WriteSegmentStreaming(jsonl, entries, TestContext.Current.CancellationToken);
+        await using (FileStream out1 = new(jsonl, FileMode.Create, FileAccess.Write))
+            await WalSegmentEntry.WriteSegmentStreamingAsync(out1, entries, TestContext.Current.CancellationToken);
+
         string arrayPath = Path.Combine(_tempRoot, "legacy_arr.wal");
         string asArray = "[" + string.Join(",", File.ReadLines(jsonl).Where(l => l.Length > 0)) + "]";
-        File.WriteAllText(arrayPath, asArray);
+        await File.WriteAllTextAsync(arrayPath, asArray, TestContext.Current.CancellationToken);
 
-        List<WalSegmentEntry> sync = WalSegmentEntry.ReadSegment(arrayPath).ToList();
+        List<WalSegmentEntry> sync;
+        await using (FileStream in1 = new(arrayPath, FileMode.Open, FileAccess.Read))
+            sync = WalSegmentEntry.ReadSegment(in1).ToList();
+
         List<WalSegmentEntry> async = [];
-        await foreach (WalSegmentEntry e in WalSegmentEntry.ReadSegmentAsync(arrayPath, TestContext.Current.CancellationToken))
-            async.Add(e);
+        await using (FileStream in2 = new(arrayPath, FileMode.Open, FileAccess.Read))
+        {
+            await foreach (WalSegmentEntry e in WalSegmentEntry.ReadSegmentAsync(in2, TestContext.Current.CancellationToken))
+                async.Add(e);
+        }
 
         Assert.Equal(entries.Count, sync.Count);
         Assert.Equal(entries.Count, async.Count);
@@ -294,7 +349,7 @@ public sealed class TestPitrHardening : IDisposable
         }
     }
 
-    // ── 61b1f46d: replay only the exact bytes that passed digest verification ────────────────────
+    // ── replay only the exact bytes that passed digest verification ────────────────────
 
     [Fact]
     public async Task Restore_RejectsSegmentReplacedAfterVerification_SameSizeDifferentBytes()
@@ -305,9 +360,9 @@ public sealed class TestPitrHardening : IDisposable
         BackupCatalog catalog = NewCatalog("tamper");
         string artifacts = ArtifactsDir("tamper");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
         wal.Write([(1, [KvLog(2, 200, "b", "vvv", 1)])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         string seg = Path.Combine(artifacts, inc.BackupId.ToString("N"), "partition_1.wal");
 
@@ -326,12 +381,12 @@ public sealed class TestPitrHardening : IDisposable
 
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(
             Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint"));
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
 
         // alreadyVerified:true isolates the point-of-use binding — even when the up-front verify is skipped,
         // staging re-hashes the bytes actually consumed and rejects the swap before anything is applied.
         await Assert.ThrowsAsync<BackupArtifactException>(() =>
-            RestoreEngine.RestoreAsync(chain, artifacts, T(300), restored, alreadyVerified: true, ct: TestContext.Current.CancellationToken));
+            RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(300), restored, alreadyVerified: true, ct: TestContext.Current.CancellationToken));
 
         // The tampered value never reached the backend.
         Assert.Null(GetValue(restored, "b"));
@@ -357,29 +412,29 @@ public sealed class TestPitrHardening : IDisposable
         BackupCatalog catalog = NewCatalog("eom");
         string artifacts = ArtifactsDir("eom");
 
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, artifacts, catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], fullBackend, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
         wal.Write([(1,
         [
             KvLog(2, 200, "b", "v2", 1, counter: 0),
             KvLog(3, 200, "c", "v3", 1, counter: 5),
             KvLog(4, 201, "d", "v4", 1, counter: 0),
         ])]);
-        BackupManifest inc = BackupDriver.RunIncremental(wal, [Part(1)], full.BackupId, artifacts, catalog, ct: TestContext.Current.CancellationToken);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(inc.BackupId, TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
         string cp = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
 
         // Inclusive end-of-millisecond target for ms 200 (what bootstrap and the restore API both resolve to).
         HLCTimestamp target = PitrTargetResolver.FromUnixMilliseconds(200);
 
         MemoryPersistenceBackend inclusive = MemoryPersistenceBackend.OpenCheckpoint(cp);
-        await RestoreEngine.RestoreAsync(chain, artifacts, target, inclusive, ct: TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), target, inclusive, ct: TestContext.Current.CancellationToken);
         Assert.Equal("v2", GetValue(inclusive, "b"));
         Assert.Equal("v3", GetValue(inclusive, "c")); // counter-5 same-ms commit IS included
         Assert.Null(GetValue(inclusive, "d"));         // the next millisecond is excluded
 
         // The buggy bare (·, 200, 0) target would have dropped the counter-5 commit.
         MemoryPersistenceBackend bare = MemoryPersistenceBackend.OpenCheckpoint(cp);
-        await RestoreEngine.RestoreAsync(chain, artifacts, T(200), bare, ct: TestContext.Current.CancellationToken);
+        await RestoreEngine.RestoreAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), bare, ct: TestContext.Current.CancellationToken);
         Assert.Equal("v2", GetValue(bare, "b"));
         Assert.Null(GetValue(bare, "c")); // demonstrates the excluded-commit bug the fix prevents
     }

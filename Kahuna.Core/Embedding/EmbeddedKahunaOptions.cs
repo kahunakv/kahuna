@@ -1,3 +1,4 @@
+using Kahuna.Server.Persistence.Pitr;
 using Writes = Kahuna.Server.KeyValues.Writes;
 
 namespace Kahuna;
@@ -385,6 +386,25 @@ public sealed class EmbeddedKahunaOptions
     /// When empty, backup operations are disabled.
     /// </summary>
     public string BackupDir { get; set; } = "";
+
+    /// <summary>
+    /// Which storage target holds backups. <c>"local"</c> (the default) keeps them in
+    /// <see cref="BackupDir"/>. Any other value requires <see cref="BackupStorageProvider"/> to be set,
+    /// since object-storage targets ship as separate packages an embedding host opts into.
+    /// </summary>
+    public string BackupTarget { get; set; } = "local";
+
+    /// <summary>
+    /// Local directory backup bytes transit when the target cannot be written to directly by the storage
+    /// engine. Mandatory for such a target; size it for one whole full backup.
+    /// </summary>
+    public string BackupScratchDir { get; set; } = "";
+
+    /// <summary>
+    /// Installs an object-storage target. Null (the default) uses the local-directory implementations, so
+    /// an embedded node inherits no cloud SDK it did not ask for.
+    /// </summary>
+    public BackupStorageProvider? BackupStorageProvider { get; set; }
 
     /// <summary>
     /// Operator-assigned cluster identity stamped into every backup manifest; set the same value on

@@ -252,10 +252,14 @@ public sealed class KahunaManager : IKahuna, IDisposable
 
         if (!string.IsNullOrWhiteSpace(configuration.BackupDir))
         {
+            BackupStoragePair backupStorage = CreateBackupStorage(configuration);
+
             backupService = new BackupService(
                 raft,
                 persistenceBackend,
                 configuration.BackupDir,
+                backupStorage.Manifests,
+                backupStorage.Artifacts,
                 configuration.Storage,
                 configuration.StorageRevision,
                 FlushPersistenceAsync,
@@ -389,12 +393,13 @@ public sealed class KahunaManager : IKahuna, IDisposable
         TimeSpan baseSnapshotInterval)
     {
         BackupCatalog catalog = new(new LocalDirectoryStorageTarget(backupDir));
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(leafBackupId);
+        LocalDirectoryArtifactStore artifacts = new(backupDir);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(leafBackupId);
 
         // Coverage validation (Zero → natural end, fail closed on out-of-range / unknown lower bound)
         // is centralized in BootstrapHelper.BootstrapNode so it happens before any backend/WAL mutation.
         await FlushPersistenceAsync();
-        await BootstrapHelper.BootstrapNodeAsync(chain, backupDir, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
+        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
     }
 
     /// <summary>
@@ -403,6 +408,56 @@ public sealed class KahunaManager : IKahuna, IDisposable
     /// <param name="configuration"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
+    /// <summary>
+    /// Builds the backup storage pair. A host that registered a
+    /// <see cref="KahunaConfiguration.BackupStorageProvider"/> gets whatever it returns; otherwise the
+    /// local-directory implementations are used, so an existing deployment behaves exactly as before.
+    /// <para>
+    /// A non-local target with no provider registered is a configuration error rather than a silent
+    /// fallback to local disk: writing backups to the wrong place is not a failure an operator would
+    /// notice until they needed a restore. Startup validation catches it first; this is the backstop for
+    /// a host that bypassed validation.
+    /// </para>
+    /// </summary>
+    private static BackupStoragePair CreateBackupStorage(KahunaConfiguration configuration)
+    {
+        string target = string.IsNullOrWhiteSpace(configuration.BackupTarget) ? "local" : configuration.BackupTarget;
+        string? scratch = string.IsNullOrWhiteSpace(configuration.BackupScratchDir) ? null : configuration.BackupScratchDir;
+
+        // Backup bytes sit on local disk in cleartext while they transit scratch, whatever the eventual
+        // target is, so the scratch root gets the same treatment as a local backup root: refuse it if it
+        // is symlinked or group/world-writable, then create it owner-only. Doing this centrally means a
+        // storage provider cannot forget it — and cannot weaken it, since a target that declares no POSIX
+        // hardening of its own still stages here.
+        if (scratch is not null)
+        {
+            BackupFilePermissions.EnsureRootSecure(scratch);
+            BackupFilePermissions.CreateDirectory(scratch);
+        }
+
+        if (configuration.BackupStorageProvider is not null)
+        {
+            BackupStoragePair pair = configuration.BackupStorageProvider(
+                new BackupStorageContext(target, configuration.BackupDir, scratch));
+
+            if (pair.Artifacts.Capabilities.RequiresLocalScratch && scratch is null)
+                throw new KahunaServerException(
+                    $"The configured backup target '{target}' stages backups through a local directory, " +
+                    "but no backup scratch directory is configured.");
+
+            return pair;
+        }
+
+        if (!string.Equals(target, "local", StringComparison.OrdinalIgnoreCase))
+            throw new KahunaServerException(
+                $"Backup target '{target}' requires a backup storage provider to be registered by the host " +
+                "(object-storage targets ship as separate packages); only 'local' is built in.");
+
+        return new BackupStoragePair(
+            new LocalDirectoryStorageTarget(configuration.BackupDir),
+            new LocalDirectoryArtifactStore(configuration.BackupDir));
+    }
+
     private static IPersistenceBackend GetPersistence(KahunaConfiguration configuration, ILogger<IKahuna> logger, RocksDbSharedResources? sharedResources)
     {
         return configuration.Storage switch
@@ -1899,19 +1954,19 @@ public sealed class KahunaManager : IKahuna, IDisposable
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
-    public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
         // Public listing runs the cheap structural check only; full artifact verification (hashing
         // every file of every backup) is opt-in at the service layer, not on the default network path.
-        try { return Task.FromResult(svc.ListBackups(verifyArtifacts: false, ct)); }
+        try { return await svc.ListBackupsAsync(verifyArtifacts: false, ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
-    public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
-        try { return Task.FromResult(svc.ResolveAndValidate(leafBackupId, ct)); }
+        try { return await svc.ResolveAndValidateAsync(leafBackupId, ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
@@ -1936,7 +1991,7 @@ public sealed class KahunaManager : IKahuna, IDisposable
         try
         {
             BackupGcInventory inventory = dryRun
-                ? svc.PlanGarbageCollection(ct)
+                ? await svc.PlanGarbageCollectionAsync(ct)
                 : await svc.RunGarbageCollectionAsync(ct);
 
             long bytes = 0;
@@ -1953,11 +2008,11 @@ public sealed class KahunaManager : IKahuna, IDisposable
                     Reason = c.Reason
                 });
             }
-            // Surface only the entry name, never the absolute server path.
+            // The plan already carries display names only, never absolute server paths.
             foreach (OrphanSweepCandidate o in inventory.OrphanReclamations)
                 result.OrphanReclamations.Add(new KahunaBackupGcOrphan
                 {
-                    Name = Path.GetFileName(o.Path),
+                    Name = o.Name,
                     IsDirectory = o.IsDirectory,
                     Reason = o.Reason
                 });

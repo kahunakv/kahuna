@@ -57,7 +57,7 @@ internal static class RestoreEngine
     /// </param>
     /// <param name="artifactsDir">
     /// Root directory where per-backup artifact subdirectories live
-    /// (<c>{artifactsDir}/{backupId:N}/</c>).
+    /// (addressed by backup id within the store).
     /// </param>
     /// <param name="targetTime">
     /// HLC stop-timestamp T. Every key-value entry whose commit HLC (payload <c>LastModified</c>)
@@ -76,7 +76,7 @@ internal static class RestoreEngine
     /// </exception>
     internal static async Task<RestoreResult> RestoreAsync(
         IReadOnlyList<BackupManifest> chain,
-        string artifactsDir,
+        IBackupArtifactStore artifacts,
         HLCTimestamp targetTime,
         IPersistenceBackend backend,
         TimeSpan? pitrWindow = null,
@@ -91,7 +91,7 @@ internal static class RestoreEngine
         // verify-then-use window. Callers that verify externally (e.g. after staging the checkpoint)
         // pass alreadyVerified to skip re-hashing here.
         if (!alreadyVerified && chain.Count > 0)
-            BackupArtifactVerifier.Verify(chain[0], artifactsDir, ct);
+            await BackupArtifactVerifier.VerifyAsync(chain[0], artifacts, ct).ConfigureAwait(false);
 
         long totalApplied = 0;
         HLCTimestamp lastAppliedTime = default;
@@ -113,35 +113,37 @@ internal static class RestoreEngine
 
                 // Verify this incremental's artifacts immediately before consuming them.
                 if (!alreadyVerified)
-                    BackupArtifactVerifier.Verify(manifest, artifactsDir, ct);
-
-                string artifactPath = Path.Combine(artifactsDir, manifest.BackupId.ToString("N"));
+                    await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, ct).ConfigureAwait(false);
 
                 foreach (PartitionBackupRange range in manifest.PartitionRanges)
                 {
                     int partitionId = range.PartitionId;
                     string relKey = $"partition_{partitionId}.wal";
-                    string walFile = Path.Combine(artifactPath, relKey);
 
-                    // Every range in an incremental manifest was written with a segment file. A missing
-                    // file is corruption, not an empty partition — fail closed rather than silently
-                    // dropping the partition's changes.
-                    if (!File.Exists(walFile))
+                    // Every range in an incremental manifest was written with a segment. A missing one is
+                    // corruption, not an empty partition — fail closed rather than silently dropping the
+                    // partition's changes.
+                    if (!await artifacts.ExistsAsync(manifest.BackupId, relKey, ct).ConfigureAwait(false))
                         throw new BackupArtifactException(
                             $"Backup {manifest.BackupId:N}: declared segment for partition {partitionId} " +
-                            $"is missing ({walFile}).");
+                            $"is missing ('{relKey}').");
 
-                    // Copy the source into private staging while hashing, and verify size + digest against
-                    // the manifest BEFORE replaying. From here on we read only the staged copy, closing the
-                    // verify/use race between digest verification and replay.
-                    string stagedFile = StageAndVerifySegment(walFile, relKey, manifest, stagingRoot, ct);
+                    // Copy the source into private local staging while hashing, and verify size + digest
+                    // against the manifest BEFORE replaying. From here on we read only the staged copy,
+                    // which closes the verify/use race between digest verification and replay — and is
+                    // also what lets a remote store be the source: the bytes replayed are local, verified,
+                    // and immutable for the duration.
+                    string stagedFile = await StageAndVerifySegmentAsync(
+                        artifacts, manifest, relKey, stagingRoot, ct).ConfigureAwait(false);
 
                     List<PersistenceRequestItem> batch = new(ApplyBatchSize);
 
                     // Stream the staged segment one record at a time (async I/O) so peak memory is a single
                     // entry plus one write batch, not the whole (potentially multi-GB) segment, and disk
                     // reads do not block the calling thread.
-                    await foreach (WalSegmentEntry entry in WalSegmentEntry.ReadSegmentAsync(stagedFile, ct).ConfigureAwait(false))
+                    await using FileStream stagedStream = new(
+                        stagedFile, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+                    await foreach (WalSegmentEntry entry in WalSegmentEntry.ReadSegmentAsync(stagedStream, ct).ConfigureAwait(false))
                     {
                         ct.ThrowIfCancellationRequested();
 
@@ -227,8 +229,8 @@ internal static class RestoreEngine
     /// bytes replayed are provably the bytes that passed verification — closing the window in which a
     /// source artifact could be swapped between digest verification and replay.
     /// </summary>
-    private static string StageAndVerifySegment(
-        string sourceWalFile, string relKey, BackupManifest manifest, string stagingDir, CancellationToken ct)
+    private static async Task<string> StageAndVerifySegmentAsync(
+        IBackupArtifactStore artifacts, BackupManifest manifest, string relKey, string stagingDir, CancellationToken ct)
     {
         if (!manifest.Checksums.TryGetValue(relKey, out string? expectedDigest))
             throw new BackupArtifactException(
@@ -242,21 +244,21 @@ internal static class RestoreEngine
         long size = 0;
         byte[] hash;
 
-        // Open the source without a share-write lock and copy through a hashing stream. FileMode.CreateNew
-        // guarantees the staged path is freshly ours.
-        using (FileStream src = new(sourceWalFile, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: false))
-        using (FileStream dst = new(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536))
+        // Stream the artifact out of the store through a hashing stream into staging, so the digest is
+        // computed over exactly the bytes that land on disk. FileMode.CreateNew guarantees the staged path
+        // is freshly ours. Hashing during the transfer avoids a second full pass over a large segment.
+        await using (Stream src = await artifacts.OpenReadAsync(manifest.BackupId, relKey, ct: ct).ConfigureAwait(false))
+        await using (FileStream dst = new(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, useAsync: true))
         using (SHA256 sha = SHA256.Create())
-        using (CryptoStream cs = new(dst, sha, CryptoStreamMode.Write, leaveOpen: true))
+        await using (CryptoStream cs = new(dst, sha, CryptoStreamMode.Write, leaveOpen: true))
         {
             byte[] buffer = ArrayPool<byte>.Shared.Rent(65536);
             try
             {
                 int read;
-                while ((read = src.Read(buffer, 0, buffer.Length)) > 0)
+                while ((read = await src.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    cs.Write(buffer, 0, read);
+                    await cs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
                     size += read;
                 }
             }

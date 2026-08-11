@@ -7,8 +7,14 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// Describes a single backup artifact: its identity, type, WAL coverage per partition,
 /// parent link (Incremental only), per-file checksums, and an optional cluster-wide
 /// snapshot timestamp for coordinated restores.
+/// <para>
+/// Public because it is the document a storage target persists and returns, and targets live in
+/// separate assemblies (object-storage implementations). The mutators that stamp derived identity
+/// (<see cref="ApplyOwnerIdentity"/>, <see cref="SetBaseCut"/>, <see cref="SetClusterSnapshotTime"/>)
+/// stay internal: a target stores and retrieves a manifest, it never composes one.
+/// </para>
 /// </summary>
-internal sealed class BackupManifest
+public sealed class BackupManifest
 {
     /// <summary>
     /// The format version produced by the current code. Version 1 is the first version that hashes

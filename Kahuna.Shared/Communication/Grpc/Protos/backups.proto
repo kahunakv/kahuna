@@ -58,6 +58,9 @@ message GrpcBackupInfoResponse {
   // cluster and which node produced each backup, so a per-node (partial) catalog is visible.
   string ClusterId          = 19;
   string CoordinatorNode    = 20;
+  // Artifacts exist for this id but no manifest does: the backup never completed (or is still in
+  // flight). Such entries also set IsInvalid, so older callers still refuse to use them.
+  bool   IsIncomplete       = 21;
 }
 
 message GrpcListBackupsResponse {

@@ -79,8 +79,8 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
         MemoryPersistenceBackend src = new();
 
         int[] partitions = entries.Select(e => e.partition).Distinct().ToArray();
-        BackupManifest full = await BackupDriver.RunFullAsync(wal, partitions.Select(Part).ToArray(), src, artifacts, catalog);
-        IReadOnlyList<BackupManifest> chain = catalog.ResolveAndValidate(full.BackupId);
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, partitions.Select(Part).ToArray(), src, BackupTestStores.Artifacts(artifacts), catalog);
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(full.BackupId);
 
         string cpPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend dst = MemoryPersistenceBackend.OpenCheckpoint(cpPath);
@@ -126,7 +126,7 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
 
         FailingWal wal = new(new InMemoryWAL(Log), _ => RaftOperationStatus.Errored);
 
-        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
         Assert.Contains("seed the WAL checkpoint", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(FindCheckpoint(wal, 1)); // nothing durably seeded
     }
@@ -141,7 +141,7 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
         InMemoryWAL inner = new(Log);
         FailingWal wal = new(inner, logs => logs[0].Item1 == 2 ? RaftOperationStatus.Errored : (RaftOperationStatus?)null);
 
-        await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
+        await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
 
         // Partition 2's checkpoint never landed; the failure is not masked as success.
         Assert.Null(FindCheckpoint(wal, 2));
@@ -159,18 +159,18 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
         FailingWal wal = new(inner, _ => ++calls == 1 ? RaftOperationStatus.Errored : (RaftOperationStatus?)null);
 
         // First attempt fails closed — the backend was already restored, but the WAL was not seeded.
-        await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
+        await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
         Assert.Null(FindCheckpoint(wal, 1));
 
         // Re-running the bootstrap (backend restore + checkpoint writes are idempotent) now succeeds.
-        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
+        await BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
 
         RaftLog? cp1 = FindCheckpoint(wal, 1);
         Assert.NotNull(cp1);
         Assert.Equal(5, cp1!.Id);
 
         // A further (successful) re-run overwrites by key — exactly one checkpoint, no duplicates.
-        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
+        await BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
         Assert.Single(wal.ReadLogsRange(1, 0), l => l.Type == RaftLogType.CommittedCheckpoint);
     }
 }

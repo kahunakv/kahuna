@@ -2341,6 +2341,7 @@ public class GrpcCommunication : IKahunaCommunication
         SubstitutionReason = string.IsNullOrEmpty(r.SubstitutionReason) ? null : r.SubstitutionReason,
         FormatVersion = r.FormatVersion,
         IsInvalid = r.IsInvalid,
+        IsIncomplete = r.IsIncomplete,
         InvalidReason = string.IsNullOrEmpty(r.InvalidReason) ? null : r.InvalidReason,
         MinRecoverablePhysicalMs = r.HasCoverage ? r.MinRecoverablePhysicalMs : null,
         MaxRecoverablePhysicalMs = r.HasCoverage ? r.MaxRecoverablePhysicalMs : null,

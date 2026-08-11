@@ -1,4 +1,6 @@
 
+using Kahuna.Server.Persistence.Pitr;
+
 namespace Kahuna.Server.Configuration;
 
 public sealed class KahunaConfiguration
@@ -582,8 +584,43 @@ public sealed class KahunaConfiguration
     /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
+    /// <para>
+    /// Still required with a non-local <see cref="BackupTarget"/>: it is where the local scratch area and
+    /// any host-side state live, and it remains the fallback root the default local stores would use.
+    /// </para>
     /// </summary>
     public string BackupDir { get; set; } = "";
+
+    /// <summary>
+    /// Which storage target holds backups. <c>"local"</c> (the default) keeps them in
+    /// <see cref="BackupDir"/> on this host. Any other value requires a matching
+    /// <see cref="BackupStorageProvider"/> to be registered by the host, since object-storage targets
+    /// live in separate assemblies that <c>Kahuna.Core</c> deliberately does not reference — an embedded
+    /// consumer must not inherit a cloud SDK it never asked for.
+    /// </summary>
+    public string BackupTarget { get; set; } = "local";
+
+    /// <summary>
+    /// Local directory backup bytes transit when the target cannot be written to or read from directly by
+    /// a persistence backend. A checkpoint is produced by the storage engine through the filesystem and
+    /// nothing else, so a remote target must stage it here before upload.
+    /// <para>
+    /// Mandatory for a target that requires it, and validated at startup rather than at first backup.
+    /// Size it for a whole full backup: one transits this directory in its entirety.
+    /// </para>
+    /// </summary>
+    public string BackupScratchDir { get; set; } = "";
+
+    /// <summary>
+    /// Host-supplied factory for the backup storage pair, and the seam through which an object-storage
+    /// target is installed. Left null the local directory implementations are used, which is why nothing
+    /// changes for an existing deployment.
+    /// <para>
+    /// Not serialized configuration — a host sets this in code (from <c>Kahuna.Server</c>'s DI wiring, or
+    /// directly for an embedded node) after deciding which package to depend on.
+    /// </para>
+    /// </summary>
+    public BackupStorageProvider? BackupStorageProvider { get; set; }
 
     /// <summary>
     /// Operator-assigned identity of this cluster, stamped into every backup manifest. Set the SAME

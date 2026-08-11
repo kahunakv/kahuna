@@ -34,9 +34,12 @@ public static class ListBackupsCommand
         {
             if (b.IsInvalid)
             {
+                // An incomplete backup is called out separately from a corrupt one: the artifacts of a
+                // backup that never finished are expected debris an operator can ignore or reclaim,
+                // whereas a corrupt manifest on a complete backup is a problem worth investigating.
                 table.AddRow(
                     b.BackupId.ToString(),
-                    "[red]INVALID[/]",
+                    b.IsIncomplete ? "[yellow]INCOMPLETE[/]" : "[red]INVALID[/]",
                     "-",
                     "-",
                     Markup.Escape(b.InvalidReason ?? "unreadable manifest"));

@@ -251,5 +251,40 @@ public static class ConfigurationValidator
 
         if (configuration.BaseSnapshotInterval > configuration.PitrWindow)
             configuration.BaseSnapshotInterval = configuration.PitrWindow;
+
+        ValidateBackupTarget(configuration);
+    }
+
+    /// <summary>
+    /// Refuses a backup target that cannot work, at startup rather than at the first backup. Both failures
+    /// here are silent-data-loss shaped: a node that starts happily and only discovers at backup time that
+    /// it has nowhere to write, or nowhere to stage, has been advertising a backup capability it never had.
+    /// </summary>
+    private static void ValidateBackupTarget(KahunaConfiguration configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration.BackupDir))
+            return; // backups disabled entirely
+
+        if (string.IsNullOrWhiteSpace(configuration.BackupTarget))
+            configuration.BackupTarget = "local";
+
+        bool isLocal = string.Equals(configuration.BackupTarget, "local", StringComparison.OrdinalIgnoreCase);
+        if (isLocal)
+            return;
+
+        if (configuration.BackupStorageProvider is null)
+            throw new KahunaServerException(
+                $"Backup target '{configuration.BackupTarget}' has no storage provider registered. " +
+                "Object-storage targets ship as separate packages and the host must install one by setting " +
+                "KahunaConfiguration.BackupStorageProvider; only 'local' is built in.");
+
+        // A remote target always stages checkpoints locally, because a persistence backend can only write
+        // one through the filesystem. Requiring the path up front means the operator sizes the volume for
+        // it deliberately instead of discovering the requirement when a full backup fills the disk.
+        if (string.IsNullOrWhiteSpace(configuration.BackupScratchDir))
+            throw new KahunaServerException(
+                $"Backup target '{configuration.BackupTarget}' requires a local scratch directory " +
+                "(--backup-scratch-dir): a checkpoint is written through the filesystem before upload. " +
+                "Size it for one full backup, which transits it in its entirety.");
     }
 }
