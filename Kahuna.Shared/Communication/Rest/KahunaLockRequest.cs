@@ -12,7 +12,7 @@ public sealed class KahunaLockRequest
     [JsonPropertyName("resource")]
     public string? Resource { get; set; }
     
-    [JsonPropertyName("lockId")]
+    [JsonPropertyName("owner")]
     public byte[]? Owner { get; set; }
     
     [JsonPropertyName("expiresMs")]

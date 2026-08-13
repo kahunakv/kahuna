@@ -16,7 +16,7 @@ public sealed class KahunaExtendKeyValueRequest
     [JsonPropertyName("expiresMs")]
     public int ExpiresMs { get; set; }
     
-    [JsonPropertyName("value")]
+    [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
 
     [JsonPropertyName("coordinatorKey")]

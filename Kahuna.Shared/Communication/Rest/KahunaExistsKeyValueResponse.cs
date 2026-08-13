@@ -16,7 +16,7 @@ public sealed class KahunaExistsKeyValueResponse
     [JsonPropertyName("revision")]
     public long Revision { get; set; }
     
-    [JsonPropertyName("timestamp")]
+    [JsonPropertyName("expires")]
     public HLCTimestamp Expires { get; set; }
 
     /// <summary>

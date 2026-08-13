@@ -22,7 +22,7 @@ public sealed class KahunaExistsKeyValueRequest
     [JsonPropertyName("readTimestamp")]
     public HLCTimestamp ReadTimestamp { get; set; }
 
-    [JsonPropertyName("value")]
+    [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
 
     [JsonPropertyName("coordinatorKey")]

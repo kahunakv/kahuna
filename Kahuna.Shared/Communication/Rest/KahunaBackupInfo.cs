@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Kahuna.Shared.Communication.Rest;
 
 /// <summary>
@@ -5,6 +7,7 @@ namespace Kahuna.Shared.Communication.Rest;
 /// </summary>
 public sealed class KahunaBackupInfo
 {
+    [JsonPropertyName("backupId")]
     public Guid BackupId { get; set; }
 
     /// <summary>
@@ -12,11 +15,16 @@ public sealed class KahunaBackupInfo
     /// or restored by the current code without an explicit upgrade; ≥1 is a current, fully-verified
     /// format. Exposed so listings are honest about old artifacts rather than labeling them corrupt.
     /// </summary>
+    [JsonPropertyName("formatVersion")]
     public int FormatVersion { get; set; }
 
+    [JsonPropertyName("type")]
     public string Type { get; set; } = "";
+    [JsonPropertyName("createdAtUtc")]
     public DateTime CreatedAtUtc { get; set; }
+    [JsonPropertyName("parentBackupId")]
     public Guid? ParentBackupId { get; set; }
+    [JsonPropertyName("partitionCount")]
     public int PartitionCount { get; set; }
 
     /// <summary>
@@ -25,6 +33,7 @@ public sealed class KahunaBackupInfo
     /// from any node can see which cluster produced each entry — a catalog mixing cluster ids, or one
     /// showing only some of the cluster's backups, signals a non-shared (per-node, partial) catalog.
     /// </summary>
+    [JsonPropertyName("clusterId")]
     public string? ClusterId { get; set; }
 
     /// <summary>
@@ -33,18 +42,24 @@ public sealed class KahunaBackupInfo
     /// their producing nodes; if a listing shows only backups produced by the local node, the catalog
     /// is node-local and therefore only a partial view of the cluster's backups.
     /// </summary>
+    [JsonPropertyName("coordinatorNode")]
     public string? CoordinatorNode { get; set; }
+    [JsonPropertyName("clusterSnapshotNode")]
     public int? ClusterSnapshotNode { get; set; }
+    [JsonPropertyName("clusterSnapshotPhysical")]
     public long? ClusterSnapshotPhysical { get; set; }
+    [JsonPropertyName("clusterSnapshotCounter")]
     public uint? ClusterSnapshotCounter { get; set; }
 
     /// <summary>
     /// The backup kind the caller asked for ("Full" or "Incremental"). Equal to <see cref="ActualKind"/>
     /// unless the request was substituted (see <see cref="SubstitutionReason"/>).
     /// </summary>
+    [JsonPropertyName("requestedKind")]
     public string? RequestedKind { get; set; }
 
     /// <summary>The backup kind actually produced. Equals <see cref="Type"/>.</summary>
+    [JsonPropertyName("actualKind")]
     public string? ActualKind { get; set; }
 
     /// <summary>
@@ -52,6 +67,7 @@ public sealed class KahunaBackupInfo
     /// incremental fell back to a full because the WAL compaction floor advanced past the parent).
     /// The value explains why so the substitution is observable rather than silent.
     /// </summary>
+    [JsonPropertyName("substitutionReason")]
     public string? SubstitutionReason { get; set; }
 
     /// <summary>
@@ -60,6 +76,7 @@ public sealed class KahunaBackupInfo
     /// placeholder — only <see cref="BackupId"/> is meaningful — and <see cref="InvalidReason"/> explains
     /// the problem.
     /// </summary>
+    [JsonPropertyName("isInvalid")]
     public bool IsInvalid { get; set; }
 
     /// <summary>
@@ -72,9 +89,11 @@ public sealed class KahunaBackupInfo
     /// finished" from "finished but the manifest is corrupt", which need different operator responses.
     /// </para>
     /// </summary>
+    [JsonPropertyName("isIncomplete")]
     public bool IsIncomplete { get; set; }
 
     /// <summary>Human-readable reason this entry is invalid or incomplete; null when the entry is valid.</summary>
+    [JsonPropertyName("invalidReason")]
     public string? InvalidReason { get; set; }
 
     /// <summary>
@@ -84,11 +103,13 @@ public sealed class KahunaBackupInfo
     /// <see cref="MinRecoverablePhysicalMs"/>..<see cref="MaxRecoverablePhysicalMs"/>, independent of
     /// how much wall-clock time has passed.
     /// </summary>
+    [JsonPropertyName("minRecoverablePhysicalMs")]
     public long? MinRecoverablePhysicalMs { get; set; }
 
     /// <summary>
     /// For the Full backup at the head of a resolved chain: the physical-ms component of the latest
     /// recoverable HLC (the newest captured entry across the whole chain). Null otherwise.
     /// </summary>
+    [JsonPropertyName("maxRecoverablePhysicalMs")]
     public long? MaxRecoverablePhysicalMs { get; set; }
 }

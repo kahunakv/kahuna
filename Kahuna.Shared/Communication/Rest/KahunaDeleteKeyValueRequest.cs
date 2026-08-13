@@ -16,7 +16,7 @@ public sealed class KahunaDeleteKeyValueRequest
     [JsonPropertyName("key")]
     public string? Key { get; set; }
     
-    [JsonPropertyName("value")]
+    [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
 
     [JsonPropertyName("coordinatorKey")]
