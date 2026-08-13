@@ -1,5 +1,6 @@
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kommander.Data;
 using Kommander.Time;
 
@@ -209,12 +210,17 @@ internal sealed class DurableTransactionRecovery
         if (commit)
         {
             settleable = new(group.Count);
+
+            // One scratch message serves the whole group; each serialization fully consumes it before the next
+            // intent overwrites it.
+            KeyValueMessage scratch = new();
+
             foreach (PreparedIntent intent in group)
             {
                 bool materialized;
                 try
                 {
-                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent);
+                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent, scratch);
                     materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
 
                     // Replication makes the value durable and converges followers, but the leader applies a key/value

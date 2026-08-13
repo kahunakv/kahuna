@@ -279,7 +279,13 @@ internal sealed class PreparedIntentStore
     {
         PreparedIntentCommand[] batch = commands as PreparedIntentCommand[] ?? [.. commands];
 
-        PreparedIntentDeltaMessage delta = new();
+        PreparedIntentDeltaMessage delta = scratchDelta ??= new();
+
+        // Entry-side clear rather than trusting the previous call's cleanup: if an earlier serialization threw
+        // mid-batch, its half-built commands are still parked here and must never leak into this delta. Discarded
+        // (not pooled) because only messages that went through ResetCommandMessage may re-enter the pool.
+        delta.Commands.Clear();
+        delta.Header = null;
 
         foreach (PreparedIntentCommand command in batch)
             delta.Commands.Add(ToProto(command));
@@ -289,7 +295,78 @@ internal sealed class PreparedIntentStore
         byte[] data = ReplicationSerializer.Serialize(delta);
         locallyProposedDeltas.AddOrUpdate(data, batch);
 
+        // The proto layer is scaffolding: the bytes are final and the delta cache above holds the decoded
+        // commands, never these messages, so they can be recycled for the next serialization on this thread.
+        ReturnCommandMessages(delta);
+
         return data;
+    }
+
+    /// <summary>
+    /// Upper bound on proto command messages retained per thread; a burst beyond the cap is dropped for the GC.
+    /// Rent and return both happen inside the synchronous <see cref="SerializeDelta"/>, so unlike request pooling
+    /// the pool has perfect thread locality.
+    /// </summary>
+    private const int MaxPooledCommandMessages = 1024;
+
+    [ThreadStatic]
+    private static Stack<PreparedIntentCommandMessage>? pooledCommandMessages;
+
+    // Reused delta envelope for this thread's serializations; its repeated field keeps its backing array across
+    // calls. Safe because SerializeDelta is synchronous with no awaits between first touch and last use.
+    [ThreadStatic]
+    private static PreparedIntentDeltaMessage? scratchDelta;
+
+    private static PreparedIntentCommandMessage RentCommandMessage()
+    {
+        Stack<PreparedIntentCommandMessage>? pool = pooledCommandMessages;
+        return pool is { Count: > 0 } ? pool.Pop() : new PreparedIntentCommandMessage();
+    }
+
+    private static void ReturnCommandMessages(PreparedIntentDeltaMessage delta)
+    {
+        Stack<PreparedIntentCommandMessage> pool = pooledCommandMessages ??= new();
+
+        foreach (PreparedIntentCommandMessage message in delta.Commands)
+        {
+            if (pool.Count >= MaxPooledCommandMessages)
+                break;
+
+            ResetCommandMessage(message);
+            pool.Push(message);
+        }
+
+        delta.Commands.Clear();
+        delta.Header = null;
+    }
+
+    /// <summary>
+    /// Returns every field to its proto3 default so a recycled message is indistinguishable from a fresh one.
+    /// The fill paths (<see cref="FillPrepareProto"/> and the resolve/remove arms of <see cref="ToProto"/>) rely
+    /// on this: each sets only the fields its kind carries, so a stale field surviving here would leak one
+    /// command's payload into the next delta on this thread. Every field of
+    /// <see cref="PreparedIntentCommandMessage"/> must be listed; the encoding test's descriptor sweep fails if a
+    /// newly added proto field is missed. Internal for that test.
+    /// </summary>
+    internal static void ResetCommandMessage(PreparedIntentCommandMessage m)
+    {
+        m.Kind = PreparedIntentCommandKindMessage.PreparedIntentPrepare;
+        m.TransactionIdNode = 0; m.TransactionIdPhysical = 0; m.TransactionIdCounter = 0;
+        m.Epoch = 0;
+        m.Key = string.Empty;
+        m.Commit = false;
+        m.ManifestHash = 0;
+        m.RecordAnchorKey = string.Empty;
+        m.CommitTimestampNode = 0; m.CommitTimestampPhysical = 0; m.CommitTimestampCounter = 0;
+        m.State = 0;
+        m.Value = ByteString.Empty; m.ValueNull = false;
+        m.Bucket = string.Empty; m.BucketNull = false;
+        m.Revision = 0;
+        m.ExpiresNode = 0; m.ExpiresPhysical = 0; m.ExpiresCounter = 0;
+        m.NoRevision = false;
+        m.BaseRevision = 0; m.BaseState = 0;
+        m.RecoveryDeadlineNode = 0; m.RecoveryDeadlinePhysical = 0; m.RecoveryDeadlineCounter = 0;
+        m.Resolution = 0;
     }
 
     /// <summary>
@@ -375,28 +452,28 @@ internal sealed class PreparedIntentStore
         }
     }
 
+    // Fills a pooled message; every rented message starts at proto3 defaults (see ResetCommandMessage), so each
+    // arm only sets the fields its kind carries.
     private static PreparedIntentCommandMessage ToProto(PreparedIntentCommand command)
     {
+        PreparedIntentCommandMessage m = RentCommandMessage();
+
         switch (command)
         {
             case PrepareIntentCommand prepare:
-                return PrepareProtoOf(prepare.Intent);
+                return FillPrepareProto(m, prepare.Intent);
 
             case ResolveIntentCommand resolve:
-                return new()
-                {
-                    Kind = PreparedIntentCommandKindMessage.PreparedIntentResolve,
-                    TransactionIdNode = resolve.TransactionId.N, TransactionIdPhysical = resolve.TransactionId.L, TransactionIdCounter = resolve.TransactionId.C,
-                    Epoch = resolve.Epoch, Key = resolve.Key, Commit = resolve.Commit
-                };
+                m.Kind = PreparedIntentCommandKindMessage.PreparedIntentResolve;
+                m.TransactionIdNode = resolve.TransactionId.N; m.TransactionIdPhysical = resolve.TransactionId.L; m.TransactionIdCounter = resolve.TransactionId.C;
+                m.Epoch = resolve.Epoch; m.Key = resolve.Key; m.Commit = resolve.Commit;
+                return m;
 
             case RemoveIntentCommand remove:
-                return new()
-                {
-                    Kind = PreparedIntentCommandKindMessage.PreparedIntentRemove,
-                    TransactionIdNode = remove.TransactionId.N, TransactionIdPhysical = remove.TransactionId.L, TransactionIdCounter = remove.TransactionId.C,
-                    Epoch = remove.Epoch, Key = remove.Key
-                };
+                m.Kind = PreparedIntentCommandKindMessage.PreparedIntentRemove;
+                m.TransactionIdNode = remove.TransactionId.N; m.TransactionIdPhysical = remove.TransactionId.L; m.TransactionIdCounter = remove.TransactionId.C;
+                m.Epoch = remove.Epoch; m.Key = remove.Key;
+                return m;
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown prepared-intent command");
@@ -429,28 +506,33 @@ internal sealed class PreparedIntentStore
         }
     }
 
+    // Fresh-message form for the snapshot/state-transfer paths, which run at checkpoint cadence and don't pool.
+    private static PreparedIntentCommandMessage PrepareProtoOf(PreparedIntent i) => FillPrepareProto(new PreparedIntentCommandMessage(), i);
+
     // A prepared intent maps to (and from) a PREPARE-kind command message, which carries every intent field plus
-    // its resolution — reused for both delta commands and full snapshot entries.
-    private static PreparedIntentCommandMessage PrepareProtoOf(PreparedIntent i) => new()
+    // its resolution — reused for both delta commands (pooled messages) and full snapshot entries (fresh
+    // messages). Sets every prepare-carried field, so the target may be a recycled message.
+    private static PreparedIntentCommandMessage FillPrepareProto(PreparedIntentCommandMessage m, PreparedIntent i)
     {
-        Kind = PreparedIntentCommandKindMessage.PreparedIntentPrepare,
-        TransactionIdNode = i.TransactionId.N, TransactionIdPhysical = i.TransactionId.L, TransactionIdCounter = i.TransactionId.C,
-        Epoch = i.Epoch, Key = i.Key,
-        ManifestHash = i.ManifestHash, RecordAnchorKey = i.RecordAnchorKey,
-        CommitTimestampNode = i.CommitTimestamp.N, CommitTimestampPhysical = i.CommitTimestamp.L, CommitTimestampCounter = i.CommitTimestamp.C,
-        State = (int)i.State,
+        m.Kind = PreparedIntentCommandKindMessage.PreparedIntentPrepare;
+        m.TransactionIdNode = i.TransactionId.N; m.TransactionIdPhysical = i.TransactionId.L; m.TransactionIdCounter = i.TransactionId.C;
+        m.Epoch = i.Epoch; m.Key = i.Key;
+        m.ManifestHash = i.ManifestHash; m.RecordAnchorKey = i.RecordAnchorKey;
+        m.CommitTimestampNode = i.CommitTimestamp.N; m.CommitTimestampPhysical = i.CommitTimestamp.L; m.CommitTimestampCounter = i.CommitTimestamp.C;
+        m.State = (int)i.State;
         // Wrap the intent's value array without copying: the committed value is immutable and the message is
         // serialized synchronously by the caller before the array could change, so aliasing it here is safe and
         // avoids a full value copy per intent on every prepare/settle serialization.
-        Value = i.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(i.Value), ValueNull = i.Value is null,
-        Bucket = i.Bucket ?? string.Empty, BucketNull = i.Bucket is null,
-        Revision = i.Revision,
-        ExpiresNode = i.Expires.N, ExpiresPhysical = i.Expires.L, ExpiresCounter = i.Expires.C,
-        NoRevision = i.NoRevision,
-        BaseRevision = i.BaseRevision, BaseState = (int)i.BaseState,
-        RecoveryDeadlineNode = i.RecoveryDeadline.N, RecoveryDeadlinePhysical = i.RecoveryDeadline.L, RecoveryDeadlineCounter = i.RecoveryDeadline.C,
-        Resolution = (int)i.Resolution
-    };
+        m.Value = i.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(i.Value); m.ValueNull = i.Value is null;
+        m.Bucket = i.Bucket ?? string.Empty; m.BucketNull = i.Bucket is null;
+        m.Revision = i.Revision;
+        m.ExpiresNode = i.Expires.N; m.ExpiresPhysical = i.Expires.L; m.ExpiresCounter = i.Expires.C;
+        m.NoRevision = i.NoRevision;
+        m.BaseRevision = i.BaseRevision; m.BaseState = (int)i.BaseState;
+        m.RecoveryDeadlineNode = i.RecoveryDeadline.N; m.RecoveryDeadlinePhysical = i.RecoveryDeadline.L; m.RecoveryDeadlineCounter = i.RecoveryDeadline.C;
+        m.Resolution = (int)i.Resolution;
+        return m;
+    }
 
     private static PreparedIntent IntentOf(PreparedIntentCommandMessage m, PreparedIntentDeltaHeaderMessage? header = null) => new(
         header is null

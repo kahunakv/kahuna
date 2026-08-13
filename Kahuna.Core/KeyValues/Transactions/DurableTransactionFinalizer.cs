@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kommander.Data;
 using Kommander.Time;
 
@@ -744,6 +745,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool[] materialized = new bool[partition.Intents.Count];
         int next = 0;
 
+        // One scratch message serves the whole partition; each serialization fully consumes it before the next
+        // intent overwrites it.
+        KeyValueMessage scratch = new();
+
         while (next < partition.Intents.Count)
         {
             List<(int Index, byte[] Record)> window = new(Math.Min(maxMaterializationBatchItems, partition.Intents.Count - next));
@@ -751,7 +756,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             while (next < partition.Intents.Count && window.Count < maxMaterializationBatchItems)
             {
-                byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next]);
+                byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next], scratch);
                 if (window.Count > 0 && windowBytes + record.Length > maxMaterializationBatchBytes)
                     break;
 

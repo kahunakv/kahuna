@@ -16,32 +16,34 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// </summary>
 internal static class PreparedIntentMaterializer
 {
-    public static byte[] ToKeyValueRecord(PreparedIntent intent)
+    /// <summary>
+    /// Encodes the intent into <paramref name="scratch"/> and returns the serialized record. The scratch message
+    /// exists so a materialization loop allocates one message for the whole loop instead of one per intent; every
+    /// field the record carries is overwritten on every call, so nothing from a previous intent can leak into the
+    /// next record. The returned array is freshly allocated each call and safe to retain (the replication log keeps
+    /// it); only the scratch message is reused, and it is fully consumed before this method returns.
+    /// </summary>
+    public static byte[] ToKeyValueRecord(PreparedIntent intent, KeyValueMessage scratch)
     {
         KeyValueRequestType type = intent.State == KeyValueState.Deleted
             ? KeyValueRequestType.TryDelete
             : KeyValueRequestType.TrySet;
 
-        KeyValueMessage message = new()
-        {
-            Type = (int)type,
-            Key = intent.Key,
-            Revision = intent.Revision,
-            NoRevision = intent.NoRevision,
-            ExpireNode = intent.Expires.N, ExpirePhysical = intent.Expires.L, ExpireCounter = intent.Expires.C,
-            // One canonical commit timestamp stamps last-modified/last-used/time.
-            LastModifiedNode = intent.CommitTimestamp.N, LastModifiedPhysical = intent.CommitTimestamp.L, LastModifiedCounter = intent.CommitTimestamp.C,
-            LastUsedNode = intent.CommitTimestamp.N, LastUsedPhysical = intent.CommitTimestamp.L, LastUsedCounter = intent.CommitTimestamp.C,
-            TimeNode = intent.CommitTimestamp.N, TimePhysical = intent.CommitTimestamp.L, TimeCounter = intent.CommitTimestamp.C,
-            TransactionIdNode = intent.TransactionId.N,
-            TransactionIdPhysical = intent.TransactionId.L,
-            TransactionIdCounter = intent.TransactionId.C,
-            RecordAnchorKey = intent.RecordAnchorKey
-        };
+        scratch.Type = (int)type;
+        scratch.Key = intent.Key;
+        scratch.Revision = intent.Revision;
+        scratch.NoRevision = intent.NoRevision;
+        scratch.ExpireNode = intent.Expires.N; scratch.ExpirePhysical = intent.Expires.L; scratch.ExpireCounter = intent.Expires.C;
+        // One canonical commit timestamp stamps last-modified/last-used/time.
+        scratch.LastModifiedNode = intent.CommitTimestamp.N; scratch.LastModifiedPhysical = intent.CommitTimestamp.L; scratch.LastModifiedCounter = intent.CommitTimestamp.C;
+        scratch.LastUsedNode = intent.CommitTimestamp.N; scratch.LastUsedPhysical = intent.CommitTimestamp.L; scratch.LastUsedCounter = intent.CommitTimestamp.C;
+        scratch.TimeNode = intent.CommitTimestamp.N; scratch.TimePhysical = intent.CommitTimestamp.L; scratch.TimeCounter = intent.CommitTimestamp.C;
+        scratch.TransactionIdNode = intent.TransactionId.N;
+        scratch.TransactionIdPhysical = intent.TransactionId.L;
+        scratch.TransactionIdCounter = intent.TransactionId.C;
+        scratch.RecordAnchorKey = intent.RecordAnchorKey;
+        scratch.Value = intent.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(intent.Value);
 
-        if (intent.Value is not null)
-            message.Value = UnsafeByteOperations.UnsafeWrap(intent.Value);
-
-        return ReplicationSerializer.Serialize(message);
+        return ReplicationSerializer.Serialize(scratch);
     }
 }

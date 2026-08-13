@@ -1187,7 +1187,7 @@ public sealed class TestDurableTransactionFinalizer
     {
         PreparedIntent intent = Intent(Ts(1000), 1, "acct/1") with { Value = [4, 5, 6], Revision = 9, CommitTimestamp = Ts(1234) };
 
-        byte[] bytes = PreparedIntentMaterializer.ToKeyValueRecord(intent);
+        byte[] bytes = PreparedIntentMaterializer.ToKeyValueRecord(intent, new Replication.Protos.KeyValueMessage());
         Replication.Protos.KeyValueMessage message = ReplicationSerializer.UnserializeKeyValueMessage(bytes);
 
         Assert.Equal("acct/1", message.Key);
@@ -1198,5 +1198,32 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(intent.TransactionId, new HLCTimestamp(
             message.TransactionIdNode, message.TransactionIdPhysical, message.TransactionIdCounter));
         Assert.Equal(intent.RecordAnchorKey, message.RecordAnchorKey);
+    }
+
+    /// <summary>A materialization loop reuses one scratch message across intents; every record field must be
+    /// overwritten per intent, so a delete serialized after a set through the same scratch carries no trace of
+    /// the earlier value, and the earlier record is unaffected by later reuse.</summary>
+    [Fact]
+    public void Materializer_ScratchReuse_DoesNotLeakBetweenIntents()
+    {
+        Replication.Protos.KeyValueMessage scratch = new();
+
+        PreparedIntent set = Intent(Ts(1000), 1, "acct/1") with { Value = [4, 5, 6], Revision = 9, CommitTimestamp = Ts(1234) };
+        PreparedIntent delete = Intent(Ts(2000), 1, "acct/2") with { Value = null, State = KeyValueState.Deleted, Revision = 3, CommitTimestamp = Ts(2345) };
+
+        byte[] setBytes = PreparedIntentMaterializer.ToKeyValueRecord(set, scratch);
+        byte[] deleteBytes = PreparedIntentMaterializer.ToKeyValueRecord(delete, scratch);
+
+        Replication.Protos.KeyValueMessage setMessage = ReplicationSerializer.UnserializeKeyValueMessage(setBytes);
+        Assert.Equal("acct/1", setMessage.Key);
+        Assert.Equal(new byte[] { 4, 5, 6 }, setMessage.Value.ToByteArray());
+        Assert.Equal((int)KeyValueRequestType.TrySet, setMessage.Type);
+
+        Replication.Protos.KeyValueMessage deleteMessage = ReplicationSerializer.UnserializeKeyValueMessage(deleteBytes);
+        Assert.Equal("acct/2", deleteMessage.Key);
+        Assert.True(deleteMessage.Value.IsEmpty);
+        Assert.Equal((int)KeyValueRequestType.TryDelete, deleteMessage.Type);
+        Assert.Equal(3, deleteMessage.Revision);
+        Assert.Equal(Ts(2345), new HLCTimestamp(deleteMessage.LastModifiedNode, deleteMessage.LastModifiedPhysical, deleteMessage.LastModifiedCounter));
     }
 }

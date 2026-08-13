@@ -168,6 +168,33 @@ internal static class KeyValueRequestPool
         return request;
     }
 
+    /// <summary>
+    /// Rents a <c>FlushAck</c> message: the background writer notifying the owning actor that
+    /// <paramref name="key"/> has been durably stored up to <paramref name="revision"/>. The revision
+    /// travels in <see cref="KeyValueRequest.CompareRevision"/> (unused by this message type); routing
+    /// keys on <paramref name="key"/> so it reaches the same actor that holds the entry.
+    /// FlushAck is the one fire-and-forget message type drawn from the pool: ownership transfers to the
+    /// receiving actor, which returns the request after handling it. That is only sound while flush acks
+    /// have a single producer and a single consistent-hash delivery — a second producer that kept a
+    /// reference after sending would race the recycled object.
+    /// </summary>
+    public static KeyValueRequest RentFlushAck(string key, long revision)
+        => Rent(
+            KeyValueRequestType.FlushAck,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            key,
+            null,
+            null,
+            revision,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            null);
+
     public static void Return(KeyValueRequest obj)
     {
         obj.Clear();

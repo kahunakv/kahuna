@@ -181,6 +181,87 @@ public sealed class TestPreparedIntentDeltaEncoding
         Assert.Equal(PreparedIntentResolution.Committed, proposer.Get("row/1")!.Resolution);
     }
 
+    /// <summary>The serializer recycles proto command messages across deltas on the same thread. A prepare fills
+    /// every payload field; a later settle command reusing that message sets only its own few, so any field the
+    /// recycle path failed to reset would leak the earlier prepare's payload into the settle's wire bytes. Serialize
+    /// a fully populated prepare first, then a settle on the same thread, and assert at the wire level that the
+    /// settle commands carry nothing but their own fields.</summary>
+    [Fact]
+    public void RecycledMessages_DoNotLeakAcrossDeltas()
+    {
+        HLCTimestamp txId = Ts(1000);
+        const long epoch = 3;
+
+        // Fully populates the pooled messages (value, bucket, anchor, timestamps, revisions ...).
+        PreparedIntentStore.SerializeDelta([
+            new PrepareIntentCommand(Intent(txId, epoch, "row/1")),
+            new PrepareIntentCommand(Intent(txId, epoch, "row/2"))]);
+
+        // Same thread, so this delta is built on the recycled messages.
+        byte[] settleBytes = PreparedIntentStore.SerializeDelta([
+            new ResolveIntentCommand(txId, epoch, "row/1", Commit: true),
+            new RemoveIntentCommand(txId, epoch, "row/1")]);
+
+        PreparedIntentDeltaMessage decoded = ReplicationSerializer.UnserializePreparedIntentDeltaMessage([.. settleBytes]);
+        Assert.Equal(2, decoded.Commands.Count);
+
+        foreach (PreparedIntentCommandMessage command in decoded.Commands)
+        {
+            // Prepare payload must be entirely absent from a resolve/remove command.
+            Assert.Equal(0, command.ManifestHash);
+            Assert.Equal(string.Empty, command.RecordAnchorKey);
+            Assert.Equal(0, command.CommitTimestampPhysical);
+            Assert.Equal(0, command.State);
+            Assert.True(command.Value.IsEmpty);
+            Assert.False(command.ValueNull);
+            Assert.Equal(string.Empty, command.Bucket);
+            Assert.False(command.BucketNull);
+            Assert.Equal(0, command.Revision);
+            Assert.Equal(0, command.ExpiresPhysical);
+            Assert.Equal(0, command.BaseRevision);
+            Assert.Equal(0, command.RecoveryDeadlinePhysical);
+            Assert.Equal(0, command.Resolution);
+        }
+
+        Assert.Equal(PreparedIntentCommandKindMessage.PreparedIntentResolve, decoded.Commands[0].Kind);
+        Assert.True(decoded.Commands[0].Commit);
+        Assert.Equal(PreparedIntentCommandKindMessage.PreparedIntentRemove, decoded.Commands[1].Kind);
+        Assert.False(decoded.Commands[1].Commit);
+    }
+
+    /// <summary>Every field of the command message must return to its proto3 default when recycled — the fill
+    /// paths set only the fields their kind carries and trust the rest to be clean. Sweeps the message descriptor
+    /// so a field added to the proto but missed by the reset fails here instead of leaking payload on the wire.</summary>
+    [Fact]
+    public void ResetCommandMessage_RestoresEveryFieldToDefault()
+    {
+        PreparedIntentCommandMessage message = new();
+
+        foreach (Google.Protobuf.Reflection.FieldDescriptor field in PreparedIntentCommandMessage.Descriptor.Fields.InDeclarationOrder())
+        {
+            object nonDefault = field.FieldType switch
+            {
+                Google.Protobuf.Reflection.FieldType.Enum => Enum.ToObject(field.EnumType.ClrType, field.EnumType.Values[1].Number),
+                Google.Protobuf.Reflection.FieldType.Int32 => 42,
+                Google.Protobuf.Reflection.FieldType.Int64 => 42L,
+                Google.Protobuf.Reflection.FieldType.UInt32 => 42u,
+                Google.Protobuf.Reflection.FieldType.Bool => true,
+                Google.Protobuf.Reflection.FieldType.String => "leak",
+                Google.Protobuf.Reflection.FieldType.Bytes => Google.Protobuf.ByteString.CopyFrom(1, 2, 3),
+                _ => throw new InvalidOperationException(
+                    $"field '{field.Name}' has unhandled type {field.FieldType}; extend this sweep and ResetCommandMessage together")
+            };
+
+            field.Accessor.SetValue(message, nonDefault);
+        }
+
+        Assert.NotEqual(new PreparedIntentCommandMessage(), message);
+
+        PreparedIntentStore.ResetCommandMessage(message);
+
+        Assert.Equal(new PreparedIntentCommandMessage(), message);
+    }
+
     [Fact]
     public void DeltaWrittenWithoutAHeader_IsStillRead()
     {

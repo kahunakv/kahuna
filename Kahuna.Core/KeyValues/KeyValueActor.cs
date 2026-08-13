@@ -430,7 +430,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
                 KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
-                KeyValueRequestType.FlushAck => FlushAck(message),
+                KeyValueRequestType.FlushAck => FlushAckAndRecycle(message),
                 KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };
@@ -708,6 +708,20 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
             entry.FlushedRevision = ackedRevision;
 
         return null;
+    }
+
+    /// <summary>
+    /// Handles a flush ack and returns the pooled request. FlushAck messages are fire-and-forget with
+    /// a single producer (the background writer's flush notification), so once the handler has run this
+    /// actor is the request's sole owner and must recycle it — the sender cannot, having no completion
+    /// to await. Nothing may touch the message after this returns: the pool can hand it to another
+    /// thread immediately.
+    /// </summary>
+    private KeyValueResponse? FlushAckAndRecycle(KeyValueRequest message)
+    {
+        KeyValueResponse? response = FlushAck(message);
+        KeyValueRequestPool.Return(message);
+        return response;
     }
 
     /// <summary>
