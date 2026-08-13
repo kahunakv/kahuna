@@ -83,6 +83,21 @@ public sealed class TestClusterReadiness : IDisposable
         Assert.Equal("NotMember", health.LocalRole);
     }
 
+    /// <summary>A decommissioned node keeps its port open so the caller can read the result of the
+    /// leave, and stays up until the orchestrator stops it. It must not be advertised as ready in
+    /// that window: the cluster has already dropped it, so routing traffic to it is exactly what
+    /// asking it to leave was meant to prevent.</summary>
+    [Fact]
+    public void Health_Leaving_ReportsNotReady()
+    {
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(
+            new FakeRaft { Initialized = true, Role = ClusterMemberRole.Leaving });
+
+        Assert.False(health.Ready);
+        Assert.True(health.Initialized);
+        Assert.Equal("Leaving", health.LocalRole);
+    }
+
     /// <summary>A probe hitting a node so early in boot that membership state is not constructed
     /// yet must get a fail-closed not-ready, never an unhandled exception (HTTP 500).</summary>
     [Fact]
@@ -212,6 +227,7 @@ public sealed class TestClusterReadiness : IDisposable
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
         public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<LeaveClusterResult> RequestLeaveAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
         public Task UpdateNodes() => throw new NotImplementedException();
 

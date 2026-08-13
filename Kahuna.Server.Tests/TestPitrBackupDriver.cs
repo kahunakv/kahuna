@@ -143,7 +143,7 @@ public sealed class TestPitrBackupDriver : IDisposable
 
         BackupManifest manifest = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
-        BackupManifest? stored = await catalog.GetAsync(manifest.BackupId);
+        BackupManifest? stored = await catalog.GetAsync(manifest.BackupId, TestContext.Current.CancellationToken);
         Assert.NotNull(stored);
         Assert.Equal(manifest.BackupId, stored!.BackupId);
     }
@@ -347,7 +347,7 @@ public sealed class TestPitrBackupDriver : IDisposable
 
         BackupManifest parentManifest = BackupManifest.CreateFull(
             [PartitionBackupRange.Create(1, 1, default, 5, new HLCTimestamp(0, 500, 0))]);
-        await catalog.PutAsync(parentManifest);
+        await catalog.PutAsync(parentManifest, TestContext.Current.CancellationToken);
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
             await BackupDriver.RunIncrementalAsync(wal, [Part(1)], parentManifest.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken));
@@ -505,7 +505,7 @@ public sealed class TestPitrBackupDriver : IDisposable
             topologyGenerationProbe: () => 12345L, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(12345L, manifest.TopologyGeneration);
-        Assert.NotNull(await catalog.GetAsync(manifest.BackupId));
+        Assert.NotNull(await catalog.GetAsync(manifest.BackupId, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -587,7 +587,7 @@ public sealed class TestPitrBackupDriver : IDisposable
             wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
             verifyCoordinator: _ => Task.FromResult(true), ct: TestContext.Current.CancellationToken);
 
-        Assert.NotNull(await catalog.GetAsync(m.BackupId));
+        Assert.NotNull(await catalog.GetAsync(m.BackupId, TestContext.Current.CancellationToken));
     }
 
     // ── test helpers ────────────────────────────────────────────────────────────────────────

@@ -36,9 +36,9 @@ public sealed class TestPitrCatalog : IDisposable
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest m = BackupManifest.CreateFull([Range(1, 1, 10)]);
-        await cat.PutAsync(m);
+        await cat.PutAsync(m, TestContext.Current.CancellationToken);
 
-        BackupManifest? got = await cat.GetAsync(m.BackupId);
+        BackupManifest? got = await cat.GetAsync(m.BackupId, TestContext.Current.CancellationToken);
         Assert.NotNull(got);
         Assert.Equal(m.BackupId, got!.BackupId);
         Assert.Equal(BackupType.Full, got.Type);
@@ -51,7 +51,7 @@ public sealed class TestPitrCatalog : IDisposable
     public async Task StorageTarget_Get_MissingId_ReturnsNull()
     {
         BackupCatalog cat = NewCatalog();
-        Assert.Null(await cat.GetAsync(Guid.NewGuid()));
+        Assert.Null(await cat.GetAsync(Guid.NewGuid(), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -60,8 +60,8 @@ public sealed class TestPitrCatalog : IDisposable
         BackupCatalog cat = NewCatalog();
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 5)]);
         BackupManifest inc = BackupManifest.CreateIncremental(full.BackupId, [Range(1, 6, 10)]);
-        await cat.PutAsync(full);
-        await cat.PutAsync(inc);
+        await cat.PutAsync(full, TestContext.Current.CancellationToken);
+        await cat.PutAsync(inc, TestContext.Current.CancellationToken);
 
         IReadOnlyList<BackupManifest> all = await cat.ListAsync(TestContext.Current.CancellationToken);
         Assert.Equal(2, all.Count);
@@ -75,9 +75,9 @@ public sealed class TestPitrCatalog : IDisposable
         HLCTimestamp toHlc = new(1, 1_000_000, 3);
         PartitionBackupRange r = PartitionBackupRange.Create(1, 1, fromHlc, 50, toHlc);
         BackupManifest m = BackupManifest.CreateFull([r]);
-        await cat.PutAsync(m);
+        await cat.PutAsync(m, TestContext.Current.CancellationToken);
 
-        BackupManifest? got = await cat.GetAsync(m.BackupId);
+        BackupManifest? got = await cat.GetAsync(m.BackupId, TestContext.Current.CancellationToken);
         PartitionBackupRange rr = got!.PartitionRanges[0];
         Assert.Equal(fromHlc, rr.FromHlc);
         Assert.Equal(toHlc, rr.ToHlc);
@@ -90,7 +90,7 @@ public sealed class TestPitrCatalog : IDisposable
     {
         BackupCatalog cat = NewCatalog();
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
-        await cat.PutAsync(full);
+        await cat.PutAsync(full, TestContext.Current.CancellationToken);
 
         IReadOnlyList<BackupManifest> chain = await cat.ResolveChainAsync(full.BackupId, TestContext.Current.CancellationToken);
         Assert.Single(chain);
@@ -104,9 +104,9 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
         BackupManifest inc1 = BackupManifest.CreateIncremental(full.BackupId, [Range(1, 11, 20)]);
         BackupManifest inc2 = BackupManifest.CreateIncremental(inc1.BackupId, [Range(1, 21, 30)]);
-        await cat.PutAsync(full);
-        await cat.PutAsync(inc1);
-        await cat.PutAsync(inc2);
+        await cat.PutAsync(full, TestContext.Current.CancellationToken);
+        await cat.PutAsync(inc1, TestContext.Current.CancellationToken);
+        await cat.PutAsync(inc2, TestContext.Current.CancellationToken);
 
         IReadOnlyList<BackupManifest> chain = await cat.ResolveChainAsync(inc2.BackupId, TestContext.Current.CancellationToken);
 
@@ -122,7 +122,7 @@ public sealed class TestPitrCatalog : IDisposable
         BackupCatalog cat = NewCatalog();
         // Store only the incremental — its parent is absent from the catalog.
         BackupManifest inc = BackupManifest.CreateIncremental(Guid.NewGuid(), [Range(1, 11, 20)]);
-        await cat.PutAsync(inc);
+        await cat.PutAsync(inc, TestContext.Current.CancellationToken);
 
         BackupChainException ex = await Assert.ThrowsAsync<BackupChainException>(async () => await cat.ResolveChainAsync(inc.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("not found", ex.Message);
@@ -135,7 +135,7 @@ public sealed class TestPitrCatalog : IDisposable
         // A manifest that points to itself as its own parent.
         BackupManifest m = BackupManifest.CreateFull([Range(1, 1, 10)]);
         m.ParentBackupId = m.BackupId;
-        await cat.PutAsync(m);
+        await cat.PutAsync(m, TestContext.Current.CancellationToken);
 
         BackupChainException ex = await Assert.ThrowsAsync<BackupChainException>(async () => await cat.ResolveChainAsync(m.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("Cycle", ex.Message);
@@ -149,8 +149,8 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest a = BackupManifest.CreateFull([Range(1, 1, 10)]);
         BackupManifest b = BackupManifest.CreateIncremental(a.BackupId, [Range(1, 11, 20)]);
         a.ParentBackupId = b.BackupId; // close the cycle
-        await cat.PutAsync(a);
-        await cat.PutAsync(b);
+        await cat.PutAsync(a, TestContext.Current.CancellationToken);
+        await cat.PutAsync(b, TestContext.Current.CancellationToken);
 
         BackupChainException ex = await Assert.ThrowsAsync<BackupChainException>(async () => await cat.ResolveChainAsync(b.BackupId, TestContext.Current.CancellationToken));
         Assert.Contains("Cycle", ex.Message);
@@ -229,9 +229,9 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest full = BackupManifest.CreateFull([Range(1, 1, 10)]);
         BackupManifest inc1 = BackupManifest.CreateIncremental(full.BackupId, [Range(1, 11, 20)]);
         BackupManifest inc2 = BackupManifest.CreateIncremental(inc1.BackupId, [Range(1, 21, 30)]);
-        await cat.PutAsync(full);
-        await cat.PutAsync(inc1);
-        await cat.PutAsync(inc2);
+        await cat.PutAsync(full, TestContext.Current.CancellationToken);
+        await cat.PutAsync(inc1, TestContext.Current.CancellationToken);
+        await cat.PutAsync(inc2, TestContext.Current.CancellationToken);
 
         IReadOnlyList<BackupManifest> chain = await cat.ResolveAndValidateAsync(inc2.BackupId, TestContext.Current.CancellationToken);
 
@@ -269,9 +269,9 @@ public sealed class TestPitrCatalog : IDisposable
         BackupManifest m = FullWithRange(1, 10);
         const string cluster = "cluster-a";
         m.ApplyOwnerIdentity(new BackupOwnerIdentity(cluster, "node-a:8001", 7, "sqlite", "rev-3", 42));
-        await cat.PutAsync(m);
+        await cat.PutAsync(m, TestContext.Current.CancellationToken);
 
-        BackupManifest? got = await cat.GetAsync(m.BackupId);
+        BackupManifest? got = await cat.GetAsync(m.BackupId, TestContext.Current.CancellationToken);
         Assert.NotNull(got);
         Assert.Equal(cluster, got!.ClusterId);
         Assert.Equal("node-a:8001", got.CoordinatorNode);

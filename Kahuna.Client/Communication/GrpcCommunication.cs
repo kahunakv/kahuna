@@ -2216,6 +2216,39 @@ public class GrpcCommunication : IKahunaCommunication
         };
     }
 
+    public async Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = GetClusterClient(channel);
+
+        GrpcClusterLeaveResponse response = await client.LeaveAsync(
+            new GrpcClusterLeaveRequest(),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return new KahunaClusterLeaveResponse
+        {
+            Left = response.Left,
+            Outcome = GrpcLeaveOutcomeToString(response.Outcome),
+            MembershipVersion = response.MembershipVersion,
+            Retryable = response.Retryable,
+            Reason = response.Reason
+        };
+    }
+
+    /// <summary>
+    /// Names match the outcome names the REST surface reports, so callers can branch on one
+    /// vocabulary regardless of transport.
+    /// </summary>
+    private static string GrpcLeaveOutcomeToString(GrpcLeaveClusterOutcome outcome) => outcome switch
+    {
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeCommitted                 => "Committed",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeNotAMember                => "NotAMember",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedInsufficientVoters => "RefusedInsufficientVoters",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeNotInitialized            => "NotInitialized",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeNoLeader                  => "NoLeader",
+        _                                                                    => "Timeout"
+    };
+
     private static string GrpcRoleToString(GrpcClusterMemberRole role) => role switch
     {
         GrpcClusterMemberRole.ClusterMemberRoleLearner   => "Learner",

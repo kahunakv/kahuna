@@ -183,6 +183,7 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
         public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<LeaveClusterResult> RequestLeaveAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
         public Task UpdateNodes() => throw new NotImplementedException();
 

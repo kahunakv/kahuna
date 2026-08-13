@@ -1736,6 +1736,28 @@ public class RestCommunication : IKahunaCommunication
         return response;
     }
 
+    public async Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken)
+    {
+        // Refusals and unresolved attempts come back as 409/503/504 carrying the verdict in the
+        // body, so the non-2xx statuses are accepted rather than turned into exceptions — and the
+        // request is deliberately not wrapped in the retry policy: whether to repeat a decommission
+        // is the caller's decision, guided by the response's own retryable flag.
+        KahunaClusterLeaveResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/cluster/leave")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .AllowAnyHttpStatus()
+            .PostJsonAsync(new { }, cancellationToken: cancellationToken)
+            .ReceiveJson<KahunaClusterLeaveResponse>()
+            .ConfigureAwait(false);
+
+        if (response is null || string.IsNullOrEmpty(response.Outcome))
+            throw new KahunaException("LeaveCluster returned no outcome", LockResponseType.Errored);
+
+        return response;
+    }
+
     public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
     {
         AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);

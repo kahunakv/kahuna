@@ -133,10 +133,42 @@ That's the whole flow. You do **not** restart or reconfigure the existing nodes.
 
 ## 5. Removing a node
 
-### Graceful leave (decommissioning)
-A node can commit its own removal on shutdown so the roster shrinks immediately instead of waiting for
-failure detection. This is **off by default** and enabled with **`--graceful-leave-on-shutdown`**. Use
-it when you are **retiring** a node for good.
+### Decommissioning a running node (the API)
+Ask the node to leave, then stop it:
+
+```
+POST /v1/cluster/leave        # on the node you are removing
+```
+
+or `kahuna.control --cluster-leave --node https://node-3:8082` (in the interactive console:
+`cluster leave <endpoint>`), or the `Cluster.Leave` gRPC call, or `KahunaClient.LeaveCluster(nodeUrl)`.
+
+The call returns once the removal is **committed**, so a scale-down can sequence node removals without
+polling the roster. The node keeps serving its port afterwards — it has to, in order to answer you —
+and reports itself **not ready** on `/v1/cluster/health` from that moment, so load balancers stop
+routing to it. Stopping the process is your next step, and only when the answer says it left.
+
+| Outcome | HTTP | What it means |
+|---|---|---|
+| `Committed` | 200 | It is out of the roster. Stop the process. |
+| `NotAMember` | 200 | It was already out (you retried, or it had been evicted). Nothing to do. |
+| `RefusedInsufficientVoters` | 409 | Removing it would leave zero Voters. **Never retry** — see the safety floor below. |
+| `NotInitialized` / `NoLeader` | 503 | It could not attempt the removal. Retry later. |
+| `Timeout` | 504 | Genuinely unresolved: the removal may still commit. **Re-read the roster** (§7) before deciding — do not assume either result. |
+
+The response carries a `retryable` flag saying the same thing, so a script can branch on one field.
+The CLI exits non-zero whenever the node is still in the roster.
+
+> **Decision — leaving and stopping are separate steps.** Coupling them (leave, then immediately exit)
+> would put you back where the failure-detector path already is: you would never learn whether the
+> removal actually committed before the process disappeared. Keeping them apart lets the caller confirm
+> the committed roster *first*, and stop the node knowing the cluster has already let go of it.
+
+### Graceful leave on shutdown (the flag)
+A node can also commit its own removal on shutdown, without anyone asking it to, so the roster shrinks
+immediately instead of waiting for failure detection. This is **off by default** and enabled with
+**`--graceful-leave-on-shutdown`**. Use it when you are **retiring** a node for good and have no
+orchestrator to drive the API call above.
 
 > **Decision — graceful leave is OFF by default, and that is deliberate.** The tempting default is
 > "always leave cleanly on shutdown." But a **rolling restart** — bouncing each node to deploy a new
@@ -145,14 +177,15 @@ it when you are **retiring** a node for good.
 > for good.* A plain restart (the common case) leaves the roster untouched.
 
 ### The safety floor: the cluster won't let you remove the last Voter
-A graceful leave that would drop the cluster to **zero Voters** is **refused** — the cluster tells the
-node "no" and the node simply stops without committing a removal. Going from 2 Voters to 1 is allowed;
-going from 1 to 0 is not.
+A leave that would drop the cluster to **zero Voters** is **refused**. Going from 2 Voters to 1 is
+allowed; going from 1 to 0 is not. Over the API the refusal comes back as `RefusedInsufficientVoters`
+(409) and the node carries on serving, unchanged — it keeps its role and its partition leaderships.
+On the shutdown-flag path the node simply stops without committing a removal.
 
 > **Concept — refusing the last-Voter leave.** Committing "remove the last Voter" would leave the
 > cluster with no one able to make decisions — permanently bricked, with no quorum even to *undo* the
-> removal. The cluster treats this as a terminal refusal: it never retries, and the leaving node, on
-> seeing the refusal, just shuts down. Your data and roster are left intact.
+> removal. The cluster treats this as a terminal refusal: never retry it. Add a Voter first, or stop
+> the cluster outright instead of shrinking it. Your data and roster are left intact either way.
 
 ### Automatic eviction of a dead node (SWIM)
 If a node crashes or becomes unreachable **without** leaving, the cluster detects it through a gossip +
@@ -261,9 +294,12 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 
 ## 10. Operational invariants (gotchas worth memorizing)
 
-- **A rolling restart must NOT use `--graceful-leave-on-shutdown`.** Leave is for decommissioning, not
-  restarts. Restart a node without that flag and the roster is untouched; the node simply rejoins its
-  partitions when it comes back.
+- **A rolling restart must NOT leave.** Neither `--graceful-leave-on-shutdown` nor
+  `POST /v1/cluster/leave` belongs in a restart: leaving is for decommissioning. Restart a node without
+  either and the roster is untouched; the node simply rejoins its partitions when it comes back.
+- **A node that left does not come back on its own.** Auto-rejoin exists to rescue a node evicted while
+  it was down; it is deliberately suppressed once a node has been asked to leave, so a decommission is
+  never quietly undone. Re-admitting the node is a fresh join (§4).
 - **You cannot remove the last Voter.** The cluster refuses it (§5). Plan capacity so you never need to.
 - **Only Voters count for quorum.** A cluster with 3 Voters and 2 Learners still needs 2 (a majority of
   the *Voters*) to make progress — the Learners don't help quorum until promoted.
@@ -281,9 +317,10 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 A Kahuna cluster's membership is a consensus-committed roster, changed one node at a time. A new node
 joins a running cluster with `--join-existing` (seeding off `--initial-cluster`), enters as a
 non-voting Learner, catches up, and is auto-promoted to Voter — quorum never weakened in the process.
-A node leaves either politely (`--graceful-leave-on-shutdown`, for decommissioning only — never for
-restarts) or by being detected dead and evicted via SWIM, with suspicion and grace windows tuned to
-absorb transient hiccups. The cluster refuses any change that would remove the last Voter. You watch
+A node leaves either politely — asked to over the API (`POST /v1/cluster/leave`, which confirms the
+committed removal before you stop the process) or on shutdown via `--graceful-leave-on-shutdown`, both
+for decommissioning only, never for restarts — or by being detected dead and evicted via SWIM, with
+suspicion and grace windows tuned to absorb transient hiccups. The cluster refuses any change that would remove the last Voter. You watch
 all of it with `kahuna.control --cluster-members`. The one failure mode to know is the compaction
 floor: a node that needs log the cluster has already discarded can't catch up by replay alone — seed
 it from a recent backup first, then let it join.

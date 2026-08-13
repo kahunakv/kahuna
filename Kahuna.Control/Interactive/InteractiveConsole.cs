@@ -353,6 +353,13 @@ public static class InteractiveConsole
                     continue;
                 }
 
+                if (commandTrim.StartsWith("cluster leave", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    history.Add(commandTrim);
+                    await ClusterLeave(connection, commandTrim);
+                    continue;
+                }
+
                 if (commandTrim.Equals("backup full", StringComparison.InvariantCultureIgnoreCase))
                 {
                     history.Add(commandTrim);
@@ -678,6 +685,23 @@ public static class InteractiveConsole
 
         bool deleted = await connection.DeleteSequence(parts[1]);
         AnsiConsole.MarkupLine(deleted ? "[cyan]deleted[/]\n" : "[yellow]not found[/]\n");
+    }
+
+    /// <summary>
+    /// <c>cluster leave &lt;endpoint&gt;</c>. The endpoint is required rather than defaulted: the
+    /// shell holds a pool of connections, and defaulting would decommission whichever node the pool
+    /// happened to hand over.
+    /// </summary>
+    private static async Task ClusterLeave(KahunaClient connection, string commandTrim)
+    {
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: cluster leave <node-endpoint>[/]\n");
+            return;
+        }
+
+        await ClusterLeaveCommand.Execute(connection, parts[2], null);
     }
 
     private static void WriteSequence(KahunaSequence sequence, string action)

@@ -243,7 +243,7 @@ public sealed class TestPitrRestore : IDisposable
         BackupCatalog catalog = NewCatalog("window_reject");
         string artifacts = ArtifactsDir("window_reject");
         BackupManifest full = BackupManifest.CreateFull([]);
-        await catalog.PutAsync(full);
+        await catalog.PutAsync(full, TestContext.Current.CancellationToken);
 
         MemoryPersistenceBackend backend = new();
         IReadOnlyList<BackupManifest> chain = [full];
@@ -262,7 +262,7 @@ public sealed class TestPitrRestore : IDisposable
 
         BackupManifest full = BackupManifest.CreateFull([]);
         BackupCatalog catalog = NewCatalog("window_future");
-        await catalog.PutAsync(full);
+        await catalog.PutAsync(full, TestContext.Current.CancellationToken);
         string artifacts = ArtifactsDir("window_future");
 
         IReadOnlyList<BackupManifest> chain = [full];
@@ -504,7 +504,7 @@ public sealed class TestPitrRestore : IDisposable
         File.WriteAllText(seg, asArray);
         inc.Checksums["partition_1.wal"] = BackupArtifactVerifier.ComputeSha256(seg);
         inc.Sizes["partition_1.wal"] = new FileInfo(seg).Length;
-        await catalog.PutAsync(inc);
+        await catalog.PutAsync(inc, TestContext.Current.CancellationToken);
 
         string checkpointPath = Path.Combine(artifacts, full.BackupId.ToString("N"), "checkpoint");
         MemoryPersistenceBackend restored = MemoryPersistenceBackend.OpenCheckpoint(checkpointPath);

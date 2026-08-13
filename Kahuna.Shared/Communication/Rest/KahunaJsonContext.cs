@@ -30,6 +30,7 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(SequenceAllocation))]
 [JsonSerializable(typeof(KahunaClusterMembershipResponse))]
 [JsonSerializable(typeof(KahunaClusterHealthResponse))]
+[JsonSerializable(typeof(KahunaClusterLeaveResponse))]
 [JsonSerializable(typeof(KahunaClusterMemberResponse))]
 [JsonSerializable(typeof(List<KahunaClusterMemberResponse>))]
 [JsonSerializable(typeof(KahunaBackupInfo))]

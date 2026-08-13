@@ -1,19 +1,38 @@
 
 using System.Text.Json;
 using Kommander;
+using Kommander.Data;
 using Kommander.System;
 using Kahuna.Shared.Communication.Rest;
 
 namespace Kahuna.Communication.External.Rest;
 
 /// <summary>
-/// Provides read-only REST endpoints exposing cluster membership topology and node readiness.
+/// Provides REST endpoints exposing cluster membership topology, node readiness, and graceful
+/// decommission of the local node.
 /// </summary>
 public static class ClusterHandlers
 {
     public static void MapClusterRoutes(WebApplication app)
     {
         app.MapGet("/v1/cluster/membership", (IRaft raft) => BuildMembershipResponse(raft));
+
+        // Decommission: commit this node's removal from the roster now, instead of stopping the
+        // process and making the cluster infer the departure from silence — which costs the
+        // suspicion timeout plus the eviction grace per node, and logs a planned removal as a
+        // failure. The node deliberately keeps serving its port afterwards so the caller can read
+        // the committed result before stopping the process; stopping is the caller's next step.
+        app.MapPost("/v1/cluster/leave", async (IRaft raft, HttpContext httpContext) =>
+        {
+            LeaveClusterResult result = await ClusterLeave.ExecuteAsync(raft, httpContext.RequestAborted)
+                .ConfigureAwait(false);
+
+            return Results.Text(
+                JsonSerializer.Serialize(
+                    ClusterLeave.ToResponse(result), KahunaJsonContext.Default.KahunaClusterLeaveResponse),
+                "application/json",
+                statusCode: ClusterLeave.ToStatusCode(result.Outcome));
+        });
 
         // Readiness probe: a node opens its port and answers membership queries roughly a second
         // after launch, but refuses every key/value request until cluster initialization completes
@@ -65,10 +84,15 @@ public static class ClusterHandlers
 
     /// <summary>
     /// Ready requires both conditions: initialization complete (otherwise no partition leader can
-    /// be resolved and every request returns MustRetry) and a serving role in the roster (a node
-    /// evicted while down reports NotMember and likewise cannot serve). The role alone is
-    /// misleading — during initialization a node can report Voter while unable to serve a single
-    /// read — which is why the flag gates first.
+    /// be resolved and every request returns MustRetry) and a serving role in the roster. The role
+    /// alone is misleading — during initialization a node can report Voter while unable to serve a
+    /// single read — which is why the flag gates first.
+    /// <para>
+    /// Neither <c>NotMember</c> (evicted while down) nor <c>Leaving</c> (decommissioned, on its way
+    /// out) is a serving role. Reporting a decommissioned node as ready would keep load balancers
+    /// routing to a node the cluster has already dropped, which is the opposite of what asking it
+    /// to leave was for.
+    /// </para>
     /// </summary>
     public static KahunaClusterHealthResponse BuildHealthResponse(IRaft raft)
     {
@@ -94,7 +118,9 @@ public static class ClusterHandlers
 
         return new()
         {
-            Ready = initialized && localRole != nameof(ClusterMemberRole.NotMember),
+            Ready = initialized
+                && localRole != nameof(ClusterMemberRole.NotMember)
+                && localRole != nameof(ClusterMemberRole.Leaving),
             Initialized = initialized,
             LocalRole = localRole
         };

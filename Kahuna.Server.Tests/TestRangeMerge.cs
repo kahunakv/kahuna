@@ -354,9 +354,14 @@ public sealed class TestRangeMerge : BaseCluster
             Assert.True(outcome.IsSuccess);
             Assert.Equal(right.PartitionId, outcome.RetiredPartitionId);
 
-            // Wait for the descriptor map to converge on all nodes.
-            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
-            await WaitUntilAsync(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            // Wait for the descriptor map to converge on EVERY node before asserting:
+            // followers apply the replicated cutover asynchronously, so the meta leader
+            // converging first says nothing about the other nodes' maps.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+            {
+                KahunaManager km = kahuna;
+                await WaitUntilAsync(() => km.RangeMapStore.Current.FindAll(Space).Count == 1);
+            }
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
             {
@@ -453,7 +458,14 @@ public sealed class TestRangeMerge : BaseCluster
             MergeOutcome outcome = await MergeViaLeaders(Space, left, right, nodes, ct);
             Assert.True(outcome.IsSuccess);
 
-            await WaitUntilAsync(() => metaLeader.RangeMapStore.Current.FindAll(Space).Count == 1);
+            // Converge on EVERY node before asserting — followers apply the replicated
+            // cutover asynchronously, so waiting on the meta leader alone leaves a
+            // window where a follower still holds the two pre-merge descriptors.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+            {
+                KahunaManager km = kahuna;
+                await WaitUntilAsync(() => km.RangeMapStore.Current.FindAll(Space).Count == 1);
+            }
 
             // Post-merge invariant: no gap, no overlap, full coverage.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)

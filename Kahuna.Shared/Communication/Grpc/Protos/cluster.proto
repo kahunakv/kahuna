@@ -2,9 +2,37 @@ syntax = "proto3";
 
 service Cluster {
   rpc GetMembership (GrpcGetMembershipRequest) returns (GrpcGetMembershipResponse);
+  rpc Leave (GrpcClusterLeaveRequest) returns (GrpcClusterLeaveResponse);
 }
 
 message GrpcGetMembershipRequest {
+}
+
+message GrpcClusterLeaveRequest {
+}
+
+message GrpcClusterLeaveResponse {
+  // Whether the node is out of the committed roster.
+  bool Left = 1;
+  GrpcLeaveClusterOutcome Outcome = 2;
+  // Roster version resulting from the request; for a committed removal, the version that no
+  // longer lists this node. 0 when no roster version is known locally.
+  int64 MembershipVersion = 3;
+  // Whether repeating the request could produce a different answer. False for a permanent
+  // refusal and for outcomes that already succeeded.
+  bool Retryable = 4;
+  string Reason = 5;
+}
+
+enum GrpcLeaveClusterOutcome {
+  LEAVE_CLUSTER_OUTCOME_COMMITTED = 0;
+  LEAVE_CLUSTER_OUTCOME_NOT_A_MEMBER = 1;
+  // Removal would leave the cluster without a voter: permanent, never retry.
+  LEAVE_CLUSTER_OUTCOME_REFUSED_INSUFFICIENT_VOTERS = 2;
+  LEAVE_CLUSTER_OUTCOME_NOT_INITIALIZED = 3;
+  LEAVE_CLUSTER_OUTCOME_NO_LEADER = 4;
+  // Not confirmed before the deadline; the removal may still commit, so re-read the roster.
+  LEAVE_CLUSTER_OUTCOME_TIMEOUT = 5;
 }
 
 message GrpcClusterMember {

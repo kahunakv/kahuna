@@ -1077,6 +1077,33 @@ public class KahunaClient
         communication.GetClusterMembership(GetRoundRobinUrl(), cancellationToken);
 
     /// <summary>
+    /// Decommissions a node: asks it to commit its own removal from the cluster roster, so the
+    /// cluster shrinks by consensus instead of waiting out failure detection. The node keeps serving
+    /// until it is stopped — stopping it is the caller's next step, and only after the response says
+    /// the removal committed.
+    /// <para>
+    /// Outcomes are reported, not thrown: a removal that would strand the cluster without a voter
+    /// comes back as <c>RefusedInsufficientVoters</c> with <c>Retryable = false</c>. An outcome of
+    /// <c>Timeout</c> is genuinely unresolved — re-read the membership roster before deciding.
+    /// </para>
+    /// </summary>
+    /// <param name="nodeUrl">
+    /// The endpoint of the node to decommission. Required when the client was built with several
+    /// endpoints: this call targets one specific node, so the round-robin pick that serves ordinary
+    /// requests would decommission an arbitrary one.
+    /// </param>
+    /// <param name="cancellationToken"></param>
+    public Task<KahunaClusterLeaveResponse> LeaveCluster(string? nodeUrl = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(nodeUrl) && urls.Length > 1)
+            throw new ArgumentException(
+                "LeaveCluster requires the endpoint of the node to decommission when the client is configured with multiple endpoints.",
+                nameof(nodeUrl));
+
+        return communication.LeaveCluster(string.IsNullOrEmpty(nodeUrl) ? urls[0] : nodeUrl, cancellationToken);
+    }
+
+    /// <summary>
     /// Executes a script on the key-value store
     /// Scripts are executed as all or nothing transactions
     /// if one command fails the entire transaction is aborted

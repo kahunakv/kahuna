@@ -180,7 +180,7 @@ public sealed class TestBackupRetention : IDisposable
         BackupCatalog catalog = new(new LocalDirectoryStorageTarget(_tempRoot));
 
         Guid id = G(7);
-        await catalog.PutAsync(Full(id, Base));                                              // writes {id}.manifest
+        await catalog.PutAsync(Full(id, Base), TestContext.Current.CancellationToken);        // writes {id}.manifest
         Directory.CreateDirectory(Path.Combine(_tempRoot, id.ToString("N")));     // its artifact directory
 
         // Corrupt the manifest file so the parsed listing can no longer read it.
@@ -212,18 +212,18 @@ public sealed class TestBackupRetention : IDisposable
         Directory.CreateDirectory(_tempRoot);
         BackupCatalog catalog = new(new LocalDirectoryStorageTarget(_tempRoot));
         Guid id = G(1);
-        await catalog.PutAsync(Full(id, Base));
+        await catalog.PutAsync(Full(id, Base), TestContext.Current.CancellationToken);
         string artifactDir = Path.Combine(_tempRoot, id.ToString("N"));
         Directory.CreateDirectory(artifactDir);
         File.WriteAllText(Path.Combine(artifactDir, "checkpoint"), "data");
 
-        await catalog.DeleteAsync(id, BackupTestStores.Artifacts(_tempRoot));
+        await catalog.DeleteAsync(id, BackupTestStores.Artifacts(_tempRoot), TestContext.Current.CancellationToken);
 
-        Assert.Null(await catalog.GetAsync(id));
+        Assert.Null(await catalog.GetAsync(id, TestContext.Current.CancellationToken));
         Assert.False(Directory.Exists(artifactDir));
 
         // Idempotent: a second delete of an absent backup is a no-op, not an error.
-        await catalog.DeleteAsync(id, BackupTestStores.Artifacts(_tempRoot));
+        await catalog.DeleteAsync(id, BackupTestStores.Artifacts(_tempRoot), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -233,16 +233,16 @@ public sealed class TestBackupRetention : IDisposable
         LocalDirectoryStorageTarget target = new(_tempRoot);
         BackupCatalog catalog = new(target);
         Guid id = G(1);
-        await catalog.PutAsync(Full(id, Base));
+        await catalog.PutAsync(Full(id, Base), TestContext.Current.CancellationToken);
         string artifactDir = Path.Combine(_tempRoot, id.ToString("N"));
         Directory.CreateDirectory(artifactDir);
 
         // Simulate a crash after the manifest tombstone but before the artifact dir is removed.
-        await target.DeleteAsync(id);
+        await target.DeleteAsync(id, TestContext.Current.CancellationToken);
 
         // No manifest resolves to the (still-present) artifacts — the invariant holds — and the orphan
         // sweep now reclaims the directory.
-        Assert.Null(await catalog.GetAsync(id));
+        Assert.Null(await catalog.GetAsync(id, TestContext.Current.CancellationToken));
         IReadOnlyList<OrphanSweepCandidate> sweep =
             await BackupRetention.PlanOrphanSweepAsync(BackupTestStores.Artifacts(_tempRoot), new HashSet<Guid>(), new HashSet<Guid>(), TestContext.Current.CancellationToken);
         Assert.Contains(id.ToString("N"), sweep.Select(c => Path.GetFileName(c.Name)));

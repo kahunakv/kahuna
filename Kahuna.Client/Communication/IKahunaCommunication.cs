@@ -98,6 +98,13 @@ public interface IKahunaCommunication
 
      Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken);
 
+     /// <summary>
+     /// Asks the node at <paramref name="url"/> to leave the cluster roster. The outcome is carried
+     /// in the response — including refusals — rather than raised as an error, so a caller can tell
+     /// a permanent refusal from an attempt worth repeating.
+     /// </summary>
+     Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken);
+
      Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken);
      Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken);
      Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken);

@@ -934,7 +934,7 @@ public sealed class TestBackupService : IDisposable
         // Simulate a pre-hardening (legacy) manifest sitting in the same backup directory.
         BackupManifest legacy = BackupManifest.CreateFull([]);
         legacy.FormatVersion = 0;
-        await new LocalDirectoryStorageTarget(BackupDir("legacy_list")).PutAsync(legacy);
+        await new LocalDirectoryStorageTarget(BackupDir("legacy_list")).PutAsync(legacy, TestContext.Current.CancellationToken);
 
         IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> listed = await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken);
 
@@ -1184,6 +1184,7 @@ public sealed class TestBackupService : IDisposable
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken ct = default) => Task.CompletedTask;
         public Task JoinCluster(CancellationToken ct = default) => Task.CompletedTask;
         public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<LeaveClusterResult> RequestLeaveAsync(CancellationToken cancellationToken = default) => Task.FromResult(new LeaveClusterResult(LeaveClusterOutcome.NotInitialized, 0));
         public int GetPartitionKey(string partitionKey) => 0;
         public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
         public long GetPartitionGeneration(int partitionId) => 0;

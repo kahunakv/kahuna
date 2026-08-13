@@ -81,6 +81,7 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public Task JoinCluster(CancellationToken cancellationToken = default) => inner.JoinCluster(cancellationToken);
     public Task JoinCluster(IEnumerable<string> seeds, CancellationToken cancellationToken = default) => inner.JoinCluster(seeds, cancellationToken);
     public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => inner.LeaveCluster(dispose, cancellationToken);
+    public Task<LeaveClusterResult> RequestLeaveAsync(CancellationToken cancellationToken = default) => inner.RequestLeaveAsync(cancellationToken);
     public Task UpdateNodes() => inner.UpdateNodes();
     public IList<RaftNode> GetNodes() => inner.GetNodes();
     public HLCTimestamp GetLastNodeActivity(string endpoint) => inner.GetLastNodeActivity(endpoint);

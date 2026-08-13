@@ -527,6 +527,7 @@ public sealed class TestMembership : BaseCluster
             => membershipHandlers?.Invoke(membership);
 
         public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => leaveTask;
+        public Task<LeaveClusterResult> RequestLeaveAsync(CancellationToken cancellationToken = default) => Task.FromResult(new LeaveClusterResult(LeaveClusterOutcome.NotInitialized, 0));
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken ct = default) => Task.CompletedTask;
         public Task JoinCluster(CancellationToken ct = default) => Task.CompletedTask;
 
@@ -638,6 +639,7 @@ public sealed class TestMembership : BaseCluster
         public ClusterMemberRole LocalRole => ClusterMemberRole.NotMember;
         public ClusterMembership GetMembership() => new();
         public Task LeaveCluster(bool dispose = false, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<LeaveClusterResult> RequestLeaveAsync(CancellationToken cancellationToken = default) => Task.FromResult(new LeaveClusterResult(LeaveClusterOutcome.NotInitialized, 0));
 
         public event Func<int, RaftLog, Task<bool>>? OnLogRestored { add { } remove { } }
         public event Func<int, RaftLog, Task<bool>>? OnReplicationReceived { add { } remove { } }

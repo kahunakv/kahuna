@@ -139,6 +139,20 @@ if (IsSingleCommand(opts))
             return;
         }
 
+        if (opts.ClusterLeave)
+        {
+            string? target = ResolveTargetNode(opts);
+            if (target is null)
+            {
+                AnsiConsole.MarkupLine("[red]--cluster-leave decommissions one specific node: name it with --node <endpoint> when the connection lists several endpoints.[/]");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            await ClusterLeaveCommand.Execute(connection, target, format);
+            return;
+        }
+
         if (opts.BackupFull)
         {
             await BackupFullCommand.Execute(connection, format);
@@ -222,6 +236,18 @@ static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
     return Task.FromResult(new KahunaClient(connectionPool, null, null, kahunaOptions));
 }
 
+// Resolves which node a cluster command acts on. --node wins; otherwise the single configured
+// endpoint is unambiguous. Returns null when the connection lists several endpoints and none was
+// named — picking one would decommission an arbitrary node.
+static string? ResolveTargetNode(KahunaControlOptions opts)
+{
+    if (!string.IsNullOrEmpty(opts.Node))
+        return opts.Node;
+
+    string[] pool = (opts.ConnectionSource ?? "").Split(",", StringSplitOptions.RemoveEmptyEntries);
+    return pool.Length == 1 ? pool[0] : null;
+}
+
 // Removes the first occurrence of a bare flag from the argument array, returning whether it was
 // present. Used to intercept flags the CommandLineParser options don't declare before parsing.
 static bool ConsumeFlag(ref string[] arguments, string flag)
@@ -289,6 +315,9 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (kahunaControlOptions.ClusterMembers)
+        return true;
+
+    if (kahunaControlOptions.ClusterLeave)
         return true;
 
     if (kahunaControlOptions.BackupFull)

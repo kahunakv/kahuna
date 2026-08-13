@@ -20,6 +20,7 @@ namespace Kahuna.Server.Tests;
 public sealed class TestRestWireFieldNames
 {
     private static readonly JsonSerializerOptions ResponseOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions NoNamingPolicyOptions = new();
 
     private static void AssertNamedProperty(string json, string expected, string absent, string owner)
     {
@@ -192,7 +193,7 @@ public sealed class TestRestWireFieldNames
     public void ResponsesPinTheirWireNamesWithoutANamingPolicy(Type type, string expected)
     {
         // No camelCase policy: whatever survives here is spelled out on the type itself.
-        string json = JsonSerializer.Serialize(Activator.CreateInstance(type), type, new JsonSerializerOptions());
+        string json = JsonSerializer.Serialize(Activator.CreateInstance(type), type, NoNamingPolicyOptions);
 
         using JsonDocument document = JsonDocument.Parse(json);
 

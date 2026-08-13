@@ -88,6 +88,12 @@ public sealed class KahunaControlOptions
     [Option("cluster-members", Required = false, HelpText = "Prints the live cluster membership roster")]
     public bool ClusterMembers { get; set; }
 
+    [Option("cluster-leave", Required = false, HelpText = "Asks a node to leave the cluster roster (decommission). Target it with --node when the connection lists several endpoints; stop the process afterwards")]
+    public bool ClusterLeave { get; set; }
+
+    [Option("node", Required = false, HelpText = "Endpoint of the node a cluster command targets, e.g. https://localhost:8082")]
+    public string? Node { get; set; }
+
     [Option("backup-full", Required = false, HelpText = "Takes a full backup on the connected node")]
     public bool BackupFull { get; set; }
 

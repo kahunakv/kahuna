@@ -312,7 +312,7 @@ public sealed class TestPitrArtifactValidation : IDisposable
 
         // One valid manifest.
         BackupManifest valid = BackupManifest.CreateFull([]);
-        await target.PutAsync(valid);
+        await target.PutAsync(valid, TestContext.Current.CancellationToken);
 
         // One garbage manifest file with a recognizable id in its name.
         Guid badId = Guid.NewGuid();
