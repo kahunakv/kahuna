@@ -323,6 +323,7 @@ public sealed class TestClusterLeave : BaseCluster
         public double GetPartitionLogOpsPerSecond(int partitionId) => throw new NotImplementedException();
         public int GetPartitionWalQueueDepth(int partitionId) => throw new NotImplementedException();
         public double GetPartitionCommitWaitMs(int partitionId) => throw new NotImplementedException();
+        public long GetCommitIndex(int partitionId) => throw new NotImplementedException();
         public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => throw new NotImplementedException();
         public int GetPartitionKey(string partitionKey) => throw new NotImplementedException();
         public int GetPrefixPartitionKey(string prefixPartitionKey) => throw new NotImplementedException();

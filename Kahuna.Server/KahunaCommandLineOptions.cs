@@ -298,6 +298,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-backfill-entries-per-round", Required = false, HelpText = "Maximum committed entries shipped to a stale follower per heartbeat interval", Default = 128)]
     public int RaftMaxBackfillEntriesPerRound { get; set; } = 128;
 
+    [Option("raft-follower-saturation-backoff", Required = false, HelpText = "How long a leader stops sending backfill batches to a peer after that peer reports its WAL queue saturated, in milliseconds", Default = 1000)]
+    public int RaftFollowerSaturationBackoff { get; set; } = 1000;
+
     [Option("raft-learner-promotion-lag", Required = false, HelpText = "Maximum entries a learner may trail the leader and still be eligible for promotion", Default = 10)]
     public int RaftLearnerPromotionLag { get; set; } = 10;
 

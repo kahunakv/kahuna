@@ -607,6 +607,7 @@ public sealed class TestMembership : BaseCluster
         public double GetPartitionLogOpsPerSecond(int partitionId) => 0;
         public int GetPartitionWalQueueDepth(int partitionId) => 0;
         public double GetPartitionCommitWaitMs(int partitionId) => 0;
+        public long GetCommitIndex(int partitionId) => 0;
     }
 
     private sealed class CaptureLogger : ILogger<IRaft>
@@ -708,6 +709,7 @@ public sealed class TestMembership : BaseCluster
         public double GetPartitionLogOpsPerSecond(int partitionId) => 0;
         public int GetPartitionWalQueueDepth(int partitionId) => 0;
         public double GetPartitionCommitWaitMs(int partitionId) => 0;
+        public long GetCommitIndex(int partitionId) => 0;
     }
 
     private sealed class StubKahunaForE5 : IKahuna

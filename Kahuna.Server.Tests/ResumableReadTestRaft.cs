@@ -126,6 +126,7 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public double GetPartitionLogOpsPerSecond(int partitionId) => inner.GetPartitionLogOpsPerSecond(partitionId);
     public int GetPartitionWalQueueDepth(int partitionId) => inner.GetPartitionWalQueueDepth(partitionId);
     public double GetPartitionCommitWaitMs(int partitionId) => inner.GetPartitionCommitWaitMs(partitionId);
+    public long GetCommitIndex(int partitionId) => inner.GetCommitIndex(partitionId);
     public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => inner.GetPartitionMap();
     public int GetPartitionKey(string partitionKey) => inner.GetPartitionKey(partitionKey);
     public int GetPrefixPartitionKey(string prefixPartitionKey) => inner.GetPrefixPartitionKey(prefixPartitionKey);

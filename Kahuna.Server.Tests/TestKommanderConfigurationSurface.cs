@@ -52,6 +52,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.GrpcScheme)] = nameof(KahunaCommandLineOptions.RaftGrpcScheme),
         [nameof(RaftConfiguration.BackfillThreshold)] = nameof(KahunaCommandLineOptions.RaftBackfillThreshold),
         [nameof(RaftConfiguration.MaxBackfillEntriesPerRound)] = nameof(KahunaCommandLineOptions.RaftMaxBackfillEntriesPerRound),
+        [nameof(RaftConfiguration.FollowerSaturationBackoff)] = nameof(KahunaCommandLineOptions.RaftFollowerSaturationBackoff),
         [nameof(RaftConfiguration.LearnerPromotionLag)] = nameof(KahunaCommandLineOptions.RaftLearnerPromotionLag),
         [nameof(RaftConfiguration.LearnerPromotionStableWindow)] = nameof(KahunaCommandLineOptions.RaftLearnerPromotionStableWindow),
         [nameof(RaftConfiguration.GossipInterval)] = nameof(KahunaCommandLineOptions.RaftGossipInterval),

@@ -1254,5 +1254,6 @@ public sealed class TestBackupService : IDisposable
         public double GetPartitionLogOpsPerSecond(int partitionId) => 0;
         public int GetPartitionWalQueueDepth(int partitionId) => 0;
         public double GetPartitionCommitWaitMs(int partitionId) => 0;
+        public long GetCommitIndex(int partitionId) => 0;
     }
 }

@@ -299,6 +299,8 @@ public sealed class TestClusterReadiness : IDisposable
 
         public double GetPartitionCommitWaitMs(int partitionId) => throw new NotImplementedException();
 
+        public long GetCommitIndex(int partitionId) => throw new NotImplementedException();
+
         public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => throw new NotImplementedException();
 
         public int GetPartitionKey(string partitionKey) => throw new NotImplementedException();
