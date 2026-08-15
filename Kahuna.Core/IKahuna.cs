@@ -106,6 +106,17 @@ public interface IKahuna
     /// partition leader. Returns the serialized record, or null when no record exists locally.</summary>
     public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken);
 
+    /// <summary>Replicates one checksummed page of key-values moved by a range split/merge onto
+    /// <paramref name="partitionId"/>'s Raft log, routed here because this node is that partition's leader.
+    /// The page bytes are a serialized range-snapshot page frame. Returns whether the page committed.</summary>
+    public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken);
+
+    /// <summary>Answers the transaction state a moving key range carries — completion receipts plus the
+    /// serialized canonical transaction records and prepared intents in <c>[startKey, endKey)</c> — routed
+    /// here because this node leads the source partition. Ok is false when leadership could not be
+    /// confirmed (the caller re-routes), never "no state".</summary>
+    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken);
+
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability);
 
     /// <summary>Probes many locally owned keys for concurrent write intents, one result per requested key.</summary>

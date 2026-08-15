@@ -101,6 +101,12 @@ internal sealed class LockManager
     /// <summary>Per-partition application-durability floor tracker, shared node-wide.</summary>
     private readonly PartitionDurabilityTracker? durabilityTracker;
 
+    /// <summary>Retained lock-actor shard lists (also addressed through the routers), so
+    /// partition-scoped maintenance can broadcast to every shard.</summary>
+    private readonly List<IActorRef<LockActor, LockRequest, LockResponse>> ephemeralLockInstances = [];
+
+    private readonly List<IActorRef<LockActor, LockRequest, LockResponse>> persistentLockInstances = [];
+
     public LockManager(
         ActorSystem actorSystem,
         IRaft raft,
@@ -140,6 +146,26 @@ internal sealed class LockManager
     }
 
     /// <summary>
+    /// Broadcasts a partition eviction to every lock actor shard (ephemeral and persistent) after
+    /// this node stopped being one of the partition's replicas, so no shard retains a resident
+    /// lease for it. Completes when every shard has processed the eviction.
+    /// </summary>
+    internal async Task EvictUnhostedPartitionLocksAsync(int partitionId)
+    {
+        LockRequest request = new(LockRequestType.EvictPartition, string.Empty, null, 0, LockDurability.Persistent, 0, partitionId, null);
+
+        List<Task<LockResponse?>> tasks = new(ephemeralLockInstances.Count + persistentLockInstances.Count);
+
+        foreach (IActorRef<LockActor, LockRequest, LockResponse> actor in ephemeralLockInstances)
+            tasks.Add(actor.Ask(request)!);
+
+        foreach (IActorRef<LockActor, LockRequest, LockResponse> actor in persistentLockInstances)
+            tasks.Add(actor.Ask(request)!);
+
+        await Task.WhenAll(tasks);
+    }
+
+    /// <summary>
     /// Creates the ephemeral locks router
     /// </summary>
     /// <param name="backgroundWriter"></param>
@@ -151,10 +177,8 @@ internal sealed class LockManager
         KahunaConfiguration configuration
     )
     {
-        List<IActorRef<LockActor, LockRequest, LockResponse>> ephemeralInstances = new(configuration.LocksWorkers);
-
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            ephemeralInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
+            ephemeralLockInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "ephemeral-lock-" + i,
                 backgroundWriter,
                 proposalRouter,
@@ -165,7 +189,7 @@ internal sealed class LockManager
                 logger
             ));
 
-        return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
+        return actorSystem.CreateConsistentHashRouter(ephemeralLockInstances);
     }
 
     /// <summary>
@@ -180,10 +204,8 @@ internal sealed class LockManager
         KahunaConfiguration configuration
     )
     {
-        List<IActorRef<LockActor, LockRequest, LockResponse>> persistentInstances = new(configuration.LocksWorkers);
-
         for (int i = 0; i < configuration.LocksWorkers; i++)
-            persistentInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
+            persistentLockInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "persistent-lock-" + i,
                 backgroundWriter,
                 proposalRouter,
@@ -193,8 +215,8 @@ internal sealed class LockManager
                 configuration,
                 logger
             ));
-        
-        return actorSystem.CreateConsistentHashRouter(persistentInstances);
+
+        return actorSystem.CreateConsistentHashRouter(persistentLockInstances);
     }
 
     private IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> GetProposalRouter(
@@ -330,7 +352,7 @@ internal sealed class LockManager
         // lock projection behind the committed log) or already deposed. Answering from that state
         // is how a released lock resurfaces as Busy. A non-leader must refuse retryably so the
         // caller re-resolves and lands on the published, fully caught-up leader.
-        if (!await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             return (LockResponseType.MustRetry, 0);
 
         LockRequest request = new(
@@ -379,7 +401,7 @@ internal sealed class LockManager
         int partitionId = dataPartitionRouter.Locate(resource);
 
         // See TryLock: forwarded requests must not be answered from a non-leader's stale state.
-        if (!await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             return (LockResponseType.MustRetry, 0);
 
         LockRequest request = new(
@@ -427,7 +449,7 @@ internal sealed class LockManager
         int partitionId = dataPartitionRouter.Locate(resource);
 
         // See TryLock: forwarded requests must not be answered from a non-leader's stale state.
-        if (!await raft.AmILeader(partitionId, CancellationToken.None))
+        if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             return LockResponseType.MustRetry;
 
         LockRequest request = new(
@@ -475,7 +497,7 @@ internal sealed class LockManager
 
         // Reads mirror the locator's quorum-confirmed gate (read-index): a forwarded Get answered
         // by a minority-partitioned or mid-promotion node would report a stale holder/token.
-        if (!await raft.ConfirmLeadershipAsync(partitionId, CancellationToken.None))
+        if (!await raft.ConfirmLeadershipIfHosted(partitionId, CancellationToken.None))
             return (LockResponseType.MustRetry, null);
 
         LockRequest request = new(

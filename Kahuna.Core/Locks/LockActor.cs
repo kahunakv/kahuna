@@ -133,6 +133,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
                 LockRequestType.CompleteProposal => CompleteProposal(message),
                 LockRequestType.ReleaseProposal => ReleaseProposal(message),
                 LockRequestType.InvalidateOrApply => InvalidateOrApply(message),
+                LockRequestType.EvictPartition => EvictPartition(message),
                 _ => LockStaticResponses.ErroredResponse
             };
         }
@@ -594,10 +595,38 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     }
     
     /// <summary>
+    /// Removes every resident lock entry owned by the partition carried in the request, after the
+    /// committed placement map stopped listing this node as one of its replicas. The persistent
+    /// lock rows are purged from the backend separately; this drops the actor-resident copies —
+    /// ephemeral locks included — so a later re-gain of the partition can never answer from a
+    /// stale resident lease (whose fencing token could sit below the freshly re-seeded backend
+    /// row, regressing the fencing contract). Lock resources route purely by key-space hash, so
+    /// the classification is the same hash the locator applies.
+    /// </summary>
+    private LockResponse EvictPartition(LockRequest message)
+    {
+        List<string>? toEvict = null;
+
+        foreach (string resource in locks.Keys)
+        {
+            if (dataPartitionRouter.Locate(resource) == message.PartitionId)
+                (toEvict ??= []).Add(resource);
+        }
+
+        if (toEvict is not null)
+        {
+            foreach (string resource in toEvict)
+                locks.Remove(resource);
+        }
+
+        return new(LockResponseType.Unlocked, toEvict?.Count ?? 0);
+    }
+
+    /// <summary>
     /// Releases a failed lock proposal by removing the replication intent from the lock entry and the proposal list.
     /// </summary>
     /// <param name="message"></param>
-    /// <returns></returns>    
+    /// <returns></returns>
     private LockResponse ReleaseProposal(LockRequest message)
     {
         if (!locks.TryGetValue(message.Resource, out LockEntry? entry))

@@ -906,4 +906,155 @@ public class TestPersistenceBackends
         Assert.True(sawBacklog);
         Assert.True(passes > 1);
     }
+
+    // ─── ScanKeyValues / ScanLocks (whole-family paged scans) ────────────────────
+
+    private static IPersistenceBackend CreateBackend(string kind) => kind switch
+    {
+        "memory" => new MemoryPersistenceBackend(),
+        "sqlite" => new SqlitePersistenceBackend(SqliteTempPath(), "v1"),
+        "rocksdb" => new RocksDbPersistenceBackend(RocksDbTempPath(), "v1"),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
+
+    private static PersistenceRequestItem MakeLockItem(string resource, long fencingToken) =>
+        new(resource,
+            System.Text.Encoding.UTF8.GetBytes("owner" + fencingToken),
+            revision: fencingToken,
+            expiresNode: 0, expiresPhysical: 1000, expiresCounter: 0,
+            lastUsedNode: 0, lastUsedPhysical: 0, lastUsedCounter: 0,
+            lastModifiedNode: 0, lastModifiedPhysical: fencingToken, lastModifiedCounter: 0,
+            state: (int)Locks.Data.LockState.Locked);
+
+    private static List<(string Key, ReadOnlyKeyValueEntry Entry)> DrainKeyValueScan(IPersistenceBackend backend, int limit)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> all = [];
+        string? cursor = null;
+        int pages = 0;
+
+        while (true)
+        {
+            KeyValueScanPage page = backend.ScanKeyValues(cursor, limit);
+            all.AddRange(page.Items);
+            Assert.True(page.Items.Count <= limit);
+            if (page.NextCursor is null)
+                return all;
+            cursor = page.NextCursor;
+            Assert.True(++pages < 10_000, "scan did not converge");
+        }
+    }
+
+    private static List<(string Resource, Locks.Data.LockEntry Entry)> DrainLockScan(IPersistenceBackend backend, int limit)
+    {
+        List<(string, Locks.Data.LockEntry)> all = [];
+        string? cursor = null;
+        int pages = 0;
+
+        while (true)
+        {
+            LockScanPage page = backend.ScanLocks(cursor, limit);
+            all.AddRange(page.Items);
+            Assert.True(page.Items.Count <= limit);
+            if (page.NextCursor is null)
+                return all;
+            cursor = page.NextCursor;
+            Assert.True(++pages < 10_000, "scan did not converge");
+        }
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("sqlite")]
+    [InlineData("rocksdb")]
+    public void TestScanKeyValuesCoversEveryKeyExactlyOnce(string kind)
+    {
+        IPersistenceBackend backend = CreateBackend(kind);
+        try
+        {
+            // Many key spaces (spreads across SQLite shards), plus a second write of every third
+            // key at a higher revision — the scan must return each key once, at its latest
+            // revision, never surfacing revision-history rows as extra keys.
+            HashSet<string> expected = [];
+            for (int space = 0; space < 8; space++)
+            {
+                List<PersistenceRequestItem> items = MakeItems($"space{space}", 5);
+                Assert.True(backend.StoreKeyValues(items));
+                foreach (PersistenceRequestItem item in items)
+                    expected.Add(item.Key);
+            }
+
+            List<PersistenceRequestItem> rewrites = [];
+            foreach (string key in expected.Where(static (_, i) => i % 3 == 0))
+                rewrites.Add(MakeItem(key, revision: 90, lastModifiedPhysical: 90));
+            Assert.True(backend.StoreKeyValues(rewrites));
+
+            List<(string Key, ReadOnlyKeyValueEntry Entry)> scanned = DrainKeyValueScan(backend, limit: 7);
+
+            Assert.Equal(expected.Count, scanned.Count);
+            Assert.Equal(expected, scanned.Select(static s => s.Key).ToHashSet());
+
+            HashSet<string> rewritten = rewrites.Select(static r => r.Key).ToHashSet();
+            foreach ((string key, ReadOnlyKeyValueEntry entry) in scanned)
+                Assert.Equal(rewritten.Contains(key) ? 90 : long.Parse(key[^4..]), entry.Revision);
+        }
+        finally
+        {
+            (backend as IDisposable)?.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("sqlite")]
+    [InlineData("rocksdb")]
+    public void TestScanLocksCoversEveryResourceExactlyOnce(string kind)
+    {
+        IPersistenceBackend backend = CreateBackend(kind);
+        try
+        {
+            HashSet<string> expected = [];
+            List<PersistenceRequestItem> items = [];
+            for (int space = 0; space < 5; space++)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    string resource = $"lockspace{space}/res{i}";
+                    items.Add(MakeLockItem(resource, fencingToken: 1));
+                    expected.Add(resource);
+                }
+            }
+            Assert.True(backend.StoreLocks(items));
+
+            // Re-acquisitions at a higher fencing token must not duplicate the resource.
+            Assert.True(backend.StoreLocks([MakeLockItem("lockspace0/res0", 7), MakeLockItem("lockspace4/res2", 7)]));
+
+            List<(string Resource, Locks.Data.LockEntry Entry)> scanned = DrainLockScan(backend, limit: 4);
+
+            Assert.Equal(expected.Count, scanned.Count);
+            Assert.Equal(expected, scanned.Select(static s => s.Resource).ToHashSet());
+            Assert.Equal(7, scanned.Single(static s => s.Resource == "lockspace0/res0").Entry.FencingToken);
+        }
+        finally
+        {
+            (backend as IDisposable)?.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("sqlite")]
+    [InlineData("rocksdb")]
+    public void TestScanOnEmptyBackendTerminatesWithNothing(string kind)
+    {
+        IPersistenceBackend backend = CreateBackend(kind);
+        try
+        {
+            Assert.Empty(DrainKeyValueScan(backend, limit: 10));
+            Assert.Empty(DrainLockScan(backend, limit: 10));
+        }
+        finally
+        {
+            (backend as IDisposable)?.Dispose();
+        }
+    }
 }

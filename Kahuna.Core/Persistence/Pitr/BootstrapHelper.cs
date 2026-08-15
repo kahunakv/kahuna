@@ -71,6 +71,11 @@ internal static class BootstrapHelper
         DateTime nowUtc,
         TimeSpan baseSnapshotInterval = default)
     {
+        // A chain that covers only part of the cluster (captured by a node hosting a subset of the
+        // partitions under replica placement) must not seed a node at all — the missing partitions'
+        // absence would be indistinguishable from data loss. Fail closed before touching anything.
+        BackupChainCoverage.ValidatePartitionCoverage(chain);
+
         // Validate the target against the chain's exact recoverable coverage BEFORE touching the
         // backend or WAL — a target below the base cut or above captured coverage (or a chain with an
         // unknown lower bound) fails closed here, so we never seed WAL checkpoints for a state that

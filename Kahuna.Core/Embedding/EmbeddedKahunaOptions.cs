@@ -560,4 +560,56 @@ public sealed class EmbeddedKahunaOptions
     /// Weight applied to WAL queue depth in the balancer's load score.
     /// </summary>
     public double LeaderBalancerQueueWeight { get; set; } = 0.5;
+
+    // ── Replica-placement knobs ──────────────────────────────────────────────
+    // Per-partition replica placement (replication factor). Off by default: RF = 0 keeps
+    // legacy full replication, where every roster voter hosts every range.
+
+    /// <summary>
+    /// Desired number of voter replicas per partition range. 0 (the default) means full
+    /// replication: every roster voter hosts every range. When &gt; 0, each range gets a replica
+    /// set of this size and quorum is computed per range over its voter replicas only. Prefer
+    /// odd values.
+    /// </summary>
+    public int ReplicationFactor { get; set; }
+
+    /// <summary>
+    /// Master switch for the continual replica-placement rebalancer on the P0 leader. When
+    /// false (the default) no rebalancing moves are planned; in-flight replica transitions are
+    /// still driven to completion. Initial placement at <see cref="ReplicationFactor"/> is
+    /// applied regardless of this flag.
+    /// </summary>
+    public bool EnablePlacementRebalancer { get; set; }
+
+    /// <summary>
+    /// Maximum number of new replica moves (add or remove sequences) initiated per
+    /// placement-controller pass. Bounds the blast radius of a bad plan.
+    /// </summary>
+    public int MaxReplicaMovesPerPass { get; set; } = 2;
+
+    /// <summary>
+    /// Maximum number of ranges with an in-flight transitional replica (learner catching up or
+    /// removal awaiting final drop) at any time. Caps concurrent backfill/snapshot transfers so
+    /// rebalancing never starves client traffic.
+    /// </summary>
+    public int MaxConcurrentReplicaTransfers { get; set; } = 1;
+
+    /// <summary>
+    /// Minimum per-node replica-count imbalance above the even-spread ceiling before the
+    /// placement planner emits balancing moves. Under-replicated ranges bypass the deadband.
+    /// </summary>
+    public int ReplicaCountDeadband { get; set; } = 1;
+
+    /// <summary>
+    /// Optional locality hint (zone/rack) for the local node. When set, the placement planner
+    /// prefers spreading a range's replicas across distinct zones.
+    /// </summary>
+    public string? Zone { get; set; }
+
+    /// <summary>
+    /// Gossips per-partition load reports even when nothing else consumes them. Reports are
+    /// gossiped automatically whenever the leader balancer, the placement rebalancer, or a
+    /// replication factor is enabled; this flag only matters to opt in without any of those.
+    /// </summary>
+    public bool EnableLoadReports { get; set; }
 }

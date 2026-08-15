@@ -60,4 +60,50 @@ internal static class BackupChainCoverage
 
         return target;
     }
+
+    /// <summary>
+    /// Validates that the chain covers every data partition of the cluster it was captured from:
+    /// the union of the manifests' covered sets must reach the newest recorded cluster partition
+    /// set. Under per-partition replica placement a node captures only the partitions it hosts, so
+    /// a single node's chain can be a strict subset of the cluster — restoring it alone would
+    /// silently reconstruct a cluster missing the partitions hosted elsewhere. Chains with no
+    /// coverage records (written before coverage existed) pass: they could only be produced under
+    /// full replication, where one node's capture is the whole cluster by construction.
+    /// </summary>
+    /// <exception cref="BackupDriverException">
+    /// The chain does not cover every cluster partition (typed <c>RestrictedCoverage</c>); the
+    /// message names the missing partitions.
+    /// </exception>
+    internal static void ValidatePartitionCoverage(IReadOnlyList<BackupManifest> chain)
+    {
+        List<int>? clusterPartitions = null;
+        HashSet<int> covered = [];
+        bool anyRecorded = false;
+
+        foreach (BackupManifest m in chain)
+        {
+            // The newest recorded cluster set wins; within a chain the topology-generation link
+            // check keeps the partition layout constant anyway, so "newest" is a formality.
+            if (m.ClusterPartitions is not null)
+                clusterPartitions = m.ClusterPartitions;
+
+            if (m.CoveredPartitions is not null)
+            {
+                anyRecorded = true;
+                covered.UnionWith(m.CoveredPartitions);
+            }
+        }
+
+        if (!anyRecorded || clusterPartitions is null)
+            return;
+
+        List<int> missing = [.. clusterPartitions.Where(p => !covered.Contains(p)).Order()];
+        if (missing.Count > 0)
+            throw new BackupDriverException(
+                $"This backup chain does not cover the whole cluster: partition(s) {string.Join(", ", missing)} " +
+                "were hosted on other nodes when it was taken (per-partition replica placement was active), " +
+                "so restoring it would silently reconstruct a cluster missing their data. Restore a chain " +
+                "that covers every partition, or combine per-node backups once composed restores are supported.")
+                { RestrictedCoverage = true };
+    }
 }

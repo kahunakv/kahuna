@@ -3,6 +3,8 @@ syntax = "proto3";
 service Cluster {
   rpc GetMembership (GrpcGetMembershipRequest) returns (GrpcGetMembershipResponse);
   rpc Leave (GrpcClusterLeaveRequest) returns (GrpcClusterLeaveResponse);
+  rpc GetPlacement (GrpcGetPlacementRequest) returns (GrpcGetPlacementResponse);
+  rpc SetReplicationFactor (GrpcSetReplicationFactorRequest) returns (GrpcSetReplicationFactorResponse);
 }
 
 message GrpcGetMembershipRequest {
@@ -56,4 +58,60 @@ enum GrpcClusterMemberRole {
   CLUSTER_MEMBER_ROLE_VOTER = 1;
   CLUSTER_MEMBER_ROLE_LEAVING = 2;
   CLUSTER_MEMBER_ROLE_NOT_MEMBER = 3;
+}
+
+message GrpcGetPlacementRequest {
+}
+
+message GrpcGetPlacementResponse {
+  // Globally configured replication factor on the answering node. 0 = full replication.
+  int32 ReplicationFactor = 1;
+  bool RebalancerEnabled = 2;
+  bool Initialized = 3;
+  string LocalEndpoint = 4;
+  int32 HostedPartitionCount = 5;
+  repeated GrpcPartitionPlacement Partitions = 6;
+}
+
+message GrpcPartitionPlacement {
+  int32 PartitionId = 1;
+  // Lifecycle state name (Active, Draining, Removed, ...).
+  string State = 2;
+  int64 Generation = 3;
+  // Per-range override when set, else the global factor. 0 = full replication.
+  int32 EffectiveReplicationFactor = 4;
+  // Whether the answering node hosts (materializes) this partition locally.
+  bool HostedLocally = 5;
+  // Empty = legacy full replication (every roster voter hosts the range).
+  repeated GrpcPartitionReplica Replicas = 6;
+}
+
+message GrpcPartitionReplica {
+  string Endpoint = 1;
+  GrpcPartitionReplicaRole Role = 2;
+}
+
+enum GrpcPartitionReplicaRole {
+  PARTITION_REPLICA_ROLE_VOTER = 0;
+  PARTITION_REPLICA_ROLE_LEARNER = 1;
+  PARTITION_REPLICA_ROLE_REMOVING = 2;
+}
+
+message GrpcSetReplicationFactorRequest {
+  int32 PartitionId = 1;
+  // 0 clears the per-partition override (inherit the global factor).
+  int32 ReplicationFactor = 2;
+}
+
+message GrpcSetReplicationFactorResponse {
+  // True when the override was committed. The change adjusts the placement target only;
+  // the rebalancer moves replicas toward it on later passes.
+  bool Success = 1;
+  // Commit outcome name (Success, or the refusing status).
+  string Status = 2;
+  // Committed range generation after the change; 0 when refused.
+  int64 Generation = 3;
+  // Why the override was refused; empty on success. A follower refuses: retry against the
+  // meta-partition leader.
+  string Reason = 4;
 }

@@ -332,7 +332,9 @@ public abstract class BaseCluster
         IEnumerable<string> peers,
         ILogger<IRaft> raftLogger,
         ILogger<IKahuna> kahunaLogger,
-        int initialPartitions = 3)
+        int initialPartitions = 3,
+        int replicationFactor = 0,
+        bool enablePlacementRebalancer = false)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         ActorSystem actorSystem = new(logger: raftLogger);
@@ -349,6 +351,13 @@ public abstract class BaseCluster
             Host = "localhost",
             Port = port,
             InitialPartitions = initialPartitions,
+            // 0 = legacy full replication (the default for every existing fixture); > 0 assigns each
+            // data partition a replica set of this size at bootstrap, so most nodes do not host most
+            // partitions — the placement-forwarding fixtures rely on that.
+            ReplicationFactor = replicationFactor,
+            // Off by default so existing fixtures keep their static bootstrap placement; the placed
+            // operation suites turn it on to run the same code paths a production RF cluster would.
+            EnablePlacementRebalancer = enablePlacementRebalancer,
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
@@ -394,6 +403,71 @@ public abstract class BaseCluster
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
         return (raft, kahuna);
+    }
+
+    /// <summary>
+    /// Assembles an N-node cluster in one call: builds the nodes, wires the in-memory transports,
+    /// joins them, and waits until every partition (meta included) has an elected leader somewhere.
+    /// With <paramref name="replicationFactor"/> &gt; 0 it additionally waits until every node's
+    /// applied map lists a full replica set for every data partition, so callers observe a settled
+    /// placement rather than the bootstrap race.
+    /// </summary>
+    protected static async Task<(IRaft[] Rafts, IKahuna[] Kahunas)> AssembleCluster(
+        int nodeCount,
+        string walStorage,
+        int partitions,
+        ILogger<IRaft> raftLogger,
+        ILogger<IKahuna> kahunaLogger,
+        int replicationFactor = 0,
+        bool enablePlacementRebalancer = false)
+    {
+        InMemoryCommunication raftComm = new();
+        MemoryInterNodeCommmunication interComm = new();
+
+        string[] endpoints = [.. Enumerable.Range(1, nodeCount).Select(i => $"localhost:{8000 + i}")];
+
+        IRaft[] rafts = new IRaft[nodeCount];
+        IKahuna[] kahunas = new IKahuna[nodeCount];
+
+        for (int i = 0; i < nodeCount; i++)
+        {
+            string self = endpoints[i];
+            (rafts[i], kahunas[i]) = BuildNode(
+                interComm, raftComm, walStorage, i + 1, 8000 + i + 1,
+                endpoints.Where(e => e != self), raftLogger, kahunaLogger,
+                partitions, replicationFactor, enablePlacementRebalancer);
+        }
+
+        interComm.SetNodes(endpoints.Zip(kahunas).ToDictionary(p => p.First, p => p.Second));
+        raftComm.SetNodes(endpoints.Zip(rafts).ToDictionary(p => p.First, p => p.Second));
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await Task.WhenAll(rafts.Select(r => r.JoinCluster(ct)));
+
+        for (int partitionId = 0; partitionId <= partitions; partitionId++)
+        {
+            int probed = partitionId;
+            await WaitUntilAsync(async () =>
+            {
+                foreach (IRaft raft in rafts)
+                    if (await raft.AmILeaderIfHosted(probed, ct))
+                        return true;
+                return false;
+            }, timeoutMs: 60_000);
+        }
+
+        if (replicationFactor > 0)
+        {
+            foreach (IRaft raft in rafts)
+                for (int partitionId = 1; partitionId <= partitions; partitionId++)
+                {
+                    IRaft probedRaft = raft;
+                    int probed = partitionId;
+                    await WaitUntilAsync(() => probedRaft.GetPartitionReplicas(probed).Count >= replicationFactor);
+                }
+        }
+
+        return (rafts, kahunas);
     }
 
     /// <summary>

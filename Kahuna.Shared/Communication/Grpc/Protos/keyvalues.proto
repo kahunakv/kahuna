@@ -1104,6 +1104,8 @@ message GrpcBatchServerKeyValueRequest {
     GrpcDurableOperationRequest DurableOperation = 49;
     GrpcLookupTransactionRecordRequest LookupTransactionRecord = 50;
     GrpcTryCheckManyWriteIntentsRequest TryCheckManyWriteIntents = 51;
+    GrpcReplicateKeyValueRangePageRequest ReplicateKeyValueRangePage = 52;
+    GrpcGetRangeTransactionStateRequest GetRangeTransactionState = 53;
   }
 }
 
@@ -1160,6 +1162,8 @@ message GrpcBatchServerKeyValueResponse
     GrpcDurableOperationResponse DurableOperation = 48;
     GrpcLookupTransactionRecordResponse LookupTransactionRecord = 49;
     GrpcTryCheckManyWriteIntentsResponse TryCheckManyWriteIntents = 50;
+    GrpcReplicateKeyValueRangePageResponse ReplicateKeyValueRangePage = 51;
+    GrpcGetRangeTransactionStateResponse GetRangeTransactionState = 52;
   }
 }
 
@@ -1240,6 +1244,39 @@ message GrpcImportCompletionReceiptsRequest {
 
 message GrpcImportCompletionReceiptsResponse {
   bool Success = 1;
+}
+
+// One bounded, checksummed page of key-values being moved by a range split/merge, forwarded to the
+// destination partition's leader so it replicates the page's entries onto that partition's Raft log —
+// every replica of the destination applies them, and a leader change mid-copy loses nothing. The page
+// bytes are a serialized RangeSnapshotPage (the same checksummed frame the range transfer uses).
+message GrpcReplicateKeyValueRangePageRequest {
+  int32 PartitionId = 1;
+  bytes Page = 2;
+}
+
+message GrpcReplicateKeyValueRangePageResponse {
+  bool Success = 1;
+}
+
+// Reads the transaction state a moving key range carries — completion receipts, canonical transaction
+// records and prepared intents whose key/anchor falls in [StartKey, EndKey) — from the node that leads
+// the source partition, whose stores are authoritative. Used by split/merge to gather the handoff set
+// when the driving node is not a replica of the source range. Absent bounds mean -inf / +inf.
+message GrpcGetRangeTransactionStateRequest {
+  optional string StartKey = 1;
+  optional string EndKey = 2;
+  // The source partition whose confirmed leader must answer: a follower's stores can lag the
+  // newest prepared intent, and a handoff missing an intent strands its transaction after cutover.
+  int32 PartitionId = 3;
+}
+
+message GrpcGetRangeTransactionStateResponse {
+  bool Success = 1;
+  repeated GrpcCompletionReceiptEntry Receipts = 2;
+  // Serialized TransactionRecordSnapshotMessage / PreparedIntentSnapshotMessage blobs, empty when none.
+  bytes TransactionRecords = 3;
+  bytes PreparedIntents = 4;
 }
 
 // A batch of coordinator decision records serialized as one CoordinatorDecisionSnapshotMessage blob.
@@ -1351,6 +1388,8 @@ enum GrpcServerBatchType {
   SERVER_DURABLE_OPERATION = 47;
   SERVER_LOOKUP_TRANSACTION_RECORD = 48;
   SERVER_TRY_CHECK_MANY_WRITE_INTENTS = 49;
+  SERVER_REPLICATE_KEY_VALUE_RANGE_PAGE = 50;
+  SERVER_GET_RANGE_TRANSACTION_STATE = 51;
 }
 
 enum GrpcRangeLockMode {

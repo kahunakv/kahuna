@@ -9,6 +9,12 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "KeyValueActor Message: {Actor} {Type} Key={Key} {Value} Expires={ExpiresMs} Flags={Flags} Revision={Revision} TxId={TransactionId} {Durability}")]
     public static partial void LogKeyValueActorEnter(this ILogger<IKahuna> logger, string actor, KeyValueRequestType type, string key, int? value, int expiresMs, KeyValueFlags flags, long revision, HLCTimestamp transactionId, KeyValueDurability durability);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Exported whole-partition state of partition #{PartitionId} at index {UpToIndex} ({Bytes} bytes)")]
+    public static partial void LogExportedPartitionState(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Imported whole-partition state of partition #{PartitionId}: {KeyValues} key-values, {Locks} locks, {Records} records, {Intents} intents")]
+    public static partial void LogImportedPartitionState(this ILogger<IKahuna> logger, int partitionId, int keyValues, int locks, int records, int intents);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Revision={Revision} Time={Elapsed}ms")]
     public static partial void LogKeyValueActorTook(this ILogger<IKahuna> logger, string actor, KeyValueRequestType type, string key, KeyValueResponseType? response, long? revision, long elapsed);
 
@@ -274,4 +280,13 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Trying to release exclusive lock for {Key} but MVCC entries are null")]
     public static partial void LogReleaseExclusiveLockMvccNull(this ILogger<IKahuna> logger, string key);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Partition placement: replication factor {ReplicationFactor} ({Mode}), rebalancer {RebalancerState}, hosting {HostedCount} of {TotalCount} partitions")]
+    public static partial void LogPlacementStartupBanner(this ILogger<IKahuna> logger, int replicationFactor, string mode, string rebalancerState, int hostedCount, int totalCount);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Started hosting {Count} partition(s): {PartitionIds}")]
+    public static partial void LogHostedPartitionsGained(this ILogger<IKahuna> logger, int count, string partitionIds);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Stopped hosting {Count} partition(s): {PartitionIds}")]
+    public static partial void LogHostedPartitionsLost(this ILogger<IKahuna> logger, int count, string partitionIds);
 }

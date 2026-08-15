@@ -1077,6 +1077,27 @@ public class KahunaClient
         communication.GetClusterMembership(GetRoundRobinUrl(), cancellationToken);
 
     /// <summary>
+    /// Returns the per-partition replica placement table: replica endpoints and roles, effective
+    /// replication factor, and which partitions the answering node hosts locally. The map is
+    /// committed cluster-wide; only the answering node's local perspective (hosted flags) varies.
+    /// </summary>
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaClusterPlacementResponse> GetClusterPlacement(string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.GetClusterPlacement(string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, cancellationToken);
+
+    /// <summary>
+    /// Commits a per-partition replication-factor override (0 clears it, inheriting the global
+    /// configuration). The change adjusts the placement target only — the rebalancer moves
+    /// replicas toward it on later passes. Leader-only: a follower's refusal is carried in the
+    /// response (<c>Success = false</c> with the reason), so try another node when refused.
+    /// </summary>
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaSetReplicationFactorResponse> SetReplicationFactor(
+        int partitionId, int replicationFactor, string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.SetReplicationFactor(
+            string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, partitionId, replicationFactor, cancellationToken);
+
+    /// <summary>
     /// Decommissions a node: asks it to commit its own removal from the cluster roster, so the
     /// cluster shrinks by consensus instead of waiting out failure detection. The node keeps serving
     /// until it is stopped — stopping it is the caller's next step, and only after the response says

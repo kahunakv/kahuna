@@ -137,7 +137,7 @@ internal sealed class RangeSplitTrigger : IDisposable
         // shares P0, so CreatePartitionAsync (system-leader) and the descriptor cutover (meta-leader)
         // require the same node — no P0+P1 colocation to coordinate. The periodic caller skips
         // gracefully when this node is not the P0 leader.
-        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+        if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct))
         {
             // Clear all trigger-local state symmetrically with LoadCheckAsync, so a re-promotion
             // starts clean. In count-only mode (loadThreshold == 0) the load checker may never run,
@@ -227,7 +227,7 @@ internal sealed class RangeSplitTrigger : IDisposable
         if (loadThreshold <= 0)
             return 0;
 
-        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, ct))
+        if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct))
         {
             // Lost meta-leadership — reset all debounce and cooldown state so a future promotion
             // starts clean and doesn't inherit timestamps from the previous leadership tenure.

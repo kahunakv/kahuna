@@ -255,9 +255,20 @@ internal sealed class TransactionCoordinator : IDisposable
         if (string.IsNullOrEmpty(handle.RecordAnchorKey))
             return (false, KeyValueResponseType.Errored);
 
-        TransactionRecord? record = await manager
-            .LookupDurableRecordRouted(handle.TransactionId, DurableFinalizeEpoch, handle.RecordAnchorKey, CancellationToken.None)
-            .ConfigureAwait(false);
+        TransactionRecord? record;
+        try
+        {
+            record = await manager
+                .LookupDurableRecordRouted(handle.TransactionId, DurableFinalizeEpoch, handle.RecordAnchorKey, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            // The anchor leader cannot be resolved from here right now, so the outcome cannot be
+            // proven either way — answer the retryable unknown rather than a terminal Errored.
+            return (true, KeyValueResponseType.MustRetry);
+        }
+
         if (record is null)
             return (false, KeyValueResponseType.Errored);
 
@@ -278,6 +289,13 @@ internal sealed class TransactionCoordinator : IDisposable
     /// </summary>
     public async Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle)
     {
+        // The commit may have reached this coordinator via placement forwarding, but everything it
+        // does from here — staged-base validation reads, durable prepare legs, the decision
+        // proposal, settlement — is new work this node initiates against other partitions' leaders.
+        // Lift the forwarded-request loop guard so that fan-out routes; without this a forwarded
+        // commit wedges on MustRetry because none of its sub-operations may leave the node.
+        using ForwardedRequestScope.SuppressScope _ = ForwardedRequestScope.Suppress();
+
         HLCTimestamp transactionId = handle.TransactionId;
 
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
@@ -442,6 +460,11 @@ internal sealed class TransactionCoordinator : IDisposable
     /// </summary>
     public async Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle)
     {
+        // Same as CommitTransaction: a forwarded rollback's compensating work (mutation rollbacks,
+        // lock releases on participant leaders) is new fan-out this node initiates, not a re-forward
+        // of the rollback itself — lift the loop guard so it can route.
+        using ForwardedRequestScope.SuppressScope _ = ForwardedRequestScope.Suppress();
+
         HLCTimestamp transactionId = handle.TransactionId;
 
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
@@ -1978,8 +2001,18 @@ internal sealed class TransactionCoordinator : IDisposable
                     if (holder.TransactionId == input.TransactionId && holder.Epoch == input.Epoch)
                         continue;
 
-                    TransactionRecord? holderRecord = await manager.LookupDurableRecordRouted(
-                        holder.TransactionId, holder.Epoch, holder.RecordAnchorKey, cancellationToken);
+                    TransactionRecord? holderRecord;
+                    try
+                    {
+                        holderRecord = await manager.LookupDurableRecordRouted(
+                            holder.TransactionId, holder.Epoch, holder.RecordAnchorKey, cancellationToken);
+                    }
+                    catch (PartitionNotHostedException)
+                    {
+                        // The holder's decision cannot be consulted right now: a retryable unknown,
+                        // never a silent fallback to the intent's possibly-stale local resolution.
+                        return StagedBaseValidation.Unknown;
+                    }
 
                     // The routed record is authoritative; a missing record (already purged after settlement)
                     // falls back to the resolution stamped on the intent itself.

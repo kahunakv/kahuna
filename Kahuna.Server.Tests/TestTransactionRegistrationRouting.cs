@@ -2488,12 +2488,14 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
     /// <summary>
     /// The inbound handler must re-check local leadership before folding. When the node is not
-    /// the coordinator-partition leader, <c>CompleteOperationInbound</c> returns <c>MustRetry</c>
-    /// without touching the coordinator — preventing a false acknowledgement from a demoted node.
-    /// When the node is the leader the call folds and returns <c>Set</c>.
+    /// the coordinator-partition leader, <c>CompleteOperationInbound</c> redirects the completion
+    /// once to the leader it resolves locally and returns that leader's answer — never a false
+    /// acknowledgement from its own (demoted) state, and never a blind refusal a sender routing on
+    /// a replica guess would only retry against the same node. When the node is the leader the
+    /// call folds locally and returns <c>Set</c>.
     /// </summary>
     [Fact]
-    public async Task CompleteOperationInbound_WhenNotLeader_ReturnsMustRetry_WhenLeader_ReturnsSet()
+    public async Task CompleteOperationInbound_WhenNotLeader_RedirectsToLeader_WhenLeader_Folds()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Node[] nodes = await Assemble();
@@ -2536,29 +2538,17 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             if (followerNode is not null)
             {
-                // A pure follower rejects the inbound fold with MustRetry.
-                (KeyValueResponseType followerOutcome, string? followerAnchor) =
+                // A pure follower redirects to the coordinator leader and answers with the leader's
+                // fold — the acknowledgement is truthful because only the actual leader recorded it.
+                (KeyValueResponseType followerOutcome, _) =
                     await followerNode.Kahuna.CompleteOperationInbound(handle.CoordinatorKey, handle.TransactionId, op, payload);
-                Assert.Equal(KeyValueResponseType.MustRetry, followerOutcome);
-                Assert.Null(followerAnchor);
+                Assert.Equal(KeyValueResponseType.Set, followerOutcome);
 
-                // Operation must still be completable — no false fold happened.
-                // Locate the actual coordinator leader and fold there.
-                foreach (Node node in nodes)
-                {
-                    (KeyValueResponseType tryOutcome, _) =
-                        await node.Kahuna.CompleteOperationInbound(handle.CoordinatorKey, handle.TransactionId, op, payload);
-                    if (tryOutcome == KeyValueResponseType.Set)
-                    {
-                        // Confirm the working set recorded the effect.
-                        TransactionWorkingSet? ws =
-                            await node.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
-                        Assert.NotNull(ws);
-                        Assert.Contains(ws!.ModifiedKeys, m => m.Key == "inbound/k");
-                        return;
-                    }
-                }
-                Assert.Fail("No node accepted CompleteOperationInbound as leader");
+                // The effect landed on the coordinator's working set, exactly once, via the redirect.
+                TransactionWorkingSet? ws =
+                    await followerNode.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                Assert.NotNull(ws);
+                Assert.Contains(ws!.ModifiedKeys, m => m.Key == "inbound/k");
             }
             else
             {

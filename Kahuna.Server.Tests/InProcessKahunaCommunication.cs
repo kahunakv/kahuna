@@ -270,6 +270,12 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken) =>
         throw new NotImplementedException();
 
+    public Task<KahunaClusterPlacementResponse> GetClusterPlacement(string url, CancellationToken cancellationToken) =>
+        throw new NotImplementedException();
+
+    public Task<KahunaSetReplicationFactorResponse> SetReplicationFactor(string url, int partitionId, int replicationFactor, CancellationToken cancellationToken) =>
+        throw new NotImplementedException();
+
     public Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken) =>
         kahuna.TakeFullBackupAsync(cancellationToken);
 

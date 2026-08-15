@@ -153,6 +153,31 @@ if (IsSingleCommand(opts))
             return;
         }
 
+        if (opts.ClusterPlacement)
+        {
+            await ClusterPlacementCommand.Execute(connection, opts.Node, format);
+            return;
+        }
+
+        if (opts.SetReplicationFactor.HasValue)
+        {
+            if (opts.Partition is null or <= 0)
+            {
+                AnsiConsole.MarkupLine("[red]--set-replication-factor needs the target data partition: add --partition <id>.[/]");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            // The override is leader-only; when no node is named, try every connected endpoint.
+            string[] endpoints = !string.IsNullOrEmpty(opts.Node)
+                ? [opts.Node]
+                : (opts.ConnectionSource ?? "").Split(",", StringSplitOptions.RemoveEmptyEntries);
+
+            await SetReplicationFactorCommand.Execute(
+                connection, opts.Partition.Value, opts.SetReplicationFactor.Value, endpoints, format);
+            return;
+        }
+
         if (opts.BackupFull)
         {
             await BackupFullCommand.Execute(connection, format);

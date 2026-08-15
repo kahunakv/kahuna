@@ -240,6 +240,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly InvalidateOrApplyHandler invalidateOrApplyHandler;
 
     /// <summary>
+    /// Drops every resident entry owned by a partition this node stopped hosting, so stale
+    /// resident copies can never outlive the replica.
+    /// </summary>
+    private readonly EvictPartitionHandler evictPartitionHandler;
+
+    /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
     /// and diagnostics for the KeyValueActor.
@@ -348,6 +354,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         releaseProposalHandler = new(context);
         resumeReadHandler = new(context);
         invalidateOrApplyHandler = new(context);
+        evictPartitionHandler = new(context);
     }
 
     /// <summary>
@@ -431,6 +438,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
                 KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 KeyValueRequestType.FlushAck => FlushAckAndRecycle(message),
+                KeyValueRequestType.EvictPartition => evictPartitionHandler.Execute(message),
                 KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };

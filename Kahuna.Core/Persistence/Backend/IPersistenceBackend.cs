@@ -32,6 +32,16 @@ internal interface IPersistenceBackend
     /// </summary>
     public long GetDurabilityFloor(int partitionId) => -1;
 
+    /// <summary>
+    /// Removes a partition's persisted application-durability floor. Called when this node stops
+    /// being one of the partition's replicas: the floor vouches for applies whose local rows are
+    /// being purged, so if the partition is ever hosted here again the stale floor would either
+    /// pin WAL retention (stale-low) or — worse — suppress replay of entries the purged copy no
+    /// longer reflects (stale-high after a re-seed). The default keeps non-participating backends
+    /// at "no opinion".
+    /// </summary>
+    public bool RemoveDurabilityFloor(int partitionId) => true;
+
     public LockEntry? GetLock(string resource);
     
     public KeyValueEntry? GetKeyValue(string keyName);
@@ -67,6 +77,48 @@ internal interface IPersistenceBackend
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);
+
+    /// <summary>
+    /// Whole-family paged scan over every current key-value row, in bounded pages of at most
+    /// <paramref name="limit"/> entries. Pass null to start; pass the previous page's
+    /// <see cref="KeyValueScanPage.NextCursor"/> to resume — the cursor is opaque and
+    /// backend-owned (a sharded backend encodes its shard position in it), so callers must never
+    /// interpret or fabricate it. Iterate until the cursor is null; a short or empty page with a
+    /// non-null cursor only means the backend advanced internally.
+    /// <para>
+    /// The scan covers rows that are present for the scan's whole duration exactly once; rows
+    /// written or deleted concurrently may or may not appear. It reads the physical family only —
+    /// committed writes still queued in the background writer are not visible, so callers needing
+    /// completeness against the commit frontier must drain the writer first.
+    /// </para>
+    /// </summary>
+    public KeyValueScanPage ScanKeyValues(string? cursor, int limit) =>
+        throw new NotSupportedException("This persistence backend does not support whole-family scans.");
+
+    /// <summary>
+    /// Whole-family paged scan over every current lock row. Cursor and coverage semantics are
+    /// identical to <see cref="ScanKeyValues"/>.
+    /// </summary>
+    public LockScanPage ScanLocks(string? cursor, int limit) =>
+        throw new NotSupportedException("This persistence backend does not support whole-family scans.");
+
+    /// <summary>
+    /// Physically removes every row belonging to each key — the current row, all retained revision
+    /// history and any no-revision provenance — as opposed to writing a tombstone. This is the
+    /// whole-partition install/purge primitive (replica seeding replaces a partition's data;
+    /// un-hosting reclaims it); it must never be used on the request path, where deletes are
+    /// tombstone writes. Callers must ensure no writes for the affected keys are in flight
+    /// (a queued background-writer flush landing after the removal would resurrect rows).
+    /// </summary>
+    public bool DeleteKeyValues(IReadOnlyList<string> keys) =>
+        throw new NotSupportedException("This persistence backend does not support physical key removal.");
+
+    /// <summary>
+    /// Physically removes every row belonging to each lock resource. Same contract and caller
+    /// constraints as <see cref="DeleteKeyValues"/>.
+    /// </summary>
+    public bool DeleteLocks(IReadOnlyList<string> resources) =>
+        throw new NotSupportedException("This persistence backend does not support physical key removal.");
 
 /// <summary>
     /// Prunes persisted key/value revision history according to retention policy.

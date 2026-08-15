@@ -80,7 +80,6 @@ internal sealed class RangeSplitter
 
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
-    private readonly KvStateMachineTransfer transfer;
     private readonly RangeQuiesceStore quiesceStore;
     private readonly KeyValuesManager manager;
     private readonly ILogger<IKahuna> logger;
@@ -88,14 +87,12 @@ internal sealed class RangeSplitter
     public RangeSplitter(
         IRaft raft,
         RangeMapStore rangeMapStore,
-        KvStateMachineTransfer transfer,
         RangeQuiesceStore quiesceStore,
         KeyValuesManager manager,
         ILogger<IKahuna> logger)
     {
         this.raft = raft;
         this.rangeMapStore = rangeMapStore;
-        this.transfer = transfer;
         this.quiesceStore = quiesceStore;
         this.manager = manager;
         this.logger = logger;
@@ -158,10 +155,15 @@ internal sealed class RangeSplitter
         // ── 3. Check both halves are non-empty (min-range-size guard) ────────────
         // We probe by exporting exactly one key from each half at "now". An empty export means
         // that half is empty — splitting would produce a gap or a vacuous range.
+        // With a committed replica set on the source, the probe must read through the locator
+        // (the source partition's leader): this node may not host the range, and a local read
+        // would answer empty for a populated half.
+        bool placedSource = raft.GetPartitionReplicas(descriptor.PartitionId).Count > 0;
+
         HLCTimestamp probeTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        bool leftHasKeys = await HalfHasKeysAsync(keySpace, descriptor.StartKey, splitKey, probeTs, ct);
-        bool rightHasKeys = await HalfHasKeysAsync(keySpace, splitKey, descriptor.EndKey, probeTs, ct);
+        bool leftHasKeys = await HalfHasKeysAsync(keySpace, descriptor.StartKey, splitKey, probeTs, placedSource, ct);
+        bool rightHasKeys = await HalfHasKeysAsync(keySpace, splitKey, descriptor.EndKey, probeTs, placedSource, ct);
 
         if (!leftHasKeys || !rightHasKeys)
         {
@@ -172,19 +174,26 @@ internal sealed class RangeSplitter
 
         // ── 4. (Partition already created by caller) ─────────────────────────────
 
-        // ── 5. Bulk export [K,E) at snapshotTs → import to P' ───────────────────
+        // ── 5. Bulk copy [K,E) at snapshotTs → P' ───────────────────────────────
+        // Routed through partition leaders: the source is paged via the locator and every page is
+        // replicated onto P''s Raft log, so the copy is correct even when this node hosts neither
+        // side. Under legacy full replication the copy degenerates to the local export/import.
         HLCTimestamp snapshotTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         try
         {
-            Stream bulkSnapshot = await transfer.ExportRangeAsync(
-                keySpace, splitKey, descriptor.EndKey, snapshotTs, KeyValueDurability.Persistent, ct);
-
-            await transfer.ImportRangeAsync(bulkSnapshot, ct);
+            if (!await manager.CopyRangeToPartitionAsync(
+                    keySpace, splitKey, descriptor.EndKey, snapshotTs, descriptor.PartitionId, newPartitionId,
+                    HLCTimestamp.Zero, ct))
+            {
+                logger.LogError("RangeSplitter: bulk copy failed for {Space} [{Key},{End})",
+                    keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                return SplitOutcome.TransferFailed;
+            }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "RangeSplitter: bulk export/import failed for {Space} [{Key},{End})",
+            logger.LogError(ex, "RangeSplitter: bulk copy failed for {Space} [{Key},{End})",
                 keySpace, splitKey, descriptor.EndKey ?? "+inf");
             return SplitOutcome.TransferFailed;
         }
@@ -216,13 +225,20 @@ internal sealed class RangeSplitter
 
         try
         {
-            // ── 7. Final catch-up export: capture writes since snapshotTs ────────
+            // ── 7. Final catch-up copy: capture writes since snapshotTs ──────────
+            // Read as the quiesce lock's owner: the exclusive range lock stamped a write intent
+            // on every resident key of [K,E), and a foreign snapshot read meeting those live
+            // intents answers MustRetry forever.
             HLCTimestamp catchupTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-            Stream catchupSnapshot = await transfer.ExportRangeAsync(
-                keySpace, splitKey, descriptor.EndKey, catchupTs, KeyValueDurability.Persistent, ct);
-
-            await transfer.ImportRangeAsync(catchupSnapshot, ct);
+            if (!await manager.CopyRangeToPartitionAsync(
+                    keySpace, splitKey, descriptor.EndKey, catchupTs, descriptor.PartitionId, newPartitionId,
+                    splitTxId, ct))
+            {
+                logger.LogError("RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
+                    keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                return SplitOutcome.TransferFailed;
+            }
 
             // ── 7b. Transfer range locks: clamp P's live locks to [K,E), inject into P' ──
             // Locks are actor-local (not Raft-replicated), so they must be read from the
@@ -240,14 +256,41 @@ internal sealed class RangeSplitter
             if (clampedLocks.Count > 0)
                 await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, newPartitionId, clampedLocks, ct);
 
-            // ── 7c. Transfer completion receipts whose key moves to [K,E) into P' ────────
-            // The moved range's receipts are replicated onto the destination partition's Raft log so every
-            // replica of P' holds them — a re-commit routed to P' after cutover resolves Committed rather than
-            // MustRetry even if P''s leader changes. Read the moving range's receipts from this node's store
-            // (it holds them because this node participated in P's group). The handoff must be durable before
-            // cutover: if it fails, abort so the source partition is never retired with the receipt lost.
-            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
-                manager.GetLocalCompletionReceiptsForRange(splitKey, descriptor.EndKey);
+            // ── 7c/7d. Gather the moving range's transaction state, then hand it to P' ───
+            // Completion receipts, canonical transaction records and prepared intents whose
+            // key/anchor moves to [K,E) are replicated onto the destination partition's Raft log
+            // so every replica of P' holds them — a re-commit, re-drive, recovery or finalize
+            // routed to P' after cutover still resolves even if P''s leader changes. With a
+            // committed replica set on the source the gather must read the source partition
+            // leader's stores (this node may hold none of them); under legacy full replication it
+            // reads this node's stores, which every replica of P's group populated. Neither
+            // handoff is best-effort: a lost receipt, decision or unresolved intent would strand
+            // its transaction, so a non-durable step aborts the split before cutover.
+            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts;
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords;
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents;
+
+            if (placedSource)
+            {
+                bool gathered;
+                (gathered, movedReceipts, movedRecords, movedIntents) =
+                    await manager.GetRangeTransactionStateFromPartitionLeaderAsync(
+                        descriptor.PartitionId, splitKey, descriptor.EndKey, ct);
+
+                if (!gathered)
+                {
+                    logger.LogError(
+                        "RangeSplitter: could not gather the moving range's transaction state from P{Source}'s leader — aborting split before cutover",
+                        descriptor.PartitionId);
+                    return SplitOutcome.TransferFailed;
+                }
+            }
+            else
+            {
+                movedReceipts = manager.GetLocalCompletionReceiptsForRange(splitKey, descriptor.EndKey);
+                movedRecords = manager.GetLocalTransactionRecordsForRange(splitKey, descriptor.EndKey);
+                movedIntents = manager.GetLocalPreparedIntentsForRange(splitKey, descriptor.EndKey);
+            }
 
             if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(newPartitionId, movedReceipts, ct))
             {
@@ -255,17 +298,6 @@ internal sealed class RangeSplitter
                     "RangeSplitter: completion-receipt handoff to P{New} not durable — aborting split before cutover", newPartitionId);
                 return SplitOutcome.TransferFailed;
             }
-
-            // ── 7d. Transfer unresolved durable-intent 2PC state whose key/anchor moves to [K,E) into P' ────
-            // Canonical transaction records and prepared intents are replicated onto the destination partition the
-            // same way as receipts: every replica of P' holds them, so a re-drive, recovery, or finalize routed to
-            // P' after cutover still resolves — even if P''s leader changes. Like the receipt handoff this is NOT
-            // best-effort: a lost decision or unresolved intent would strand the transaction, so a non-durable
-            // handoff aborts the split before cutover.
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords =
-                manager.GetLocalTransactionRecordsForRange(splitKey, descriptor.EndKey);
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents =
-                manager.GetLocalPreparedIntentsForRange(splitKey, descriptor.EndKey);
 
             if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(newPartitionId, movedRecords, movedIntents, ct))
             {
@@ -381,13 +413,22 @@ internal sealed class RangeSplitter
 
     // ── helpers ──────────────────────────────────────────────────────────────────
 
-    /// <summary>Probes whether the half-open interval [start,end) within keySpace has at least one key.</summary>
+    /// <summary>
+    /// Probes whether the half-open interval [start,end) within keySpace has at least one key.
+    /// With a committed replica set the probe reads through the locator (the range's leader); a
+    /// retryable answer counts as empty, which safely refuses the split for this round — the
+    /// trigger retries on its next tick.
+    /// </summary>
     private async Task<bool> HalfHasKeysAsync(
-        string keySpace, string? startKey, string? endKey, HLCTimestamp ts, CancellationToken ct)
+        string keySpace, string? startKey, string? endKey, HLCTimestamp ts, bool routeThroughLeader, CancellationToken ct)
     {
-        KeyValueGetByRangeResult result = await manager.GetByRange(
-            HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
-            KeyValueDurability.Persistent).ConfigureAwait(false);
+        KeyValueGetByRangeResult result = routeThroughLeader
+            ? await manager.LocateAndGetByRange(
+                HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
+                KeyValueDurability.Persistent, ct).ConfigureAwait(false)
+            : await manager.GetByRange(
+                HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
+                KeyValueDurability.Persistent).ConfigureAwait(false);
 
         return result.Items.Count > 0;
     }

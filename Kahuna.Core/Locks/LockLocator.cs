@@ -63,14 +63,14 @@ internal sealed class LockLocator
         if (!raft.Joined)
             return (LockResponseType.MustRetry, 0);
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.TryLock(resource, owner, expiresMs, durability);
 
-        string leader;
+        string? leader;
 
         try
         {
-            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken);
         }
         catch (RaftException ex)
         {
@@ -79,6 +79,13 @@ internal sealed class LockLocator
             // the leader-election exception as a server error. Log the reason so a leader
             // resolution failure other than a routine election delay is still visible.
             logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return (LockResponseType.MustRetry, 0);
+        }
+
+        if (leader is null)
+        {
+            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
 
             return (LockResponseType.MustRetry, 0);
         }
@@ -110,14 +117,14 @@ internal sealed class LockLocator
         if (!raft.Joined)
             return (LockResponseType.MustRetry, 0);
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
 
-        string leader;
+        string? leader;
 
         try
         {
-            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken);
         }
         catch (RaftException ex)
         {
@@ -126,6 +133,13 @@ internal sealed class LockLocator
             // the leader-election exception as a server error. Log the reason so a leader
             // resolution failure other than a routine election delay is still visible.
             logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return (LockResponseType.MustRetry, 0);
+        }
+
+        if (leader is null)
+        {
+            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
 
             return (LockResponseType.MustRetry, 0);
         }
@@ -157,14 +171,14 @@ internal sealed class LockLocator
         if (!raft.Joined)
             return LockResponseType.MustRetry;
 
-        if (await raft.AmILeader(partitionId, cancellationToken))
+        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.TryUnlock(resource, owner, durability);
 
-        string leader;
+        string? leader;
 
         try
         {
-            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken);
         }
         catch (RaftException ex)
         {
@@ -173,6 +187,13 @@ internal sealed class LockLocator
             // the leader-election exception as a server error. Log the reason so a leader
             // resolution failure other than a routine election delay is still visible.
             logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return LockResponseType.MustRetry;
+        }
+
+        if (leader is null)
+        {
+            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
 
             return LockResponseType.MustRetry;
         }
@@ -206,14 +227,14 @@ internal sealed class LockLocator
         // belief: a minority-partitioned leader keeps believing it leads and would answer with a
         // stale holder — the one read where staleness can break mutual-exclusion assumptions.
         // Writes don't need this; replication itself fails on a deposed leader.
-        if (await raft.ConfirmLeadershipAsync(partitionId, cancellationToken))
+        if (await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken))
             return await manager.GetLock(resource, durability);
 
-        string leader;
+        string? leader;
 
         try
         {
-            leader = await raft.WaitForLeader(partitionId, cancellationToken);
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken);
         }
         catch (RaftException ex)
         {
@@ -222,6 +243,13 @@ internal sealed class LockLocator
             // the leader-election exception as a server error. Log the reason so a leader
             // resolution failure other than a routine election delay is still visible.
             logger.LogLockLeaderNotResolved(partitionId, resource, ex.Message);
+
+            return (LockResponseType.MustRetry, null);
+        }
+
+        if (leader is null)
+        {
+            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
 
             return (LockResponseType.MustRetry, null);
         }

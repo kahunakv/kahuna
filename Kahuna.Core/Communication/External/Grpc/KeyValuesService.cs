@@ -1959,18 +1959,20 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Inter-node landing point for a register-remote operation registration. This node leads the
-    /// coordinator partition (the caller routed here by coordinator key), so it registers against the
-    /// node-local session.
+    /// Inter-node landing point for a register-remote operation registration. Routed through the
+    /// locator rather than straight into the node-local session table: under replica placement the
+    /// sender may have picked a coordinator-partition replica that does not hold the session, and a
+    /// hosting non-leader receiver must redirect once to its accurately-resolved local leader
+    /// instead of answering RejectedSessionClosed from the wrong node.
     /// </summary>
-    internal Task<GrpcBeginOperationResponse> BeginOperationInternal(GrpcBeginOperationRequest request, ServerCallContext context)
+    internal async Task<GrpcBeginOperationResponse> BeginOperationInternal(GrpcBeginOperationRequest request, ServerCallContext context)
     {
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
         TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
         byte[]? digest = request.HasPayloadDigest ? request.PayloadDigest.ToByteArray() : null;
 
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) =
-            keyValues.BeginOperation(transactionId, operationId, (OperationKind)request.Kind, digest);
+            await keyValues.LocateAndBeginOperation(request.CoordinatorKey, transactionId, operationId, (OperationKind)request.Kind, digest, context.CancellationToken);
 
         GrpcBeginOperationResponse response = new()
         {
@@ -1985,7 +1987,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         if (recordAnchorKey is not null)
             response.RecordAnchorKey = recordAnchorKey;
 
-        return Task.FromResult(response);
+        return response;
     }
 
     /// <summary>Inter-node landing point for a register-remote operation completion.</summary>
@@ -2292,6 +2294,51 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             ? await keyValues.ForgetCompletionReceiptsReplicated(request.DestinationPartitionId, receipts)
             : await keyValues.ImportCompletionReceiptsReplicated(request.DestinationPartitionId, receipts);
         return new GrpcImportCompletionReceiptsResponse { Success = durable };
+    }
+
+    internal async Task<GrpcReplicateKeyValueRangePageResponse> ReplicateKeyValueRangePageInternal(GrpcReplicateKeyValueRangePageRequest request, ServerCallContext context)
+    {
+        // The forwarding node routed here because this node leads the destination partition: replicate the
+        // moved page's entries onto that partition's Raft log so every replica applies them.
+        bool committed = await keyValues.ReplicateKeyValueRangePageLocal(
+            request.PartitionId, request.Page.ToByteArray(), context.CancellationToken);
+        return new GrpcReplicateKeyValueRangePageResponse { Success = committed };
+    }
+
+    internal async Task<GrpcGetRangeTransactionStateResponse> GetRangeTransactionStateInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
+    {
+        (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents) =
+            await keyValues.GetRangeTransactionStateLocal(
+                request.PartitionId,
+                request.HasStartKey ? request.StartKey : null,
+                request.HasEndKey ? request.EndKey : null,
+                context.CancellationToken);
+
+        GrpcGetRangeTransactionStateResponse response = new()
+        {
+            Success = ok,
+            TransactionRecords = records.Length > 0 ? UnsafeByteOperations.UnsafeWrap(records) : ByteString.Empty,
+            PreparedIntents = intents.Length > 0 ? UnsafeByteOperations.UnsafeWrap(intents) : ByteString.Empty
+        };
+
+        foreach (CompletionReceiptRecord receipt in receipts)
+        {
+            GrpcCompletionReceiptEntry entry = new()
+            {
+                TransactionIdNode     = receipt.TransactionId.N,
+                TransactionIdPhysical = receipt.TransactionId.L,
+                TransactionIdCounter  = receipt.TransactionId.C,
+                Key                   = receipt.Key,
+                Durability            = (int)receipt.Durability,
+            };
+
+            if (receipt.RecordAnchorKey is not null)
+                entry.RecordAnchorKey = receipt.RecordAnchorKey;
+
+            response.Receipts.Add(entry);
+        }
+
+        return response;
     }
 
     internal async Task<GrpcDurableOperationResponse> DurableOperationInternal(GrpcDurableOperationRequest request, ServerCallContext context)

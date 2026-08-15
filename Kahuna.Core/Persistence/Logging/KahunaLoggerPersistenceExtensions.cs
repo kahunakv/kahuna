@@ -26,4 +26,7 @@ public static partial class KahunaLoggerPersistenceExtensions
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "PITR horizon: partition={PartitionId} protectedIndex={ProtectedIndex} boundaryMs={BoundaryMs}")]
     public static partial void LogPitrHorizonUpdated(this ILogger<IKahuna> logger, int partitionId, long protectedIndex, long boundaryMs);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Dropped background-writer bookkeeping for partition #{PartitionId}: this node no longer hosts it")]
+    public static partial void LogDroppedUnhostedPartitionBookkeeping(this ILogger<IKahuna> logger, int partitionId);
 }

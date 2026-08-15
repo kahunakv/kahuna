@@ -54,20 +54,17 @@ internal sealed class RangeMerger
 
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
-    private readonly KvStateMachineTransfer transfer;
     private readonly KeyValuesManager manager;
     private readonly ILogger<IKahuna> logger;
 
     public RangeMerger(
         IRaft raft,
         RangeMapStore rangeMapStore,
-        KvStateMachineTransfer transfer,
         KeyValuesManager manager,
         ILogger<IKahuna> logger)
     {
         this.raft          = raft;
         this.rangeMapStore = rangeMapStore;
-        this.transfer      = transfer;
         this.manager       = manager;
         this.logger        = logger;
     }
@@ -101,20 +98,31 @@ internal sealed class RangeMerger
 
         logger.LogRangeMergerMerging(keySpace, left.StartKey ?? "-inf", left.EndKey, left.PartitionId, right.StartKey, right.EndKey ?? "+inf", right.PartitionId);
 
-        // -- 2. Bulk export [B,C) at snapshotTs -> import to survivor -------------
+        // -- 2. Bulk copy [B,C) at snapshotTs -> survivor -------------------------
+        // Routed through partition leaders: the right range is paged via the locator and every
+        // page is replicated onto the survivor's Raft log, so the copy is correct even when this
+        // node hosts neither side. Under legacy full replication the copy degenerates to the
+        // historical local export/import (a physical no-op on a node-global backend).
         HLCTimestamp snapshotTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        bool placedRight = raft.GetPartitionReplicas(right.PartitionId).Count > 0;
 
         try
         {
-            Stream bulkSnapshot = await transfer.ExportRangeAsync(
-                keySpace, right.StartKey, right.EndKey, snapshotTs, KeyValueDurability.Persistent, ct);
-
-            await transfer.ImportRangeAsync(bulkSnapshot, ct);
+            if (!await manager.CopyRangeToPartitionAsync(
+                    keySpace, right.StartKey, right.EndKey, snapshotTs, right.PartitionId, left.PartitionId,
+                    HLCTimestamp.Zero, ct))
+            {
+                logger.LogError(
+                    "RangeMerger: bulk copy failed for {Space} [{Start},{End})",
+                    keySpace, right.StartKey, right.EndKey ?? "+inf");
+                return MergeOutcome.TransferFailed;
+            }
         }
         catch (Exception ex)
         {
             logger.LogError(ex,
-                "RangeMerger: bulk export/import failed for {Space} [{Start},{End})",
+                "RangeMerger: bulk copy failed for {Space} [{Start},{End})",
                 keySpace, right.StartKey, right.EndKey ?? "+inf");
             return MergeOutcome.TransferFailed;
         }
@@ -159,8 +167,34 @@ internal sealed class RangeMerger
         // handoff aborts the merge before cutover.
         try
         {
-            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts =
-                manager.GetLocalCompletionReceiptsForRange(right.StartKey, right.EndKey);
+            // With a committed replica set on the right range the gather must read its leader's
+            // stores (this node may hold none of them); under legacy full replication it reads
+            // this node's stores, which every replica of the right group populated.
+            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts;
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords;
+            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents;
+
+            if (placedRight)
+            {
+                bool gathered;
+                (gathered, movedReceipts, movedRecords, movedIntents) =
+                    await manager.GetRangeTransactionStateFromPartitionLeaderAsync(
+                        right.PartitionId, right.StartKey, right.EndKey, ct);
+
+                if (!gathered)
+                {
+                    logger.LogError(
+                        "RangeMerger: could not gather the moving range's transaction state from P{Right}'s leader — aborting merge before cutover",
+                        right.PartitionId);
+                    return MergeOutcome.TransferFailed;
+                }
+            }
+            else
+            {
+                movedReceipts = manager.GetLocalCompletionReceiptsForRange(right.StartKey, right.EndKey);
+                movedRecords = manager.GetLocalTransactionRecordsForRange(right.StartKey, right.EndKey);
+                movedIntents = manager.GetLocalPreparedIntentsForRange(right.StartKey, right.EndKey);
+            }
 
             if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct))
             {
@@ -168,11 +202,6 @@ internal sealed class RangeMerger
                     "RangeMerger: completion-receipt handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
                 return MergeOutcome.TransferFailed;
             }
-
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords =
-                manager.GetLocalTransactionRecordsForRange(right.StartKey, right.EndKey);
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents =
-                manager.GetLocalPreparedIntentsForRange(right.StartKey, right.EndKey);
 
             if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(left.PartitionId, movedRecords, movedIntents, ct))
             {
@@ -263,9 +292,11 @@ internal sealed class RangeMerger
     // -- helpers ------------------------------------------------------------------
 
     /// <summary>
-    /// Counts keys in the given descriptor's range by paging <see cref="KeyValuesManager.GetByRange"/>,
-    /// stopping early once <paramref name="maxCount"/> keys have been found.
-    /// Used to decide whether a range is an under-min merge candidate.
+    /// Counts keys in the given descriptor's range by paging range reads, stopping early once
+    /// <paramref name="maxCount"/> keys have been found. Used to decide whether a range is an
+    /// under-min merge candidate. With a committed replica set the pages read through the locator
+    /// (the range's leader) — this node may not host the range, and a local read would answer an
+    /// empty count that wrongly qualifies a populated range for merging.
     /// </summary>
     internal async Task<int> CountRangeKeysAsync(
         RangeDescriptor descriptor,
@@ -275,6 +306,8 @@ internal sealed class RangeMerger
         int count      = 0;
         string? cursor = null;
         bool hasMore   = true;
+
+        bool routeThroughLeader = raft.GetPartitionReplicas(descriptor.PartitionId).Count > 0;
 
         while (hasMore && count < maxCount)
         {
@@ -294,16 +327,28 @@ internal sealed class RangeMerger
                 pageStartInclusive = false;
             }
 
-            KeyValueGetByRangeResult page = await manager.GetByRange(
-                HLCTimestamp.Zero,
-                descriptor.KeySpace,
-                pageStart,
-                pageStartInclusive,
-                descriptor.EndKey,
-                false,
-                Math.Min(CountPageSize, maxCount - count),
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent);
+            KeyValueGetByRangeResult page = routeThroughLeader
+                ? await manager.LocateAndGetByRange(
+                    HLCTimestamp.Zero,
+                    descriptor.KeySpace,
+                    pageStart,
+                    pageStartInclusive,
+                    descriptor.EndKey,
+                    false,
+                    Math.Min(CountPageSize, maxCount - count),
+                    HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent,
+                    ct)
+                : await manager.GetByRange(
+                    HLCTimestamp.Zero,
+                    descriptor.KeySpace,
+                    pageStart,
+                    pageStartInclusive,
+                    descriptor.EndKey,
+                    false,
+                    Math.Min(CountPageSize, maxCount - count),
+                    HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent);
 
             if (page.Type != KeyValueResponseType.Get || page.Items.Count == 0)
                 break;

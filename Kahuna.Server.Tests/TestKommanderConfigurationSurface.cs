@@ -96,7 +96,8 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxReplicaMovesPerPass)] = nameof(KahunaCommandLineOptions.RaftMaxReplicaMovesPerPass),
         [nameof(RaftConfiguration.MaxConcurrentReplicaTransfers)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentReplicaTransfers),
         [nameof(RaftConfiguration.ReplicaCountDeadband)] = nameof(KahunaCommandLineOptions.RaftReplicaCountDeadband),
-        [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone)
+        [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone),
+        [nameof(RaftConfiguration.EnableLoadReports)] = nameof(KahunaCommandLineOptions.RaftEnableLoadReports)
     };
 
     /// <summary>

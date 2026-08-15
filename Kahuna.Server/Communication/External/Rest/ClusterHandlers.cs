@@ -4,6 +4,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.System;
 using Kahuna.Shared.Communication.Rest;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Kahuna.Communication.External.Rest;
 
@@ -49,6 +50,115 @@ public static class ClusterHandlers
                 "application/json",
                 statusCode: health.Ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
         });
+
+        // Placement table: which nodes host each partition and in what role, the effective
+        // replication factor, and which partitions the answering node hosts locally. Under full
+        // replication every replica set is empty and everything is hosted locally.
+        app.MapGet("/v1/cluster/placement", (IRaft raft) => Results.Text(
+            JsonSerializer.Serialize(
+                BuildPlacementResponse(raft), KahunaJsonContext.Default.KahunaClusterPlacementResponse),
+            "application/json"));
+
+        // Per-partition replication-factor override (0 clears it). Leader-only like every map
+        // mutation: a follower refuses with the reason and the caller retries against the
+        // meta-partition leader. The change adjusts the placement target only — the rebalancer
+        // moves replicas toward it on later passes.
+        app.MapPost("/v1/cluster/replication-factor", async (
+            [FromBody] KahunaSetReplicationFactorRequest req, IRaft raft, HttpContext httpContext) =>
+        {
+            KahunaSetReplicationFactorResponse response =
+                await SetReplicationFactorAsync(raft, req, httpContext.RequestAborted).ConfigureAwait(false);
+
+            return Results.Text(
+                JsonSerializer.Serialize(response, KahunaJsonContext.Default.KahunaSetReplicationFactorResponse),
+                "application/json",
+                statusCode: response.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict);
+        });
+    }
+
+    /// <summary>
+    /// Commits a per-partition replication-factor override and maps the outcome to the wire shape.
+    /// Kommander refuses by throwing (not initialized, system partition, follower); those become a
+    /// non-success response carrying the reason, so the caller can retry against the leader instead
+    /// of receiving an opaque 500.
+    /// </summary>
+    public static async Task<KahunaSetReplicationFactorResponse> SetReplicationFactorAsync(
+        IRaft raft, KahunaSetReplicationFactorRequest req, CancellationToken cancellationToken)
+    {
+        if (req.PartitionId <= 0 || req.ReplicationFactor < 0)
+            return new()
+            {
+                Success = false,
+                Status = "InvalidInput",
+                Reason = "partitionId must be a data partition (> 0) and replicationFactor must be >= 0 (0 clears the override)."
+            };
+
+        try
+        {
+            RaftPartitionLifecycleResult result = await raft.SetReplicationFactorAsync(
+                req.PartitionId, req.ReplicationFactor, cancellationToken).ConfigureAwait(false);
+
+            return new()
+            {
+                Success = result.Success,
+                Status = result.Status.ToString(),
+                Generation = result.Generation,
+                Reason = result.Success ? null : "The override was not committed; see status."
+            };
+        }
+        catch (RaftException ex)
+        {
+            return new()
+            {
+                Success = false,
+                Status = "Refused",
+                Reason = ex.Message
+            };
+        }
+    }
+
+    /// <summary>
+    /// Builds the placement table from the committed partition map. The hosted flags describe the
+    /// answering node; every node returns the same map (it is committed on the meta partition), so
+    /// asking a second node only changes the local perspective fields.
+    /// </summary>
+    public static KahunaClusterPlacementResponse BuildPlacementResponse(IRaft raft)
+    {
+        KahunaClusterPlacementResponse response = new()
+        {
+            ReplicationFactor = raft.Configuration.ReplicationFactor,
+            RebalancerEnabled = raft.Configuration.EnablePlacementRebalancer,
+            Initialized = raft.IsInitialized,
+            LocalEndpoint = raft.GetLocalEndpoint()
+        };
+
+        foreach (RaftPartitionRange range in raft.GetPartitionMap())
+        {
+            bool hosted = raft.HostsPartition(range.PartitionId);
+
+            KahunaPartitionPlacementResponse partition = new()
+            {
+                PartitionId = range.PartitionId,
+                State = range.State.ToString(),
+                Generation = range.Generation,
+                EffectiveReplicationFactor = raft.GetEffectiveReplicationFactor(range.PartitionId),
+                HostedLocally = hosted
+            };
+
+            foreach (RaftReplica replica in range.Replicas)
+                partition.Replicas.Add(new KahunaPartitionReplicaResponse
+                {
+                    Endpoint = replica.Endpoint,
+                    Role = replica.Role.ToString()
+                });
+
+            if (hosted && range.State != RaftPartitionState.Removed)
+                response.HostedPartitionCount++;
+
+            response.Partitions.Add(partition);
+        }
+
+        return response;
     }
 
     public static KahunaClusterMembershipResponse BuildMembershipResponse(IRaft raft)
@@ -98,6 +208,7 @@ public static class ClusterHandlers
     {
         bool initialized;
         string localRole;
+        int hostedPartitions = 0;
 
         try
         {
@@ -116,13 +227,31 @@ public static class ClusterHandlers
             };
         }
 
+        // Informational only, never a readiness condition: a node hosting zero data partitions
+        // still serves every key by forwarding to the hosting nodes — so a failure computing the
+        // count must not flip readiness either.
+        if (initialized)
+        {
+            try
+            {
+                foreach (RaftPartitionRange range in raft.GetPartitionMap())
+                    if (range.State != RaftPartitionState.Removed && raft.HostsPartition(range.PartitionId))
+                        hostedPartitions++;
+            }
+            catch (Exception)
+            {
+                hostedPartitions = 0;
+            }
+        }
+
         return new()
         {
             Ready = initialized
                 && localRole != nameof(ClusterMemberRole.NotMember)
                 && localRole != nameof(ClusterMemberRole.Leaving),
             Initialized = initialized,
-            LocalRole = localRole
+            LocalRole = localRole,
+            HostedPartitions = hostedPartitions
         };
     }
 }

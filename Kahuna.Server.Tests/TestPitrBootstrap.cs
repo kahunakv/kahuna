@@ -127,6 +127,36 @@ public sealed class TestPitrBootstrap : IDisposable
     }
 
     [Fact]
+    public async Task GuardRail_RestrictedCoverageChain_RefusesBeforeSeedingAnything()
+    {
+        // A chain captured by a node that hosted only partition 1 of a two-partition cluster must
+        // never seed a node: the missing partition's absence would look exactly like data loss.
+        string artifacts = ArtifactsDir("guard_coverage");
+        BackupCatalog catalog = NewCatalog("guard_coverage");
+
+        InMemoryWAL wal = BuildWal((1, KvLog(1, 100, "k", "v", 1)), (2, KvLog(1, 110, "k2", "v2", 1)));
+        MemoryPersistenceBackend src = new();
+
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], src,
+            BackupTestStores.Artifacts(artifacts), catalog,
+            hostsPartition: id => id == 1, ct: TestContext.Current.CancellationToken);
+
+        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(full.BackupId, TestContext.Current.CancellationToken);
+        MemoryPersistenceBackend dst = new();
+        InMemoryWAL dstWal = new(Log);
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            BootstrapHelper.BootstrapNodeAsync(
+                chain, BackupTestStores.Artifacts(artifacts), T(100), dst, dstWal,
+                TimeSpan.FromHours(1), NowUtc(200)));
+
+        Assert.True(ex.RestrictedCoverage);
+        Assert.Contains("2", ex.Message, StringComparison.Ordinal);
+        // Nothing was seeded: the destination WAL has no checkpoint (no-checkpoint sentinel ≤ 0).
+        Assert.True(dstWal.GetLastCheckpoint(1) <= 0);
+    }
+
+    [Fact]
     public async Task GuardRail_TargetWithinWindow_DoesNotThrow()
     {
         // Arrange: full backup at t=100, window = 1 h, now = t=200 ms (well within window).

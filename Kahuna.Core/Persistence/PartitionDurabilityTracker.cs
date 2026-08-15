@@ -60,12 +60,15 @@ internal sealed class PartitionDurabilityTracker
         /// <summary>Per snapshot channel, the highest index whose apply has completed in memory —
         /// the resolve ceiling for the next durable snapshot of that store.</summary>
         public readonly long[] HighestApplied = [-1, -1, -1, -1];
+
+        /// <summary>Set under the lock when <see cref="Forget"/> retires this object from the
+        /// dictionary, so a concurrent registration that already fetched it detects the retirement
+        /// and fetches a fresh one instead of mutating an orphan (whose updates would be lost,
+        /// letting a later watermark advance over an entry that was never resolved).</summary>
+        public bool Removed;
     }
 
     private readonly ConcurrentDictionary<int, PartitionState> partitions = new();
-
-    private PartitionState GetState(int partitionId) =>
-        partitions.GetOrAdd(partitionId, static _ => new PartitionState());
 
     /// <summary>
     /// Registers a delivered entry as pending on its resolution channel. Idempotent by index: an
@@ -77,15 +80,24 @@ internal sealed class PartitionDurabilityTracker
         if (logIndex < 0)
             return;
 
-        PartitionState state = GetState(partitionId);
-
-        lock (state)
+        while (true)
         {
-            if (state.HighestRegistered >= logIndex)
-                return;
+            PartitionState state = partitions.GetOrAdd(partitionId, static _ => new PartitionState());
 
-            state.Pending[logIndex] = channel;
-            state.HighestRegistered = logIndex;
+            lock (state)
+            {
+                // Retired between GetOrAdd and the lock (a concurrent Forget); fetch again so the
+                // registration lands in live state rather than an orphan whose updates are lost.
+                if (state.Removed)
+                    continue;
+
+                if (state.HighestRegistered >= logIndex)
+                    return;
+
+                state.Pending[logIndex] = channel;
+                state.HighestRegistered = logIndex;
+                return;
+            }
         }
     }
 
@@ -98,12 +110,20 @@ internal sealed class PartitionDurabilityTracker
         if (logIndex < 0)
             return;
 
-        PartitionState state = GetState(partitionId);
-
-        lock (state)
+        while (true)
         {
-            if (logIndex > state.HighestRegistered)
-                state.HighestRegistered = logIndex;
+            PartitionState state = partitions.GetOrAdd(partitionId, static _ => new PartitionState());
+
+            lock (state)
+            {
+                // Retired between GetOrAdd and the lock (a concurrent Forget); fetch again.
+                if (state.Removed)
+                    continue;
+
+                if (logIndex > state.HighestRegistered)
+                    state.HighestRegistered = logIndex;
+                return;
+            }
         }
     }
 
@@ -116,28 +136,42 @@ internal sealed class PartitionDurabilityTracker
         if (logIndex < 0)
             return;
 
-        PartitionState state = GetState(partitionId);
-
-        lock (state)
+        while (true)
         {
-            if (logIndex > state.HighestApplied[(int)channel])
-                state.HighestApplied[(int)channel] = logIndex;
+            PartitionState state = partitions.GetOrAdd(partitionId, static _ => new PartitionState());
+
+            lock (state)
+            {
+                // Retired between GetOrAdd and the lock (a concurrent Forget); fetch again.
+                if (state.Removed)
+                    continue;
+
+                if (logIndex > state.HighestApplied[(int)channel])
+                    state.HighestApplied[(int)channel] = logIndex;
+                return;
+            }
         }
     }
 
-    /// <summary>Returns the current resolve ceiling for a snapshot channel (-1 = nothing applied).</summary>
+    /// <summary>Returns the current resolve ceiling for a snapshot channel (-1 = nothing applied).
+    /// Never creates tracking state: a resolve-side read of an untracked (or forgotten) partition
+    /// must not make it observed again.</summary>
     public long GetHighestApplied(int partitionId, DurabilityChannel channel)
     {
-        PartitionState state = GetState(partitionId);
+        if (!partitions.TryGetValue(partitionId, out PartitionState? state))
+            return -1;
 
         lock (state)
             return state.HighestApplied[(int)channel];
     }
 
-    /// <summary>Resolves one flush-channel index: its durable artifact (the flushed row) landed.</summary>
+    /// <summary>Resolves one flush-channel index: its durable artifact (the flushed row) landed.
+    /// Never creates tracking state — a flush ack that lands after the partition was forgotten
+    /// (this node stopped hosting it) must not resurrect an empty entry.</summary>
     public void Resolve(int partitionId, long logIndex)
     {
-        PartitionState state = GetState(partitionId);
+        if (!partitions.TryGetValue(partitionId, out PartitionState? state))
+            return;
 
         lock (state)
             state.Pending.Remove(logIndex);
@@ -146,13 +180,15 @@ internal sealed class PartitionDurabilityTracker
     /// <summary>
     /// Resolves every pending index of <paramref name="channel"/> at or below
     /// <paramref name="upToLogIndex"/>: the store snapshot that covers their applies persisted.
+    /// Never creates tracking state (see <see cref="Resolve"/>).
     /// </summary>
     public void ResolveUpTo(int partitionId, DurabilityChannel channel, long upToLogIndex)
     {
         if (upToLogIndex < 0)
             return;
 
-        PartitionState state = GetState(partitionId);
+        if (!partitions.TryGetValue(partitionId, out PartitionState? state))
+            return;
 
         lock (state)
         {
@@ -212,4 +248,25 @@ internal sealed class PartitionDurabilityTracker
 
     /// <summary>Partitions this tracker has observed, for floor-persistence sweeps.</summary>
     public IReadOnlyCollection<int> ObservedPartitions => (IReadOnlyCollection<int>)partitions.Keys;
+
+    /// <summary>
+    /// Drops all tracking state for a partition this node stopped hosting. A retained entry would
+    /// keep reporting a durability floor for a range whose WAL Kommander already reclaimed — and if
+    /// the range is ever hosted here again, that stale floor could pin (or worse, misstate) the new
+    /// copy's WAL retention. Registration (<see cref="RegisterPending"/> / <see cref="MarkApplied"/>)
+    /// recreates state naturally when the partition's entries are applied here again. The retirement
+    /// flag is set under the state's lock so a racing registration never mutates the orphan.
+    /// </summary>
+    public void Forget(int partitionId)
+    {
+        if (!partitions.TryGetValue(partitionId, out PartitionState? state))
+            return;
+
+        lock (state)
+        {
+            state.Removed = true;
+            // Remove only if the dictionary still maps to this exact object (never a replacement).
+            partitions.TryRemove(new KeyValuePair<int, PartitionState>(partitionId, state));
+        }
+    }
 }

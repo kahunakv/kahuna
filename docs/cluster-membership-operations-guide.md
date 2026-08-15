@@ -11,6 +11,10 @@ written for two audiences:
 No prior knowledge of Kahuna's internals is assumed. Concepts are introduced as they come up, and the
 key design decisions are called out with the reasoning behind them.
 
+This guide covers *which nodes are in the cluster*. For *which nodes hold each partition's data* —
+running with a replication factor instead of every node hosting everything — see the
+[replication factor operations guide](replication-factor-guide.md).
+
 > **Scope.** This guide is about **multi-node clusters**. The embedded/standalone single-node mode is
 > deliberately unaffected by everything here — none of the flags below apply to it.
 

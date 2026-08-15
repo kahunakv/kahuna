@@ -138,6 +138,10 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
 
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
 
+        // The restart window this stub freezes is "partitions materialized, leader unresolved":
+        // the hosted guard answers yes so the locator proceeds to the failing leader resolution.
+        public bool HostsPartition(int partitionId) => true;
+
         public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(false);
         public ValueTask<bool> ConfirmLocalApplicationAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public IReadOnlyList<Kommander.System.RaftReplica> GetPartitionReplicas(int partitionId) => throw new NotImplementedException();
@@ -266,5 +270,13 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) => throw new NotImplementedException();
 
         public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) => throw new NotImplementedException();
+
+        public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) => throw new NotImplementedException();
+
+        public long GetStaleProposedSkippedCount(int partitionId) => throw new NotImplementedException();
+
+        public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => throw new NotImplementedException();
+
+        public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
     }
 }

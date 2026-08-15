@@ -72,6 +72,12 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     public long GetDurabilityFloor(int partitionId) =>
         durabilityFloors.TryGetValue(partitionId, out long floor) ? floor : -1;
 
+    public bool RemoveDurabilityFloor(int partitionId)
+    {
+        durabilityFloors.TryRemove(partitionId, out _);
+        return true;
+    }
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
@@ -291,6 +297,98 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Whole-family paged scan of the current key-value rows: keys strictly greater than the
+    /// cursor (which is simply the last key of the previous page), in ordinal order.
+    /// </summary>
+    public KeyValueScanPage ScanKeyValues(string? cursor, int limit)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> items = [];
+
+        lock (kvLock)
+        {
+            IList<string> keys = keyValues.Keys;
+
+            int start = 0;
+            if (cursor is not null)
+            {
+                start = LowerBound(keys, cursor);
+                if (start < keys.Count && string.CompareOrdinal(keys[start], cursor) == 0)
+                    start++;
+            }
+
+            for (int i = start; i < keys.Count && items.Count < limit; i++)
+            {
+                KeyValueEntry value = keyValues.Values[i];
+                items.Add((keys[i], new(
+                    value.Value,
+                    value.Revision,
+                    value.Expires,
+                    value.LastUsed,
+                    value.LastModified,
+                    value.State
+                )));
+            }
+        }
+
+        return new(items, items.Count == limit ? items[^1].Item1 : null);
+    }
+
+    /// <summary>
+    /// Whole-family paged scan of the lock rows. The lock table is unordered, so each page
+    /// snapshots and sorts the resource set — O(N log N) per page, acceptable for this
+    /// test/embedded backend.
+    /// </summary>
+    public LockScanPage ScanLocks(string? cursor, int limit)
+    {
+        List<string> resources = [.. locks.Keys];
+        resources.Sort(StringComparer.Ordinal);
+
+        List<(string, LockEntry)> items = [];
+
+        foreach (string resource in resources)
+        {
+            if (items.Count >= limit)
+                break;
+
+            if (cursor is not null && string.CompareOrdinal(resource, cursor) <= 0)
+                continue;
+
+            // A concurrently removed resource is simply skipped.
+            if (locks.TryGetValue(resource, out LockEntry? entry))
+                items.Add((resource, entry));
+        }
+
+        return new(items, items.Count == limit ? items[^1].Item1 : null);
+    }
+
+    /// <summary>
+    /// Physically removes each key's current row, revision history and no-revision provenance.
+    /// </summary>
+    public bool DeleteKeyValues(IReadOnlyList<string> keys)
+    {
+        lock (kvLock)
+        {
+            foreach (string key in keys)
+            {
+                keyValues.Remove(key);
+                noRevisionWrites.Remove(key);
+                keyValueRevisions.TryRemove(key, out _);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Physically removes each lock resource's row.</summary>
+    public bool DeleteLocks(IReadOnlyList<string> resources)
+    {
+        foreach (string resource in resources)
+            locks.TryRemove(resource, out _);
+
+        return true;
     }
 
     /// <summary>

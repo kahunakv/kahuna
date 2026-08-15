@@ -135,6 +135,24 @@ public sealed class BackupManifest
     public long? TopologyGeneration { get; set; }
 
     /// <summary>
+    /// Every data partition id the cluster's committed map listed at capture time (excluding ranges
+    /// mid-move or already merged away). This is what a restore must reconstruct to be whole. Null on
+    /// manifests written before coverage was recorded — those could only be produced under full
+    /// replication, where one node's capture covers everything by construction.
+    /// </summary>
+    public List<int>? ClusterPartitions { get; set; }
+
+    /// <summary>
+    /// The subset of <see cref="ClusterPartitions"/> this node hosted — and therefore actually
+    /// captured — at backup time. A partition listed here but absent from
+    /// <see cref="PartitionRanges"/> was covered but empty (no committed WAL entries), which is not
+    /// a coverage gap. Under full replication this equals <see cref="ClusterPartitions"/>; under
+    /// per-partition replica placement it can be a strict subset, and restore refuses a chain whose
+    /// union of covered sets does not reach every cluster partition. Null on pre-coverage manifests.
+    /// </summary>
+    public List<int>? CoveredPartitions { get; set; }
+
+    /// <summary>
     /// Stamps the owner/topology identity onto this manifest at write time. Only non-null fields on
     /// <paramref name="identity"/> are applied, so a partially-known identity (e.g. before the cluster
     /// coordinator assigns a cluster id) leaves the unknown fields null rather than overwriting them

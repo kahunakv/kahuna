@@ -49,5 +49,14 @@ internal sealed class BackupDriverException : Exception
     /// </summary>
     public bool RetryableLeadershipLoss { get; init; }
 
+    /// <summary>
+    /// True when a restore or bootstrap refused a backup chain whose covered partition set does not
+    /// reach every partition of the cluster it was captured from. Under per-partition replica
+    /// placement a node captures only the partitions it hosts (the manifest records both the covered
+    /// and the full cluster set), so restoring such a chain alone would silently reconstruct a
+    /// cluster missing the partitions hosted elsewhere. The message names the missing partitions.
+    /// </summary>
+    public bool RestrictedCoverage { get; init; }
+
     public BackupDriverException(string message) : base(message) { }
 }

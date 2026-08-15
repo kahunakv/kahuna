@@ -453,6 +453,24 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcReplicateKeyValueRangePageRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetRangeTransactionStateRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcLookupTransactionRecordRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -872,6 +890,16 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerLookupTransactionRecord;
             batchRequest.LookupTransactionRecord = itemRequest.LookupTransactionRecord;
         }
+        else if (itemRequest.ReplicateKeyValueRangePage is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerReplicateKeyValueRangePage;
+            batchRequest.ReplicateKeyValueRangePage = itemRequest.ReplicateKeyValueRangePage;
+        }
+        else if (itemRequest.GetRangeTransactionState is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerGetRangeTransactionState;
+            batchRequest.GetRangeTransactionState = itemRequest.GetRangeTransactionState;
+        }
         else if (itemRequest.AcquireSnapshotHold is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireSnapshotHold;
@@ -1153,6 +1181,14 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerLookupTransactionRecord:
                         item.Promise.TrySetResult(new(response.LookupTransactionRecord));
+                        break;
+
+                    case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
+                        item.Promise.TrySetResult(new(response.ReplicateKeyValueRangePage));
+                        break;
+
+                    case GrpcServerBatchType.ServerGetRangeTransactionState:
+                        item.Promise.TrySetResult(new(response.GetRangeTransactionState));
                         break;
 
                     case GrpcServerBatchType.ServerTryAcquireSnapshotHold:

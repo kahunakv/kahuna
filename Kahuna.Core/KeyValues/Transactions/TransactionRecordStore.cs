@@ -498,6 +498,36 @@ internal sealed class TransactionRecordStore
         return result;
     }
 
+    /// <summary>
+    /// Drops every record whose anchor satisfies <paramref name="shouldRemoveAnchor"/> and returns how many
+    /// were removed. This is the un-host purge: when this node stops being a replica of the anchors'
+    /// partition, the canonical decisions live on the partition's replicas (and return in a seeding snapshot
+    /// on any re-gain), so the local copies are dead retention. Bumps the change stamp so the next per-
+    /// partition snapshot rewrites the emptied slice.
+    /// </summary>
+    public int PurgeWhere(Func<string, bool> shouldRemoveAnchor)
+    {
+        lock (applyGate)
+        {
+            List<(HLCTimestamp TransactionId, long Epoch)>? toRemove = null;
+
+            foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+            {
+                if (shouldRemoveAnchor(kv.Value.RecordAnchorKey))
+                    (toRemove ??= []).Add(kv.Key);
+            }
+
+            if (toRemove is null)
+                return 0;
+
+            foreach ((HLCTimestamp TransactionId, long Epoch) key in toRemove)
+                records.TryRemove(key, out _);
+
+            Interlocked.Increment(ref version);
+            return toRemove.Count;
+        }
+    }
+
     /// <summary>Folds transferred records into this partition's set (idempotent by identity + terminal-decision
     /// authority), for whole-partition state transfer that repairs a below-floor node or a split/merge cutover.</summary>
     public void ImportRecords(IEnumerable<TransactionRecord> incoming)

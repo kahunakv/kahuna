@@ -738,6 +738,39 @@ internal sealed class PreparedIntentStore
         return result;
     }
 
+    /// <summary>
+    /// Drops every intent whose key satisfies <paramref name="shouldRemove"/> and returns how many were
+    /// removed. This is the un-host purge: when this node stops being a replica of the keys' partition, the
+    /// intents' resolution lives with the partition's replicas (and returns in a seeding snapshot on any
+    /// re-gain), so the local copies are dead retention. Byte accounting is adjusted and the change stamp
+    /// bumped so the next per-partition snapshot rewrites the emptied slice.
+    /// </summary>
+    public int PurgeWhere(Func<string, bool> shouldRemove)
+    {
+        lock (applyGate)
+        {
+            List<string>? toRemove = null;
+
+            foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+            {
+                if (shouldRemove(kv.Key))
+                    (toRemove ??= []).Add(kv.Key);
+            }
+
+            if (toRemove is null)
+                return 0;
+
+            foreach (string key in toRemove)
+            {
+                if (intents.TryRemove(key, out PreparedIntent? removed))
+                    Interlocked.Add(ref totalBytes, -IntentBytes(removed));
+            }
+
+            Interlocked.Increment(ref version);
+            return toRemove.Count;
+        }
+    }
+
     /// <summary>Folds transferred intents into this partition's set (idempotent by key + resolution authority).</summary>
     public void ImportIntents(IEnumerable<PreparedIntent> incoming)
     {

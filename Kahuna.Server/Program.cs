@@ -102,6 +102,9 @@ else
 
         RaftConfiguration configuration = CreateRaftConfiguration(opts);
 
+        ConfigurationValidator.ValidateReplicaPlacement(
+            configuration.ReplicationFactor, opts.InitialCluster!.Count(), logger);
+
         bool walSyncWrites = opts.GetWalSyncWrites();
 
         IWAL walAdapter = opts.WalStorage switch
@@ -355,6 +358,12 @@ static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts
     InitialPartitions = opts.InitialClusterPartitions,
     EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool,
     PartitionExecutorPoolSize = opts.RaftExecutorPoolSize,
+    ReplicationFactor = opts.RaftReplicationFactor,
+    EnablePlacementRebalancer = opts.RaftEnablePlacementRebalancer,
+    MaxReplicaMovesPerPass = opts.RaftMaxReplicaMovesPerPass,
+    MaxConcurrentReplicaTransfers = opts.RaftMaxConcurrentReplicaTransfers,
+    ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
+    Zone = opts.RaftZone,
     Storage = opts.Storage,
     StoragePath = opts.StoragePath,
     StorageRevision = opts.StorageRevision,
@@ -531,6 +540,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxReplicaMovesPerPass = opts.RaftMaxReplicaMovesPerPass,
         MaxConcurrentReplicaTransfers = opts.RaftMaxConcurrentReplicaTransfers,
         ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
-        Zone = opts.RaftZone
+        Zone = opts.RaftZone,
+        EnableLoadReports = opts.RaftEnableLoadReports
     };
 }

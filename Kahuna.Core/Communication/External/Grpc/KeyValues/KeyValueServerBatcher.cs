@@ -33,10 +33,15 @@ internal sealed class KeyValueServerBatcher
     /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task BatchServerKeyValueRequests(
         IAsyncStreamReader<GrpcBatchServerKeyValueRequest> requestStream,
-        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream, 
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
+        // This stream only ever carries requests forwarded by another Kahuna node, so every handler
+        // dispatched from it serves under the forwarded-request marker: a non-hosting receiver
+        // answers MustRetry instead of forwarding onward (replica-placement loop safety).
+        using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.Enter();
+
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -285,6 +290,20 @@ internal sealed class KeyValueServerBatcher
                     {
                         GrpcLookupTransactionRecordRequest? req = request.LookupTransactionRecord;
                         Track(request, LookupTransactionRecordDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
+                    {
+                        GrpcReplicateKeyValueRangePageRequest? req = request.ReplicateKeyValueRangePage;
+                        Track(request, ReplicateKeyValueRangePageDelayed(semaphore, request.RequestId, req, responseStream, context));
+                    }
+                    break;
+
+                    case GrpcServerBatchType.ServerGetRangeTransactionState:
+                    {
+                        GrpcGetRangeTransactionStateRequest? req = request.GetRangeTransactionState;
+                        Track(request, GetRangeTransactionStateDelayed(semaphore, request.RequestId, req, responseStream, context));
                     }
                     break;
 
@@ -987,6 +1006,54 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerDurableOperation,
                 RequestId = requestId,
                 DurableOperation = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task ReplicateKeyValueRangePageDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcReplicateKeyValueRangePageRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcReplicateKeyValueRangePageResponse resp = await service.ReplicateKeyValueRangePageInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerReplicateKeyValueRangePage,
+                RequestId = requestId,
+                ReplicateKeyValueRangePage = resp
+            });
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task GetRangeTransactionStateDelayed(
+        SemaphoreSlim semaphore,
+        int requestId,
+        GrpcGetRangeTransactionStateRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context)
+    {
+        await semaphore.WaitAsync(context.CancellationToken);
+        try
+        {
+            GrpcGetRangeTransactionStateResponse resp = await service.GetRangeTransactionStateInternal(request, context);
+            await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+            {
+                Type = GrpcServerBatchType.ServerGetRangeTransactionState,
+                RequestId = requestId,
+                GetRangeTransactionState = resp
             });
         }
         finally

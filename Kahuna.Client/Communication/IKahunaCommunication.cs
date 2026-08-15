@@ -105,6 +105,21 @@ public interface IKahunaCommunication
      /// </summary>
      Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken);
 
+     /// <summary>
+     /// Returns the per-partition replica placement table as seen by the node at
+     /// <paramref name="url"/>: replica endpoints and roles, effective replication factor, and
+     /// which partitions that node hosts locally.
+     /// </summary>
+     Task<KahunaClusterPlacementResponse> GetClusterPlacement(string url, CancellationToken cancellationToken);
+
+     /// <summary>
+     /// Commits a per-partition replication-factor override on the node at <paramref name="url"/>
+     /// (0 clears it). Leader-only: a follower's refusal is carried in the response — status,
+     /// reason — rather than raised, so the caller can retry against another node.
+     /// </summary>
+     Task<KahunaSetReplicationFactorResponse> SetReplicationFactor(
+         string url, int partitionId, int replicationFactor, CancellationToken cancellationToken);
+
      Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken);
      Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken);
      Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken);

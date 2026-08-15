@@ -169,6 +169,16 @@ public sealed class TestClusterLeave : BaseCluster
                 m.Endpoint == "localhost:8001" && m.Role == ClusterMemberRole.Voter);
 
             string key = $"refused-{Guid.NewGuid():N}";
+
+            // The departed voters are still up, and until the survivor wins the key's partition
+            // election its cached leader still points at one of them — a set in that window is
+            // answered MustRetry (the retryable leader-change contract), not served. "Keeps
+            // serving" means serving once its elections settle, so wait for the key partition's
+            // leadership the same way the refusal above waited for the system partition's —
+            // resolved with the same routing the locator applies.
+            int keyPartition = new Kahuna.Server.KeyValues.Ranges.DataPartitionRouter(raft1).Locate(key);
+            await WaitUntilAsync(async () => await raft1.AmILeaderQuick(keyPartition).AsTask(), timeoutMs: 30_000);
+
             (KeyValueResponseType setType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes("still-serving"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Ephemeral,
@@ -323,12 +333,17 @@ public sealed class TestClusterLeave : BaseCluster
         public double GetPartitionLogOpsPerSecond(int partitionId) => throw new NotImplementedException();
         public int GetPartitionWalQueueDepth(int partitionId) => throw new NotImplementedException();
         public double GetPartitionCommitWaitMs(int partitionId) => throw new NotImplementedException();
+        public long GetStaleProposedSkippedCount(int partitionId) => throw new NotImplementedException();
+        public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => throw new NotImplementedException();
+        public bool HostsPartition(int partitionId) => throw new NotImplementedException();
+        public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
         public long GetCommitIndex(int partitionId) => throw new NotImplementedException();
         public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => throw new NotImplementedException();
         public int GetPartitionKey(string partitionKey) => throw new NotImplementedException();
         public int GetPrefixPartitionKey(string prefixPartitionKey) => throw new NotImplementedException();
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) => throw new NotImplementedException();
         public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) => throw new NotImplementedException();
+        public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) => throw new NotImplementedException();
 
         public IWAL WalAdapter => throw new NotImplementedException();
         public ICommunication Communication => throw new NotImplementedException();

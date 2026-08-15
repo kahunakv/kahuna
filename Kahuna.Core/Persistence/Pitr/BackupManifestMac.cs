@@ -87,6 +87,16 @@ internal static class BackupManifestMac
         Field("snapPhysical", m.ClusterSnapshotPhysical?.ToString(CultureInfo.InvariantCulture));
         Field("snapCounter", m.ClusterSnapshotCounter?.ToString(CultureInfo.InvariantCulture));
 
+        // Partition coverage is security-relevant: stripping or widening it would let a partial
+        // backup masquerade as a whole-cluster one at restore. Emitted only when present so
+        // manifests signed before coverage existed still verify byte-for-byte.
+        if (m.ClusterPartitions is not null)
+            sb.Append("clusterPartitions=")
+              .Append(string.Join(',', m.ClusterPartitions.OrderBy(i => i))).Append('\n');
+        if (m.CoveredPartitions is not null)
+            sb.Append("coveredPartitions=")
+              .Append(string.Join(',', m.CoveredPartitions.OrderBy(i => i))).Append('\n');
+
         sb.Append("ranges:\n");
         foreach (PartitionBackupRange r in m.PartitionRanges.OrderBy(x => x.PartitionId))
             sb.Append(r.PartitionId).Append(':')

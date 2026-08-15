@@ -4,7 +4,9 @@ This guide explains how to operate Kahuna's **leader balancer** — what it does
 how to configure it, and what to watch. It is written for operators running a clustered Kahuna
 deployment (directly or as the storage engine behind a database such as CamusDB).
 
-No prior knowledge of the internals is assumed. For the full mechanism — the planner, the suggestion
+No prior knowledge of the internals is assumed. Leader balancing decides which replica **leads**
+each partition; the separate [replication factor operations guide](replication-factor-guide.md)
+covers which nodes **hold** each partition at all. For the full mechanism — the planner, the suggestion
 protocol, and the safety proofs — see the upstream
 [Kommander leader balancer developer guide](https://github.com/.../leader-balancer-developer-guide.md)
 (`docs/leader-balancer-developer-guide.md` in the Kommander repo); this guide is the operator-facing

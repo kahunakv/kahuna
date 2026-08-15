@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// Header of a whole-partition snapshot stream (the first length-delimited message). The stream
+// layout is: header, key-value RangeSnapshotPage sequence (terminated by hasMore=false), lock
+// page sequence (terminated by hasMore=false), store section. Every section is checksummed so a
+// truncated or corrupt stream is detected before any state is mutated on the importer.
+message PartitionStateHeader {
+  int32 partitionId = 1;
+  int64 upToIndex = 2;
+}
+
+// One persistent lock in a whole-partition snapshot. Carries every field needed to reconstruct
+// the lock row verbatim on the importing node (mirrors the lock persistence row).
+message PartitionStateLockEntry {
+  string resource = 1;
+  optional bytes owner = 2;
+  int64 fencingToken = 3;
+  int32 expiresNode = 4;
+  int64 expiresPhysical = 5;
+  uint32 expiresCounter = 6;
+  int32 lastUsedNode = 7;
+  int64 lastUsedPhysical = 8;
+  uint32 lastUsedCounter = 9;
+  int32 lastModifiedNode = 10;
+  int64 lastModifiedPhysical = 11;
+  uint32 lastModifiedCounter = 12;
+  int32 state = 13;
+}
+
+// A bounded, checksummed page of persistent locks.
+message PartitionStateLockPage {
+  repeated PartitionStateLockEntry entries = 1;
+  uint64 checksum = 2;   // FNV-1a 64 over the serialized entries; verified on import.
+  bool hasMore = 3;
+}
+
+// Terminal section: the partition's slices of the durable transaction stores, each in that
+// store's own serialized wire format so the store's existing import path applies it.
+message PartitionStateStoreSection {
+  bytes completionReceipts = 1;   // CompletionReceiptStore.SerializeImport format
+  bytes transactionRecords = 2;   // TransactionRecordStore.SerializeRecords format
+  bytes preparedIntents = 3;      // PreparedIntentStore.SerializeIntents format
+  uint64 checksum = 4;            // FNV-1a 64 over the three payloads, in field order.
+}

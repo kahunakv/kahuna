@@ -310,5 +310,15 @@ public sealed class TestClusterReadiness : IDisposable
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) => throw new NotImplementedException();
 
         public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) => throw new NotImplementedException();
+
+        public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) => throw new NotImplementedException();
+
+        public long GetStaleProposedSkippedCount(int partitionId) => throw new NotImplementedException();
+
+        public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => throw new NotImplementedException();
+
+        public bool HostsPartition(int partitionId) => throw new NotImplementedException();
+
+        public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
     }
 }

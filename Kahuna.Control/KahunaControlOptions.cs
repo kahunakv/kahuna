@@ -94,6 +94,15 @@ public sealed class KahunaControlOptions
     [Option("node", Required = false, HelpText = "Endpoint of the node a cluster command targets, e.g. https://localhost:8082")]
     public string? Node { get; set; }
 
+    [Option("cluster-placement", Required = false, HelpText = "Prints the per-partition replica placement table (replicas, roles, effective replication factor, locally hosted partitions)")]
+    public bool ClusterPlacement { get; set; }
+
+    [Option("set-replication-factor", Required = false, HelpText = "Commits a per-partition replication-factor override; requires --partition. 0 clears the override. Tries each connected endpoint until the meta-partition leader accepts (or target one with --node)")]
+    public int? SetReplicationFactor { get; set; }
+
+    [Option("partition", Required = false, HelpText = "Data partition id a placement command targets")]
+    public int? Partition { get; set; }
+
     [Option("backup-full", Required = false, HelpText = "Takes a full backup on the connected node")]
     public bool BackupFull { get; set; }
 

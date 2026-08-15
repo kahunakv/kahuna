@@ -456,10 +456,15 @@ public sealed class LocksService : Locker.LockerBase
     
     public override async Task BatchServerLockRequests(
         IAsyncStreamReader<GrpcBatchServerLockRequest> requestStream,
-        IServerStreamWriter<GrpcBatchServerLockResponse> responseStream, 
+        IServerStreamWriter<GrpcBatchServerLockResponse> responseStream,
         ServerCallContext context
     )
     {
+        // This stream only ever carries requests forwarded by another Kahuna node, so every handler
+        // dispatched from it serves under the forwarded-request marker: a non-hosting receiver
+        // answers MustRetry instead of forwarding onward (replica-placement loop safety).
+        using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.Enter();
+
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

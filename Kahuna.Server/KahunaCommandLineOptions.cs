@@ -394,6 +394,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-zone", Required = false, HelpText = "Optional locality hint (zone/rack) for the local node. When set, the placement planner prefers spreading a range's replicas across distinct zones.", Default = null)]
     public string? RaftZone { get; set; }
 
+    [Option("raft-enable-load-reports", Required = false, HelpText = "Gossip per-partition load reports even when nothing else consumes them. Reports feed the leader balancer, the placement planner's zone/leader hints, and load-based range splitting; they are gossiped automatically whenever the leader balancer, the placement rebalancer, or a replication factor is enabled, so this flag only matters to opt in without any of those.", Default = false)]
+    public bool RaftEnableLoadReports { get; set; }
+
     [Option("raft-grpc-enable-append-logs-coalescing", Required = false, HelpText = "Enable coalescing of multiple AppendLogs calls into a single gRPC frame per write cycle. Useful for write-heavy multi-partition workloads where per-peer send concurrency is the bottleneck.", Default = false)]
     public bool RaftGrpcEnableAppendLogsCoalescing { get; set; }
 

@@ -70,6 +70,97 @@ public sealed class ClusterService : Cluster.ClusterBase
         };
     }
 
+    /// <summary>
+    /// Returns the per-partition placement table. Mirrors REST <c>GET /v1/cluster/placement</c> 1:1;
+    /// the hosted flags describe the answering node.
+    /// </summary>
+    public override Task<GrpcGetPlacementResponse> GetPlacement(GrpcGetPlacementRequest request, ServerCallContext context)
+    {
+        GrpcGetPlacementResponse response = new()
+        {
+            ReplicationFactor = raft.Configuration.ReplicationFactor,
+            RebalancerEnabled = raft.Configuration.EnablePlacementRebalancer,
+            Initialized = raft.IsInitialized,
+            LocalEndpoint = raft.GetLocalEndpoint()
+        };
+
+        foreach (RaftPartitionRange range in raft.GetPartitionMap())
+        {
+            bool hosted = raft.HostsPartition(range.PartitionId);
+
+            GrpcPartitionPlacement partition = new()
+            {
+                PartitionId = range.PartitionId,
+                State = range.State.ToString(),
+                Generation = range.Generation,
+                EffectiveReplicationFactor = raft.GetEffectiveReplicationFactor(range.PartitionId),
+                HostedLocally = hosted
+            };
+
+            foreach (RaftReplica replica in range.Replicas)
+                partition.Replicas.Add(new GrpcPartitionReplica
+                {
+                    Endpoint = replica.Endpoint,
+                    Role = ToGrpcReplicaRole(replica.Role)
+                });
+
+            if (hosted && range.State != RaftPartitionState.Removed)
+                response.HostedPartitionCount++;
+
+            response.Partitions.Add(partition);
+        }
+
+        return Task.FromResult(response);
+    }
+
+    /// <summary>
+    /// Commits a per-partition replication-factor override (0 clears it). Leader-only: a follower
+    /// refuses with the reason so the caller retries against the meta-partition leader. Mirrors
+    /// REST <c>POST /v1/cluster/replication-factor</c> 1:1.
+    /// </summary>
+    public override async Task<GrpcSetReplicationFactorResponse> SetReplicationFactor(
+        GrpcSetReplicationFactorRequest request, ServerCallContext context)
+    {
+        if (request.PartitionId <= 0 || request.ReplicationFactor < 0)
+            return new()
+            {
+                Success = false,
+                Status = "InvalidInput",
+                Reason = "PartitionId must be a data partition (> 0) and ReplicationFactor must be >= 0 (0 clears the override)."
+            };
+
+        try
+        {
+            RaftPartitionLifecycleResult result = await raft.SetReplicationFactorAsync(
+                request.PartitionId, request.ReplicationFactor, context.CancellationToken).ConfigureAwait(false);
+
+            return new()
+            {
+                Success = result.Success,
+                Status = result.Status.ToString(),
+                Generation = result.Generation,
+                Reason = result.Success ? "" : "The override was not committed; see status."
+            };
+        }
+        catch (RaftException ex)
+        {
+            return new()
+            {
+                Success = false,
+                Status = "Refused",
+                Reason = ex.Message
+            };
+        }
+    }
+
+    private static GrpcPartitionReplicaRole ToGrpcReplicaRole(RaftReplicaRole role) => role switch
+    {
+        RaftReplicaRole.Voter    => GrpcPartitionReplicaRole.PartitionReplicaRoleVoter,
+        RaftReplicaRole.Learner  => GrpcPartitionReplicaRole.PartitionReplicaRoleLearner,
+        RaftReplicaRole.Removing => GrpcPartitionReplicaRole.PartitionReplicaRoleRemoving,
+        _                        => GrpcPartitionReplicaRole.PartitionReplicaRoleRemoving
+    };
+
     private static GrpcLeaveClusterOutcome ToGrpcOutcome(LeaveClusterOutcome outcome) => outcome switch
     {
         LeaveClusterOutcome.Committed                 => GrpcLeaveClusterOutcome.LeaveClusterOutcomeCommitted,

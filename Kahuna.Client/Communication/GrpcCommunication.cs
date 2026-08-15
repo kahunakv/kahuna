@@ -2216,6 +2216,75 @@ public class GrpcCommunication : IKahunaCommunication
         };
     }
 
+    public async Task<KahunaClusterPlacementResponse> GetClusterPlacement(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = GetClusterClient(channel);
+
+        GrpcGetPlacementResponse response = await client.GetPlacementAsync(
+            new GrpcGetPlacementRequest(),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        List<KahunaPartitionPlacementResponse> partitions = new(response.Partitions.Count);
+        foreach (GrpcPartitionPlacement p in response.Partitions)
+        {
+            KahunaPartitionPlacementResponse partition = new()
+            {
+                PartitionId = p.PartitionId,
+                State = p.State,
+                Generation = p.Generation,
+                EffectiveReplicationFactor = p.EffectiveReplicationFactor,
+                HostedLocally = p.HostedLocally
+            };
+
+            foreach (GrpcPartitionReplica r in p.Replicas)
+                partition.Replicas.Add(new KahunaPartitionReplicaResponse
+                {
+                    Endpoint = r.Endpoint,
+                    Role = GrpcReplicaRoleToString(r.Role)
+                });
+
+            partitions.Add(partition);
+        }
+
+        return new KahunaClusterPlacementResponse
+        {
+            ReplicationFactor = response.ReplicationFactor,
+            RebalancerEnabled = response.RebalancerEnabled,
+            Initialized = response.Initialized,
+            LocalEndpoint = response.LocalEndpoint,
+            HostedPartitionCount = response.HostedPartitionCount,
+            Partitions = partitions
+        };
+    }
+
+    public async Task<KahunaSetReplicationFactorResponse> SetReplicationFactor(
+        string url, int partitionId, int replicationFactor, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = GetClusterClient(channel);
+
+        GrpcSetReplicationFactorResponse response = await client.SetReplicationFactorAsync(
+            new GrpcSetReplicationFactorRequest { PartitionId = partitionId, ReplicationFactor = replicationFactor },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return new KahunaSetReplicationFactorResponse
+        {
+            Success = response.Success,
+            Status = response.Status,
+            Generation = response.Generation,
+            Reason = string.IsNullOrEmpty(response.Reason) ? null : response.Reason
+        };
+    }
+
+    private static string GrpcReplicaRoleToString(GrpcPartitionReplicaRole role) => role switch
+    {
+        GrpcPartitionReplicaRole.PartitionReplicaRoleVoter    => "Voter",
+        GrpcPartitionReplicaRole.PartitionReplicaRoleLearner  => "Learner",
+        GrpcPartitionReplicaRole.PartitionReplicaRoleRemoving => "Removing",
+        _                                                     => role.ToString()
+    };
+
     public async Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);

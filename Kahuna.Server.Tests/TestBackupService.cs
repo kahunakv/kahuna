@@ -329,6 +329,140 @@ public sealed class TestBackupService : IDisposable
         Assert.Empty(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken));
     }
 
+    // ── partition coverage under replica placement ───────────────────────────────────────────
+
+    /// <summary>
+    /// A two-partition map where this node hosts only partition 1 (replica placement in effect).
+    /// Both partitions have committed WAL entries so a capture that ignored the hosted set would
+    /// wrongly include partition 2.
+    /// </summary>
+    private static StubRaft MakeRestrictedRaft(InMemoryWAL wal)
+    {
+        StubRaft raft = MakeRaft(wal, 1, 2);
+        raft.HostsPartitionOverride = id => id == 1;
+        return raft;
+    }
+
+    [Fact]
+    public async Task TakeFull_RestrictedHosting_RecordsCoverage_AndSkipsUnhostedPartitions()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        MemoryPersistenceBackend backend = new();
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+        BackupService svc = MakeService("cov_full", wal, backend, raft: MakeRestrictedRaft(wal));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto =
+            await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        BackupManifest m = (await ReadManifestAsync("cov_full", dto.BackupId))!;
+        Assert.Equal([1, 2], m.ClusterPartitions!.Order());
+        Assert.Equal([1], m.CoveredPartitions);
+        // Partition 2 has committed entries but is hosted elsewhere: it must not be captured.
+        Assert.Single(m.PartitionRanges);
+        Assert.Equal(1, m.PartitionRanges[0].PartitionId);
+    }
+
+    [Fact]
+    public async Task TakeFull_FullHosting_RecordsFullCoverage()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("cov_full_legacy", wal, new MemoryPersistenceBackend());
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto =
+            await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        BackupManifest m = (await ReadManifestAsync("cov_full_legacy", dto.BackupId))!;
+        Assert.Equal([1], m.ClusterPartitions);
+        Assert.Equal([1], m.CoveredPartitions);
+    }
+
+    [Fact]
+    public async Task TakeIncremental_RestrictedHosting_RecordsCoverage()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        BackupService svc = MakeService("cov_incr", wal, new MemoryPersistenceBackend(), raft: MakeRestrictedRaft(wal));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full =
+            await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo incr =
+            await svc.TakeIncrementalAsync(full.BackupId, ct: TestContext.Current.CancellationToken);
+
+        BackupManifest m = (await ReadManifestAsync("cov_incr", incr.BackupId))!;
+        Assert.Equal([1, 2], m.ClusterPartitions!.Order());
+        Assert.Equal([1], m.CoveredPartitions);
+        Assert.All(m.PartitionRanges, r => Assert.Equal(1, r.PartitionId));
+    }
+
+    [Fact]
+    public async Task RestoreAndValidate_RestrictedChain_RefuseNamingMissingPartitions()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        MemoryPersistenceBackend backend = new();
+        Put(backend, "k1", Encoding.UTF8.GetBytes("v1"), 1);
+        BackupService svc = MakeService("cov_refuse", wal, backend, raft: MakeRestrictedRaft(wal));
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full =
+            await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        // Chain validation surfaces the same refusal a restore would give.
+        BackupDriverException vex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            svc.ValidateChainAsync(full.BackupId, TestContext.Current.CancellationToken));
+        Assert.True(vex.RestrictedCoverage);
+        Assert.Contains("2", vex.Message, StringComparison.Ordinal);
+
+        // The restore itself refuses before touching the destination.
+        string target = Path.Combine(_tempRoot, "cov_refuse_restore");
+        BackupDriverException rex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero, ct: TestContext.Current.CancellationToken));
+        Assert.True(rex.RestrictedCoverage);
+        Assert.False(Directory.Exists(target));
+    }
+
+    [Fact]
+    public void CoverageValidation_LegacyChain_WithoutRecords_Passes()
+    {
+        // Manifests written before coverage existed have null fields; they could only be produced
+        // under full replication, so the chain passes untouched.
+        BackupManifest full = BackupManifest.CreateFull([]);
+        BackupManifest incr = BackupManifest.CreateIncremental(full.BackupId, []);
+        BackupChainCoverage.ValidatePartitionCoverage([full, incr]);
+    }
+
+    [Fact]
+    public void CoverageValidation_UnionAcrossChain_ReachingEveryPartition_Passes()
+    {
+        // Coverage is a union over the chain: a link that captured a partition the others did not
+        // still counts toward whole-cluster coverage.
+        BackupManifest full = BackupManifest.CreateFull([]);
+        full.ClusterPartitions = [1, 2];
+        full.CoveredPartitions = [1];
+        BackupManifest incr = BackupManifest.CreateIncremental(full.BackupId, []);
+        incr.ClusterPartitions = [1, 2];
+        incr.CoveredPartitions = [2];
+        BackupChainCoverage.ValidatePartitionCoverage([full, incr]);
+    }
+
+    [Fact]
+    public async Task Restore_WidenedCoverage_TamperedManifest_FailsAuthentication()
+    {
+        // An attacker without the MAC key cannot make a partial backup claim full coverage: the
+        // covered set is part of the authenticated payload.
+        string key = WriteKeyFile("cov");
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        BackupService svc = MakeService("cov_mac", wal, new MemoryPersistenceBackend(),
+            raft: MakeRestrictedRaft(wal), macKeyFile: key);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full =
+            await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        MutateManifest(BackupDir("cov_mac"), full.BackupId, m => m.CoveredPartitions = [1, 2]);
+
+        string target = Path.Combine(_tempRoot, "cov_mac_restore");
+        await Assert.ThrowsAsync<BackupArtifactException>(() =>
+            svc.RestoreToAsync(full.BackupId, target, HLCTimestamp.Zero, ct: TestContext.Current.CancellationToken));
+    }
+
     [Fact]
     public async Task TakeCoordinated_OnLeader_StampsCoordinatorIdentity()
     {
@@ -1196,7 +1330,11 @@ public sealed class TestBackupService : IDisposable
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(IsLeader);
         public ValueTask<bool> ConfirmLeadershipAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(IsLeader);
         public ValueTask<bool> ConfirmLocalApplicationAsync(int partitionId, CancellationToken cancellationToken = default) => ValueTask.FromResult(IsLeader);
-        public IReadOnlyList<Kommander.System.RaftReplica> GetPartitionReplicas(int partitionId) => [];
+        // Settable so placement-routing tests can describe a replica set / leader hint; defaults
+        // preserve the legacy behavior every other StubRaft-based test relies on.
+        public Func<int, IReadOnlyList<Kommander.System.RaftReplica>>? PartitionReplicasOverride { get; set; }
+        public IReadOnlyList<Kommander.System.RaftReplica> GetPartitionReplicas(int partitionId) =>
+            PartitionReplicasOverride?.Invoke(partitionId) ?? [];
         public int GetEffectiveReplicationFactor(int partitionId) => 0;
         public Task<Kommander.Data.RaftPartitionLifecycleResult> SetReplicationFactorAsync(int partitionId, int replicationFactor, CancellationToken ct = default) => throw new NotImplementedException();
         public ValueTask<string> WaitForLeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(string.Empty);
@@ -1255,5 +1393,14 @@ public sealed class TestBackupService : IDisposable
         public int GetPartitionWalQueueDepth(int partitionId) => 0;
         public double GetPartitionCommitWaitMs(int partitionId) => 0;
         public long GetCommitIndex(int partitionId) => 0;
+        public long GetStaleProposedSkippedCount(int partitionId) => 0;
+        public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => Array.Empty<RaftSnapshotStatus>();
+        // Settable so a test can model per-partition replica placement (a partition this node does
+        // not host). Defaults to hosting everything, matching full replication.
+        public Func<int, bool>? HostsPartitionOverride { get; set; }
+        public bool HostsPartition(int partitionId) => HostsPartitionOverride?.Invoke(partitionId) ?? true;
+        public Func<int, string?>? PartitionLeaderHintOverride { get; set; }
+        public string? GetPartitionLeaderHint(int partitionId) => PartitionLeaderHintOverride?.Invoke(partitionId);
+        public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
     }
 }

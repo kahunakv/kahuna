@@ -1736,6 +1736,50 @@ public class RestCommunication : IKahunaCommunication
         return response;
     }
 
+    public async Task<KahunaClusterPlacementResponse> GetClusterPlacement(string url, CancellationToken cancellationToken)
+    {
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaClusterPlacementResponse? response = await retryPolicy.ExecuteAsync(() =>
+            url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/cluster/placement")
+                .WithHeader("Accept", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0")
+                .GetAsync(cancellationToken: cancellationToken)
+                .ReceiveJson<KahunaClusterPlacementResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("GetClusterPlacement returned null", LockResponseType.Errored);
+
+        return response;
+    }
+
+    public async Task<KahunaSetReplicationFactorResponse> SetReplicationFactor(
+        string url, int partitionId, int replicationFactor, CancellationToken cancellationToken)
+    {
+        // Refusals come back as 409 carrying the verdict in the body (a follower refuses; the
+        // caller retries against the leader), so non-2xx statuses are accepted rather than turned
+        // into exceptions — and the request is not wrapped in the retry policy: whether and where
+        // to repeat a map mutation is the caller's decision.
+        KahunaSetReplicationFactorResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/cluster/replication-factor")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .AllowAnyHttpStatus()
+            .PostJsonAsync(
+                new KahunaSetReplicationFactorRequest { PartitionId = partitionId, ReplicationFactor = replicationFactor },
+                cancellationToken: cancellationToken)
+            .ReceiveJson<KahunaSetReplicationFactorResponse>()
+            .ConfigureAwait(false);
+
+        if (response is null || string.IsNullOrEmpty(response.Status))
+            throw new KahunaException("SetReplicationFactor returned no outcome", LockResponseType.Errored);
+
+        return response;
+    }
+
     public async Task<KahunaClusterLeaveResponse> LeaveCluster(string url, CancellationToken cancellationToken)
     {
         // Refusals and unresolved attempts come back as 409/503/504 carrying the verdict in the

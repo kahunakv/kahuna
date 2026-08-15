@@ -148,6 +148,26 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>
+    /// Drops every receipt whose key satisfies <paramref name="shouldRemove"/> and returns how many were
+    /// removed. This is the un-host purge: when this node stops being a replica of the keys' partition, the
+    /// idempotency answers these receipts prove are served by the partition's live replicas — and travel back
+    /// in the seeding snapshot if the partition is ever hosted here again — so the local copies are dead
+    /// retention.
+    /// </summary>
+    public int PurgeWhere(Func<string, bool> shouldRemove)
+    {
+        int removed = 0;
+
+        foreach (CompletionReceiptRecord record in SnapshotRange(null, null))
+        {
+            if (shouldRemove(record.Key) && Forget(record.TransactionId, record.Key))
+                removed++;
+        }
+
+        return removed;
+    }
+
+    /// <summary>
     /// Drops every receipt older than <paramref name="ttl"/> and returns how many were removed. This is the age
     /// backstop that bounds the store independently of the coordinator-driven <see cref="Forget"/> path.
     /// <para>

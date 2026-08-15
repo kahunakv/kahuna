@@ -215,7 +215,7 @@ internal sealed class BackupService : IDisposable
             // A cluster-wide coordinated backup may only be taken by the meta-partition leader (the backup
             // coordinator). Fail fast on a follower so the caller retries against the leader.
             const int metaPartition = RangeMapStore.MetaPartitionId;
-            if (!await _raft.AmILeader(metaPartition, ct).ConfigureAwait(false))
+            if (!await _raft.AmILeaderIfHosted(metaPartition, ct).ConfigureAwait(false))
                 throw new KahunaBackupException(KahunaBackupOutcome.NotBackupCoordinator,
                     "This node is not the backup coordinator (it does not lead the meta partition); " +
                     "retry the coordinated backup against the current leader.");
@@ -225,7 +225,7 @@ internal sealed class BackupService : IDisposable
             // a cut this node no longer has authority over.
             long coordinatorTerm = _raft.WalAdapter.GetCurrentTerm(metaPartition);
             async Task<bool> StillCoordinator(CancellationToken fenceCt) =>
-                await _raft.AmILeader(metaPartition, fenceCt).ConfigureAwait(false)
+                await _raft.AmILeaderIfHosted(metaPartition, fenceCt).ConfigureAwait(false)
                 && _raft.WalAdapter.GetCurrentTerm(metaPartition) == coordinatorTerm;
 
             HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
@@ -417,6 +417,11 @@ internal sealed class BackupService : IDisposable
 
         IReadOnlyList<BackupManifest> chain =
             await _catalog.ResolveAndValidateAsync(leafBackupId, ct).ConfigureAwait(false);
+
+        // A chain that covers only part of the cluster is not restorable on its own — surface that
+        // to a caller validating the chain, exactly as the restore itself would refuse it.
+        BackupChainCoverage.ValidatePartitionCoverage(chain);
+
         (HLCTimestamp? min, HLCTimestamp max) = BackupChainCoverage.Compute(chain);
 
         List<KahunaBackupInfo> dtos = chain.Select(ToDto).ToList();
@@ -517,6 +522,10 @@ internal sealed class BackupService : IDisposable
             BackupManifestMac.Verify(m, _macKey);
             await BackupArtifactVerifier.VerifyAsync(m, _artifacts, ct).ConfigureAwait(false);
         }
+
+        // Refuse a chain that covers only part of the cluster (taken by a node that hosted only some
+        // partitions under replica placement) — after authentication, before any destination bytes.
+        BackupChainCoverage.ValidatePartitionCoverage(chain);
 
         // Full backup is always chain[0]; its checkpoint is the base image.
         BackupManifest fullBackup = chain[0];

@@ -45,4 +45,14 @@ internal sealed class KahunaDurabilityProvider : IApplicationDurabilityProvider
 
         return Math.Max(live, persisted);
     }
+
+    /// <summary>
+    /// Evicts the cached persisted floor for a partition this node stopped hosting. The "read once
+    /// per partition" contract above assumes the floor only advances through this node's own flush
+    /// cycle — but a partition that leaves and later returns re-seeds from a snapshot, and the old
+    /// cached floor would then vouch for applies the purged local copy no longer has. Evicting here
+    /// makes a re-hosted partition re-read the backend, which reflects whatever the replica-loss
+    /// purge left there.
+    /// </summary>
+    internal void Forget(int partitionId) => persistedFloors.TryRemove(partitionId, out _);
 }

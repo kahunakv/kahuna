@@ -132,17 +132,17 @@ internal sealed class SequenceLocator
         int partitionId = dataPartitionRouter.Locate(SequenceActor.GetStorageKey(name));
 
         bool servesLocally = confirmLeadership
-            ? await raft.ConfirmLeadershipAsync(partitionId, cancellationToken).ConfigureAwait(false)
-            : await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+            ? await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken).ConfigureAwait(false)
+            : await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false);
 
         if (servesLocally)
             return (true, raft.GetLocalEndpoint());
 
-        string leader;
+        string? leader;
 
         try
         {
-            leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
         }
         catch (RaftException ex)
         {
@@ -150,6 +150,13 @@ internal sealed class SequenceLocator
             // the caller to retry rather than surface the election as a server error, but log the reason so
             // a resolution failure that is not a routine election delay stays visible.
             logger.LogWarning("Sequence leader not resolved for partition {PartitionId} ('{Name}'): {Reason}", partitionId, name, ex.Message);
+
+            return (false, "");
+        }
+
+        if (leader is null)
+        {
+            logger.LogWarning("Sequence leader not resolved for partition {PartitionId} ('{Name}'): partition is not hosted on this node", partitionId, name);
 
             return (false, "");
         }

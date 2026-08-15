@@ -518,7 +518,9 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
 
     // ── helpers ──────────────────────────────────────────────────────────────────
 
-    private static void WritePage(Stream stream, List<(string, ReadOnlyKeyValueEntry)> items, bool hasMore)
+    // Shared with the whole-partition state transfer, which reuses the same bounded, checksummed
+    // key-value page format for its kv section.
+    internal static void WritePage(Stream stream, IReadOnlyList<(string, ReadOnlyKeyValueEntry)> items, bool hasMore)
     {
         RangeSnapshotPage page = new() { HasMore = hasMore };
 
@@ -553,7 +555,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
         return message;
     }
 
-    private static PersistenceRequestItem ToPersistenceItem(RangeSnapshotEntry entry)
+    internal static PersistenceRequestItem ToPersistenceItem(RangeSnapshotEntry entry)
     {
         byte[]? value = entry.HasValue ? entry.Value.ToByteArray() : null;
 
@@ -568,7 +570,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     }
 
     /// <summary>FNV-1a 64 over the serialized entries (order-sensitive), for per-page integrity.</summary>
-    private static ulong ChecksumOf(IEnumerable<RangeSnapshotEntry> entries)
+    internal static ulong ChecksumOf(IEnumerable<RangeSnapshotEntry> entries)
     {
         FnvHashStream hasher = new();
         foreach (RangeSnapshotEntry entry in entries)

@@ -1,5 +1,6 @@
 
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.Configuration;
 
@@ -210,6 +211,42 @@ public static class ConfigurationValidator
                 $"RangeSplitSettleWindow ({configuration.RangeSplitSettleWindow.TotalMilliseconds:F0} ms) " +
                 $"must be at least MinLeaderStabilityMs ({minLeaderStabilityMs} ms); " +
                 "a shorter window allows re-splitting before the new partition's leader has stabilised.");
+    }
+
+    /// <summary>
+    /// Validates the replica-placement (replication factor) settings at startup. A negative factor
+    /// is meaningless and refused; questionable-but-workable settings only warn, because Kommander
+    /// degrades gracefully — a cluster with fewer live nodes than the factor simply runs every
+    /// range at the available node count until more nodes join.
+    /// </summary>
+    /// <param name="replicationFactor">Desired voter replicas per range; 0 = full replication.</param>
+    /// <param name="seedNodeCount">Number of seed nodes known at startup, or null when the caller
+    /// cannot know it (an embedded node handed an externally built discovery).</param>
+    /// <param name="logger">Sink for the non-fatal warnings; null suppresses them.</param>
+    /// <exception cref="KahunaServerException">Thrown when the factor is negative.</exception>
+    public static void ValidateReplicaPlacement(int replicationFactor, int? seedNodeCount, ILogger? logger)
+    {
+        if (replicationFactor < 0)
+            throw new KahunaServerException(
+                $"Replication factor ({replicationFactor}) must be zero or positive; " +
+                "0 means full replication (every voter hosts every range).");
+
+        if (replicationFactor == 0)
+            return;
+
+        // An even factor tolerates no more failures than the next odd factor down (quorum of 4 is 3,
+        // same single-failure tolerance as quorum of 3 at 3 replicas) while paying for an extra copy.
+        if (replicationFactor % 2 == 0)
+            logger?.LogWarning(
+                "Replication factor {ReplicationFactor} is even; it has the same failure tolerance as {OddFactor} " +
+                "at the cost of an extra replica per range. Prefer odd values.",
+                replicationFactor, replicationFactor - 1);
+
+        if (seedNodeCount is > 0 && replicationFactor > seedNodeCount)
+            logger?.LogWarning(
+                "Replication factor {ReplicationFactor} exceeds the {SeedNodeCount} seed node(s); " +
+                "ranges will hold one replica per available node until enough nodes join.",
+                replicationFactor, seedNodeCount);
     }
 
     private static void ValidatePersistentRevisionRetention(KahunaConfiguration configuration)

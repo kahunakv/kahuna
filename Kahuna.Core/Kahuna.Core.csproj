@@ -84,6 +84,9 @@
     <Protobuf Include="Replication\Protos\prepared_intent_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
+    <Protobuf Include="Replication\Protos\partitionstate_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
     <Protobuf Include="Persistence\Protos\rocksdb.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>

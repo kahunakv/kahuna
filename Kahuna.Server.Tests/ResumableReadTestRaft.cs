@@ -133,4 +133,10 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) => inner.RegisterStateMachineTransfer(transfer);
 
     public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) => inner.RegisterSystemStateTransfer(transfer);
+
+    public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) => inner.RegisterPartitionStateTransfer(transfer);
+    public long GetStaleProposedSkippedCount(int partitionId) => inner.GetStaleProposedSkippedCount(partitionId);
+    public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => inner.GetSnapshotStatuses(partitionId);
+    public bool HostsPartition(int partitionId) => inner.HostsPartition(partitionId);
+    public string? GetPartitionLeaderHint(int partitionId) => inner.GetPartitionLeaderHint(partitionId);
 }

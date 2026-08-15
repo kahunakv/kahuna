@@ -55,6 +55,8 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
     public long GetDurabilityFloor(int partitionId) => inner.GetDurabilityFloor(partitionId);
 
+    public bool RemoveDurabilityFloor(int partitionId) => inner.RemoveDurabilityFloor(partitionId);
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         bool stored = inner.StoreLocks(items);
@@ -186,6 +188,22 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
         return MergeScan(items, unflushedWrites.Collect(prefix, effectiveStart), limit);
     }
+
+    // Whole-family scans are a physical-family primitive (replica seeding / un-host purging), not a
+    // read-your-writes path: the opaque, stateless cursor cannot window the unflushed set without
+    // double- or never-emitting its keys across pages, so the overlay is NOT merged here. Callers
+    // that need completeness against the commit frontier drain the background writer first — the
+    // scan contract on the interface states this.
+    public KeyValueScanPage ScanKeyValues(string? cursor, int limit) => inner.ScanKeyValues(cursor, limit);
+
+    public LockScanPage ScanLocks(string? cursor, int limit) => inner.ScanLocks(cursor, limit);
+
+    // Physical removals pass through: the install/purge callers guarantee no writes for the
+    // affected keys are queued (a seeding partition has no local applies; an un-hosted partition's
+    // delivery has stopped), so there is no overlay state to reconcile.
+    public bool DeleteKeyValues(IReadOnlyList<string> keys) => inner.DeleteKeyValues(keys);
+
+    public bool DeleteLocks(IReadOnlyList<string> resources) => inner.DeleteLocks(resources);
 
     public bool PruneKeyValueRevisions(
         IReadOnlyCollection<string>? keys,

@@ -133,6 +133,22 @@ public interface IInterNodeCommunication
     /// </summary>
     public Task<bool> ImportCompletionReceipts(string node, int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts, CancellationToken cancellationToken, bool forget = false);
 
+    /// <summary>
+    /// Forwards one checksummed page of key-values moved by a range split/merge to <paramref name="node"/>
+    /// (the destination partition's leader) so it replicates the page's entries onto
+    /// <paramref name="partitionId"/>'s Raft log. Returns whether the page committed.
+    /// </summary>
+    public Task<bool> ReplicateKeyValueRangePage(string node, int partitionId, byte[] page, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads the transaction state a moving key range carries — completion receipts plus serialized
+    /// canonical transaction records and prepared intents in <c>[startKey, endKey)</c> — from
+    /// <paramref name="node"/> (the source partition's leader). Ok is false when the remote node could
+    /// not confirm leadership of <paramref name="partitionId"/> and refused to answer from possibly
+    /// lagging stores.
+    /// </summary>
+    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken);
+
 
     /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);

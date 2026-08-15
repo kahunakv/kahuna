@@ -292,10 +292,21 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await RunTargetedRevisionCleanup();
                 await RunFullRevisionSweep();
                 UpdatePitrHorizon();
+                // Periodic backstop for the event-driven teardown below: a write applied just
+                // before the partition was un-hosted can re-create bookkeeping after the explicit
+                // teardown message ran, so every flush cycle re-validates against the committed map.
+                ForgetUnhostedPartitions();
                 // If either queue still has items after the time budget, reschedule immediately
                 // instead of waiting for the next periodic timer tick.
                 if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
                     self.Send(new(BackgroundWriteType.Flush));
+                break;
+
+            case BackgroundWriteType.ForgetUnhostedPartitions:
+                // Sent when the committed placement map stops listing this node as a replica of one
+                // or more partitions: drop their per-partition bookkeeping promptly instead of
+                // waiting for the next periodic flush tick.
+                ForgetUnhostedPartitions();
                 break;
 
             case BackgroundWriteType.FlushAndNotify:
@@ -329,6 +340,70 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     }
 
     /// <summary>
+    /// Drops every piece of per-partition bookkeeping — checkpoint tracking, enqueued-HLC watermark,
+    /// persisted-floor cache, and the partition's durability-tracker state — for partitions the
+    /// committed placement map no longer hosts on this node. Retained state would be a WAL retention
+    /// leak (and a stale durability floor) if the range is ever hosted here again; the on-disk floor
+    /// row is reclaimed when the partition's local data is purged. Consults <c>HostsPartition</c>
+    /// directly: it reads the same committed map the placement events are derived from, so the sweep
+    /// can never drop a partition that is still hosted. A no-op until the first partition map has
+    /// been applied, since before that nothing is materialized and every partition would look
+    /// un-hosted.
+    /// </summary>
+    private void ForgetUnhostedPartitions()
+    {
+        if (!raft.IsInitialized)
+            return;
+
+        HashSet<int>? toForget = null;
+
+        foreach (int partitionId in partitionIds.Keys)
+            if (!raft.HostsPartition(partitionId))
+                (toForget ??= []).Add(partitionId);
+
+        foreach (int partitionId in maxEnqueuedHlc.Keys)
+            if (!raft.HostsPartition(partitionId))
+                (toForget ??= []).Add(partitionId);
+
+        foreach (int partitionId in lastPersistedFloors.Keys)
+            if (!raft.HostsPartition(partitionId))
+                (toForget ??= []).Add(partitionId);
+
+        if (durabilityTracker is not null)
+        {
+            foreach (int partitionId in durabilityTracker.ObservedPartitions)
+                if (!raft.HostsPartition(partitionId))
+                    (toForget ??= []).Add(partitionId);
+        }
+
+        if (toForget is null)
+            return;
+
+        foreach (int partitionId in toForget)
+        {
+            partitionIds.Remove(partitionId);
+            maxEnqueuedHlc.TryRemove(partitionId, out _);
+            lastPersistedFloors.Remove(partitionId);
+            durabilityTracker?.Forget(partitionId);
+
+            logger.LogDroppedUnhostedPartitionBookkeeping(partitionId);
+        }
+
+        if (partitionIds.Count == 0)
+            pendingCheckpoint = false;
+    }
+
+    /// <summary>
+    /// Whether any per-partition bookkeeping (checkpoint tracking, enqueued-HLC watermark, or
+    /// persisted-floor cache) is currently retained for <paramref name="partitionId"/>.
+    /// Test/observability only.
+    /// </summary>
+    internal bool HasPartitionBookkeeping(int partitionId) =>
+        partitionIds.ContainsKey(partitionId)
+        || maxEnqueuedHlc.ContainsKey(partitionId)
+        || lastPersistedFloors.ContainsKey(partitionId);
+
+    /// <summary>
     /// Performs a checkpoint operation on partitions to ensure their state is up-to-date and synchronized.
     /// This method checks if any pending checkpoints can be completed by iterating over tracked partitions.
     /// Partitions that have exceeded the allowed checkpoint interval are processed, ensuring they are in a consistent state.
@@ -354,7 +429,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if ((currentTime - kv.Value) < maxTime)
                 continue;
 
-            if (!await raft.AmILeader(kv.Key, CancellationToken.None))
+            if (!await raft.AmILeaderIfHosted(kv.Key, CancellationToken.None))
             {
                 //logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", kv.Key);
 
@@ -1119,6 +1194,14 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         foreach (RaftPartitionRange partition in partitions)
         {
             int partitionId = partition.PartitionId;
+
+            // The committed map covers the whole cluster; the WAL adapter and the retention floor
+            // are local, so only partitions materialized on this node get a horizon here (a range
+            // hosted elsewhere has no local WAL to protect, and Kommander reclaims the WAL of a
+            // range this node stopped hosting on its own).
+            if (!raft.HostsPartition(partitionId))
+                continue;
+
             long protectedIndex = PitrHorizon.ComputeProtectedIndex(
                 raft.WalAdapter, partitionId, now,
                 configuration.PitrWindow, configuration.BaseSnapshotInterval);

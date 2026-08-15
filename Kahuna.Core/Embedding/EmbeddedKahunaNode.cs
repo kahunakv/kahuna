@@ -47,6 +47,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
 
+        // This constructor forms its quorum from phantom witnesses; the only real node is this one.
+        ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: 1, raftLogger);
+
         actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftCommunication = new();
 
@@ -197,6 +200,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
 
+        // The caller owns discovery here, so the seed node count is unknown at this layer.
+        ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: null, raftLogger);
+
         actorSystem = new(logger: raftLogger);
 
         this.sharedResources = CreateSharedResources(options);
@@ -329,8 +335,27 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         await Raft.WaitForLeader(0, cancellationToken).ConfigureAwait(false);
 
+        // Wait for a leader only on the partitions this node hosts. JoinCluster returns after the
+        // first committed partition map has been applied, so the hosted set is known here — but a
+        // later map application (the initial replica seeding, or a rebalance) can stop hosting a
+        // partition at any point during this loop, so each id is re-checked and a partition that
+        // becomes non-hosted mid-wait is simply skipped: a range hosted elsewhere needs no local
+        // leader, and requests for it are served by forwarding. With the replication factor off,
+        // every partition is hosted and this is exactly the historical wait.
         for (int partitionId = 1; partitionId <= Raft.Configuration.InitialPartitions; partitionId++)
-            await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        {
+            if (!Raft.HostsPartition(partitionId))
+                continue;
+
+            try
+            {
+                await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (PartitionNotHostedException)
+            {
+                // The placement map moved this range off the node between the check and the wait.
+            }
+        }
     }
 
     public async Task<string> WaitForLeaderForKeyAsync(string key, CancellationToken cancellationToken = default)
@@ -483,7 +508,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             LeaderBalancerReportTtl = options.LeaderBalancerReportTtl,
             MinLeaderStabilityMs = (long)options.MinLeaderStability.TotalMilliseconds,
             LeaderBalancerOpsWeight = options.LeaderBalancerOpsWeight,
-            LeaderBalancerQueueWeight = options.LeaderBalancerQueueWeight
+            LeaderBalancerQueueWeight = options.LeaderBalancerQueueWeight,
+            ReplicationFactor = options.ReplicationFactor,
+            EnablePlacementRebalancer = options.EnablePlacementRebalancer,
+            MaxReplicaMovesPerPass = options.MaxReplicaMovesPerPass,
+            MaxConcurrentReplicaTransfers = options.MaxConcurrentReplicaTransfers,
+            ReplicaCountDeadband = options.ReplicaCountDeadband,
+            Zone = options.Zone,
+            EnableLoadReports = options.EnableLoadReports
         };
     }
 

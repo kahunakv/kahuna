@@ -145,6 +145,18 @@ public sealed class TestMembership : BaseCluster
             string key = $"e2-{Guid.NewGuid():N}";
             byte[] value = Encoding.UTF8.GetBytes("after-leave");
 
+            // The departed node may still be the key partition's cached leader until the
+            // survivors' re-election completes; a set in that window is answered MustRetry (the
+            // retryable leader-change contract), not served. "Cluster serves requests" means
+            // serving once its elections settle, so wait for a survivor to hold the key
+            // partition's leadership — resolved with the same routing the locator applies.
+            int keyPartition = new Kahuna.Server.KeyValues.Ranges.DataPartitionRouter(raft1).Locate(key);
+            await WaitUntilAsync(async () =>
+            {
+                string leader = await raft1.WaitForLeader(keyPartition, TestContext.Current.CancellationToken);
+                return leader is "localhost:8001" or "localhost:8002";
+            }, timeoutMs: 30_000);
+
             (KeyValueResponseType type, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, value, null, -1, KeyValueFlags.Set, 0,
                 KeyValueDurability.Ephemeral, TestContext.Current.CancellationToken);
@@ -608,6 +620,11 @@ public sealed class TestMembership : BaseCluster
         public int GetPartitionWalQueueDepth(int partitionId) => 0;
         public double GetPartitionCommitWaitMs(int partitionId) => 0;
         public long GetCommitIndex(int partitionId) => 0;
+        public long GetStaleProposedSkippedCount(int partitionId) => 0;
+        public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => Array.Empty<RaftSnapshotStatus>();
+        public bool HostsPartition(int partitionId) => true;
+        public string? GetPartitionLeaderHint(int partitionId) => null;
+        public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
     }
 
     private sealed class CaptureLogger : ILogger<IRaft>
@@ -710,6 +727,11 @@ public sealed class TestMembership : BaseCluster
         public int GetPartitionWalQueueDepth(int partitionId) => 0;
         public double GetPartitionCommitWaitMs(int partitionId) => 0;
         public long GetCommitIndex(int partitionId) => 0;
+        public long GetStaleProposedSkippedCount(int partitionId) => 0;
+        public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => Array.Empty<RaftSnapshotStatus>();
+        public bool HostsPartition(int partitionId) => true;
+        public string? GetPartitionLeaderHint(int partitionId) => null;
+        public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
     }
 
     private sealed class StubKahunaForE5 : IKahuna
@@ -759,6 +781,8 @@ public sealed class TestMembership : BaseCluster
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotImplementedException();
         public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability) => throw new NotImplementedException();
 
         public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys) => throw new NotImplementedException();

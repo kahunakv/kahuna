@@ -182,7 +182,7 @@ internal sealed class RangeMapStore : IDisposable
     {
         try
         {
-            if (!await raft.AmILeader(MetaPartitionId, cancellationToken).ConfigureAwait(false))
+            if (!await raft.AmILeaderIfHosted(MetaPartitionId, cancellationToken).ConfigureAwait(false))
                 return false;
 
             RaftReplicationResult result =

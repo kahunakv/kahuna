@@ -89,7 +89,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryLock(resource, owner, expiresMs, durability);
+        {
+            // Re-enter the locator (like the production gRPC transport does) so a hosting
+            // non-leader receiver redirects once to its accurately-resolved local leader instead
+            // of running the lock on a follower; the forwarded marker keeps a non-hosting
+            // receiver from forwarding onward.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -115,7 +123,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryExtendLock(resource, owner, expiresMs, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -139,7 +151,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryUnlock(resource, owner, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryUnlock(resource, owner, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -161,7 +177,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.GetLock(resource, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndGetLock(resource, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -287,7 +307,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -311,11 +335,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<KahunaSetKeyValueResponseItem> bag = [];
 
             foreach (KahunaSetKeyValueRequestItem item in items)
             {
-                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.TrySetKeyValue(
+                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.LocateAndTrySetKeyValue(
                     item.TransactionId,
                     item.Key ?? "",
                     item.Value,
@@ -324,6 +350,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
                     item.Flags,
                     item.ExpiresMs,
                     item.Durability,
+                    cancellationToken,
                     item.RoutedGeneration
                 );
                 
@@ -373,14 +400,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<KahunaDeleteKeyValueResponseItem> bag = [];
 
             foreach (KahunaDeleteKeyValueRequestItem item in items)
             {
-                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.TryDeleteKeyValue(
+                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.LocateAndTryDeleteKeyValue(
                     item.TransactionId,
                     item.Key ?? "",
-                    item.Durability
+                    item.Durability,
+                    cancellationToken
                 );
 
                 bag.Add(new()
@@ -424,7 +454,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryDeleteKeyValue(transactionId, key, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -450,7 +484,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryExtendKeyValue(transactionId, key, expiresMs, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -477,7 +515,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -504,7 +546,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -521,8 +567,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
-                await kahunaNode.TryGetManyValues(transactionId, readTimestamp, keys);
+                await kahunaNode.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
 
             // Test seam: replace designated per-key results with MustRetry to simulate a per-key routing
             // transient. Only fires when GetManyValuesFault is set by a test.
@@ -582,8 +630,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             Interlocked.Increment(ref existsManyCallCount);
 
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> readResponses =
-                await kahunaNode.TryExistsManyValues(transactionId, readTimestamp, keys);
+                await kahunaNode.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
 
             AddToReadManyResponses(readResponses, lockSync, responses);
             return;
@@ -617,7 +667,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             Interlocked.Increment(ref checkWriteIntentCallCount);
 
-            return await kahunaNode.TryCheckWriteIntentValue(transactionId, key, durability);
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
@@ -634,7 +686,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             Interlocked.Increment(ref checkManyWriteIntentsCallCount);
 
-            return await kahunaNode.TryCheckManyWriteIntentValues(transactionId, keys);
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
@@ -661,7 +715,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -686,7 +744,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -712,10 +774,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> bag = [];
 
             foreach ((string key, int expiresMs, KeyValueDurability durability) in xkeys)
-                bag.Add(await kahunaNode.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability));
+                bag.Add(await kahunaNode.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken));
 
             AddToAcquireLockResponses(bag, lockSync, responses);
             return;
@@ -756,7 +820,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryReleaseExclusiveLock(transactionId, key, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
+        }
         
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -781,7 +849,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -811,7 +883,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             await AcquireRangeLockHook(transactionId, prefix, cancellationToken);
 
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
+        }
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
@@ -837,7 +913,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        }
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
@@ -862,11 +942,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability)> bag = [];
 
             foreach ((string key, KeyValueDurability durability) in xkeys)
             {
-                (KeyValueResponseType type, string _) = await kahunaNode.TryReleaseExclusiveLock(transactionId, key, durability);
+                (KeyValueResponseType type, string _) = await kahunaNode.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
                 bag.Add((type, key, durability));
             }
 
@@ -915,7 +997,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -944,11 +1030,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> bag = [];
 
             foreach ((string key, KeyValueDurability durability) in xkeys)
             {
-                (KeyValueResponseType type, HLCTimestamp proposalId, string _, KeyValueDurability _) = await kahunaNode.TryPrepareMutations(transactionId, commitId, key, durability, 0, recordAnchorKey);
+                (KeyValueResponseType type, HLCTimestamp proposalId, string _, KeyValueDurability _) = await kahunaNode.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, 0, recordAnchorKey);
                 bag.Add((type, proposalId, key, durability));
             }
 
@@ -1009,13 +1097,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             // Test seam: let the commit apply on the remote leader (so the value, receipt, and — for an anchor —
             // the durable decision are all installed there) but hide its success from the caller as MustRetry.
             // This models a committed-but-lost/covered response: the coordinator cannot tell the commit landed.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             if (CommitMutationsResponseFault is not null && CommitMutationsResponseFault(transactionId, key))
             {
-                await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
+                await kahunaNode.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancellationToken);
                 return (KeyValueResponseType.MustRetry, 0);
             }
 
-            return await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
+            return await kahunaNode.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
@@ -1024,7 +1114,35 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<bool> ReplicateKeyValueRangePage(string node, int partitionId, byte[] page, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.GetRangeTransactionStateLocal(partitionId, startKey, endKey, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1032,7 +1150,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1058,6 +1180,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag = [];
 
             foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in xkeys)
@@ -1070,7 +1194,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
                     continue;
                 }
 
-                (KeyValueResponseType type, long commitIndex) = await kahunaNode.TryCommitMutations(transactionId, key, ticketId, durability);
+                (KeyValueResponseType type, long commitIndex) = await kahunaNode.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancellationToken);
                 bag.Add((type, key, commitIndex, durability));
             }
 
@@ -1115,8 +1239,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             RollbackObserver?.Invoke(transactionId, key);
-            return await kahunaNode.TryRollbackMutations(transactionId, key, ticketId, durability);
+            return await kahunaNode.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
@@ -1136,12 +1262,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             ConcurrentBag<(KeyValueResponseType, string, long, KeyValueDurability)> bag = [];
 
             foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) in xkeys)
             {
                 RollbackObserver?.Invoke(transactionId, key);
-                (KeyValueResponseType type, long commitIndex) = await kahunaNode.TryRollbackMutations(transactionId, key, ticketId, durability);
+                (KeyValueResponseType type, long commitIndex) = await kahunaNode.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancellationToken);
                 bag.Add((type, key, commitIndex, durability));
             }
 
@@ -1184,7 +1312,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.GetByBucket(transactionId, prefixedKey, readTimestamp, durability);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1194,7 +1326,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         Interlocked.Increment(ref getByRangeCallCount);
 
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            // This call re-enters the receiving node's locator, so it must carry the
+            // forwarded-request marker: a non-hosting receiver answers MustRetry instead of
+            // forwarding onward, mirroring the gRPC server-batcher receive path.
+            using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.Enter();
+
             return await kahunaNode.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1227,7 +1366,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.StartTransaction(options);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndStartTransaction(options, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1235,7 +1378,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.CommitTransaction(handle);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndCommitTransaction(handle, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1243,7 +1390,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
-            return await kahunaNode.RollbackTransaction(handle);
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndRollbackTransaction(handle, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1253,7 +1404,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref beginOperationCallCount);
-            return await Task.FromResult(kahunaNode.BeginOperation(transactionId, operationId, kind, payloadDigest));
+
+            // Route through the locator: the sender may have guessed a coordinator-partition
+            // replica that does not hold the session; a hosting non-leader receiver redirects
+            // once to its accurately-resolved local leader instead of answering
+            // RejectedSessionClosed from the wrong node's session table.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");

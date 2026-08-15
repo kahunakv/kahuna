@@ -108,6 +108,10 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly RangeMapStore rangeMapStore;
 
+    private readonly PartitionDataEnumerator partitionDataEnumerator;
+
+    private readonly PartitionStateTransfer partitionStateTransfer;
+
     private readonly SnapshotFloorStore snapshotFloorStore;
 
     private readonly CompletionReceiptStore completionReceiptStore;
@@ -217,10 +221,25 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     private async Task<string?> ResolveDurableLeader(int partitionId, CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        // Durable-path routing is always a sub-operation the serving node initiates on its own
+        // behalf (a 2PC leg to a participant leader, an anchor-record lookup for a foreign intent),
+        // never a re-forward of the request being served — so the forwarded-request loop guard must
+        // not apply. Without this, any durable work reached through forwarding (a forwarded read
+        // meeting an unsettled foreign intent, a forwarded commit fanning out its prepares) could
+        // not route to partitions this node does not host.
+        using ForwardedRequestScope.SuppressScope _ = ForwardedRequestScope.Suppress();
+
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
             return null;
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        // For a partition this node does not host, the resolver answers a replica target (the
+        // receiver redirects to its own leader if needed). A null target means the operation
+        // cannot be routed from here at all — surface the typed retryable condition rather than
+        // running the durable op locally, which requires hosting the partition.
+        string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            throw new PartitionNotHostedException(partitionId);
+
         return leader == raft.GetLocalEndpoint() ? null : leader;
     }
 
@@ -462,6 +481,32 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal async Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
     {
+        // The sender may have routed on a replica guess (no gossiped leader hint yet): every durable
+        // kind below requires the partition leader (propose via the local scheduler, apply on leader
+        // state). This node hosts the partition, so its own leader resolution is accurate — redirect
+        // once to the actual leader instead of failing the operation against a follower, which the
+        // sender would only retry against the same guessed replica. Bounded: the redirect target is
+        // the current leader, which serves locally; a mid-flight leadership move just redirects again.
+        if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string? actualLeader;
+            try
+            {
+                actualLeader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RaftException)
+            {
+                // Leadership undecided (election in progress): fail the forwarded op; the origin retries.
+                return false;
+            }
+
+            if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
+                return await interNodeCommunication.DurableOperation(actualLeader, partitionId, kind, logType, payload, cancellationToken).ConfigureAwait(false);
+
+            if (actualLeader is null)
+                return false;
+        }
+
         switch (kind)
         {
             case DurableOpReplicate:
@@ -496,10 +541,35 @@ internal sealed class KeyValuesManager : IDisposable
     /// none exists. The record crosses the wire serialized so the public transport contract never exposes the
     /// internal record type.
     /// </summary>
-    internal Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
+    internal async Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
     {
+        // Only the anchor partition's leader is authoritative; a lagging follower's "absent" answer
+        // would be indistinguishable from "no record exists". If the sender's leader guess landed
+        // here on a follower, redirect once — this node hosts the partition, so its own resolution
+        // is accurate.
+        if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string? actualLeader;
+            try
+            {
+                actualLeader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RaftException)
+            {
+                throw new PartitionNotHostedException(partitionId);
+            }
+
+            if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
+                return await interNodeCommunication
+                    .LookupTransactionRecord(actualLeader, partitionId, transactionId, epoch, anchorKey, cancellationToken)
+                    .ConfigureAwait(false);
+
+            if (actualLeader is null)
+                throw new PartitionNotHostedException(partitionId);
+        }
+
         TransactionRecord? record = transactionRecordStore.Get(transactionId, epoch);
-        return Task.FromResult(record is null ? null : TransactionRecordStore.SerializeRecords([record]));
+        return record is null ? null : TransactionRecordStore.SerializeRecords([record]);
     }
 
     /// <summary>
@@ -634,6 +704,10 @@ internal sealed class KeyValuesManager : IDisposable
         // for the generation fence.
         rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // Per-partition data ownership over the node-global backend, for whole-partition snapshot
+        // export and un-host purging. Classifies against the committed range map and the hash pool.
+        partitionDataEnumerator = new(persistenceBackend, () => rangeMapStore.Current, raft.Configuration.InitialPartitions);
+
         // Snapshot-floor registry: replicated on the same meta partition as the range map.
         // When an external store is provided (shared with BackgroundWriterActor) use it directly;
         // otherwise create a new instance owned by this manager.
@@ -664,6 +738,27 @@ internal sealed class KeyValuesManager : IDisposable
         transactionRecordStore.AttachBundledPrepareProbe((intentKey, transactionId, epoch) =>
             preparedIntentStore.Get(intentKey) is { } liveIntent &&
             liveIntent.TransactionId == transactionId && liveIntent.Epoch == epoch);
+
+        // Whole-partition state transfer: seeds a replica whose needed log entries were compacted.
+        // Drains the background writer before exporting so the physical-family scan reflects every
+        // applied entry (the export contract requires at least everything applied at the boundary).
+        partitionStateTransfer = new(
+            partitionDataEnumerator,
+            persistenceBackend,
+            completionReceiptStore,
+            transactionRecordStore,
+            preparedIntentStore,
+            () => rangeMapStore.Current,
+            raft.Configuration.InitialPartitions,
+            () =>
+            {
+                TaskCompletionSource<bool> flushed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                backgroundWriter.Send(new(BackgroundWriteType.FlushAndNotify, flushed));
+                return flushed.Task;
+            },
+            configuration.StoragePath,
+            configuration.StorageRevision,
+            logger);
 
         durableRecordRetentionTtl = configuration.TransactionOutcomeRetentionTtl;
         durableRecordGcMaxPerPass = configuration.DurableRecordGcMaxPerPass;
@@ -792,9 +887,9 @@ internal sealed class KeyValuesManager : IDisposable
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
-        rangeSplitter     = new(raft, rangeMapStore, kvStateMachineTransfer, rangeQuiesceStore, this, logger);
+        rangeSplitter     = new(raft, rangeMapStore, rangeQuiesceStore, this, logger);
         rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, this, writeFrequencyRegistry, configuration, logger);
-        rangeMerger       = new(raft, rangeMapStore, kvStateMachineTransfer, this, logger);
+        rangeMerger       = new(raft, rangeMapStore, this, logger);
         rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, writeFrequencyRegistry, configuration, logger);
 
         // Periodic split checker: fires on every CollectionInterval and calls TriggerAsync.
@@ -842,6 +937,12 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal RangeMapStore RangeMapStore => rangeMapStore;
 
+    /// <summary>Enumerates the backend data owned by one partition (snapshot export / un-host purge).</summary>
+    internal PartitionDataEnumerator PartitionDataEnumerator => partitionDataEnumerator;
+
+    /// <summary>Whole-partition state transfer, registered with Kommander for replica seeding.</summary>
+    internal PartitionStateTransfer PartitionStateTransfer => partitionStateTransfer;
+
     /// <summary>
     /// The replicated, refcounted, leased MVCC snapshot-floor registry.
     /// </summary>
@@ -860,7 +961,7 @@ internal sealed class KeyValuesManager : IDisposable
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
 
-        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+        if (await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return await snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct).ConfigureAwait(false);
 
         string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
@@ -880,7 +981,7 @@ internal sealed class KeyValuesManager : IDisposable
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
-        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+        if (await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return await snapshotFloorStore.RenewAsync(holdId, leaseMs, ct).ConfigureAwait(false);
 
         string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
@@ -898,7 +999,7 @@ internal sealed class KeyValuesManager : IDisposable
         if (!raft.Joined)
             return KeyValueResponseType.MustRetry;
 
-        if (await raft.AmILeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+        if (await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return await snapshotFloorStore.ReleaseAsync(holdId, ct).ConfigureAwait(false);
 
         string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
@@ -932,7 +1033,7 @@ internal sealed class KeyValuesManager : IDisposable
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
 
-        if (await raft.ConfirmLeadershipAsync(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+        if (await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return ReadLocalSnapshotFloor();
 
         string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
@@ -941,7 +1042,7 @@ internal sealed class KeyValuesManager : IDisposable
             // The election settled on this node after the confirmation above failed; confirm
             // again before answering. If it still cannot be confirmed, the local hold registry
             // may not include committed mutations from the prior term — refuse to answer.
-            if (await raft.ConfirmLeadershipAsync(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+            if (await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
                 return ReadLocalSnapshotFloor();
 
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
@@ -1035,7 +1136,7 @@ internal sealed class KeyValuesManager : IDisposable
         // Only the meta-partition leader can commit the seed. If this node is not the leader,
         // resolve the current leader and forward the seed request to it. Then wait for the descriptor
         // to replicate to this node so follow-on routes on this node see it immediately.
-        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
+        if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
         {
             string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
             if (leader == raft.GetLocalEndpoint())
@@ -1112,7 +1213,7 @@ internal sealed class KeyValuesManager : IDisposable
         if (!rangeQuiesceStore.IsEmpty)
             return false;
 
-        if (!await raft.AmILeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
+        if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
         {
             string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
             if (leader != raft.GetLocalEndpoint())
@@ -3613,8 +3714,30 @@ internal sealed class KeyValuesManager : IDisposable
 
         int partitionId = locator.LocatePartition(coordinatorKey);
 
-        if (raft.Joined && !await raft.AmILeader(partitionId, CancellationToken.None))
+        if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
+        {
+            // Under replica placement the sender may have picked a coordinator-partition replica
+            // that is not the leader; this node hosts the partition, so its own resolution is
+            // accurate — redirect the completion once instead of refusing a sender that would
+            // only retry against the same guessed replica. A genuinely unresolvable leader keeps
+            // the retryable refusal below.
+            string? actualLeader;
+            try
+            {
+                actualLeader = await raft.TryResolveLeader(partitionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (RaftException)
+            {
+                actualLeader = null;
+            }
+
+            if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
+                return await interNodeCommunication
+                    .CompleteOperation(actualLeader, coordinatorKey, transactionId, operationId, payload, CancellationToken.None)
+                    .ConfigureAwait(false);
+
             return (KeyValueResponseType.MustRetry, null);
+        }
 
         string? anchor = CompleteOperation(transactionId, operationId, payload);
         return (KeyValueResponseType.Set, anchor);
@@ -4245,8 +4368,19 @@ internal sealed class KeyValuesManager : IDisposable
             || transactionRecordStore.Get(foreignIntent.TransactionId, foreignIntent.Epoch) is not null)
             return false;
 
-        TransactionRecord? record = await LookupDurableRecordRouted(
-            foreignIntent.TransactionId, foreignIntent.Epoch, foreignIntent.RecordAnchorKey, CancellationToken.None).ConfigureAwait(false);
+        TransactionRecord? record;
+        try
+        {
+            record = await LookupDurableRecordRouted(
+                foreignIntent.TransactionId, foreignIntent.Epoch, foreignIntent.RecordAnchorKey, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            // The anchor partition's leader could not be resolved from here right now (placement
+            // view still warming). The resolution is best-effort: the read's retryable outcome
+            // stands and a later attempt — or settlement — resolves the intent.
+            return true;
+        }
 
         if (record is { IsTerminal: true })
             request.ForeignDecisionHint = new ForeignDecisionHint(foreignIntent.TransactionId, foreignIntent.Epoch, record.Decision);
@@ -4279,8 +4413,18 @@ internal sealed class KeyValuesManager : IDisposable
                 || transactionRecordStore.Get(intent.TransactionId, intent.Epoch) is not null)
                 continue;
 
-            TransactionRecord? record = await LookupDurableRecordRouted(
-                intent.TransactionId, intent.Epoch, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+            TransactionRecord? record;
+            try
+            {
+                record = await LookupDurableRecordRouted(
+                    intent.TransactionId, intent.Epoch, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+            }
+            catch (PartitionNotHostedException)
+            {
+                // This intent's anchor leader cannot be resolved from here right now; skip it —
+                // the scan's retryable outcome stands for anything left unresolved.
+                continue;
+            }
 
             if (record is { IsTerminal: true })
                 (decisions ??= [])[(intent.TransactionId, intent.Epoch)] = record.Decision;
@@ -5052,10 +5196,15 @@ internal sealed class KeyValuesManager : IDisposable
         int partitionId,
         CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
             return await GetRangeLocksAsync(keySpace).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        // A partition this node does not host resolves through the placement-safe funnel; an
+        // unroutable target answers "no locks" rather than throwing — the split/merge lock
+        // transfer is best-effort with a post-cutover confirm loop.
+        string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            return [];
         if (leader == raft.GetLocalEndpoint())
             return await GetRangeLocksAsync(keySpace).ConfigureAwait(false);
 
@@ -5076,13 +5225,17 @@ internal sealed class KeyValuesManager : IDisposable
         if (locks.Count == 0)
             return;
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
         {
             await ImportRangeLocksAsync(keySpace, locks).ConfigureAwait(false);
             return;
         }
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        // Placement-safe resolution; an unroutable target skips the inject — the post-cutover
+        // confirm-and-reimport loop re-drives any lock that did not land.
+        string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            return;
         if (leader == raft.GetLocalEndpoint())
         {
             await ImportRangeLocksAsync(keySpace, locks).ConfigureAwait(false);
@@ -5146,6 +5299,312 @@ internal sealed class KeyValuesManager : IDisposable
     internal void ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport)
         => completionReceiptStore.ImportRange(receiptsToImport);
 
+    // ── split/merge data movement through partition leaders ─────────────────────────────
+
+    /// <summary>Entries per copied page — the same bound the range transfer's export uses.</summary>
+    private const int RangeCopyPageSize = 256;
+
+    private const int RangeCopyMaxAttempts = 10;
+
+    private const int RangeCopyRetryDelayMs = 200;
+
+    /// <summary>Whether the partition has a committed replica set (per-partition placement); an empty
+    /// set is legacy full replication, where every node holds every partition's data locally.</summary>
+    private bool IsPlacedPartition(int partitionId) => raft.GetPartitionReplicas(partitionId).Count > 0;
+
+    /// <summary>
+    /// Copies <c>[startKey, endKey)</c> of <paramref name="keySpace"/> at the MVCC snapshot
+    /// <paramref name="snapshotTs"/> from the source range into the destination partition — the
+    /// split/merge bulk and catch-up copy. Under legacy full replication (neither partition has a
+    /// committed replica set) this is the historical local export/import: every node holds the
+    /// data, so reading and writing the local backend is exact. Under placement the driving node
+    /// may host neither side, so the copy pages the range through the locator (which routes each
+    /// read to the source partition's leader) and replicates every page onto the destination
+    /// partition's Raft log via its leader — every replica of the destination applies the entries
+    /// through the ordinary consumer-apply path, a destination-leader change mid-copy loses
+    /// nothing, and a replica that is down catches up from the retained log. Returns false when
+    /// the copy could not complete; the caller must abort before cutover.
+    /// <para>
+    /// <paramref name="readerTransactionId"/> is the identity the pages are read under. The
+    /// split's catch-up copy runs while its quiesce range lock has stamped a write intent on every
+    /// resident key of the range; a foreign snapshot read meeting those live intents answers
+    /// MustRetry forever, so the catch-up must read as the lock's owner. Zero for reads outside a
+    /// quiesce window (the bulk copy, the merge).
+    /// </para>
+    /// </summary>
+    internal async Task<bool> CopyRangeToPartitionAsync(
+        string keySpace,
+        string? startKey,
+        string? endKey,
+        HLCTimestamp snapshotTs,
+        int sourcePartitionId,
+        int destinationPartitionId,
+        HLCTimestamp readerTransactionId,
+        CancellationToken cancellationToken)
+    {
+        if (!IsPlacedPartition(sourcePartitionId) && !IsPlacedPartition(destinationPartitionId))
+        {
+            Stream snapshot = await kvStateMachineTransfer.ExportRangeAsync(
+                keySpace, startKey, endKey, snapshotTs, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
+
+            await kvStateMachineTransfer.ImportRangeAsync(snapshot, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+
+        string? cursorKey = startKey;
+        bool cursorInclusive = true;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            KeyValueGetByRangeResult? page = null;
+            KeyValueResponseType lastType = KeyValueResponseType.MustRetry;
+
+            for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
+            {
+                KeyValueGetByRangeResult candidate = await LocateAndGetByRange(
+                    readerTransactionId, keySpace,
+                    cursorKey, cursorInclusive,
+                    endKey, false,
+                    RangeCopyPageSize, snapshotTs,
+                    KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
+
+                lastType = candidate.Type;
+
+                if (candidate.Type is KeyValueResponseType.Get)
+                {
+                    page = candidate;
+                    break;
+                }
+
+                if (candidate.Type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
+                {
+                    logger.LogWarning(
+                        "Range copy read failed KeySpace={KeySpace} Type={Type}", keySpace, candidate.Type);
+                    return false;
+                }
+
+                await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (page is null)
+            {
+                logger.LogWarning(
+                    "Range copy read did not settle KeySpace={KeySpace} LastType={Type}", keySpace, lastType);
+                return false;
+            }
+
+            if (page.Items.Count > 0)
+            {
+                using MemoryStream frame = new();
+                KvStateMachineTransfer.WritePage(frame, page.Items, hasMore: false);
+
+                if (!await ReplicateKeyValueRangePageToPartitionLeaderAsync(
+                        destinationPartitionId, frame.ToArray(), cancellationToken).ConfigureAwait(false))
+                    return false;
+            }
+
+            if (!page.HasMore || page.Items.Count == 0)
+                return true;
+
+            cursorKey = page.Items[^1].Item1;   // resume strictly after the last key
+            cursorInclusive = false;
+        }
+    }
+
+    /// <summary>
+    /// Replicates one checksummed page of moved key-values onto <paramref name="partitionId"/>'s
+    /// Raft log via its leader, forwarding over IPC when the leader is remote. Bounded retries on
+    /// an unresolvable leader; false means the page is not durable and the caller must abort.
+    /// </summary>
+    internal async Task<bool> ReplicateKeyValueRangePageToPartitionLeaderAsync(
+        int partitionId, byte[] page, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
+        {
+            if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            {
+                if (await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false))
+                    return true;
+            }
+            else
+            {
+                string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+                if (leader is not null)
+                {
+                    bool replicated = leader == raft.GetLocalEndpoint()
+                        ? await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false)
+                        : await interNodeCommunication.ReplicateKeyValueRangePage(leader, partitionId, page, cancellationToken).ConfigureAwait(false);
+
+                    if (replicated)
+                        return true;
+                }
+            }
+
+            await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Applies one checksummed page of moved key-values on this node by replicating each entry as
+    /// an ordinary committed key-value log record on <paramref name="partitionId"/> — one atomic
+    /// batched proposal through the write aggregator, admitted as terminal so ordinary write
+    /// pressure on the destination cannot reject a cutover-gating copy. The entries then apply on
+    /// every replica through the standard consumer-apply path with full wire fidelity (revision,
+    /// timestamps, tombstone state). Re-replicating the same page (a retry after an ambiguous
+    /// failure) converges: applies are newest-wins by revision and the backend upsert is
+    /// idempotent. Returns false when the page is corrupt or the proposal did not commit.
+    /// </summary>
+    public async Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken)
+    {
+        Kahuna.Server.Replication.Protos.RangeSnapshotPage? parsed;
+        try
+        {
+            parsed = Kahuna.Server.Replication.Protos.RangeSnapshotPage.Parser.ParseDelimitedFrom(new MemoryStream(page));
+        }
+        catch (Google.Protobuf.InvalidProtocolBufferException ex)
+        {
+            logger.LogWarning("Range-copy page is corrupt: {Message}", ex.Message);
+            return false;
+        }
+
+        if (parsed is null || KvStateMachineTransfer.ChecksumOf(parsed.Entries) != parsed.Checksum)
+        {
+            logger.LogWarning("Range-copy page failed checksum verification for partition {Partition}", partitionId);
+            return false;
+        }
+
+        if (parsed.Entries.Count == 0)
+            return true;
+
+        HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        List<RaftProposalEntry> entries = new(parsed.Entries.Count);
+
+        foreach (Kahuna.Server.Replication.Protos.RangeSnapshotEntry entry in parsed.Entries)
+        {
+            KeyValueState state = (KeyValueState)entry.State;
+
+            Kahuna.Server.Replication.Protos.KeyValueMessage kvm = new()
+            {
+                Type = (int)(state == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet),
+                Key = entry.Key,
+                Revision = entry.Revision,
+                ExpireNode = entry.ExpiresNode,
+                ExpirePhysical = entry.ExpiresPhysical,
+                ExpireCounter = entry.ExpiresCounter,
+                LastUsedNode = entry.LastUsedNode,
+                LastUsedPhysical = entry.LastUsedPhysical,
+                LastUsedCounter = entry.LastUsedCounter,
+                LastModifiedNode = entry.LastModifiedNode,
+                LastModifiedPhysical = entry.LastModifiedPhysical,
+                LastModifiedCounter = entry.LastModifiedCounter,
+                TimeNode = currentTime.N,
+                TimePhysical = currentTime.L,
+                TimeCounter = currentTime.C
+                // Transaction identity intentionally absent: the copied value is a terminal committed
+                // state whose completion receipt travels in the separate receipt handoff — carrying the
+                // identity here would re-record receipts on apply.
+            };
+
+            if (entry.HasValue)
+                kvm.Value = entry.Value;
+
+            entries.Add(new RaftProposalEntry(
+                ReplicationTypes.KeyValues,
+                ReplicationSerializer.Serialize(kvm),
+                AutoCommit: true,
+                ExpectedGeneration: 0));
+        }
+
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Writes.DurableProposalSubmission submission = new(
+            partitionId,
+            entries,
+            completion,
+            Writes.WriteAdmissionClass.Terminal,
+            ApplyDurableEntriesOnCommit,
+            fenceKey: null,
+            fenceGeneration: 0);
+
+        if (!writeAggregator.TryEnqueue(submission))
+            return false;
+
+        using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
+        return await submission.Committed.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Answers the transaction state a moving key range carries — completion receipts, and the
+    /// serialized canonical transaction records and prepared intents whose key/anchor falls in
+    /// <c>[startKey, endKey)</c> — but only when this node holds confirmed leadership of the source
+    /// partition: a follower's stores can lag the newest prepared intent, and a handoff missing an
+    /// intent would strand its transaction after cutover. A false answer means "not the leader,
+    /// route elsewhere", never "no state".
+    /// </summary>
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(
+        int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        if (!await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            return (false, [], [], []);
+
+        List<CompletionReceiptRecord> receipts = [.. completionReceiptStore.SnapshotRange(startKey, endKey)];
+        IReadOnlyList<TransactionRecord> records = transactionRecordStore.SnapshotRange(startKey, endKey);
+        IReadOnlyList<PreparedIntent> intents = preparedIntentStore.SnapshotRange(startKey, endKey);
+
+        return (
+            true,
+            receipts,
+            records.Count > 0 ? TransactionRecordStore.SerializeRecords(records) : [],
+            intents.Count > 0 ? PreparedIntentStore.SerializeIntents(intents) : []);
+    }
+
+    /// <summary>
+    /// Gathers the moving range's transaction state from the source partition's leader, forwarding
+    /// over IPC when the leader is remote. Used by split/merge when the source range has a
+    /// committed replica set, so the gather reads the authoritative stores rather than this node's
+    /// possibly-empty local projection. Bounded retries across leader changes.
+    /// </summary>
+    internal async Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
+        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
+        {
+            (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes) =
+                await GetRangeTransactionStateLocal(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+            if (!ok)
+            {
+                string? leader = await raft.TryResolveLeader(sourcePartitionId, cancellationToken).ConfigureAwait(false);
+
+                if (leader is not null && leader != raft.GetLocalEndpoint())
+                    (ok, receipts, recordBytes, intentBytes) = await interNodeCommunication.GetRangeTransactionState(
+                        leader, sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (ok)
+            {
+                IReadOnlyList<TransactionRecord> records = recordBytes.Length > 0
+                    ? TransactionRecordStore.DeserializeRecords(recordBytes)
+                    : [];
+                IReadOnlyList<PreparedIntent> intents = intentBytes.Length > 0
+                    ? PreparedIntentStore.DeserializeIntents(intentBytes)
+                    : [];
+
+                return (true, receipts, records, intents);
+            }
+
+            await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
+        }
+
+        return (false, [], [], []);
+    }
+
     /// <summary>
     /// Replicates moved completion receipts onto the destination partition's Raft log, so every replica of
     /// the destination range holds them and a destination-leader change right after cutover still resolves a
@@ -5194,10 +5653,14 @@ internal sealed class KeyValuesManager : IDisposable
         if (receiptsToImport.Count == 0)
             return true;
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
             return await ImportCompletionReceiptsReplicated(partitionId, receiptsToImport, cancellationToken).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        // A null target (partition not hosted here and no replica known) reports "not durable";
+        // the caller retries the handoff later rather than failing the drive.
+        string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            return false;
         if (leader == raft.GetLocalEndpoint())
             return await ImportCompletionReceiptsReplicated(partitionId, receiptsToImport, cancellationToken).ConfigureAwait(false);
 
@@ -5251,10 +5714,14 @@ internal sealed class KeyValuesManager : IDisposable
         if (receiptsToForget.Count == 0)
             return true;
 
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
             return await ForgetCompletionReceiptsReplicated(partitionId, receiptsToForget, cancellationToken).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        // A null target (partition not hosted here and no replica known) reports "not durable";
+        // the record keeps its receipts and the GC pass retries the forget later.
+        string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            return false;
         if (leader == raft.GetLocalEndpoint())
             return await ForgetCompletionReceiptsReplicated(partitionId, receiptsToForget, cancellationToken).ConfigureAwait(false);
 
@@ -5294,7 +5761,7 @@ internal sealed class KeyValuesManager : IDisposable
             int partitionId = locator.LocateRange(intent.Key).PartitionId;
             if (partitions.Contains(partitionId))
                 continue;
-            if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
                 continue;
 
             partitions.Add(partitionId);
@@ -5384,7 +5851,7 @@ internal sealed class KeyValuesManager : IDisposable
 
             if (!anchorLeadership.TryGetValue(anchorPartition, out bool leadsAnchor))
             {
-                leadsAnchor = !raft.Joined || await raft.AmILeader(anchorPartition, cancellationToken).ConfigureAwait(false);
+                leadsAnchor = !raft.Joined || await raft.AmILeaderIfHosted(anchorPartition, cancellationToken).ConfigureAwait(false);
                 anchorLeadership[anchorPartition] = leadsAnchor;
             }
 
@@ -5554,7 +6021,7 @@ internal sealed class KeyValuesManager : IDisposable
     internal async Task<int> TryResolveDecidedDurableBlockersAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
     {
-        if (raft.Joined && !await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
             return 0;
 
         DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
@@ -5583,7 +6050,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         // Only drive/read the decision when this node leads the anchor partition; otherwise the local record store
         // is not authoritative and applying an abort locally could diverge from the real remote decision.
-        if (raft.Joined && !await raft.AmILeader(anchorPartition, cancellationToken).ConfigureAwait(false))
+        if (raft.Joined && !await raft.AmILeaderIfHosted(anchorPartition, cancellationToken).ConfigureAwait(false))
             return null;
 
         // Drive the abort through the ordered scheduler seam (this node leads the anchor partition), which applies
@@ -5610,10 +6077,15 @@ internal sealed class KeyValuesManager : IDisposable
         KeyValueDurability durability,
         CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
             return await TryReleaseExclusiveRangeLock(transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        // Placement-safe resolution: the split/merge driver may not host the source partition.
+        // An unroutable target reports MustRetry — the lock has a TTL, so a missed release only
+        // delays direct writes on the old range until the quiesce lease expires.
+        string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            return KeyValueResponseType.MustRetry;
         if (leader == raft.GetLocalEndpoint())
             return await TryReleaseExclusiveRangeLock(transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability).ConfigureAwait(false);
 
@@ -6508,6 +6980,58 @@ internal sealed class KeyValuesManager : IDisposable
         }
 
         return min;
+    }
+
+    /// <summary>
+    /// Removes everything this node retains for a partition the committed map no longer hosts
+    /// here: the durable state (backend rows, store slices, floor, half-install marker — via the
+    /// state transfer, serialized against a concurrent seeding install) and then the actor-resident
+    /// entries. Memory eviction runs strictly after the durable purge: the purge drains the
+    /// background writer first, so by eviction time no evicted entry has an unflushed write that
+    /// could land afterwards and resurrect rows. Returns false when aborted (the partition was
+    /// re-gained) or a durable step could not complete; the startup re-derivation converges it.
+    /// </summary>
+    internal async Task<bool> PurgeUnhostedPartitionDataAsync(int partitionId, Func<bool> stillUnhosted, CancellationToken cancellationToken)
+    {
+        if (!await partitionStateTransfer.PurgeUnhostedPartitionAsync(partitionId, stillUnhosted, cancellationToken).ConfigureAwait(false))
+            return false;
+
+        await EvictPartitionEntriesAsync(partitionId).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Broadcasts a partition eviction to every key-value actor shard (ephemeral and persistent)
+    /// so no shard retains a resident entry — ephemeral or leader-tenure leftovers included — for
+    /// a partition this node stopped hosting. Completes when every shard has processed it.
+    /// </summary>
+    internal async Task EvictPartitionEntriesAsync(int partitionId)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.EvictPartition,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            string.Empty,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            partitionId,
+            null);
+
+        List<Task<KeyValueResponse?>> tasks = new(ephemeralInstances.Count + persistentInstances.Count);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in ephemeralInstances)
+            tasks.Add(actor.Ask(request)!);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in persistentInstances)
+            tasks.Add(actor.Ask(request)!);
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
     /// <summary>Observable async drain of the direct-write aggregator: rejects new writes, releases queued

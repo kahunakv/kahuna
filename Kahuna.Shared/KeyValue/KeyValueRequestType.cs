@@ -36,4 +36,11 @@ public enum KeyValueRequestType
     ResumeRead,
     InvalidateOrApply,
     FlushAck,
+
+    /// <summary>
+    /// Actor-internal maintenance message: removes every resident entry owned by the partition
+    /// carried in the request, after this node stopped being one of its replicas. Never sent by
+    /// clients and never serialized into the Raft log.
+    /// </summary>
+    EvictPartition,
 }

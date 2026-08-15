@@ -109,6 +109,7 @@ internal sealed class BackupDriver
             artifacts, catalog, _flushBeforeCheckpoint, snapshotT,
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
+            hostsPartition: _raft.HostsPartition,
             verifyCoordinator: verifyCoordinator, signManifest: signManifest, ct: ct);
 
     /// <summary>
@@ -126,7 +127,7 @@ internal sealed class BackupDriver
         Func<int, long, IDisposable>? acquireRetentionHold = null, BackupOwnerIdentity identity = default,
         Action<BackupManifest>? signManifest = null, CancellationToken ct = default) =>
         RunIncrementalAsync(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifacts, catalog, snapshotT,
-            acquireRetentionHold, identity, ComposeTopologyGeneration, signManifest, ct);
+            acquireRetentionHold, identity, ComposeTopologyGeneration, _raft.HostsPartition, signManifest, ct);
 
     /// <summary>
     /// Composes the current cluster topology generation from this node's live view: each partition's
@@ -201,6 +202,7 @@ internal sealed class BackupDriver
         int applyBarrierTimeoutMs = DefaultApplyBarrierTimeoutMs,
         BackupOwnerIdentity identity = default,
         Func<long>? topologyGenerationProbe = null,
+        Func<int, bool>? hostsPartition = null,
         Func<CancellationToken, Task<bool>>? verifyCoordinator = null,
         Action<BackupManifest>? signManifest = null,
         CancellationToken ct = default)
@@ -241,6 +243,8 @@ internal sealed class BackupDriver
                     "with a proven base cut cannot be taken.") { ExactCheckpointUnavailable = true };
 
             List<PartitionBackupRange> ranges = [];
+            List<int> clusterPartitions = [];
+            List<int> coveredPartitions = [];
             long maxAppliedIndex = 0;
             HLCTimestamp maxCommittedHlc = default;
 
@@ -252,6 +256,18 @@ internal sealed class BackupDriver
                     continue;
 
                 int partitionId = partition.PartitionId;
+                clusterPartitions.Add(partitionId);
+
+                // Under replica placement only hosted partitions have local WAL and state to capture;
+                // reading a non-hosted partition would yield nothing (or leftovers mid-purge) while
+                // making the manifest claim coverage it does not have. The covered set records what
+                // this backup truly holds — a covered partition with no committed entries is still
+                // covered, so it is added before the empty-WAL skip below.
+                if (hostsPartition is not null && !hostsPartition(partitionId))
+                    continue;
+
+                coveredPartitions.Add(partitionId);
+
                 (long lastId, HLCTimestamp lastHlc, long lastTerm) = snapshotT.HasValue
                     ? FindLastCommittedAtOrBefore(wal, partitionId, snapshotT.Value, ct)
                     : FindLastCommitted(wal, partitionId, ct);
@@ -375,6 +391,8 @@ internal sealed class BackupDriver
             manifest.BackupId = backupId;
             manifest.Checksums = checksums;
             manifest.Sizes = sizes;
+            manifest.ClusterPartitions = clusterPartitions;
+            manifest.CoveredPartitions = coveredPartitions;
             manifest.SetBaseCut(cut);
             manifest.ApplyOwnerIdentity(identity);
             if (capturedTopologyGeneration.HasValue)
@@ -634,6 +652,7 @@ internal sealed class BackupDriver
         Func<int, long, IDisposable>? acquireRetentionHold = null,
         BackupOwnerIdentity identity = default,
         Func<long>? topologyGenerationProbe = null,
+        Func<int, bool>? hostsPartition = null,
         Action<BackupManifest>? signManifest = null,
         CancellationToken ct = default)
     {
@@ -664,6 +683,8 @@ internal sealed class BackupDriver
             Dictionary<int, PartitionBackupRange> parentRanges = BuildHighWaterMarks(ancestors);
 
             List<PartitionBackupRange> ranges = [];
+            List<int> clusterPartitions = [];
+            List<int> coveredPartitions = [];
             Dictionary<string, string> checksums = [];
             Dictionary<string, long> sizes = [];
 
@@ -675,6 +696,16 @@ internal sealed class BackupDriver
                     continue;
 
                 int partitionId = partition.PartitionId;
+                clusterPartitions.Add(partitionId);
+
+                // Only hosted partitions have a local WAL to page; the covered set records what this
+                // node could actually capture. A hosted partition that produces no segment below
+                // (no new committed entries) is still covered — unchanged is not uncovered.
+                if (hostsPartition is not null && !hostsPartition(partitionId))
+                    continue;
+
+                coveredPartitions.Add(partitionId);
+
                 parentRanges.TryGetValue(partitionId, out PartitionBackupRange? pr);
                 long floor = wal.GetLastCheckpoint(partitionId);
 
@@ -751,6 +782,8 @@ internal sealed class BackupDriver
             manifest.BackupId = backupId;
             manifest.Checksums = checksums;
             manifest.Sizes = sizes;
+            manifest.ClusterPartitions = clusterPartitions;
+            manifest.CoveredPartitions = coveredPartitions;
             manifest.ApplyOwnerIdentity(identity);
             if (capturedTopologyGeneration.HasValue)
                 manifest.TopologyGeneration = capturedTopologyGeneration.Value;

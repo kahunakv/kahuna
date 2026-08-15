@@ -166,7 +166,7 @@ internal sealed class SequencerManager
 
         int partitionId = dataPartitionRouter.Locate(SequenceActor.GetStorageKey(normalizedName));
 
-        return await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

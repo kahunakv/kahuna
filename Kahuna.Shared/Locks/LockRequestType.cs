@@ -18,5 +18,12 @@ public enum LockRequestType
     /// replication/restore path to the owning actor so a resident in-memory entry is brought up to
     /// date with the replicated log. Never serialized into the Raft log.
     /// </summary>
-    InvalidateOrApply
+    InvalidateOrApply,
+
+    /// <summary>
+    /// Actor-internal maintenance message: removes every resident lock entry owned by the
+    /// partition carried in the request, after this node stopped being one of its replicas.
+    /// Never sent by clients and never serialized into the Raft log.
+    /// </summary>
+    EvictPartition
 }

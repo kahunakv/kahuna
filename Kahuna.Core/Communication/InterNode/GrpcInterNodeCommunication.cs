@@ -1897,6 +1897,63 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return batchResponse.ImportCompletionReceipts?.Success ?? false;
     }
 
+    public async Task<bool> ReplicateKeyValueRangePage(string node, int partitionId, byte[] page, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcReplicateKeyValueRangePageRequest request = new()
+        {
+            PartitionId = partitionId,
+            Page = UnsafeByteOperations.UnsafeWrap(page)
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        return batchResponse.ReplicateKeyValueRangePage?.Success ?? false;
+    }
+
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcGetRangeTransactionStateRequest request = new() { PartitionId = partitionId };
+
+        if (startKey is not null)
+            request.StartKey = startKey;
+        if (endKey is not null)
+            request.EndKey = endKey;
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcGetRangeTransactionStateResponse? response = batchResponse.GetRangeTransactionState;
+
+        if (response is null || !response.Success)
+            return (false, [], [], []);
+
+        List<CompletionReceiptRecord> receipts = new(response.Receipts.Count);
+
+        foreach (GrpcCompletionReceiptEntry entry in response.Receipts)
+        {
+            receipts.Add(new CompletionReceiptRecord(
+                new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
+                entry.Key,
+                entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
+                (KeyValueDurability)entry.Durability));
+        }
+
+        return (true, receipts, response.TransactionRecords.ToByteArray(), response.PreparedIntents.ToByteArray());
+    }
+
     public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);

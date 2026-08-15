@@ -6,5 +6,6 @@ public enum BackgroundWriteType
     QueueStoreLock,
     QueueStoreKeyValue,
     Flush,
-    FlushAndNotify
+    FlushAndNotify,
+    ForgetUnhostedPartitions
 }

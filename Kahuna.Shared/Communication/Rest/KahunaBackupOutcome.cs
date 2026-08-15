@@ -70,4 +70,12 @@ public enum KahunaBackupOutcome
     /// user and retry.
     /// </summary>
     InsecureRoot = 15,
+
+    /// <summary>
+    /// The backup chain covers only part of the cluster: it was captured by a node that hosted only
+    /// some partitions under per-partition replica placement, so restoring it alone would silently
+    /// reconstruct a cluster missing the partitions hosted elsewhere. The message names the missing
+    /// partitions. Restore a chain with full coverage instead.
+    /// </summary>
+    RestrictedCoverage = 16,
 }

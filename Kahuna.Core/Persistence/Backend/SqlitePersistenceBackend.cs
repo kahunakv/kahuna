@@ -421,6 +421,38 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
     }
 
+    public bool RemoveDurabilityFloor(int partitionId)
+    {
+        try
+        {
+            // Floors live in shard 0 (see StoreDurabilityFloors); a never-created shard has no row.
+            if (!File.Exists(Path.Combine(path, $"kahuna0_{dbRevision}.db")))
+                return true;
+
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(0);
+
+            readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+            try
+            {
+                using SqliteCommand command = new("DELETE FROM durability_floor WHERE partition = @partition", connection);
+                command.Parameters.AddWithValue("@partition", partitionId);
+                command.ExecuteNonQuery();
+            }
+            finally
+            {
+                readerWriterLock.ReleaseWriterLock();
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("RemoveDurabilityFloor: {Type} {Message}", ex.GetType().Name, ex.Message);
+            return false;
+        }
+    }
+
     public long GetDurabilityFloor(int partitionId)
     {
         try
@@ -1139,6 +1171,201 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Whole-family paged scan of the current key-value rows. Rows are sharded across up to
+    /// <see cref="MaxShards"/> database files by key-space hash, with no global order across them,
+    /// so the scan walks the shards sequentially and the cursor encodes
+    /// <c>"&lt;shard&gt;:&lt;lastKey&gt;"</c> (the key part may contain any character; the shard is
+    /// everything before the first colon). A page draws from a single shard; when the shard is
+    /// exhausted the returned cursor advances to the next one, so a short or empty page with a
+    /// non-null cursor is normal.
+    /// </summary>
+    public KeyValueScanPage ScanKeyValues(string? cursor, int limit) =>
+        ScanFamily(cursor, limit,
+            """
+            SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                   lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
+            FROM keys
+            WHERE (@after IS NULL OR key > @after)
+            ORDER BY key
+            LIMIT @limit
+            """,
+            static reader => (reader.IsDBNull(0) ? "" : reader.GetString(0), new ReadOnlyKeyValueEntry(
+                value: reader.IsDBNull(1) ? null : (byte[])reader[1],
+                revision: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                expires: new(
+                    reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    reader.IsDBNull(5) ? 0 : (uint)reader.GetInt64(5)
+                ),
+                lastUsed: new(
+                    reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                    reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                    reader.IsDBNull(8) ? 0 : (uint)reader.GetInt64(8)
+                ),
+                lastModified: new(
+                    reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                    reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                    reader.IsDBNull(11) ? 0 : (uint)reader.GetInt64(11)
+                ),
+                state: reader.IsDBNull(12) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(12)
+            )),
+            static page => new KeyValueScanPage(page.Items, page.NextCursor));
+
+    /// <summary>
+    /// Whole-family paged scan of the lock rows. Sharding and cursor semantics are identical to
+    /// <see cref="ScanKeyValues"/>.
+    /// </summary>
+    public LockScanPage ScanLocks(string? cursor, int limit) =>
+        ScanFamily(cursor, limit,
+            """
+            SELECT resource, owner, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                   lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, fencingToken, state
+            FROM locks
+            WHERE (@after IS NULL OR resource > @after)
+            ORDER BY resource
+            LIMIT @limit
+            """,
+            static reader => (reader.IsDBNull(0) ? "" : reader.GetString(0), new LockEntry
+            {
+                Owner = reader.IsDBNull(1) ? null : (byte[])reader[1],
+                Expires = new(
+                    reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
+                ),
+                LastUsed = new(
+                    reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                    reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                    reader.IsDBNull(7) ? 0 : (uint)reader.GetInt64(7)
+                ),
+                LastModified = new(
+                    reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                    reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                    reader.IsDBNull(10) ? 0 : (uint)reader.GetInt64(10)
+                ),
+                FencingToken = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+                State = reader.IsDBNull(12) ? LockState.Locked : (LockState)reader.GetInt32(12)
+            }),
+            static page => new LockScanPage(page.Items, page.NextCursor));
+
+    /// <summary>
+    /// Shared shard-walking core of the whole-family scans: parses the cursor, skips shard files
+    /// that were never created, queries one shard per page, and advances the cursor to the next
+    /// shard once the current one is exhausted.
+    /// </summary>
+    private TPage ScanFamily<TEntry, TPage>(
+        string? cursor,
+        int limit,
+        string query,
+        Func<SqliteDataReader, (string, TEntry)> map,
+        Func<(List<(string, TEntry)> Items, string? NextCursor), TPage> wrap)
+    {
+        int shard = 0;
+        string? afterKey = null;
+
+        if (cursor is not null)
+        {
+            int separator = cursor.IndexOf(':');
+            shard = int.Parse(cursor[..separator]);
+            afterKey = separator == cursor.Length - 1 ? null : cursor[(separator + 1)..];
+        }
+
+        List<(string, TEntry)> items = [];
+
+        for (; shard < MaxShards; shard++, afterKey = null)
+        {
+            // Skip shards whose database file was never created — opening them here would
+            // materialize empty databases as a scan side effect.
+            if (!File.Exists(Path.Combine(path, $"kahuna{shard}_{dbRevision}.db")))
+                continue;
+
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+            try
+            {
+                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+
+                using SqliteCommand command = new(query, connection);
+                command.Parameters.AddWithValue("@after", (object?)afterKey ?? DBNull.Value);
+                command.Parameters.AddWithValue("@limit", limit);
+
+                using SqliteDataReader reader = command.ExecuteReader();
+
+                while (reader.Read())
+                    items.Add(map(reader));
+            }
+            finally
+            {
+                readerWriterLock.ReleaseReaderLock();
+            }
+
+            if (items.Count == limit)
+                return wrap((items, $"{shard}:{items[^1].Item1}"));
+
+            // Shard exhausted: resume at the start of the next shard (possibly an empty page).
+            return wrap((items, shard + 1 < MaxShards ? $"{shard + 1}:" : null));
+        }
+
+        return wrap((items, null));
+    }
+
+    /// <summary>
+    /// Physically removes each key's current row, revision history and no-revision provenance,
+    /// grouped by shard with one transaction per shard.
+    /// </summary>
+    public bool DeleteKeyValues(IReadOnlyList<string> keys) => DeleteFamilyRows(
+        keys,
+        """
+        DELETE FROM keys WHERE key = @key;
+        DELETE FROM keys_revisions WHERE key = @key;
+        DELETE FROM keys_norev WHERE key = @key;
+        """);
+
+    /// <summary>Physically removes each lock resource's row, grouped by shard.</summary>
+    public bool DeleteLocks(IReadOnlyList<string> resources) => DeleteFamilyRows(
+        resources,
+        "DELETE FROM locks WHERE resource = @key;");
+
+    private bool DeleteFamilyRows(IReadOnlyList<string> keys, string deleteQuery)
+    {
+        if (keys.Count == 0)
+            return true;
+
+        Dictionary<int, List<string>> plan = GroupKeysByShard(keys);
+
+        foreach ((int shard, List<string> shardKeys) in plan)
+        {
+            // A shard whose database file was never created has no rows to remove.
+            if (!File.Exists(Path.Combine(path, $"kahuna{shard}_{dbRevision}.db")))
+                continue;
+
+            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
+
+            try
+            {
+                readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+
+                using SqliteTransaction transaction = connection.BeginTransaction();
+
+                foreach (string key in shardKeys)
+                {
+                    using SqliteCommand command = new(deleteQuery, connection, transaction);
+                    command.Parameters.AddWithValue("@key", key);
+                    command.ExecuteNonQuery();
+                }
+
+                transaction.Commit();
+            }
+            finally
+            {
+                readerWriterLock.ReleaseWriterLock();
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
