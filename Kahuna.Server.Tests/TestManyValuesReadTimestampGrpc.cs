@@ -245,6 +245,11 @@ public class TestManyValuesReadTimestampGrpc
         public void RegisterKeyRange(string keySpace) => throw new NotImplementedException();
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<KahunaRegisterKeyRangeResponse> RegisterKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<KahunaRemoveKeyRangeResponse> RemoveKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => throw new NotImplementedException();
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public bool IsBackupConfigured => throw new NotImplementedException();

@@ -2173,7 +2173,7 @@ public class GrpcCommunication : IKahunaCommunication
 
     // Intentionally unary: key-range registration is a one-shot control-plane operation performed
     // at startup or on topology changes; it is not a hot-path call suitable for batcher coalescing.
-    public async Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
+    public async Task<KahunaRegisterKeyRangeResponse> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
     {
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
@@ -2183,7 +2183,117 @@ public class GrpcCommunication : IKahunaCommunication
             KeySpace = keySpace
         }, cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        return response.Success;
+        return new KahunaRegisterKeyRangeResponse
+        {
+            Success = response.Success,
+            Status = response.Status,
+            Seeded = response.Seeded,
+            RoutingMode = response.RoutingMode,
+            DescriptorCount = response.DescriptorCount,
+            Reason = string.IsNullOrEmpty(response.Reason) ? null : response.Reason
+        };
+    }
+
+    public async Task<KahunaRemoveKeyRangeResponse> RemoveKeyRange(string url, string keySpace, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
+
+        GrpcRemoveKeyRangeResponse response = await client.RemoveKeyRangeAsync(new()
+        {
+            KeySpace = keySpace
+        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return new KahunaRemoveKeyRangeResponse
+        {
+            Success = response.Success,
+            Status = response.Status,
+            RoutingMode = response.RoutingMode,
+            DescriptorCount = response.DescriptorCount,
+            Reason = string.IsNullOrEmpty(response.Reason) ? null : response.Reason
+        };
+    }
+
+    public async Task<KahunaRangeMapResponse> GetRanges(string url, string? keySpace, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = GetClusterClient(channel);
+
+        GrpcGetRangesResponse response = await client.GetRangesAsync(
+            new GrpcGetRangesRequest { KeySpace = keySpace ?? "" },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        List<KahunaKeySpaceRangesResponse> keySpaces = new(response.KeySpaces.Count);
+        foreach (GrpcKeySpaceRanges space in response.KeySpaces)
+        {
+            KahunaKeySpaceRangesResponse entry = new()
+            {
+                KeySpace = space.KeySpace,
+                RoutingMode = space.RoutingMode
+            };
+
+            // Field presence, not emptiness, is what says "±infinity": HasStartKey false means the
+            // range opens at -inf, while an empty string would be a real (if odd) bound.
+            foreach (GrpcRangeDescriptor descriptor in space.Descriptors)
+                entry.Descriptors.Add(new KahunaRangeDescriptorResponse
+                {
+                    StartKey = descriptor.HasStartKey ? descriptor.StartKey : null,
+                    EndKey = descriptor.HasEndKey ? descriptor.EndKey : null,
+                    PartitionId = descriptor.PartitionId,
+                    Generation = descriptor.Generation
+                });
+
+            keySpaces.Add(entry);
+        }
+
+        return new KahunaRangeMapResponse
+        {
+            Initialized = response.Initialized,
+            LocalEndpoint = response.LocalEndpoint,
+            KeySpaces = keySpaces
+        };
+    }
+
+    public async Task<KahunaSplitRangeResponse> SplitRange(
+        string url, string keySpace, string splitKey, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = GetClusterClient(channel);
+
+        GrpcSplitRangeResponse response = await client.SplitRangeAsync(
+            new GrpcSplitRangeRequest { KeySpace = keySpace, SplitKey = splitKey },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return new KahunaSplitRangeResponse
+        {
+            Success = response.Success,
+            Status = response.Status,
+            Determinate = response.Determinate,
+            NewPartitionId = response.NewPartitionId,
+            NewGeneration = response.NewGeneration,
+            LeaderHint = string.IsNullOrEmpty(response.LeaderHint) ? null : response.LeaderHint,
+            Reason = string.IsNullOrEmpty(response.Reason) ? null : response.Reason
+        };
+    }
+
+    public async Task<KahunaMergeRangesResponse> MergeRanges(string url, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Cluster.ClusterClient client = GetClusterClient(channel);
+
+        GrpcMergeRangesResponse response = await client.MergeRangesAsync(
+            new GrpcMergeRangesRequest(),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return new KahunaMergeRangesResponse
+        {
+            Success = response.Success,
+            Status = response.Status,
+            Determinate = response.Determinate,
+            Merges = response.Merges,
+            LeaderHint = string.IsNullOrEmpty(response.LeaderHint) ? null : response.LeaderHint,
+            Reason = string.IsNullOrEmpty(response.Reason) ? null : response.Reason
+        };
     }
 
     public async Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken)

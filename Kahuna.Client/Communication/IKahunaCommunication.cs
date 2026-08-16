@@ -82,7 +82,46 @@ public interface IKahunaCommunication
 
      Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken);
 
-     Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken);
+     /// <summary>
+     /// Puts a key space under key-range routing on the node at <paramref name="url"/> and seeds its
+     /// whole-space descriptor.
+     /// <para>
+     /// The routing-mode half is node-local and unreplicated, so this must be sent to <b>every</b>
+     /// node; only the seed descriptor is replicated. The outcome — including refusals and the
+     /// "already seeded by someone else" case — is carried in the response rather than raised.
+     /// </para>
+     /// </summary>
+     Task<KahunaRegisterKeyRangeResponse> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken);
+
+     /// <summary>
+     /// Drops a key space's descriptors from the replicated range map. The inverse of
+     /// <see cref="RegisterKeyRange"/>; refusals (including the retryable one raised while a split
+     /// holds its quiesce window open) are carried in the response.
+     /// </summary>
+     Task<KahunaRemoveKeyRangeResponse> RemoveKeyRange(string url, string keySpace, CancellationToken cancellationToken);
+
+     /// <summary>
+     /// Returns the range-descriptor map as the node at <paramref name="url"/> has applied it,
+     /// optionally narrowed to one <paramref name="keySpace"/>. The routing modes it reports are
+     /// that node's own and are not replicated, so asking a different node can legitimately give a
+     /// different answer for the same space.
+     /// </summary>
+     Task<KahunaRangeMapResponse> GetRanges(string url, string? keySpace, CancellationToken cancellationToken);
+
+     /// <summary>
+     /// Splits the range covering <paramref name="splitKey"/> at exactly that key. Leader-only for
+     /// the partition owning the range map: a refusal is carried in the response so the caller can
+     /// retry elsewhere. Check <c>Determinate</c> before concluding a non-success means the split
+     /// did not happen.
+     /// </summary>
+     Task<KahunaSplitRangeResponse> SplitRange(
+         string url, string keySpace, string splitKey, CancellationToken cancellationToken);
+
+     /// <summary>
+     /// Runs the merge pass on the node at <paramref name="url"/>, folding adjacent under-min
+     /// ranges. Leader-only, and a non-leader refuses rather than reporting zero merges.
+     /// </summary>
+     Task<KahunaMergeRangesResponse> MergeRanges(string url, CancellationToken cancellationToken);
 
      Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
          string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);

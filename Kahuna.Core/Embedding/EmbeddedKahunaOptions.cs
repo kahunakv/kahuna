@@ -506,6 +506,13 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public TimeSpan RangeSplitSettleWindow { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Key count below which two adjacent ranges become eligible to be merged back into one.
+    /// 0 disables auto-merge: the periodic merge checker is not started at all, so cold ranges
+    /// accumulate until something merges them by hand.
+    /// </summary>
+    public int RangeMergeMinSize { get; set; } = 10;
+
     // ── Leader-balancer knobs ────────────────────────────────────────────────
     // The Kommander leader balancer redistributes partition leadership across cluster nodes.
     // A freshly split partition starts with LeaderSinceMs = 0 and becomes a balancer candidate

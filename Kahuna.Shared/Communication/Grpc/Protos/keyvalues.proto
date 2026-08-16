@@ -36,6 +36,7 @@ service KeyValuer {
   rpc BatchClientKeyValueRequests (stream GrpcBatchClientKeyValueRequest) returns (stream GrpcBatchClientKeyValueResponse);
   rpc BatchServerKeyValueRequests (stream GrpcBatchServerKeyValueRequest) returns (stream GrpcBatchServerKeyValueResponse);
   rpc RegisterKeyRange (GrpcRegisterKeyRangeRequest) returns (GrpcRegisterKeyRangeResponse);
+  rpc RemoveKeyRange (GrpcRemoveKeyRangeRequest) returns (GrpcRemoveKeyRangeResponse);
   rpc AcquireSnapshotHold (GrpcAcquireSnapshotHoldRequest) returns (GrpcAcquireSnapshotHoldResponse);
   rpc RenewSnapshotHold   (GrpcRenewSnapshotHoldRequest)   returns (GrpcRenewSnapshotHoldResponse);
   rpc ReleaseSnapshotHold (GrpcReleaseSnapshotHoldRequest)  returns (GrpcReleaseSnapshotHoldResponse);
@@ -1172,7 +1173,28 @@ message GrpcRegisterKeyRangeRequest {
 }
 
 message GrpcRegisterKeyRangeResponse {
-  bool Success = 1;
+  bool   Success = 1;
+  string Status = 2;
+  bool   Seeded = 3;
+  string RoutingMode = 4;
+  int32  DescriptorCount = 5;
+  string Reason = 6;
+}
+
+message GrpcRemoveKeyRangeRequest {
+  string KeySpace = 1;
+}
+
+message GrpcRemoveKeyRangeResponse {
+  bool   Success = 1;
+  // Removed, Indeterminate, QuiesceWindowOpen, InvalidInput or KeyRangeDisabled.
+  string Status = 2;
+  // How the answering node routes the space after the call. Removal clears the mode through
+  // replication, so it can still read KeyRange between the commit and this node applying it.
+  string RoutingMode = 3;
+  // Descriptors still visible on the answering node; 0 on success.
+  int32  DescriptorCount = 4;
+  string Reason = 5;
 }
 
 message GrpcEnsureKeyRangeSeededRequest {

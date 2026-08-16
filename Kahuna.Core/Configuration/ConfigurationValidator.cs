@@ -207,10 +207,40 @@ public static class ConfigurationValidator
             return;
 
         if (configuration.RangeSplitSettleWindow.TotalMilliseconds < minLeaderStabilityMs)
+            // Both names are given: the property for an embedded consumer, the flag for an operator
+            // who set this from the command line and has no way to map one to the other.
             throw new KahunaServerException(
-                $"RangeSplitSettleWindow ({configuration.RangeSplitSettleWindow.TotalMilliseconds:F0} ms) " +
-                $"must be at least MinLeaderStabilityMs ({minLeaderStabilityMs} ms); " +
+                $"RangeSplitSettleWindow / --range-split-settle-window ({configuration.RangeSplitSettleWindow.TotalMilliseconds:F0} ms) " +
+                $"must be at least MinLeaderStabilityMs / --raft-min-leader-stability-ms ({minLeaderStabilityMs} ms); " +
                 "a shorter window allows re-splitting before the new partition's leader has stabilised.");
+    }
+
+    /// <summary>
+    /// Refuses a collection interval short enough to undermine what else rides on it.
+    /// <para>
+    /// The interval is not only the split/merge sampling cadence: session range locks are leased for
+    /// <b>twice</b> it and renewed on its tick, with the renewal sweep bounded by one interval. Lower
+    /// it far enough and the sweep cannot finish a fan-out of inter-node re-acquires before its own
+    /// deadline, so locks lapse under load — while the operator believes they only made splitting more
+    /// eager. The floor is the phase-two commit timeout: giving an entire renewal sweep less time than
+    /// a single commit round trip is allowed cannot be defended.
+    /// </para>
+    /// <para>
+    /// Deliberately <b>not</b> part of <see cref="Validate"/>: the embedded API is used by tests that
+    /// drive lease expiry directly at sub-second intervals, and this is a guard on the operator-facing
+    /// flag, not on the library. Call it from the server's startup path.
+    /// </para>
+    /// </summary>
+    /// <exception cref="KahunaServerException">Thrown when the interval is below the floor.</exception>
+    public static void ValidateCollectionInterval(KahunaConfiguration configuration)
+    {
+        TimeSpan floor = TimeSpan.FromMilliseconds(Math.Max(configuration.Phase2CommitTimeout, 1_000));
+
+        if (configuration.CollectionInterval < floor)
+            throw new KahunaServerException(
+                $"--range-collection-interval ({configuration.CollectionInterval.TotalSeconds:F0}s) must be at least " +
+                $"{floor.TotalSeconds:F0}s (the phase-two commit timeout). It also sets the session range-lock lease " +
+                "(twice the interval) and bounds the renewal sweep, so a shorter interval risks locks lapsing under load.");
     }
 
     /// <summary>

@@ -34,7 +34,7 @@ public sealed class TestClientRangeLock
         KahunaClient client = new("http://localhost", communication: comm);
 
         string space = "rl/shared/" + Guid.NewGuid().ToString("N")[..8];
-        await client.RegisterKeyRange(space, TestContext.Current.CancellationToken);
+        await client.RegisterKeyRange(space, cancellationToken: TestContext.Current.CancellationToken);
 
         await using KahunaTransactionSession tx1 = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic },
@@ -70,7 +70,7 @@ public sealed class TestClientRangeLock
         KahunaClient client = new("http://localhost", communication: comm);
 
         string space = "rl/excl/" + Guid.NewGuid().ToString("N")[..8];
-        await client.RegisterKeyRange(space, TestContext.Current.CancellationToken);
+        await client.RegisterKeyRange(space, cancellationToken: TestContext.Current.CancellationToken);
 
         await using KahunaTransactionSession tx1 = await client.StartTransactionSession(
             new() { Locking = KeyValueTransactionLocking.Pessimistic },

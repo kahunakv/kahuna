@@ -631,34 +631,34 @@ KahunaBackupGcResult done    = await client.RunBackupGarbageCollectionAsync(dryR
 // done.RetentionDeletions / done.OrphanReclamations / done.BytesReclaimed
 ```
 
-### 11e. `kahuna.control` CLI verbs
+### 11e. `kahuna-cli` CLI verbs
 
 ```
 # Take a full backup
-kahuna.control --backup-full
+kahuna-cli --backup-full
 
 # Take a coordinated backup (recommended for production)
-kahuna.control --backup-coordinated
+kahuna-cli --backup-coordinated
 
 # Take an incremental backup on top of a previous one
-kahuna.control --backup-incremental --parent-backup-id <guid>
+kahuna-cli --backup-incremental --parent-backup-id <guid>
 
 # List all backups
-kahuna.control --list-backups
+kahuna-cli --list-backups
 
 # Resolve and validate a chain
-kahuna.control --backup-chain <leaf-guid>
+kahuna-cli --backup-chain <leaf-guid>
 
 # Reclaim backup disk (orphan sweep + retention); add --backup-gc-dry-run to preview without deleting
-kahuna.control --backup-gc
-kahuna.control --backup-gc --backup-gc-dry-run
+kahuna-cli --backup-gc
+kahuna-cli --backup-gc --backup-gc-dry-run
 
 # Offline restore to a target directory (0 = chain max; set --target-time-ms for a specific T)
-kahuna.control --restore <leaf-guid> --target-dir /data/restored
-kahuna.control --restore <leaf-guid> --target-dir /data/restored --target-time-ms 1750000000000
+kahuna-cli --restore <leaf-guid> --target-dir /data/restored
+kahuna-cli --restore <leaf-guid> --target-dir /data/restored --target-time-ms 1750000000000
 
 # Output as JSON
-kahuna.control --list-backups --format json
+kahuna-cli --list-backups --format json
 ```
 
 Interactive console verbs (type at the `>>` prompt):

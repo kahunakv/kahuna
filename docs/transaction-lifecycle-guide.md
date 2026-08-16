@@ -358,7 +358,7 @@ Every path maps onto three outcomes, and the distinction is load-bearing:
 
 Only a conflict abort is `Aborted`. A prepare that did not replicate, a deadline expiry, a presumed abort,
 an admission rejection and every infrastructural failure are `MustRetry`, so a caller never sees a false
-conflict for a transient failure. See `specs/spec-mustretry-aborted-contract.md`.
+conflict for a transient failure.
 
 ---
 

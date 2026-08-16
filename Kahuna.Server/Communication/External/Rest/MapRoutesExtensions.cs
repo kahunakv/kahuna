@@ -18,6 +18,7 @@ public static class MapRoutesExtensions
         KeyValuesHandlers.MapKeyValueRoutes(app);
         SequencesHandlers.MapSequenceRoutes(app);
         ClusterHandlers.MapClusterRoutes(app);
+        RangesHandlers.MapRangesRoutes(app);
         BackupsHandlers.MapBackupsRoutes(app);
     }
 }

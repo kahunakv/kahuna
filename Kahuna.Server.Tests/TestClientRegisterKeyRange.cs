@@ -1,5 +1,6 @@
 
 using Kahuna.Client;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Microsoft.Extensions.Logging;
 
@@ -34,8 +35,10 @@ public sealed class TestClientRegisterKeyRange
 
         string space = "client/rng/" + Guid.NewGuid().ToString("N")[..8];
 
-        bool seeded = await client.RegisterKeyRange(space, TestContext.Current.CancellationToken);
-        Assert.True(seeded);
+        KahunaRegisterKeyRangeResponse seeded = await client.RegisterKeyRange(
+            space, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(seeded.Success);
+        Assert.True(seeded.Seeded);
 
         string[] keys = [$"{space}/a", $"{space}/b", $"{space}/c"];
         foreach (string key in keys)
@@ -53,10 +56,12 @@ public sealed class TestClientRegisterKeyRange
     }
 
     /// <summary>
-    /// Registering the same key space twice returns false on the second call (already seeded).
+    /// Registering the same key space twice succeeds both times, but only the first call seeds the
+    /// descriptor. Callers are expected to register on every node, so "someone already seeded this"
+    /// is the normal answer for all but one of those calls — not a failure.
     /// </summary>
     [Fact]
-    public async Task RegisterKeyRange_SecondCall_ReturnsFalse()
+    public async Task RegisterKeyRange_SecondCall_SucceedsWithoutSeedingAgain()
     {
         await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
         await node.StartAsync(TestContext.Current.CancellationToken);
@@ -65,10 +70,16 @@ public sealed class TestClientRegisterKeyRange
 
         string space = "client/rng2/" + Guid.NewGuid().ToString("N")[..8];
 
-        bool first  = await client.RegisterKeyRange(space, TestContext.Current.CancellationToken);
-        bool second = await client.RegisterKeyRange(space, TestContext.Current.CancellationToken);
+        KahunaRegisterKeyRangeResponse first = await client.RegisterKeyRange(
+            space, cancellationToken: TestContext.Current.CancellationToken);
+        KahunaRegisterKeyRangeResponse second = await client.RegisterKeyRange(
+            space, cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.True(first);
-        Assert.False(second);
+        // Only the first call seeds; the second is still a success, because registering on every
+        // node is the contract and only one of those calls can be the one that seeds.
+        Assert.True(first.Seeded);
+        Assert.False(second.Seeded);
+        Assert.True(second.Success);
+        Assert.Equal("AlreadySeeded", second.Status);
     }
 }

@@ -178,6 +178,46 @@ if (IsSingleCommand(opts))
             return;
         }
 
+        if (opts.Ranges)
+        {
+            await RangesCommand.Execute(connection, opts.KeySpace, opts.Node, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.RegisterKeyRange))
+        {
+            await RegisterKeyRangeCommand.Register(
+                connection, opts.RegisterKeyRange, ConfiguredEndpoints(opts), opts.Node, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.UnregisterKeyRange))
+        {
+            await RegisterKeyRangeCommand.Unregister(
+                connection, opts.UnregisterKeyRange, ConfiguredEndpoints(opts), opts.Node, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.SplitRange))
+        {
+            if (string.IsNullOrEmpty(opts.SplitKey))
+            {
+                AnsiConsole.MarkupLine("[red]--split-range needs the key to cut at: add --split-key <key>.[/]");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            await SplitRangeCommand.Split(
+                connection, opts.SplitRange, opts.SplitKey, ConfiguredEndpoints(opts), opts.Node, format);
+            return;
+        }
+
+        if (opts.MergeRanges)
+        {
+            await SplitRangeCommand.Merge(connection, ConfiguredEndpoints(opts), opts.Node, format);
+            return;
+        }
+
         if (opts.BackupFull)
         {
             await BackupFullCommand.Execute(connection, format);
@@ -245,14 +285,7 @@ return;
 /// </summary>
 static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
 {
-    string? connectionString = opts.ConnectionSource;
-
-    string[] connectionPool;
-
-    if (string.IsNullOrEmpty(connectionString))
-        connectionPool = ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"];
-    else
-        connectionPool = connectionString.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
+    string[] connectionPool = ResolveConnectionPool(opts);
 
     bool insecure = opts.Insecure || connectionPool.All(IsLocalhost);
 
@@ -260,6 +293,18 @@ static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
 
     return Task.FromResult(new KahunaClient(connectionPool, null, null, kahunaOptions));
 }
+
+// Every endpoint the connection actually talks to, including the built-in pool used when no
+// connection source was given. A command that must reach all nodes (key-space registration flips a
+// node-local routing mode) cannot read the endpoints off the connection string alone: with the
+// default pool that string is empty, and the command would silently act on one round-robin node
+// while reporting cluster-wide success.
+static string[] ConfiguredEndpoints(KahunaControlOptions opts) => ResolveConnectionPool(opts);
+
+static string[] ResolveConnectionPool(KahunaControlOptions opts) =>
+    string.IsNullOrEmpty(opts.ConnectionSource)
+        ? ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"]
+        : opts.ConnectionSource.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
 
 // Resolves which node a cluster command acts on. --node wins; otherwise the single configured
 // endpoint is unambiguous. Returns null when the connection lists several endpoints and none was
@@ -343,6 +388,30 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (kahunaControlOptions.ClusterLeave)
+        return true;
+
+    // Every dispatchable flag must be listed here or the command is parsed, never run, and the tool
+    // drops into the interactive shell instead — which looks like a hang when it is driven from a
+    // script. --cluster-placement and --set-replication-factor were already in that state.
+    if (kahunaControlOptions.ClusterPlacement)
+        return true;
+
+    if (kahunaControlOptions.SetReplicationFactor.HasValue)
+        return true;
+
+    if (kahunaControlOptions.Ranges)
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.RegisterKeyRange))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.UnregisterKeyRange))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.SplitRange))
+        return true;
+
+    if (kahunaControlOptions.MergeRanges)
         return true;
 
     if (kahunaControlOptions.BackupFull)

@@ -359,7 +359,7 @@ Step by step:
   also remove P''s copy. Orphan retention is harmless-but-wasteful, and it's also what makes
   certain mid-scan-split cases read correctly (a stale descriptor query still finds the data).
 
-These two facts are why **partition-scoped storage** (see §10) is the load-bearing piece of future
+These two facts are why **partition-scoped storage** (see §11) is the load-bearing piece of future
 work.
 
 ---
@@ -458,7 +458,143 @@ Splits and merges don't have to be manual. Two background actors watch the range
 
 ---
 
-## 9. End-to-end: the life of a ranged write
+## 9. Administering ranges from outside the process
+
+Everything above happens on its own. This section is about the surface that lets you *see* and
+*steer* it on a running cluster: read the map, put a key space under key-range routing, force a
+split, run a merge pass. Same operations the background triggers perform — an operator escape hatch
+and a test hook, not a rebalancing feature.
+
+Every call exists on REST, on gRPC, and in `kahuna-cli`, and all three reach the same code.
+
+| What | REST | CLI |
+|---|---|---|
+| Read the map | `GET /v1/ranges[?keySpace=…]` | `--ranges [--key-space <space>]` |
+| Register a key space | `POST /v1/ranges/register` | `--register-key-range <space>` |
+| Remove a key space | `POST /v1/ranges/unregister` | `--unregister-key-range <space>` |
+| Split at a key | `POST /v1/ranges/split` | `--split-range <space> --split-key <key>` |
+| Run the merge pass | `POST /v1/ranges/merge` | `--merge-ranges` |
+
+### Registration is per node — the mistake everyone makes once
+
+Registration does two things, and only one of them is replicated:
+
+- the **routing-mode flip** (`hash` → `key-range`) is node-local, in-memory, and **not replicated**;
+- the **seed descriptor** (`[-inf, +inf)`) is a single meta-partition write that *is* replicated.
+
+So you must register on **every node**. Register on one and you get a cluster where that node routes
+the space by key order while the rest still hash it — the two disagree about which partition owns a
+key, and 2PC prepares land on the wrong partition. The CLI does this for you: `--register-key-range`
+fans out to every configured endpoint and exits non-zero if any node refused. `--node` targets a
+single node and says so, because that leaves the cluster half-configured.
+
+Because the seed is forwarded to the partition that owns the map, registration is **not**
+leader-only: any node accepts it. The response tells you which half you got:
+
+| `status` | Meaning |
+|---|---|
+| `Seeded` | This call committed the whole-space descriptor. Exactly one call ever gets this. |
+| `AlreadySeeded` | A descriptor already existed. Still a success — the node-local flip happened. |
+| `Indeterminate` | The mode flipped, but no descriptor is visible here yet. It may still arrive; re-read `GET /v1/ranges`. |
+| `InvalidInput` | Empty key space, or a `/meta` schema-log space (never key-range routed). |
+| `KeyRangeDisabled` | The cluster has no data partition to seed onto. Permanent. |
+
+`GET /v1/ranges` reports `routingMode` **per node**, which is how you check the fan-out actually
+landed: ask each node and compare. A key space listed with `routingMode: KeyRange` and zero
+descriptors is the broken middle state — routed by key order with nothing to route to, so every
+write to it throws.
+
+### A worked sequence
+
+```sh
+# 1. Register on every node (the CLI fans out; over REST, loop yourself).
+kahuna-cli --register-key-range users
+
+# 2. Write some keys.
+kahuna-cli --set users/0100 --value alice
+kahuna-cli --set users/0900 --value zoe
+
+# 3. Look at the map: one range, both bounds open.
+kahuna-cli --ranges --key-space users
+#   Start key  End key  Partition  Generation
+#   -inf       +inf     2          1
+
+# 4. Split it.
+kahuna-cli --split-range users --split-key users/0500
+
+# 5. Two adjacent ranges on two partitions, tiling the space.
+kahuna-cli --ranges --key-space users
+#   Start key    End key      Partition  Generation
+#   -inf         users/0500   2          2
+#   users/0500   +inf         4          2
+```
+
+Split and merge **are** leader-only (the partition that owns the map also owns the partition
+lifecycle). A node that does not lead refuses with `NotLeader` and, when gossip knows one, a
+`leaderHint`; the CLI walks the endpoints for you.
+
+### Reading a split outcome honestly
+
+`POST /v1/ranges/split` carries a `determinate` flag, and it is the field to branch on. A split is a
+multi-step transaction — create the destination partition, quiesce the source, copy, commit the
+cutover — and a failure in the later steps leaves the outcome genuinely unknown to the caller.
+
+| `status` | `determinate` | What it means for you |
+|---|---|---|
+| `Succeeded` | ✓ | Two ranges now; `newPartitionId` serves the upper half. |
+| `NotLeader` | ✓ | Nothing was attempted. Retry against the leader. |
+| `NoRange` | ✓ | No descriptor covers that key — the space is unregistered or unseeded. |
+| `InvalidSplitKey` | ✓ | The key is a range's start, which would leave an empty half. |
+| `BelowMinRangeSize` | ✓ | Policy refused: one half holds no keys. Map untouched. |
+| `PartitionCreationFailed` | ✓ (for the map) | No descriptor changed — but a partition may have been created and left unused. |
+| `TransferFailed`, `QuiesceFailed`, `CutoverFailed`, `ConcurrentSplit` | ✗ | **The map may still change.** Re-read `GET /v1/ranges` before concluding anything. |
+| `Indeterminate` | ✗ | Leadership or transport was lost mid-split. Same advice. |
+
+Treating an indeterminate outcome as "the split did not happen" is how a fault-injection harness
+manufactures a finding that was never real.
+
+`POST /v1/ranges/merge` runs the same pass the periodic checker runs, across **all** key spaces —
+there is no per-space variant, and the minimum size it enforces is configuration, not a request
+parameter. It answers `Completed` with a count (0 means nothing was eligible) or `NotLeader`. It
+never reports a count from a node that did not run the pass, which is the distinction the underlying
+trigger cannot make on its own: it returns `0` on every non-leader.
+
+### When to split by hand
+
+- Reproducing a split deterministically in a test or chaos run, instead of writing past a threshold
+  and waiting out a sampling pass.
+- Pre-splitting a key space you know is about to be loaded, so the first writes spread out.
+- Cutting a hot range at a boundary you understand better than the sampler does.
+
+Routine boundaries are the auto-splitter's job. Nothing here changes the split policy — a split this
+surface refuses is one the trigger would refuse too, for the same reason.
+
+### Tuning the policy from the command line
+
+The count-based knobs (the load-based ones live in the
+[load-based splitting guide](load-based-range-splitting-guide.md)):
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--range-split-threshold` | 1000 | Key count that triggers a split. **`0` disables auto-split entirely** — the checker is not started. |
+| `--range-split-min-range-size` | 10 | Minimum keys each half must keep. |
+| `--range-merge-min-size` | 10 | Below this, adjacent ranges become merge candidates. **`0` disables auto-merge entirely.** |
+| `--range-split-settle-window` | 10s | Post-split cooldown. Must be ≥ `--raft-min-leader-stability-ms`; startup fails otherwise. |
+| `--range-collection-interval` | 60s | Sampling cadence. See the warning below. |
+
+A `0` on a threshold is not "no limit" — the corresponding background actor is never spawned, so the
+feature is off.
+
+> **`--range-collection-interval` is not only a sampling cadence.** It also sets the session
+> range-lock lease (twice the interval) and bounds the renewal sweep. Lower it to make splits fire
+> sooner and you also shorten how long a range lock survives a slow participant. Kahuna refuses a
+> value below the phase-two commit timeout rather than clamping it silently.
+
+To make auto-split observable in a short run: `--range-split-threshold 20 --range-collection-interval 5`.
+
+---
+
+## 10. End-to-end: the life of a ranged write
 
 Putting it all together, here's a write to a key-range space, start to finish:
 
@@ -498,7 +634,7 @@ Putting it all together, here's a write to a key-range space, start to finish:
 
 ---
 
-## 10. Current limitations and where to take this next
+## 11. Current limitations and where to take this next
 
 The system as it stands delivers **logical range routing + range-scoped locking** — fully
 working and tested. What it does **not** yet deliver is *physical* load/space distribution,
@@ -552,7 +688,7 @@ Once storage is partition-scoped, the follow-on work becomes *real* instead of v
 
 ---
 
-## 11. Rules to internalize before you touch this code
+## 12. Rules to internalize before you touch this code
 
 A condensed checklist — violating any of these silently corrupts the system:
 
@@ -576,7 +712,7 @@ A condensed checklist — violating any of these silently corrupts the system:
 
 ---
 
-## 12. File map
+## 13. File map
 
 Everything lives under `Kahuna.Core/KeyValues/Ranges/` unless noted.
 

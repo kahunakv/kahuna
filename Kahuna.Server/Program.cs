@@ -5,6 +5,7 @@ using Flurl.Http;
 using CommandLine;
 
 using Kahuna;
+using Kahuna.Server;
 using Kahuna.Services;
 using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
@@ -71,7 +72,7 @@ bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertific
 if (standalone)
 {
     builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
-        new EmbeddedKahunaNode(CreateEmbeddedOptions(opts), services.GetRequiredService<ILoggerFactory>()));
+        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts), services.GetRequiredService<ILoggerFactory>()));
 
     builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
     builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
@@ -246,10 +247,23 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
     PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
     PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
-    BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds)
+    BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
+    // The range knobs are carried here as well as on the embedded options: this is the instance the
+    // validators below inspect, and without them the settle-window check would compare a default
+    // against the operator's leader-stability setting and pass no matter what was asked for.
+    RangeSplitThreshold = opts.RangeSplitThreshold,
+    RangeSplitMinRangeSize = opts.RangeSplitMinRangeSize,
+    RangeSplitSettleWindow = TimeSpan.FromSeconds(opts.RangeSplitSettleWindowSeconds),
+    RangeMergeMinSize = opts.RangeMergeMinSize,
+    CollectionInterval = TimeSpan.FromSeconds(opts.RangeCollectionIntervalSeconds),
+    RangeSplitLoadThreshold = opts.RangeSplitLoadThreshold,
+    RangeSplitLoadMinQueueDepth = opts.RangeSplitLoadMinQueueDepth,
+    RangeSplitLoadWindow = TimeSpan.FromSeconds(opts.RangeSplitLoadWindowSeconds),
+    RangeSplitLoadPollInterval = TimeSpan.FromSeconds(opts.RangeSplitLoadPollIntervalSeconds)
 }, opts.WalPath);
 
 ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLeaderStabilityMs);
+ConfigurationValidator.ValidateCollectionInterval(kahunaConfiguration);
 
 builder.Services.AddSingleton(kahunaConfiguration);
 
@@ -348,85 +362,6 @@ else
     (kahuna as IDisposable)?.Dispose();
     (app.Services.GetRequiredService<IRaft>() as IDisposable)?.Dispose();
 }
-
-static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts) => new()
-{
-    NodeName = opts.RaftNodeName,
-    NodeId = opts.RaftNodeId,
-    Host = opts.RaftHost,
-    Port = opts.RaftPort,
-    InitialPartitions = opts.InitialClusterPartitions,
-    EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool,
-    PartitionExecutorPoolSize = opts.RaftExecutorPoolSize,
-    ReplicationFactor = opts.RaftReplicationFactor,
-    EnablePlacementRebalancer = opts.RaftEnablePlacementRebalancer,
-    MaxReplicaMovesPerPass = opts.RaftMaxReplicaMovesPerPass,
-    MaxConcurrentReplicaTransfers = opts.RaftMaxConcurrentReplicaTransfers,
-    ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
-    Zone = opts.RaftZone,
-    Storage = opts.Storage,
-    StoragePath = opts.StoragePath,
-    StorageRevision = opts.StorageRevision,
-    WalStorage = opts.WalStorage,
-    WalPath = opts.WalPath,
-    WalRevision = opts.WalRevision,
-    WalSyncWrites = opts.GetWalSyncWrites(),
-    RocksDbSharedMemoryEnabled = opts.RocksDbSharedMemory,
-    RocksDbSharedMemoryBudgetMb = opts.RocksDbSharedMemoryBudgetMb,
-    RocksDbSharedMemtableBudgetMb = opts.RocksDbSharedMemtableBudgetMb,
-    RocksDbDirectReads = opts.GetRocksDbDirectReads(),
-    RocksDbStatistics = opts.RocksDbStatistics,
-    LocksWorkers = opts.LocksWorkers,
-    KeyValueWorkers = opts.KeyValueWorkers,
-    BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
-    SequencerWorkers = opts.SequencerWorkers,
-    SequencerBlockSize = opts.SequencerBlockSize,
-    SequencerIdempotencyRetentionMax = opts.SequencerIdempotencyRetentionMax,
-    SequencerIdempotencyRetentionTtl = TimeSpan.FromSeconds(opts.SequencerIdempotencyRetentionTtl),
-    SequencerMaxSequencesPerActor = opts.SequencerMaxSequencesPerActor,
-    SequencerBlockLease = TimeSpan.FromSeconds(opts.SequencerBlockLease),
-    BackendReadIOThreads = opts.BackendReadIOThreads,
-    BackendWriteIOThreads = opts.BackendWriteIOThreads,
-    BackendReadQueueDepth = opts.BackendReadQueueDepth,
-    DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
-    DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
-    MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,
-    MaxConcurrentTransactions = opts.MaxConcurrentTransactions,
-    MaxConcurrentSessions = opts.MaxConcurrentSessions,
-    TransactionPriorityReservedSlots = opts.TransactionPriorityReservedSlots,
-    TransactionPriorityAgingThreshold = opts.TransactionPriorityAgingThreshold,
-    TransactionPriorityMaxQueued = opts.TransactionPriorityMaxQueued,
-    ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
-    CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
-    CacheEntriesToRemove = opts.CacheEntriesToRemove,
-    KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
-    KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
-    KeyValueWriteMaxBatchBytes = opts.KeyValueWriteMaxBatchBytes,
-    KeyValueWriteMaxQueuedItemsPerPartition = opts.KeyValueWriteMaxQueuedItemsPerPartition,
-    KeyValueWriteMaxQueuedBytesPerPartition = opts.KeyValueWriteMaxQueuedBytesPerPartition,
-    KeyValueWriteMaxQueueDelayMs = opts.KeyValueWriteMaxQueueDelayMs,
-    MaxKeyValueWriteAggregatorInboxSize = opts.MaxKeyValueWriteAggregatorInboxSize,
-    DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay,
-    PersistentRevisionRetentionCount = opts.PersistentRevisionRetentionCount,
-    PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
-    PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),
-    PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
-    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
-    PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
-    BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
-    BackupDir = opts.PitrBackupDir,
-    BackupTarget = opts.PitrBackupTarget,
-    BackupScratchDir = opts.PitrBackupScratchDir,
-    BackupClusterId = opts.PitrBackupClusterId,
-    BackupMacKeyFile = opts.PitrBackupMacKeyFile,
-    RestoreRoot = opts.PitrRestoreRoot,
-    AllowUnconfinedRemoteRestore = opts.PitrAllowUnconfinedRemoteRestore,
-    BackupRetentionMaxChains = opts.BackupRetentionMaxChains,
-    BackupRetentionMaxAge = TimeSpan.FromSeconds(opts.BackupRetentionMaxAgeSeconds),
-    BackupRetentionMaxBytes = opts.BackupRetentionMaxBytes,
-    BackupGcInterval = TimeSpan.FromSeconds(opts.BackupGcIntervalSeconds),
-    BackupRestoreThrottleBytesPerSec = (long)opts.BackupRestoreThrottleMbps * 1_000_000
-};
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
 {

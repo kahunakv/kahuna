@@ -1607,9 +1607,110 @@ public class RestCommunication : IKahunaCommunication
         return response;
     }
 
-    public Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
+    // The range-administration calls below all follow the replication-factor contract: refusals come
+    // back as 4xx carrying the verdict in the body, so non-2xx statuses are accepted rather than
+    // turned into exceptions, and none of them is wrapped in the retry policy — whether and where to
+    // repeat a map mutation is the caller's decision, guided by the response's own status.
+
+    public async Task<KahunaRegisterKeyRangeResponse> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("RegisterKeyRange is not available over the REST transport; use the gRPC transport.");
+        KahunaRegisterKeyRangeResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/ranges/register")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .AllowAnyHttpStatus()
+            .PostJsonAsync(new KahunaKeyRangeRequest { KeySpace = keySpace }, cancellationToken: cancellationToken)
+            .ReceiveJson<KahunaRegisterKeyRangeResponse>()
+            .ConfigureAwait(false);
+
+        if (response is null || string.IsNullOrEmpty(response.Status))
+            throw new KahunaException("RegisterKeyRange returned no outcome", LockResponseType.Errored);
+
+        return response;
+    }
+
+    public async Task<KahunaRemoveKeyRangeResponse> RemoveKeyRange(string url, string keySpace, CancellationToken cancellationToken)
+    {
+        KahunaRemoveKeyRangeResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/ranges/unregister")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .AllowAnyHttpStatus()
+            .PostJsonAsync(new KahunaKeyRangeRequest { KeySpace = keySpace }, cancellationToken: cancellationToken)
+            .ReceiveJson<KahunaRemoveKeyRangeResponse>()
+            .ConfigureAwait(false);
+
+        if (response is null || string.IsNullOrEmpty(response.Status))
+            throw new KahunaException("RemoveKeyRange returned no outcome", LockResponseType.Errored);
+
+        return response;
+    }
+
+    public async Task<KahunaRangeMapResponse> GetRanges(string url, string? keySpace, CancellationToken cancellationToken)
+    {
+        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
+
+        KahunaRangeMapResponse? response = await retryPolicy.ExecuteAsync(() =>
+        {
+            IFlurlRequest request = url
+                .WithOAuthBearerToken("xxx")
+                .AppendPathSegments("v1/ranges")
+                .WithHeader("Accept", "application/json")
+                .WithSettings(o => o.HttpVersion = "2.0");
+
+            if (!string.IsNullOrEmpty(keySpace))
+                request = request.SetQueryParam("keySpace", keySpace);
+
+            return request
+                .GetAsync(cancellationToken: cancellationToken)
+                .ReceiveJson<KahunaRangeMapResponse>();
+        }).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("GetRanges returned null", LockResponseType.Errored);
+
+        return response;
+    }
+
+    public async Task<KahunaSplitRangeResponse> SplitRange(
+        string url, string keySpace, string splitKey, CancellationToken cancellationToken)
+    {
+        KahunaSplitRangeResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/ranges/split")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .AllowAnyHttpStatus()
+            .PostJsonAsync(
+                new KahunaSplitRangeRequest { KeySpace = keySpace, SplitKey = splitKey },
+                cancellationToken: cancellationToken)
+            .ReceiveJson<KahunaSplitRangeResponse>()
+            .ConfigureAwait(false);
+
+        if (response is null || string.IsNullOrEmpty(response.Status))
+            throw new KahunaException("SplitRange returned no outcome", LockResponseType.Errored);
+
+        return response;
+    }
+
+    public async Task<KahunaMergeRangesResponse> MergeRanges(string url, CancellationToken cancellationToken)
+    {
+        KahunaMergeRangesResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/ranges/merge")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .AllowAnyHttpStatus()
+            .PostAsync(cancellationToken: cancellationToken)
+            .ReceiveJson<KahunaMergeRangesResponse>()
+            .ConfigureAwait(false);
+
+        if (response is null || string.IsNullOrEmpty(response.Status))
+            throw new KahunaException("MergeRanges returned no outcome", LockResponseType.Errored);
+
+        return response;
     }
 
     /// <summary>

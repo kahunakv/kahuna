@@ -5,6 +5,9 @@ service Cluster {
   rpc Leave (GrpcClusterLeaveRequest) returns (GrpcClusterLeaveResponse);
   rpc GetPlacement (GrpcGetPlacementRequest) returns (GrpcGetPlacementResponse);
   rpc SetReplicationFactor (GrpcSetReplicationFactorRequest) returns (GrpcSetReplicationFactorResponse);
+  rpc GetRanges (GrpcGetRangesRequest) returns (GrpcGetRangesResponse);
+  rpc SplitRange (GrpcSplitRangeRequest) returns (GrpcSplitRangeResponse);
+  rpc MergeRanges (GrpcMergeRangesRequest) returns (GrpcMergeRangesResponse);
 }
 
 message GrpcGetMembershipRequest {
@@ -114,4 +117,73 @@ message GrpcSetReplicationFactorResponse {
   // Why the override was refused; empty on success. A follower refuses: retry against the
   // meta-partition leader.
   string Reason = 4;
+}
+
+message GrpcGetRangesRequest {
+  // Optional filter. Empty means every key space the answering node knows about.
+  string KeySpace = 1;
+}
+
+message GrpcGetRangesResponse {
+  // Whether cluster initialization has completed. Until true an empty list means "not known
+  // yet" rather than "no ranges exist".
+  bool Initialized = 1;
+  // The answering node's endpoint, so a node-local routing mode can be attributed.
+  string LocalEndpoint = 2;
+  repeated GrpcKeySpaceRanges KeySpaces = 3;
+}
+
+message GrpcKeySpaceRanges {
+  string KeySpace = 1;
+  // How the ANSWERING node routes this space: KeyRange or Hash. Node-local and unreplicated,
+  // unlike the descriptors, so two nodes may legitimately disagree.
+  string RoutingMode = 2;
+  // Ordered by StartKey, ordinally, the way the router itself searches them.
+  repeated GrpcRangeDescriptor Descriptors = 3;
+}
+
+message GrpcRangeDescriptor {
+  // Absent StartKey means -infinity within the key space; absent EndKey means +infinity.
+  // Field presence carries that distinction: an empty string is a real bound, not an open end.
+  optional string StartKey = 1;
+  optional string EndKey = 2;
+  int32 PartitionId = 3;
+  int64 Generation = 4;
+}
+
+message GrpcSplitRangeRequest {
+  string KeySpace = 1;
+  // The covering range [S, E) becomes [S, SplitKey) and [SplitKey, E) — the key lands in the
+  // upper half. Compared ordinally.
+  string SplitKey = 2;
+}
+
+message GrpcSplitRangeResponse {
+  bool Success = 1;
+  // Outcome name: Succeeded, NotLeader, NoRange, InvalidSplitKey, BelowMinRangeSize,
+  // PartitionCreationFailed, TransferFailed, QuiesceFailed, CutoverFailed, ConcurrentSplit,
+  // Indeterminate, InvalidInput or KeyRangeDisabled.
+  string Status = 2;
+  // False when the map may still change despite this answer. A caller that treats an
+  // indeterminate outcome as "the split did not happen" will report phantom violations.
+  bool Determinate = 3;
+  int32 NewPartitionId = 4;
+  int64 NewGeneration = 5;
+  // Best-effort retry target when this node refused for lack of leadership; empty if unknown.
+  string LeaderHint = 6;
+  string Reason = 7;
+}
+
+message GrpcMergeRangesRequest {
+}
+
+message GrpcMergeRangesResponse {
+  bool Success = 1;
+  // Completed, NotLeader or Indeterminate.
+  string Status = 2;
+  bool Determinate = 3;
+  // Adjacent pairs folded by this pass; meaningful only when the pass actually ran.
+  int32 Merges = 4;
+  string LeaderHint = 5;
+  string Reason = 6;
 }

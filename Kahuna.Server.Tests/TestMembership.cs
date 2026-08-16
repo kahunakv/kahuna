@@ -761,6 +761,11 @@ public sealed class TestMembership : BaseCluster
         public void RegisterKeyRange(string keySpace) { }
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<KahunaRegisterKeyRangeResponse> RegisterKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(new KahunaRegisterKeyRangeResponse());
+        public Task<KahunaRemoveKeyRangeResponse> RemoveKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(new KahunaRemoveKeyRangeResponse());
+        public Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => Task.FromResult(new KahunaSplitRangeResponse());
+        public Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => Task.FromResult(new KahunaMergeRangesResponse());
+        public KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => new();
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => Task.FromResult(0);
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => Task.FromResult(0);
 

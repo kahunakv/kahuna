@@ -514,6 +514,38 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-allow-insecure-certificate-validation", Required = false, HelpText = "Skip TLS certificate validation for inter-node Raft gRPC connections (use only in dev/test environments)")]
     public bool RaftAllowInsecureCertificateValidation { get; set; }
 
+    // ── Key-range split/merge policy ─────────────────────────────────────────────────────────
+    // A 0 on the threshold knobs does not merely relax the policy: the corresponding background
+    // checker is not spawned at all, so the feature never runs. That is why each help text says
+    // "disables" rather than "no limit".
+
+    [Option("range-split-threshold", Required = false, HelpText = "Sampled key count above which a key range is split automatically. 0 disables count-based auto-split entirely (the checker is not started). Default 1000.", Default = 1000)]
+    public int RangeSplitThreshold { get; set; } = 1000;
+
+    [Option("range-split-min-range-size", Required = false, HelpText = "Minimum number of keys each half must hold for an automatic split to proceed; guards against splitting into a range nothing routes to. Default 10.", Default = 10)]
+    public int RangeSplitMinRangeSize { get; set; } = 10;
+
+    [Option("range-split-settle-window", Required = false, HelpText = "Seconds a freshly split range must settle before it may be split again. Must be at least --raft-min-leader-stability-ms, or the new partition can be re-split before its leader has stabilised; startup fails if it is shorter. Default 10.", Default = 10)]
+    public int RangeSplitSettleWindowSeconds { get; set; } = 10;
+
+    [Option("range-merge-min-size", Required = false, HelpText = "Key count below which two adjacent ranges become eligible to be merged back together. 0 disables auto-merge entirely (the checker is not started). Default 10.", Default = 10)]
+    public int RangeMergeMinSize { get; set; } = 10;
+
+    [Option("range-collection-interval", Required = false, HelpText = "Seconds between range split/merge sampling passes. Shared with the key-value collector, prepared-intent recovery and session range-lock renewal (whose lease is twice this interval), so lowering it to make splits fire sooner also shortens those; refused below the phase-two commit timeout. Default 60.", Default = 60)]
+    public int RangeCollectionIntervalSeconds { get; set; } = 60;
+
+    [Option("range-split-load-threshold", Required = false, HelpText = "Sustained log-ops/sec above which a partition becomes a load-split candidate. 0 disables load-based auto-split. Cross-node load signals are only gossiped when the leader balancer is enabled, so without it this is inert for ranges led elsewhere. Default 0.", Default = 0d)]
+    public double RangeSplitLoadThreshold { get; set; }
+
+    [Option("range-split-load-min-queue-depth", Required = false, HelpText = "Minimum WAL queue depth that must accompany the ops/sec rate before a load split fires; keeps a fast but unsaturated partition from splitting. Default 8.", Default = 8)]
+    public int RangeSplitLoadMinQueueDepth { get; set; } = 8;
+
+    [Option("range-split-load-window", Required = false, HelpText = "Seconds the load predicate must hold continuously before a load split is triggered. Default 15.", Default = 15)]
+    public int RangeSplitLoadWindowSeconds { get; set; } = 15;
+
+    [Option("range-split-load-poll-interval", Required = false, HelpText = "Seconds between load-signal polls. Should stay below --range-split-load-window so the debounce can be measured. Default 5.", Default = 5)]
+    public int RangeSplitLoadPollIntervalSeconds { get; set; } = 5;
+
     /// <summary>
     /// Resolves cleanup-on-write for server startup. Enabled by default; use
     /// <see cref="DisablePersistentRevisionCleanupOnWrite"/> to turn it off from the CLI.

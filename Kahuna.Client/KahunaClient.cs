@@ -1062,12 +1062,75 @@ public class KahunaClient
     }
 
     /// <summary>
-    /// Registers a key space for range-based sharding.
-    /// After registration, keys in the space are routed via range descriptors seeded on the cluster.
-    /// Returns true when the key space was newly seeded; false when it was already registered.
+    /// Registers a key space for range-based sharding: the space becomes key-range routed on the
+    /// answering node, and its whole-space descriptor is seeded on the cluster.
+    /// <para>
+    /// <b>Send this to every node.</b> The routing-mode half is node-local and unreplicated, so a
+    /// cluster where only one node was told will route the space by key range there and hash it
+    /// everywhere else. Only the seed descriptor is replicated — and because the seed is forwarded
+    /// to the partition that owns the range map, any node can accept the call.
+    /// </para>
+    /// <para>
+    /// The response distinguishes "this call seeded it" from "someone already had" and from "the
+    /// seed is not visible here yet"; a refusal is reported, not thrown.
+    /// </para>
     /// </summary>
-    public Task<bool> RegisterKeyRange(string keySpace, CancellationToken cancellationToken = default) =>
-        communication.RegisterKeyRange(GetRoundRobinUrl(), keySpace, cancellationToken);
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaRegisterKeyRangeResponse> RegisterKeyRange(
+        string keySpace, string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.RegisterKeyRange(
+            string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, keySpace, cancellationToken);
+
+    /// <summary>
+    /// Removes a key space's range descriptors, undoing <see cref="RegisterKeyRange"/>. Idempotent.
+    /// A split holding its quiesce window open refuses transiently; the response says so.
+    /// </summary>
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaRemoveKeyRangeResponse> RemoveKeyRange(
+        string keySpace, string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.RemoveKeyRange(
+            string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, keySpace, cancellationToken);
+
+    /// <summary>
+    /// Returns the range-descriptor map the answering node has applied: per key space, the ordered
+    /// ranges with their bounds, owning partition and generation, plus how that node routes the
+    /// space. A null bound means ±infinity within the space, and bounds are ordinal — comparing them
+    /// culture-aware will read gaps that are not there.
+    /// </summary>
+    /// <param name="keySpace">Narrows the answer to one key space; every space when omitted.</param>
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaRangeMapResponse> GetRanges(
+        string? keySpace = null, string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.GetRanges(
+            string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, keySpace, cancellationToken);
+
+    /// <summary>
+    /// Splits the range covering <paramref name="splitKey"/> at exactly that key: an operator escape
+    /// hatch and a test hook, not a rebalancing feature — the auto-splitter still owns routine
+    /// boundaries. Leader-only for the partition that owns the range map; a refusal is carried in
+    /// the response so the caller can retry against another node.
+    /// <para>
+    /// Check <c>Determinate</c> before acting on a failure: an outcome from the later stages of the
+    /// split leaves the map genuinely unresolved, and re-reading <see cref="GetRanges"/> is the only
+    /// way to learn what happened.
+    /// </para>
+    /// </summary>
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaSplitRangeResponse> SplitRange(
+        string keySpace, string splitKey, string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.SplitRange(
+            string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, keySpace, splitKey, cancellationToken);
+
+    /// <summary>
+    /// Runs the merge pass on demand, folding adjacent ranges that have fallen below the configured
+    /// minimum — the same work the periodic checker does, without waiting for its cadence.
+    /// Leader-only: a node that does not lead the range map refuses rather than reporting zero
+    /// merges, so a count is only ever returned by a node that actually looked.
+    /// </summary>
+    /// <param name="nodeUrl">A specific node to ask; round-robin when omitted.</param>
+    public Task<KahunaMergeRangesResponse> MergeRanges(
+        string? nodeUrl = null, CancellationToken cancellationToken = default) =>
+        communication.MergeRanges(string.IsNullOrEmpty(nodeUrl) ? GetRoundRobinUrl() : nodeUrl, cancellationToken);
 
     /// <summary>
     /// Returns the current cluster membership roster: version, members, and this node's role.

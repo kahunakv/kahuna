@@ -78,6 +78,10 @@ var options = new EmbeddedKahunaOptions
 That's it. Everything else has a sensible default. The feature stays off as long as
 `RangeSplitLoadThreshold == 0`.
 
+The standalone server takes the same settings as command-line flags — `--range-split-load-threshold
+2000 --raft-enable-leader-balancer` here. Every knob below lists its flag; the few without one are
+reachable only from the embedded API.
+
 ---
 
 ## 4. How a load split is decided (so the knobs make sense)
@@ -108,23 +112,27 @@ bursty report could trip a split. Keep `RangeSplitLoadWindow` ≥ ~10s.
 
 ### Load-split knobs
 
-| Knob | Default | What it controls |
-|---|---|---|
-| `RangeSplitLoadThreshold` | `0` (off) | Writes/sec a partition must sustain. **Set > 0 to enable.** |
-| `RangeSplitLoadMinQueueDepth` | `8` | WAL backlog required alongside the rate. The saturation gate. |
-| `RangeSplitLoadMinCommitWaitMs` | `0` (off) | Optional commit-wait (ms) floor. Leave off unless depth is too coarse. |
-| `RangeSplitLoadWindow` | `15s` | How long the gate must hold before splitting (debounce). Keep ≥ ~10s. |
-| `RangeSplitLoadPollInterval` | `5s` | How often the cheap load poll runs. Keep < the window. |
-| `RangeSplitLoadImbalanceMax` | `0.8` | A range is "indivisible" if no split key gets each child below this fraction of the writes. |
-| `RangeSplitSettleWindow` | `10s` | Post-split cooldown; neither child is re-evaluated until it elapses. **Must be ≥ `MinLeaderStability`** (validated at startup). |
-| `RangeSplitIndivisibleCooldown` | `5min` | How long an indivisible range is skipped before the count branch re-samples it. |
+| Knob | Server flag | Default | What it controls |
+|---|---|---|---|
+| `RangeSplitLoadThreshold` | `--range-split-load-threshold` | `0` (off) | Writes/sec a partition must sustain. **Set > 0 to enable.** |
+| `RangeSplitLoadMinQueueDepth` | `--range-split-load-min-queue-depth` | `8` | WAL backlog required alongside the rate. The saturation gate. |
+| `RangeSplitLoadMinCommitWaitMs` | *(embedded only)* | `0` (off) | Optional commit-wait (ms) floor. Leave off unless depth is too coarse. |
+| `RangeSplitLoadWindow` | `--range-split-load-window` | `15s` | How long the gate must hold before splitting (debounce). Keep ≥ ~10s. |
+| `RangeSplitLoadPollInterval` | `--range-split-load-poll-interval` | `5s` | How often the cheap load poll runs. Keep < the window. |
+| `RangeSplitLoadImbalanceMax` | *(embedded only)* | `0.8` | A range is "indivisible" if no split key gets each child below this fraction of the writes. |
+| `RangeSplitSettleWindow` | `--range-split-settle-window` | `10s` | Post-split cooldown; neither child is re-evaluated until it elapses. **Must be ≥ `MinLeaderStability`** (validated at startup). |
+| `RangeSplitIndivisibleCooldown` | *(embedded only)* | `5min` | How long an indivisible range is skipped before the count branch re-samples it. |
 
 ### Count-split knobs (pre-existing)
 
-| Knob | Default | What it controls |
-|---|---|---|
-| `RangeSplitThreshold` | `1000` | Key count that triggers a size-based split. Set `0` to disable the count branch. |
-| `RangeSplitMinRangeSize` | `10` | Minimum keys each child must keep. |
+| Knob | Server flag | Default | What it controls |
+|---|---|---|---|
+| `RangeSplitThreshold` | `--range-split-threshold` | `1000` | Key count that triggers a size-based split. `0` disables the count branch — the checker is not started at all. |
+| `RangeSplitMinRangeSize` | `--range-split-min-range-size` | `10` | Minimum keys each child must keep. |
+| `CollectionInterval` | `--range-collection-interval` | `60s` | How often ranges are sampled. Shared with range-lock renewal — see the warning in the [sharding guide](key-range-sharding-guide.md#9-administering-ranges-from-outside-the-process). |
+
+Manual split and merge, for reproducing a split without waiting for a sampling pass, are covered in
+the same section of the sharding guide.
 
 ### Balancer knobs (required for load splitting — see the [balancing guide](leader-balancing-operations-guide.md))
 

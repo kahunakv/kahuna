@@ -106,9 +106,9 @@ at some existing members (used as *seeds* to contact). The node calls in, is adm
 catches up, and is promoted — while the existing Voters keep serving throughout.
 
 ```
-  kahuna --join-existing \
-         --initial-cluster "node-a:8001,node-b:8001,node-c:8001" \
-         ...other flags...
+  kahuna-server --join-existing \
+                --initial-cluster "node-a:8001,node-b:8001,node-c:8001" \
+                ...other flags...
 ```
 
 > **Decision — the join mode is an explicit flag, never guessed.** A node could in principle try to
@@ -144,7 +144,7 @@ Ask the node to leave, then stop it:
 POST /v1/cluster/leave        # on the node you are removing
 ```
 
-or `kahuna.control --cluster-leave --node https://node-3:8082` (in the interactive console:
+or `kahuna-cli --cluster-leave --node https://node-3:8082` (in the interactive console:
 `cluster leave <endpoint>`), or the `Cluster.Leave` gRPC call, or `KahunaClient.LeaveCluster(nodeUrl)`.
 
 The call returns once the removal is **committed**, so a scale-down can sequence node removals without
@@ -226,8 +226,8 @@ The roster is readable three ways; all return the same thing — the membership 
 
 - **CLI (the operator's tool):**
   ```
-  kahuna.control --cluster-members
-  kahuna.control --cluster-members --format json     # machine-readable
+  kahuna-cli --cluster-members
+  kahuna-cli --cluster-members --format json     # machine-readable
   ```
   In the interactive console, type `cluster members`.
 - **REST:** `GET /v1/cluster/membership`
@@ -325,6 +325,6 @@ A node leaves either politely — asked to over the API (`POST /v1/cluster/leave
 committed removal before you stop the process) or on shutdown via `--graceful-leave-on-shutdown`, both
 for decommissioning only, never for restarts — or by being detected dead and evicted via SWIM, with
 suspicion and grace windows tuned to absorb transient hiccups. The cluster refuses any change that would remove the last Voter. You watch
-all of it with `kahuna.control --cluster-members`. The one failure mode to know is the compaction
+all of it with `kahuna-cli --cluster-members`. The one failure mode to know is the compaction
 floor: a node that needs log the cluster has already discarded can't catch up by replay alone — seed
 it from a recent backup first, then let it join.

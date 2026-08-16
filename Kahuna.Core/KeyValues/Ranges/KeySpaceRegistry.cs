@@ -65,6 +65,14 @@ internal sealed class KeySpaceRegistry
         }
     }
 
+    /// <summary>
+    /// Snapshot of every key space this node routes by key range. Unregistered spaces are absent
+    /// (they are <see cref="RoutingMode.Hash"/> by omission, not by entry), so this is exactly the
+    /// set a reader needs to spot a space that was registered here but has no descriptor yet.
+    /// </summary>
+    public IReadOnlyCollection<string> RegisteredKeySpaces =>
+        modes.Where(static kv => kv.Value == RoutingMode.KeyRange).Select(static kv => kv.Key).ToArray();
+
     /// <summary>The routing mode for a key space, or <see cref="RoutingMode.Hash"/> if unregistered.</summary>
     public RoutingMode GetMode(string keySpace) =>
         modes.TryGetValue(keySpace, out RoutingMode mode) ? mode : RoutingMode.Hash;

@@ -103,6 +103,27 @@ public sealed class KahunaControlOptions
     [Option("partition", Required = false, HelpText = "Data partition id a placement command targets")]
     public int? Partition { get; set; }
 
+    [Option("ranges", Required = false, HelpText = "Prints the key-range map the answering node has applied: the ranges per key space, the partition serving each, and that node's routing mode. Narrow it with --key-space")]
+    public bool Ranges { get; set; }
+
+    [Option("key-space", Required = false, HelpText = "Key space a range command targets, e.g. jepsen/register (a key's prefix up to its last '/')")]
+    public string? KeySpace { get; set; }
+
+    [Option("register-key-range", Required = false, HelpText = "Puts a key space under key-range routing and seeds its whole-space descriptor. Sent to EVERY connected endpoint, because the routing-mode half is node-local; use --node to target one and accept a half-configured cluster")]
+    public string? RegisterKeyRange { get; set; }
+
+    [Option("unregister-key-range", Required = false, HelpText = "Removes a key space's range descriptors. Sent to every connected endpoint, like --register-key-range")]
+    public string? UnregisterKeyRange { get; set; }
+
+    [Option("split-range", Required = false, HelpText = "Splits the range covering --split-key in the given key space, at exactly that key. Leader-only: tries each connected endpoint until one accepts (or target one with --node)")]
+    public string? SplitRange { get; set; }
+
+    [Option("split-key", Required = false, HelpText = "Where --split-range cuts. The covering range [S,E) becomes [S,key) and [key,E), so the key itself lands in the upper half")]
+    public string? SplitKey { get; set; }
+
+    [Option("merge-ranges", Required = false, HelpText = "Runs the merge pass, folding adjacent ranges that have fallen below the configured minimum. Scans every key space — the pass has no per-space variant — and is leader-only")]
+    public bool MergeRanges { get; set; }
+
     [Option("backup-full", Required = false, HelpText = "Takes a full backup on the connected node")]
     public bool BackupFull { get; set; }
 

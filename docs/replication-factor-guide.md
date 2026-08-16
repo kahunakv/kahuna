@@ -56,7 +56,7 @@ RF 0 (the default) is full replication, bit-for-bit the pre-placement behavior.
 Set the factor on **every** node at bootstrap:
 
 ```bash
-kahuna \
+kahuna-server \
   --raft-replication-factor 3 \
   --raft-enable-placement-rebalancer true \
   --raft-zone rack-a \
@@ -93,8 +93,8 @@ key by forwarding — so never gate traffic on that number.
 Every node answers with the same committed map; only the "hosted here" perspective differs.
 
 ```bash
-kahuna.control --cluster-placement
-kahuna.control --cluster-placement --format json    # machine-readable
+kahuna-cli --cluster-placement
+kahuna-cli --cluster-placement --format json    # machine-readable
 ```
 
 or over REST: `GET /v1/cluster/placement`. Per partition you get:
@@ -124,8 +124,8 @@ successive configurations always overlap by a quorum.
 ### Per-range replication-factor override
 
 ```bash
-kahuna.control --set-replication-factor 5 --partition 3
-kahuna.control --set-replication-factor 0 --partition 3    # clear: inherit the global factor
+kahuna-cli --set-replication-factor 5 --partition 3
+kahuna-cli --set-replication-factor 0 --partition 3    # clear: inherit the global factor
 ```
 
 REST: `POST /v1/cluster/replication-factor` with `{"partitionId": 3, "replicationFactor": 5}`.
@@ -136,6 +136,16 @@ REST: `POST /v1/cluster/replication-factor` with `{"partitionId": 3, "replicatio
 - The change adjusts the **target only**. The rebalancer moves replicas toward it on later passes
   (so with the rebalancer off, the target changes and nothing else happens). Routing is unchanged
   until replicas actually move.
+
+### Ranges created by a split
+
+A key-range split creates a **new partition**, which the placement planner then places like any
+other: it enters the map with a replica set of RF nodes and shows up in `GET /v1/cluster/placement`
+with the generation the cutover committed. The split response reports the destination partition id,
+so the two views join up — `--split-range` tells you which partition now serves the upper half, and
+`--cluster-placement` tells you which nodes serve that partition. Administering splits and merges
+is covered in the
+[key-range sharding guide](key-range-sharding-guide.md#9-administering-ranges-from-outside-the-process).
 
 ### Rebalancer pacing
 

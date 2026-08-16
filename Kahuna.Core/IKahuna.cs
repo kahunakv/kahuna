@@ -381,6 +381,61 @@ public interface IKahuna
     public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Registers <paramref name="keySpace"/> as <see cref="RegisterKeyRangeAsync"/> does, but reports
+    /// the outcome instead of a <see cref="bool"/> whose <c>false</c> covers three unrelated cases.
+    /// Validates the key space, resolves "already seeded" from "seed not visible here yet" against the
+    /// applied map, and maps a transport failure mid-forward to an indeterminate answer rather than
+    /// letting it escape as an exception. Intended for the external admin surfaces; internal callers
+    /// that only need the seed bit keep using <see cref="RegisterKeyRangeAsync"/>.
+    /// </summary>
+    public Task<KahunaRegisterKeyRangeResponse> RegisterKeyRangeWithOutcomeAsync(
+        string keySpace, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes <paramref name="keySpace"/> as <see cref="RemoveKeyRangeAsync"/> does, reporting which
+    /// of that method's three <c>bool</c> meanings applies: committed, refused because a split quiesce
+    /// window is open (retry), or permanently refused.
+    /// </summary>
+    public Task<KahunaRemoveKeyRangeResponse> RemoveKeyRangeWithOutcomeAsync(
+        string keySpace, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Splits the range covering <paramref name="splitKey"/> at exactly that key, creating the
+    /// destination partition first. Leader-only for the partition that owns the range map: a node
+    /// that does not lead it refuses without attempting anything, rather than failing deep inside
+    /// partition creation where the refusal is indistinguishable from a genuine failure.
+    /// <para>
+    /// The response separates outcomes that are final from outcomes where the map may still change;
+    /// see <see cref="KahunaSplitRangeResponse.Determinate"/>. Nothing about the split policy is
+    /// changed by going through this entry point — a split that the trigger would refuse is refused
+    /// here for the same reason.
+    /// </para>
+    /// </summary>
+    public Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(
+        string keySpace, string splitKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Runs the merge pass on demand and reports whether it actually ran. Wraps
+    /// <see cref="TriggerAutoMergeAsync"/>, which answers <c>0</c> on a node that does not lead the
+    /// partition owning the range map — a count indistinguishable from a leader finding nothing
+    /// eligible. This refuses instead, so only a leader ever returns a merge count.
+    /// </summary>
+    public Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Projects the range-descriptor map as this node has applied it, optionally narrowed to a
+    /// single <paramref name="keySpace"/>. Read-only and node-local: it reports the applied
+    /// descriptor snapshot, so a lagging follower legitimately answers with an older generation
+    /// than the meta-partition leader.
+    /// <para>
+    /// Key spaces registered on this node but not yet carrying a descriptor are included with an
+    /// empty descriptor list — "registered but unseeded" is a real and diagnosable state, and
+    /// dropping those spaces would render it invisible.
+    /// </para>
+    /// </summary>
+    public KahunaRangeMapResponse GetRangeMap(string? keySpace = null);
+
+    /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
     /// Returns the number of splits performed. Only executes on the node holding leadership of
     /// both the system partition (0) and meta partition (1); returns 0 on other nodes.

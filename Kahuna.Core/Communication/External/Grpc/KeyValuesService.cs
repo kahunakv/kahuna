@@ -2200,15 +2200,60 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Registers a key space as key-range routed on this node. Node-local; must be called on every
-    /// node in the cluster at startup before data operations for the space begin.
+    /// Registers a key space as key-range routed and seeds its whole-space descriptor. Mirrors REST
+    /// <c>POST /v1/ranges/register</c> 1:1.
+    /// <para>
+    /// The routing-mode flip is node-local, so this must be called on <b>every</b> node; the seed is
+    /// a replicated meta-partition write that the manager forwards to that partition's leader, so a
+    /// follower answering here succeeds rather than refusing.
+    /// </para>
+    /// <para>
+    /// This used to flip the routing mode alone and answer <c>Success = true</c> unconditionally,
+    /// which left the space routed by key range with no descriptor to route to — every subsequent
+    /// write to it threw "no range descriptor covers key". Seeding is what makes the call usable.
+    /// </para>
     /// </summary>
-    public override Task<GrpcRegisterKeyRangeResponse> RegisterKeyRange(
+    public override async Task<GrpcRegisterKeyRangeResponse> RegisterKeyRange(
         GrpcRegisterKeyRangeRequest request,
         ServerCallContext context)
     {
-        keyValues.RegisterKeyRange(request.KeySpace);
-        return Task.FromResult(new GrpcRegisterKeyRangeResponse { Success = true });
+        KahunaRegisterKeyRangeResponse outcome = await keyValues
+            .RegisterKeyRangeWithOutcomeAsync(request.KeySpace, context.CancellationToken)
+            .ConfigureAwait(false);
+
+        return new()
+        {
+            Success = outcome.Success,
+            Status = outcome.Status,
+            Seeded = outcome.Seeded,
+            RoutingMode = outcome.RoutingMode,
+            DescriptorCount = outcome.DescriptorCount,
+            Reason = outcome.Reason ?? ""
+        };
+    }
+
+    /// <summary>
+    /// Drops a key space's descriptors from the replicated range map — the inverse of
+    /// <see cref="RegisterKeyRange"/>, used for teardown. Mirrors REST
+    /// <c>POST /v1/ranges/unregister</c> 1:1, including the retryable refusal while a split holds
+    /// the quiesce window open.
+    /// </summary>
+    public override async Task<GrpcRemoveKeyRangeResponse> RemoveKeyRange(
+        GrpcRemoveKeyRangeRequest request,
+        ServerCallContext context)
+    {
+        KahunaRemoveKeyRangeResponse outcome = await keyValues
+            .RemoveKeyRangeWithOutcomeAsync(request.KeySpace, context.CancellationToken)
+            .ConfigureAwait(false);
+
+        return new()
+        {
+            Success = outcome.Success,
+            Status = outcome.Status,
+            RoutingMode = outcome.RoutingMode,
+            DescriptorCount = outcome.DescriptorCount,
+            Reason = outcome.Reason ?? ""
+        };
     }
 
     internal async Task<GrpcEnsureKeyRangeSeededResponse> EnsureKeyRangeSeededInternal(GrpcEnsureKeyRangeSeededRequest request, ServerCallContext context)

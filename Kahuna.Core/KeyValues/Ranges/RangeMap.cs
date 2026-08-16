@@ -111,6 +111,12 @@ internal sealed class RangeMap
         return candidate.Contains(key) ? candidate : null;
     }
 
+    /// <summary>
+    /// Every key space that holds at least one descriptor. Unordered — callers that present the
+    /// result must impose their own (ordinal) order.
+    /// </summary>
+    public IReadOnlyCollection<string> KeySpaces => bySpace.Keys;
+
     /// <summary>Returns all descriptors for <paramref name="keySpace"/> in StartKey order.</summary>
     public IReadOnlyList<RangeDescriptor> FindAll(string keySpace) =>
         bySpace.TryGetValue(keySpace, out RangeDescriptor[]? ranges)

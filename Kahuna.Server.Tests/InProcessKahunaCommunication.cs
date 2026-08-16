@@ -261,8 +261,22 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<(SequenceResponseType, SequenceAllocation, int)> NextSequenceValue(string url, string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(SequenceResponseType, SequenceAllocation, int)> ReserveSequenceRange(string url, string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<(SequenceResponseType, int)> DeleteSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public Task<bool> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken) =>
-        kahuna.RegisterKeyRangeAsync(keySpace, cancellationToken);
+    // The range-administration calls reach the same manager methods the REST and gRPC surfaces use,
+    // so an in-process client sees the identical outcomes without a transport in the way.
+    public Task<KahunaRegisterKeyRangeResponse> RegisterKeyRange(string url, string keySpace, CancellationToken cancellationToken) =>
+        kahuna.RegisterKeyRangeWithOutcomeAsync(keySpace, cancellationToken);
+
+    public Task<KahunaRemoveKeyRangeResponse> RemoveKeyRange(string url, string keySpace, CancellationToken cancellationToken) =>
+        kahuna.RemoveKeyRangeWithOutcomeAsync(keySpace, cancellationToken);
+
+    public Task<KahunaRangeMapResponse> GetRanges(string url, string? keySpace, CancellationToken cancellationToken) =>
+        Task.FromResult(kahuna.GetRangeMap(keySpace));
+
+    public Task<KahunaSplitRangeResponse> SplitRange(string url, string keySpace, string splitKey, CancellationToken cancellationToken) =>
+        kahuna.SplitRangeAtKeyWithOutcomeAsync(keySpace, splitKey, cancellationToken);
+
+    public Task<KahunaMergeRangesResponse> MergeRanges(string url, CancellationToken cancellationToken) =>
+        kahuna.MergeRangesWithOutcomeAsync(cancellationToken);
 
     public Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken) =>
         throw new NotImplementedException();

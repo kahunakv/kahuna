@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -198,6 +199,76 @@ public sealed class TestRestWireFieldNames
         using JsonDocument document = JsonDocument.Parse(json);
 
         Assert.Equal(expected, string.Join(",", document.RootElement.EnumerateObject().Select(p => p.Name)));
+    }
+
+    /// <summary>
+    /// The range-administration surface, field for field. Its consumer is <c>kahuna-jepsen</c>, which
+    /// lives in another repository: a rename here compiles, passes this suite, and fails there a day
+    /// later in a nightly. Pinning the exact field list — rather than probing the few fields a test
+    /// happens to read — also catches a field silently <i>added</i> to a response a checker parses
+    /// strictly.
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(KahunaRangeMapResponse), "initialized,localEndpoint,keySpaces")]
+    [InlineData(typeof(KahunaKeySpaceRangesResponse), "keySpace,routingMode,descriptors")]
+    [InlineData(typeof(KahunaRangeDescriptorResponse), "startKey,endKey,partitionId,generation")]
+    [InlineData(typeof(KahunaKeyRangeRequest), "keySpace")]
+    [InlineData(typeof(KahunaRegisterKeyRangeResponse), "success,status,seeded,routingMode,descriptorCount,reason")]
+    [InlineData(typeof(KahunaRemoveKeyRangeResponse), "success,status,routingMode,descriptorCount,reason")]
+    [InlineData(typeof(KahunaSplitRangeRequest), "keySpace,splitKey")]
+    [InlineData(typeof(KahunaSplitRangeResponse),
+        "success,status,determinate,newPartitionId,newGeneration,leaderHint,reason")]
+    [InlineData(typeof(KahunaMergeRangesResponse), "success,status,determinate,merges,leaderHint,reason")]
+    public void RangeAdminTypesPinTheirWireNames(Type type, string expected)
+    {
+        string json = JsonSerializer.Serialize(Activator.CreateInstance(type), type, NoNamingPolicyOptions);
+
+        using JsonDocument document = JsonDocument.Parse(json);
+
+        Assert.Equal(expected, string.Join(",", document.RootElement.EnumerateObject().Select(p => p.Name)));
+    }
+
+    /// <summary>
+    /// A range bound of <c>null</c> means ±infinity within the key space, and it has to arrive as JSON
+    /// <c>null</c>: a serializer configured to omit nulls would turn an open-ended range into one
+    /// missing a field, and a consumer reading a missing key as "" would invent a bound at the empty
+    /// string — a range that contains nothing.
+    /// </summary>
+    [Fact]
+    public void RangeDescriptor_KeepsNullBoundsAsExplicitNulls()
+    {
+        string json = JsonSerializer.Serialize(
+            new KahunaRangeDescriptorResponse { StartKey = null, EndKey = "t:r/m", PartitionId = 3, Generation = 2 },
+            ResponseOptions);
+
+        using JsonDocument document = JsonDocument.Parse(json);
+
+        Assert.True(document.RootElement.TryGetProperty("startKey", out JsonElement startKey));
+        Assert.Equal(JsonValueKind.Null, startKey.ValueKind);
+        Assert.Equal("t:r/m", document.RootElement.GetProperty("endKey").GetString());
+    }
+
+    /// <summary>
+    /// The status strings a caller branches on. They are produced by <c>ToString()</c> over
+    /// <c>SplitStatus</c> plus the surface's own names, so renaming an enum member is a wire break
+    /// that nothing else would catch — the C# side would keep compiling.
+    /// </summary>
+    [Fact]
+    public void SplitStatusNames_AreStableOnTheWire()
+    {
+        Assert.Equal("Succeeded", nameof(SplitStatus.Succeeded));
+        Assert.Equal("NoRange", nameof(SplitStatus.NoRange));
+        Assert.Equal("InvalidSplitKey", nameof(SplitStatus.InvalidSplitKey));
+        Assert.Equal("BelowMinRangeSize", nameof(SplitStatus.BelowMinRangeSize));
+        Assert.Equal("PartitionCreationFailed", nameof(SplitStatus.PartitionCreationFailed));
+        Assert.Equal("TransferFailed", nameof(SplitStatus.TransferFailed));
+        Assert.Equal("QuiesceFailed", nameof(SplitStatus.QuiesceFailed));
+        Assert.Equal("CutoverFailed", nameof(SplitStatus.CutoverFailed));
+        Assert.Equal("ConcurrentSplit", nameof(SplitStatus.ConcurrentSplit));
+
+        // The routing modes reported next to every key space.
+        Assert.Equal("KeyRange", nameof(RoutingMode.KeyRange));
+        Assert.Equal("Hash", nameof(RoutingMode.Hash));
     }
 
     [Fact]

@@ -124,6 +124,11 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual void RegisterKeyRange(string keySpace) => throw new NotImplementedException();
     public virtual Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
     public virtual Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    public virtual Task<KahunaRegisterKeyRangeResponse> RegisterKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    public virtual Task<KahunaRemoveKeyRangeResponse> RemoveKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    public virtual Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    public virtual Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    public virtual KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => throw new NotImplementedException();
     public virtual Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual bool IsBackupConfigured => throw new NotImplementedException();

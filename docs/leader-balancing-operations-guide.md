@@ -73,7 +73,7 @@ Enable it when **both** of these are true:
 Set `--raft-enable-leader-balancer true` on **every node** in the cluster, then do a rolling restart.
 
 ```
-kahuna server \
+kahuna-server \
   --raft-enable-leader-balancer true \
   ... (your usual flags) ...
 ```
