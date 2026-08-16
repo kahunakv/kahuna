@@ -50,6 +50,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxDrainQuantumMaintenance)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumMaintenance),
         [nameof(RaftConfiguration.TransportSecurity)] = nameof(KahunaCommandLineOptions.RaftTransportSecurity),
         [nameof(RaftConfiguration.GrpcScheme)] = nameof(KahunaCommandLineOptions.RaftGrpcScheme),
+        [nameof(RaftConfiguration.MaxPreAuthRequestBodyBytes)] = nameof(KahunaCommandLineOptions.RaftMaxPreAuthRequestBodyBytes),
         [nameof(RaftConfiguration.BackfillThreshold)] = nameof(KahunaCommandLineOptions.RaftBackfillThreshold),
         [nameof(RaftConfiguration.MaxBackfillEntriesPerRound)] = nameof(KahunaCommandLineOptions.RaftMaxBackfillEntriesPerRound),
         [nameof(RaftConfiguration.FollowerSaturationBackoff)] = nameof(KahunaCommandLineOptions.RaftFollowerSaturationBackoff),

@@ -292,6 +292,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-allow-legacy-snapshot-senders", Required = false, HelpText = "Accept snapshot chunks that leave the sender's session-metadata fields empty, treating them as a sender that pre-dates those fields. Temporary compatibility switch for a mixed-version cluster.", Default = false)]
     public bool RaftAllowLegacySnapshotSenders { get; set; }
 
+    [Option("raft-max-pre-auth-request-body-bytes", Required = false, HelpText = "Ceiling on a Raft REST request body before it is authenticated/signed, in bytes. Bounds buffering independent of the host's own request-size limit.", Default = 32L * 1024 * 1024)]
+    public long RaftMaxPreAuthRequestBodyBytes { get; set; } = 32L * 1024 * 1024;
+
     [Option("raft-backfill-threshold", Required = false, HelpText = "Committed entries a follower may trail the leader before active backfill kicks in", Default = 10)]
     public int RaftBackfillThreshold { get; set; } = 10;
 

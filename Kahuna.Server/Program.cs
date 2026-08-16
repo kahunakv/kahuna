@@ -494,6 +494,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         SnapshotMaxPendingSessions = opts.RaftSnapshotMaxPendingSessions,
         SnapshotMaxPendingBytes = opts.RaftSnapshotMaxPendingBytes,
         AllowLegacySnapshotSenders = opts.RaftAllowLegacySnapshotSenders,
+        MaxPreAuthRequestBodyBytes = opts.RaftMaxPreAuthRequestBodyBytes,
         GrpcEnableAppendLogsCoalescing = opts.RaftGrpcEnableAppendLogsCoalescing,
         GrpcAppendLogsMaxCoalesceBatch = opts.RaftGrpcAppendLogsMaxCoalesceBatch,
         BackfillThreshold = opts.RaftBackfillThreshold,

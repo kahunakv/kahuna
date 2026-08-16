@@ -147,14 +147,16 @@ public sealed class TestMembership : BaseCluster
 
             // The departed node may still be the key partition's cached leader until the
             // survivors' re-election completes; a set in that window is answered MustRetry (the
-            // retryable leader-change contract), not served. "Cluster serves requests" means
-            // serving once its elections settle, so wait for a survivor to hold the key
-            // partition's leadership — resolved with the same routing the locator applies.
+            // retryable leader-change contract), not served. Each survivor learns the new leader
+            // independently, so the reader's view can lag the writer's — wait for BOTH survivors
+            // to agree on a surviving leader (resolved with the same routing the locator applies)
+            // before the un-retried asserts.
             int keyPartition = new Kahuna.Server.KeyValues.Ranges.DataPartitionRouter(raft1).Locate(key);
             await WaitUntilAsync(async () =>
             {
-                string leader = await raft1.WaitForLeader(keyPartition, TestContext.Current.CancellationToken);
-                return leader is "localhost:8001" or "localhost:8002";
+                string leader1 = await raft1.WaitForLeader(keyPartition, TestContext.Current.CancellationToken);
+                string leader2 = await raft2.WaitForLeader(keyPartition, TestContext.Current.CancellationToken);
+                return leader1 == leader2 && leader1 is "localhost:8001" or "localhost:8002";
             }, timeoutMs: 30_000);
 
             (KeyValueResponseType type, _, _) = await kahuna1.LocateAndTrySetKeyValue(
@@ -369,6 +371,20 @@ public sealed class TestMembership : BaseCluster
             // Surviving nodes still serve requests.
             string key = $"e6-{Guid.NewGuid():N}";
             byte[] value = Encoding.UTF8.GetBytes("still-alive");
+
+            // The dead node may still be the key partition's cached leader on either survivor
+            // until re-election completes — and each survivor learns the new leader independently,
+            // so the writer's view settling says nothing about the reader's (a get routed on the
+            // stale view forwards to the dead node and answers MustRetry, the retryable
+            // leader-change contract). "Still serve requests" means serving once elections settle:
+            // wait for BOTH survivors to agree on a surviving leader before the un-retried asserts.
+            int keyPartition = new Kahuna.Server.KeyValues.Ranges.DataPartitionRouter(raft1).Locate(key);
+            await WaitUntilAsync(async () =>
+            {
+                string leader1 = await raft1.WaitForLeader(keyPartition, TestContext.Current.CancellationToken);
+                string leader2 = await raft2.WaitForLeader(keyPartition, TestContext.Current.CancellationToken);
+                return leader1 == leader2 && leader1 is "localhost:8001" or "localhost:8002";
+            }, timeoutMs: 30_000);
 
             (KeyValueResponseType type, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, value, null, -1, KeyValueFlags.Set, 0,
