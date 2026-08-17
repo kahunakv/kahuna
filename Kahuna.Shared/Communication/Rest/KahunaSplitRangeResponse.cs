@@ -26,8 +26,11 @@ namespace Kahuna.Shared.Communication.Rest;
 ///     start, which would produce an empty half. Determinate.</description></item>
 ///   <item><description><c>BelowMinRangeSize</c> — refused by policy: one of the halves holds no keys.
 ///     Determinate.</description></item>
-///   <item><description><c>PartitionCreationFailed</c> — no descriptor changed, so determinate <i>for
-///     the range map</i>; a destination partition may still have been created and left unused.</description></item>
+///   <item><description><c>PartitionCreationFailed</c> — the destination partition could not be
+///     created, typically because leadership moved between the check and the call. No descriptor
+///     changed, so this is determinate <i>for the range map</i>; a destination partition may still
+///     have been created and left unused. A retry allocates a fresh partition ID — IDs are never
+///     reused — so retrying does not run back into the same refusal.</description></item>
 ///   <item><description><c>TransferFailed</c>, <c>QuiesceFailed</c>, <c>CutoverFailed</c>,
 ///     <c>ConcurrentSplit</c> — <b>indeterminate</b>. Re-read the map.</description></item>
 ///   <item><description><c>Indeterminate</c> — leadership or transport was lost mid-split.</description></item>

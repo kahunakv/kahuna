@@ -124,12 +124,45 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
         (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
         (IRaft sysRaft, KahunaManager _)    = await LeaderOf(0, nodes);
 
-        int newId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+        int newId = RangeSplitter.ComputeNextPartitionId(sysRaft, metaLeader.RangeMapStore.Current);
         RaftPartitionLifecycleResult cr =
             await sysRaft.CreatePartitionAsync(newId, RaftRoutingMode.Unrouted, null, ct);
         Assert.True(cr.Success);
 
-        return await metaLeader.RangeSplitter.SplitAsync(space, splitKey, newId, ct);
+        SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitKey, newId, ct);
+
+        if (outcome.IsSuccess)
+            await WaitUntilBucketServableAsync(space, nodes, ct);
+
+        return outcome;
+    }
+
+    /// <summary>
+    /// Waits until every node answers a bucket read of <paramref name="space"/> with <c>Get</c>.
+    /// <para>
+    /// A split allocates a partition ID that has never been used, so the range moves onto a brand-new
+    /// Raft group: every node has to apply the partition map, materialize the group and learn its
+    /// leader before it can serve the range, and a read that arrives first is answered with the
+    /// retryable <c>MustRetry</c>. These tests assert on bucket semantics rather than on that
+    /// settling window, so it is waited out here.
+    /// </para>
+    /// </summary>
+    private static async Task WaitUntilBucketServableAsync(
+        string space, (IRaft, KahunaManager)[] nodes, CancellationToken ct)
+    {
+        foreach ((IRaft _, KahunaManager kahuna) in nodes)
+        {
+            KahunaManager node = kahuna;
+            // Generous budget: electing the new group and propagating the map competes with every
+            // other cluster the suite runs in parallel, which overruns the 10 s default.
+            await WaitUntilAsync(async () =>
+            {
+                KeyValueGetByBucketResult probe = await node.LocateAndGetByBucket(
+                    HLCTimestamp.Zero, space, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+                return probe.Type == KeyValueResponseType.Get;
+            }, timeoutMs: 30_000);
+        }
     }
 
     // ── Bucket_SpanningMultipleRanges_ReturnsCompleteOrderedSet ──────────────
@@ -444,18 +477,38 @@ public sealed class TestGetByBucketMultiRange : BaseCluster
 
             (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
-            KeyValueGetByBucketResult result = await metaLeader.LocateAndGetByBucketWithHooks(
-                HLCTimestamp.Zero, space, KeyValueDurability.Persistent,
-                beforeQuery: null,
-                afterDescriptor: async idx =>
-                {
-                    // After D0 (idx 0) is fully collected, inject a second split on D1.
-                    if (idx != 0) return;
+            // D1's query runs concurrently with the injected split, so it can land inside the
+            // split's quiesce window on the range being moved and be answered MustRetry — the
+            // documented "read again" signal. Retry the scan; the split is injected only once, so a
+            // retry reads the settled map and must produce the complete, duplicate-free result.
+            bool splitInjected = false;
+            KeyValueGetByBucketResult result;
 
-                    SplitOutcome second = await SplitAt(space, $"{space}/0020", nodes, ct);
-                    Assert.True(second.IsSuccess, $"Mid-scan split failed: {second.Status}");
-                },
-                cancellationToken: ct);
+            for (int attempt = 1; ; attempt++)
+            {
+                result = await metaLeader.LocateAndGetByBucketWithHooks(
+                    HLCTimestamp.Zero, space, KeyValueDurability.Persistent,
+                    beforeQuery: null,
+                    afterDescriptor: async idx =>
+                    {
+                        // After D0 (idx 0) is fully collected, inject a second split on D1.
+                        if (idx != 0 || splitInjected) return;
+                        splitInjected = true;
+
+                        SplitOutcome second = await SplitAt(space, $"{space}/0020", nodes, ct);
+                        Assert.True(second.IsSuccess, $"Mid-scan split failed: {second.Status}");
+                    },
+                    cancellationToken: ct);
+
+                if (result.Type != KeyValueResponseType.MustRetry)
+                    break;
+
+                Assert.True(attempt < 5, "bucket scan still MustRetry after the mid-scan split settled");
+                await Task.Delay(200, ct);
+                (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            }
+
+            Assert.True(splitInjected, "the mid-scan split was never injected");
 
             // No duplicates: key set size equals total.
             Assert.Equal(KeyValueResponseType.Get, result.Type);

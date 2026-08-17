@@ -55,10 +55,12 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>New partition ID.</b> Computed as <c>max(partitionId in current map) + 1</c> before
-/// <see cref="RangeMapStore.MutateAsync"/>. Concurrent splits are serialised by the meta-partition
-/// Raft log, so the cutover MutateAsync rejects any case where a concurrent split already used the
-/// same ID. On rejection the split can be retried with a freshly computed ID.
+/// <b>New partition ID.</b> Allocated by <see cref="ComputeNextPartitionId"/> from Kommander's
+/// partition map — one past every ID ever used, so a merged-away or rolled-back range's ID is never
+/// handed out again (recreating a retired partition is refused outright). Concurrent splits are
+/// serialised by the meta-partition Raft log, so the cutover MutateAsync rejects any case where a
+/// concurrent split already used the same ID. On rejection the split can be retried with a freshly
+/// computed ID.
 /// </para>
 ///
 /// <para>
@@ -453,18 +455,34 @@ internal sealed class RangeSplitter
         return true;
     }
 
-    /// <summary>Returns <c>max(PartitionId in current map) + 1</c>, lower-bounded by
-    /// <see cref="RangeMapStore.FirstDataPartitionId"/>. Used by the auto-splitter to
-    /// compute the ID to pass to <see cref="IRaft.CreatePartitionAsync"/> on the system-partition
-    /// leader before calling <see cref="SplitAsync"/>.</summary>
-    internal static int ComputeNextPartitionId(RangeMap map)
+    /// <summary>
+    /// The ID to pass to <see cref="IRaft.CreatePartitionAsync"/> on the system-partition leader
+    /// before calling <see cref="SplitAsync"/>: the first partition ID nobody has ever used,
+    /// lower-bounded by <see cref="RangeMapStore.FirstDataPartitionId"/>.
+    /// <para>
+    /// The authority is Kommander's partition map, not the descriptor set. A descriptor disappears
+    /// when its range is merged away or when a split is rolled back, but the partition itself keeps
+    /// a tombstone entry that can never be recreated — so "no descriptor references this ID" is not
+    /// the same question as "this ID was never used", and answering the second one with the first
+    /// hands out an ID whose creation is refused forever. The descriptor scan stays as a cheap guard
+    /// for a range map that somehow ran ahead of the partition map.
+    /// </para>
+    /// <para>
+    /// Advisory, not a reservation: nothing is claimed until <c>CreatePartitionAsync</c> commits, so
+    /// concurrent allocators must be serialized by their caller.
+    /// </para>
+    /// </summary>
+    internal static int ComputeNextPartitionId(IRaft raft, RangeMap map)
     {
-        int maxId = RangeMapStore.FirstDataPartitionId - 1;
+        int nextId = raft.GetNextAvailablePartitionId();
+
+        if (nextId < RangeMapStore.FirstDataPartitionId)
+            nextId = RangeMapStore.FirstDataPartitionId;
 
         foreach (RangeDescriptor d in map.Descriptors)
-            if (d.PartitionId > maxId) maxId = d.PartitionId;
+            if (d.PartitionId >= nextId) nextId = d.PartitionId + 1;
 
-        return maxId + 1;
+        return nextId;
     }
 }
 

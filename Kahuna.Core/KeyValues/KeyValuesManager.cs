@@ -1325,47 +1325,35 @@ internal sealed class KeyValuesManager : IDisposable
             RangeSplitThreshold    = threshold,
             RangeSplitMinRangeSize = minRangeSize
         };
-        var trigger = new RangeSplitTrigger(raft, rangeMapStore, rangeSplitter!, this, writeFrequencyRegistry, cfg, logger);
+        // Shares the long-lived trigger's gate so a threshold-override run still serializes its
+        // partition-ID allocation against the live cadences and the manual split.
+        var trigger = new RangeSplitTrigger(
+            raft, rangeMapStore, rangeSplitter!, this, writeFrequencyRegistry, cfg, logger,
+            rangeSplitTrigger!.SplitGate);
+
         return trigger.TriggerAsync(ct);
     }
 
     /// <summary>
-    /// Test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that
-    /// exact key, bypassing any key-count threshold. Handles the full
-    /// <c>ComputeNextPartitionId → CreatePartitionAsync → SplitAsync</c> sequence internally, so
+    /// Forces a split of the descriptor covering <paramref name="splitKey"/> at that exact key,
+    /// bypassing any key-count threshold — the operator-driven split, and the seam tests drive.
+    /// Handles the full <c>allocate → CreatePartitionAsync → SplitAsync</c> sequence internally, so
     /// callers do not need to manage partition IDs. Optionally invokes
     /// <paramref name="duringQuiesce"/> inside the quiesce window (after catch-up import, before
     /// cutover) for F3-style race tests.
+    /// <para>
+    /// Runs through <see cref="RangeSplitTrigger"/> rather than allocating here, so it shares the
+    /// automatic cadences' serialization: two branches allocating a partition ID concurrently could
+    /// otherwise pick the same one, and the loser's orphan cleanup would retire the winner's live
+    /// partition.
+    /// </para>
     /// </summary>
-    internal async Task<SplitOutcome> ForceSplitAtKeyAsync(
+    internal Task<SplitOutcome> ForceSplitAtKeyAsync(
         string keySpace,
         string splitKey,
         Func<Task>? duringQuiesce = null,
-        CancellationToken ct = default)
-    {
-        int newId = RangeSplitter.ComputeNextPartitionId(rangeMapStore.Current);
-
-        RaftPartitionLifecycleResult createResult;
-        try
-        {
-            createResult = await raft.CreatePartitionAsync(newId, RaftRoutingMode.Unrouted, null, ct);
-        }
-        catch (RaftException ex)
-        {
-            // CreatePartitionAsync throws when this node is not the system-partition leader.
-            // Return a clean failure so the caller can re-resolve the leader and retry.
-            logger.LogWarning(ex, "ForceSplitAtKeyAsync: CreatePartitionAsync({Id}) threw for {Space}/{Key}", newId, keySpace, splitKey);
-            return SplitOutcome.PartitionCreationFailed;
-        }
-
-        if (!createResult.Success)
-        {
-            logger.LogWarning("ForceSplitAtKeyAsync: CreatePartitionAsync({Id}) failed for {Space}/{Key}", newId, keySpace, splitKey);
-            return SplitOutcome.PartitionCreationFailed;
-        }
-
-        return await rangeSplitter!.SplitAsync(keySpace, splitKey, newId, duringQuiesce, ct);
-    }
+        CancellationToken ct = default) =>
+        rangeSplitTrigger!.ExecuteSplitAtKeyAsync(keySpace, splitKey, duringQuiesce, ct);
 
     /// <summary>
     /// Builds the bounded-inbox + priority-control options for a key-value actor. The bound applies

@@ -237,6 +237,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: RemovePartitionAsync({PartitionId}) rejected with {Status}; partition remains orphaned")]
     public static partial void LogRangeSplitTriggerOrphanRemoveRejected(this ILogger<IKahuna> logger, int partitionId, string status);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: P{PartitionId} now carries {Space} [{Start},{End}) despite the reported split failure; keeping it instead of removing it")]
+    public static partial void LogRangeSplitTriggerOrphanRemoveSkipped(this ILogger<IKahuna> logger, int partitionId, string space, string start, string end);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "RangeSplitTrigger: CreatePartitionAsync({Id}) threw — likely lost leadership")]
     public static partial void LogRangeSplitTriggerCreateThrew(this ILogger<IKahuna> logger, Exception ex, int id);
 

@@ -376,6 +376,12 @@ atomic `MutateAsync` cutover replacing the two descriptors with one `[A,C)@P1` a
 generation, and returns the retired partition id so the caller can `RemovePartitionAsync` it.
 The generation fence covers stale routing exactly as in split.
 
+A retired partition id is **never reused**. Removing a partition leaves a tombstone in Kommander's
+partition map — the id cannot be created again — so splits allocate from that map (one past every id
+ever used) rather than from the descriptor set, which forgets an id as soon as its range is merged
+away or its split is rolled back. Partition ids therefore climb monotonically, and gaps in them are
+normal.
+
 ### Multi-range ordered scans (`LocateAndGetByRange`)
 
 Once a key space is split, an ordered scan of `[startKey, endKey)` may cross several ranges. The
@@ -546,7 +552,7 @@ cutover — and a failure in the later steps leaves the outcome genuinely unknow
 | `NoRange` | ✓ | No descriptor covers that key — the space is unregistered or unseeded. |
 | `InvalidSplitKey` | ✓ | The key is a range's start, which would leave an empty half. |
 | `BelowMinRangeSize` | ✓ | Policy refused: one half holds no keys. Map untouched. |
-| `PartitionCreationFailed` | ✓ (for the map) | No descriptor changed — but a partition may have been created and left unused. |
+| `PartitionCreationFailed` | ✓ (for the map) | The destination partition could not be created — usually leadership moved mid-call. No descriptor changed, though a partition may have been created and left unused. Retry: the next attempt allocates a fresh partition id. |
 | `TransferFailed`, `QuiesceFailed`, `CutoverFailed`, `ConcurrentSplit` | ✗ | **The map may still change.** Re-read `GET /v1/ranges` before concluding anything. |
 | `Indeterminate` | ✗ | Leadership or transport was lost mid-split. Same advice. |
 

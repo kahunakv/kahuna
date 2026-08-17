@@ -64,7 +64,7 @@ public sealed class TestRangeSplit : BaseCluster
         {
             (IRaft leaderRaft, KahunaManager leader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
 
-            int newPartitionId = RangeSplitter.ComputeNextPartitionId(leader.RangeMapStore.Current);
+            int newPartitionId = RangeSplitter.ComputeNextPartitionId(leaderRaft, leader.RangeMapStore.Current);
 
             RaftPartitionLifecycleResult createResult =
                 await leaderRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
@@ -262,9 +262,24 @@ public sealed class TestRangeSplit : BaseCluster
             (int _, long freshGen) = dataLeader.LocateRange(Space + "/p");
             Assert.Equal(outcome.NewGeneration, freshGen);
 
-            (IRaft _, KahunaManager newLeader) = await LeaderOf(outcome.NewPartitionId, nodes);
-            (KeyValueResponseType retried, _, _) = await newLeader.TrySetKeyValueRanged(
-                HLCTimestamp.Zero, Space + "/p", V("fresh"), freshGen);
+            // The split moved the right half onto a partition that never existed before, so its Raft
+            // group is newly elected and can still answer MustRetry for a moment — the retryable
+            // outcome, not a fence rejection. Retry until it commits; a genuine fence failure would
+            // keep failing and time out here.
+            KeyValueResponseType retried = KeyValueResponseType.MustRetry;
+
+            for (int attempt = 0; attempt < 20 && retried == KeyValueResponseType.MustRetry; attempt++)
+            {
+                (IRaft _, KahunaManager newLeader) = await LeaderOf(outcome.NewPartitionId, nodes);
+                (int _, long currentGen) = newLeader.LocateRange(Space + "/p");
+
+                (retried, _, _) = await newLeader.TrySetKeyValueRanged(
+                    HLCTimestamp.Zero, Space + "/p", V("fresh"), currentGen);
+
+                if (retried == KeyValueResponseType.MustRetry)
+                    await Task.Delay(100, TestContext.Current.CancellationToken);
+            }
+
             Assert.Equal(KeyValueResponseType.Set, retried);
         }
         finally
@@ -766,10 +781,22 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
             Assert.Equal(KeyValueResponseType.MustRetry, duringQuiesceResult);
 
-            // After the split the quiesce is released — the same write now succeeds.
-            (KeyValueResponseType afterRt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, key, V(val),
-                null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            // After the split the quiesce is released — the same write now succeeds. The key sits in
+            // the moved half, whose partition was created by this split, so the first attempts can
+            // still be answered MustRetry while that Raft group elects; retry until it commits
+            // rather than asserting on the settling window.
+            KeyValueResponseType afterRt = KeyValueResponseType.MustRetry;
+
+            for (int attempt = 0; attempt < 20 && afterRt == KeyValueResponseType.MustRetry; attempt++)
+            {
+                (afterRt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, V(val),
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+
+                if (afterRt == KeyValueResponseType.MustRetry)
+                    await Task.Delay(100, ct);
+            }
+
             Assert.Equal(KeyValueResponseType.Set, afterRt);
         }
         finally
@@ -905,9 +932,10 @@ public sealed class TestRangeSplit : BaseCluster
                 await WaitUntilAsync(() =>
                     kahuna.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space) == 2);
 
+            (IRaft metaRaft, KahunaManager _) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
             (_, metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
             int descriptorsBefore = metaLeader.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space);
-            int nextIdBefore = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            int nextIdBefore = RangeSplitter.ComputeNextPartitionId(metaRaft, metaLeader.RangeMapStore.Current);
 
             // Drive the guard with the stale (gen-1) descriptor: live partition-1 is now gen 2.
             bool didSplit = await metaLeader.RangeSplitTrigger.ExecuteSplitAsync(stale, Space + "/g", ct);
@@ -917,7 +945,7 @@ public sealed class TestRangeSplit : BaseCluster
             // No partition created, no cutover: descriptor count and next id unchanged.
             Assert.Equal(descriptorsBefore,
                 metaLeader.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space));
-            Assert.Equal(nextIdBefore, RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current));
+            Assert.Equal(nextIdBefore, RangeSplitter.ComputeNextPartitionId(metaRaft, metaLeader.RangeMapStore.Current));
         }
         finally
         {
@@ -1057,7 +1085,7 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.True(await sysRaft.AmILeader(SystemPartition, ct), "expected the resolved node to lead P0");
 
             RangeDescriptor current = metaLeader.RangeMapStore.Current.Find(Space, Space + "/a00")!;
-            int expectedNewId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            int expectedNewId = RangeSplitter.ComputeNextPartitionId(sysRaft, metaLeader.RangeMapStore.Current);
 
             // "/zzz" is past every key → right half empty → SplitAsync returns BelowMinRangeSize
             // AFTER CreatePartitionAsync already created expectedNewId. Cleanup must remove it.

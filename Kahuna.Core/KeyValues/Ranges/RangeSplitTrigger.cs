@@ -88,18 +88,22 @@ internal sealed class RangeSplitTrigger : IDisposable
 
     private readonly TimeSpan indivisibleCooldown;
 
-    // Serializes the create-partition + split-async region across both checker cadences.
-    // RangeSplitCheckerActor (count, ~60s) and RangeSplitLoadCheckerActor (load, ~5s) are
-    // separate Nixie actors with separate mailboxes, so they can enter TriggerAsync and
-    // LoadCheckAsync concurrently. ComputeNextPartitionId reads the current map snapshot, so
-    // two concurrent branches can compute the same newId and both call CreatePartitionAsync
-    // with it. MutateAsync's generation guard makes this safe at the data layer (the second
-    // call becomes a no-op), but we still pay a wasted CreatePartitionAsync RPC with a
-    // partition-id collision. The semaphore eliminates that.
-    private readonly SemaphoreSlim splitLock = new(1, 1);
+    // Serializes the allocate + create-partition + split-async region across every split entry
+    // point. RangeSplitCheckerActor (count, ~60s), RangeSplitLoadCheckerActor (load, ~5s) and the
+    // manual admin split all reach it, the first two as separate Nixie actors with separate
+    // mailboxes. Nothing reserves a partition ID until CreatePartitionAsync commits, so two
+    // concurrent branches can allocate the same ID; the loser then fails its split and its orphan
+    // cleanup would retire the winner's live partition. The semaphore eliminates that.
+    private readonly SemaphoreSlim splitLock;
+
+    /// <summary>True when this instance created <see cref="splitLock"/> and must dispose it.</summary>
+    private readonly bool ownsSplitLock;
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <param name="splitGate">Gate to serialize splits on. Pass the long-lived trigger's
+    /// <see cref="SplitGate"/> when constructing a short-lived trigger against the same node, so
+    /// both allocate under one lock; null gives this instance its own.</param>
     public RangeSplitTrigger(
         IRaft raft,
         RangeMapStore rangeMapStore,
@@ -107,8 +111,11 @@ internal sealed class RangeSplitTrigger : IDisposable
         KeyValuesManager manager,
         KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        SemaphoreSlim? splitGate = null)
     {
+        this.splitLock              = splitGate ?? new SemaphoreSlim(1, 1);
+        this.ownsSplitLock          = splitGate is null;
         this.raft                   = raft;
         this.rangeMapStore          = rangeMapStore;
         this.splitter               = splitter;
@@ -313,9 +320,9 @@ internal sealed class RangeSplitTrigger : IDisposable
     // ── private helpers ──────────────────────────────────────────────────────
 
     /// <summary>
-    /// Executes the create-partition + split-async step for <paramref name="descriptor"/> at
-    /// <paramref name="splitKey"/>, serialized via <see cref="splitLock"/> so the count and
-    /// load checker cadences cannot race on the same newId computation.
+    /// Executes the allocate + create-partition + split-async step for <paramref name="descriptor"/>
+    /// at <paramref name="splitKey"/>, serialized via <see cref="splitLock"/> so the count cadence,
+    /// the load cadence and the manual admin split cannot race on the same allocation.
     /// </summary>
     /// <returns><c>true</c> if the split succeeded.</returns>
     /// <remarks>
@@ -327,22 +334,98 @@ internal sealed class RangeSplitTrigger : IDisposable
     {
         logger.LogRangeSplitTriggerSplitting(descriptor.KeySpace, descriptor.StartKey ?? "−∞", descriptor.EndKey ?? "+∞", splitKey);
 
+        SplitOutcome outcome = await ExecuteSplitCoreAsync(
+            descriptor.KeySpace,
+            splitKey,
+            // Stale-descriptor guard: if another branch already split this range its generation
+            // has advanced in the live map. Bail out before issuing CreatePartitionAsync.
+            freshMap =>
+            {
+                RangeDescriptor? live = freshMap.Descriptors.FirstOrDefault(d => d.PartitionId == descriptor.PartitionId);
+                if (live is not null && live.Generation == descriptor.Generation)
+                    return true;
+
+                logger.LogRangeSplitTriggerDescriptorStale(descriptor.KeySpace, descriptor.PartitionId);
+                return false;
+            },
+            duringQuiesce: null,
+            ct);
+
+        if (!outcome.IsSuccess)
+            return false;
+
+        int newId = outcome.NewPartitionId;
+
+        // Bookkeeping runs after the split gate is released. A cadence that grabs the gate in that
+        // window and re-picks this descriptor is still stopped by the stale-descriptor preflight —
+        // the cutover bumped the parent's generation — so the settle window does not have to be
+        // recorded under the lock to be effective.
+
+        // Transfer write-frequency histogram to the two child ranges.
+        TransferTrackerOnSplit(descriptor, splitKey, newId);
+
+        // Record settle-window timestamps for both children: the left child
+        // inherits the parent partition ID; the right child gets newId. Neither
+        // will be re-evaluated until settleWindow elapses.
+        long splitTick = Stopwatch.GetTimestamp();
+        settledAt[descriptor.PartitionId] = splitTick;
+        settledAt[newId]                  = splitTick;
+
+        // Reset load-branch debounce and indivisibility cooldown for the left child
+        // (which inherits the parent partition ID) — the split changed the situation.
+        hotSince.TryRemove(descriptor.PartitionId, out _);
+        indivisibleAt.TryRemove(descriptor.PartitionId, out _);
+
+        RangeSplitMetrics.Splits.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+
+        return true;
+    }
+
+    /// <summary>
+    /// The gate serializing this node's splits. Hand it to a short-lived trigger built against the
+    /// same node so both allocate partition IDs under one lock.
+    /// </summary>
+    internal SemaphoreSlim SplitGate => splitLock;
+
+    /// <summary>
+    /// Splits the range covering <paramref name="splitKey"/> at that exact key, bypassing every
+    /// threshold — the operator-driven split. Shares <see cref="splitLock"/> with the automatic
+    /// cadences: both allocate a partition ID and create it, and nothing reserves an ID until
+    /// <c>CreatePartitionAsync</c> commits, so running them concurrently would let two branches
+    /// allocate the same ID and let the losing branch's cleanup retire the winner's live partition.
+    /// </summary>
+    /// <param name="duringQuiesce">Invoked inside the quiesce window (after catch-up import, before
+    /// cutover) so tests can drive races against a split in progress.</param>
+    internal Task<SplitOutcome> ExecuteSplitAtKeyAsync(
+        string keySpace,
+        string splitKey,
+        Func<Task>? duringQuiesce,
+        CancellationToken ct) =>
+        ExecuteSplitCoreAsync(keySpace, splitKey, preflight: null, duringQuiesce, ct);
+
+    /// <summary>
+    /// The serialized allocate → create → split → cleanup region shared by every split entry point.
+    /// <paramref name="preflight"/> runs under the lock against the freshly read map and aborts the
+    /// split when it returns <c>false</c>.
+    /// </summary>
+    private async Task<SplitOutcome> ExecuteSplitCoreAsync(
+        string keySpace,
+        string splitKey,
+        Func<RangeMap, bool>? preflight,
+        Func<Task>? duringQuiesce,
+        CancellationToken ct)
+    {
         await splitLock.WaitAsync(ct);
         try
         {
-            // Re-read the map snapshot inside the lock so ComputeNextPartitionId sees any
-            // partition created by a concurrent split that beat us here.
+            // Re-read the map snapshot inside the lock so the allocation sees any descriptor
+            // committed by a split that beat us here.
             RangeMap freshMap = rangeMapStore.Current;
-            int newId = RangeSplitter.ComputeNextPartitionId(freshMap);
 
-            // Stale-descriptor guard: if another branch already split this range its generation
-            // has advanced in the live map. Bail out before issuing CreatePartitionAsync.
-            RangeDescriptor? live = freshMap.Descriptors.FirstOrDefault(d => d.PartitionId == descriptor.PartitionId);
-            if (live is null || live.Generation != descriptor.Generation)
-            {
-                logger.LogRangeSplitTriggerDescriptorStale(descriptor.KeySpace, descriptor.PartitionId);
-                return false;
-            }
+            if (preflight is not null && !preflight(freshMap))
+                return SplitOutcome.ConcurrentSplit;
+
+            int newId = RangeSplitter.ComputeNextPartitionId(raft, freshMap);
 
             RaftPartitionLifecycleResult createResult;
             try
@@ -354,68 +437,73 @@ internal sealed class RangeSplitTrigger : IDisposable
                 // CreatePartitionAsync throws when this node lost system-partition leadership in
                 // the window between the AmILeader(0) check and here. Treat as a clean skip —
                 // the next checker tick will re-evaluate with a fresh AmILeader check.
-                logger.LogRangeSplitTriggerCreateFailed(newId, descriptor.KeySpace);
+                logger.LogRangeSplitTriggerCreateFailed(newId, keySpace);
                 logger.LogRangeSplitTriggerCreateThrew(ex, newId);
-                return false;
+                return SplitOutcome.PartitionCreationFailed;
             }
 
             if (!createResult.Success)
             {
-                logger.LogRangeSplitTriggerCreateFailed(newId, descriptor.KeySpace);
-                return false;
+                logger.LogRangeSplitTriggerCreateFailed(newId, keySpace);
+                return SplitOutcome.PartitionCreationFailed;
             }
 
-            SplitOutcome outcome = await splitter.SplitAsync(descriptor.KeySpace, splitKey, newId, ct);
+            SplitOutcome outcome = await splitter.SplitAsync(keySpace, splitKey, newId, duringQuiesce, ct);
 
             if (!outcome.IsSuccess)
             {
-                logger.LogRangeSplitTriggerSplitFailed(descriptor.KeySpace, splitKey, outcome.Status.ToString());
-
-                // Best-effort cleanup: remove the partition we just created to avoid leaving it
-                // permanently orphaned (unreferenced by routing). Log but swallow any failure —
-                // the partition stays unreferenced until an operator or future cleanup removes it.
-                // Replication of the removal is retried inside Kommander; a non-exception rejection
-                // that still surfaces here (lost system leadership, terminal error) cannot be
-                // repaired from this node, so it must at least be visible.
-                try
-                {
-                    RaftPartitionLifecycleResult removeResult = await raft.RemovePartitionAsync(newId, ct);
-
-                    if (!removeResult.Success)
-                        logger.LogRangeSplitTriggerOrphanRemoveRejected(newId, removeResult.Status.ToString());
-                }
-                catch (Exception ex)
-                {
-                    logger.LogRangeSplitTriggerOrphanRemoveFailed(newId, ex);
-                }
-
-                return false;
+                logger.LogRangeSplitTriggerSplitFailed(keySpace, splitKey, outcome.Status.ToString());
+                await RemoveOrphanedPartitionAsync(newId, ct);
+                return outcome;
             }
 
-            logger.LogRangeSplitTriggerSplit(descriptor.KeySpace, splitKey, newId);
+            logger.LogRangeSplitTriggerSplit(keySpace, splitKey, newId);
 
-            // Transfer write-frequency histogram to the two child ranges.
-            TransferTrackerOnSplit(descriptor, splitKey, newId);
-
-            // Record settle-window timestamps for both children: the left child
-            // inherits the parent partition ID; the right child gets newId. Neither
-            // will be re-evaluated until settleWindow elapses.
-            long splitTick = Stopwatch.GetTimestamp();
-            settledAt[descriptor.PartitionId] = splitTick;
-            settledAt[newId]                  = splitTick;
-
-            // Reset load-branch debounce and indivisibility cooldown for the left child
-            // (which inherits the parent partition ID) — the split changed the situation.
-            hotSince.TryRemove(descriptor.PartitionId, out _);
-            indivisibleAt.TryRemove(descriptor.PartitionId, out _);
-
-            RangeSplitMetrics.Splits.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
-
-            return true;
+            return outcome;
         }
         finally
         {
             splitLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Best-effort removal of the partition created for a split that then failed, so it is not left
+    /// permanently orphaned (unreferenced by routing, and its ID retired for good).
+    /// <para>
+    /// Skipped when the committed map does carry a descriptor on that partition: a cutover can
+    /// commit and still report failure (a replication timeout on an entry that lands anyway), and
+    /// removing the partition then would retire a range that is serving live data.
+    /// </para>
+    /// <para>
+    /// Failures are logged, not thrown — the removal is retried inside Kommander, and a rejection
+    /// that still surfaces here (lost system leadership, terminal error) cannot be repaired from
+    /// this node, so it must at least be visible.
+    /// </para>
+    /// </summary>
+    private async Task RemoveOrphanedPartitionAsync(int partitionId, CancellationToken ct)
+    {
+        foreach (RangeDescriptor descriptor in rangeMapStore.Current.Descriptors)
+        {
+            if (descriptor.PartitionId != partitionId)
+                continue;
+
+            logger.LogRangeSplitTriggerOrphanRemoveSkipped(
+                partitionId, descriptor.KeySpace, descriptor.StartKey ?? "−∞", descriptor.EndKey ?? "+∞");
+
+            return;
+        }
+
+        try
+        {
+            RaftPartitionLifecycleResult removeResult = await raft.RemovePartitionAsync(partitionId, ct);
+
+            if (!removeResult.Success)
+                logger.LogRangeSplitTriggerOrphanRemoveRejected(partitionId, removeResult.Status.ToString());
+        }
+        catch (Exception ex)
+        {
+            logger.LogRangeSplitTriggerOrphanRemoveFailed(partitionId, ex);
         }
     }
 
@@ -635,5 +723,9 @@ internal sealed class RangeSplitTrigger : IDisposable
         // it within a few half-lives and the count-based fallback remains correct throughout.
     }
 
-    public void Dispose() => splitLock.Dispose();
+    public void Dispose()
+    {
+        if (ownsSplitLock)
+            splitLock.Dispose();
+    }
 }

@@ -374,6 +374,24 @@ public class TestLocateAndScanRange : BaseCluster
         }
     }
 
+    /// <summary>
+    /// Waits until every node can name a leader for <paramref name="partitionId"/>.
+    /// <para>
+    /// A split allocates a partition ID that has never been used, so its Raft group is brand new and
+    /// still has to elect a leader. A scan routed to that range before the election completes is
+    /// answered with the retryable <c>MustRetry</c>. These tests assert on scan semantics, so the
+    /// election is waited out here rather than being folded into the assertions.
+    /// </para>
+    /// </summary>
+    private static async Task WaitForPartitionLeaderAsync(
+        int partitionId, (IRaft Raft, KahunaManager Kahuna)[] nodes, CancellationToken ct)
+    {
+        // Generous budget: electing the new group competes with every other cluster the suite runs
+        // in parallel.
+        foreach ((IRaft raft, KahunaManager _) in nodes)
+            await raft.WaitForLeader(partitionId, ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), ct);
+    }
+
 
     /// <summary>
     /// Scan_SpanningMultipleRanges_ReturnsFullOrderedResult
@@ -449,7 +467,7 @@ public class TestLocateAndScanRange : BaseCluster
             string splitKey = $"{SplitSpace}/0010";
             (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
 
-            int newPartitionId = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            int newPartitionId = RangeSplitter.ComputeNextPartitionId(sysRaft, metaLeader.RangeMapStore.Current);
             RaftPartitionLifecycleResult createResult =
                 await sysRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(createResult.Success, "CreatePartitionAsync failed");
@@ -460,6 +478,8 @@ public class TestLocateAndScanRange : BaseCluster
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(
                 SplitSpace, splitKey, newPartitionId, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            await WaitForPartitionLeaderAsync(newPartitionId, nodes, ct);
 
             // Wait for the two-descriptor map to reach all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
@@ -574,7 +594,7 @@ public class TestLocateAndScanRange : BaseCluster
             string splitKey = $"{space}/0015";
             (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
 
-            int newPart = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            int newPart = RangeSplitter.ComputeNextPartitionId(sysRaft, metaLeader.RangeMapStore.Current);
             RaftPartitionLifecycleResult cr =
                 await sysRaft.CreatePartitionAsync(newPart, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(cr.Success);
@@ -584,6 +604,8 @@ public class TestLocateAndScanRange : BaseCluster
 
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitKey, newPart, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            await WaitForPartitionLeaderAsync(newPart, nodes, ct);
 
             foreach ((IRaft _, KahunaManager kahuna) in nodes)
                 await WaitUntilAsync(() =>
@@ -705,7 +727,7 @@ public class TestLocateAndScanRange : BaseCluster
             // ── split at /0010 while cursor is held ────────────────────────────
             (IRaft sysRaft, KahunaManager _) = await LeaderOf(0, nodes);
 
-            int newPart = RangeSplitter.ComputeNextPartitionId(metaLeader.RangeMapStore.Current);
+            int newPart = RangeSplitter.ComputeNextPartitionId(sysRaft, metaLeader.RangeMapStore.Current);
             RaftPartitionLifecycleResult cr =
                 await sysRaft.CreatePartitionAsync(newPart, RaftRoutingMode.Unrouted, null, ct);
             Assert.True(cr.Success);
@@ -715,6 +737,8 @@ public class TestLocateAndScanRange : BaseCluster
 
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(space, splitAt, newPart, ct);
             Assert.True(outcome.IsSuccess, $"Split failed: {outcome.Status}");
+
+            await WaitForPartitionLeaderAsync(newPart, nodes, ct);
 
             // Wait for the two-descriptor map on all nodes.
             foreach ((IRaft _, KahunaManager kahuna) in nodes)

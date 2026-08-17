@@ -205,7 +205,7 @@ public sealed class TestRangeSplitUnderPlacement : BaseCluster
         {
             (driverRaft, driver, _) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
 
-            int newPartitionId = RangeSplitter.ComputeNextPartitionId(driver.RangeMapStore.Current);
+            int newPartitionId = RangeSplitter.ComputeNextPartitionId(driverRaft, driver.RangeMapStore.Current);
 
             RaftPartitionLifecycleResult createResult =
                 await driverRaft.CreatePartitionAsync(newPartitionId, RaftRoutingMode.Unrouted, null, ct);
