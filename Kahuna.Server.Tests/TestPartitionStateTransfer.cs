@@ -66,7 +66,7 @@ public sealed class TestPartitionStateTransfer : IDisposable
         public bool DrainInvoked;
     }
 
-    private Node MakeNode(IPersistenceBackend? backend = null, string? storagePath = null)
+    private Node MakeNode(IPersistenceBackend? backend = null, string? storagePath = null, Action<Node>? onDrain = null)
     {
         backend ??= new MemoryPersistenceBackend();
         RangeMap map = BuildMap();
@@ -81,7 +81,7 @@ public sealed class TestPartitionStateTransfer : IDisposable
         PartitionStateTransfer transfer = new(
             enumerator, backend, receipts, records, intents,
             () => map, HashPoolSize,
-            () => { node!.DrainInvoked = true; return Task.CompletedTask; },
+            () => { node!.DrainInvoked = true; onDrain?.Invoke(node!); return Task.CompletedTask; },
             storagePath, "rev", NullLogger<IKahuna>.Instance);
 
         node = new Node { Backend = backend, Receipts = receipts, Records = records, Intents = intents, Transfer = transfer };
@@ -271,6 +271,86 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.True(target.Transfer.IsInstallIncomplete(2));
 
         // The sender's retry re-drives the whole install and completes it.
+        await Import(target, 2, snapshot);
+        Assert.False(target.Transfer.IsInstallIncomplete(2));
+        Assert.Equal(4, target.Backend.GetKeyValue("ranged1/a")!.Revision);
+    }
+
+    // ── node-local coherence around the install ──────────────────────────────────
+
+    [Fact]
+    public async Task Import_DrainsQueuedWritesBeforePurge_SoAStaleFlushCannotClobberInstalledRows()
+    {
+        Node source = MakeNode();
+        int partitionId = PartitionDataEnumerator.HashPartitionOfKeySpace("hspace", HashPoolSize);
+        Assert.True(source.Backend.StoreLocks([LockItem("hspace/l1", 300)]));
+
+        byte[] snapshot = await Export(source, partitionId);
+
+        // The target emulates the background writer still holding a queued pre-snapshot lock write
+        // (fencing token 5): the drain callback lands it in the backend. Because the import drains
+        // before it purges, that stale row is deleted with the rest of the partition and the
+        // installed row survives; an import that skipped the drain would let the queued write land
+        // afterwards and blindly overwrite the installed fencing-token high-water mark.
+        Node target = MakeNode(onDrain: node => Assert.True(node.Backend.StoreLocks([LockItem("hspace/l1", 5)])));
+
+        await Import(target, partitionId, snapshot);
+
+        Assert.True(target.DrainInvoked);
+        Assert.Equal(300, target.Backend.GetLock("hspace/l1")!.FencingToken);
+    }
+
+    [Fact]
+    public async Task Import_InvalidatesResidentState_OnlyAfterASuccessfulInstall()
+    {
+        Node source = MakeNode();
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 4)]));
+        byte[] snapshot = await Export(source, 2);
+
+        List<int> invalidated = [];
+        Node target = MakeNode(storagePath: tempDir);
+        target.Transfer.AddResidentStateInvalidationHook(partitionId =>
+        {
+            invalidated.Add(partitionId);
+            return Task.CompletedTask;
+        });
+
+        // A corrupt stream never reaches the install phase, so nothing is invalidated.
+        byte[] corrupt = (byte[])snapshot.Clone();
+        corrupt[^3] ^= 0xFF;
+        await Assert.ThrowsAsync<KahunaServerException>(() => Import(target, 2, corrupt));
+        Assert.Empty(invalidated);
+
+        await Import(target, 2, snapshot);
+        Assert.Equal([2], invalidated);
+    }
+
+    [Fact]
+    public async Task Import_HookFailure_LeavesInstallIncomplete_AndRetryCompletes()
+    {
+        Node source = MakeNode();
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 4)]));
+        byte[] snapshot = await Export(source, 2);
+
+        // A node whose resident-state invalidation fails is a half-invalidated mixture that must
+        // not serve the partition: the install stays observably incomplete and the sender's retry
+        // re-drives it.
+        bool failNext = true;
+        Node target = MakeNode(storagePath: tempDir);
+        target.Transfer.AddResidentStateInvalidationHook(_ =>
+        {
+            if (failNext)
+            {
+                failNext = false;
+                throw new InvalidOperationException("resident-state eviction unavailable");
+            }
+
+            return Task.CompletedTask;
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Import(target, 2, snapshot));
+        Assert.True(target.Transfer.IsInstallIncomplete(2));
+
         await Import(target, 2, snapshot);
         Assert.False(target.Transfer.IsInstallIncomplete(2));
         Assert.Equal(4, target.Backend.GetKeyValue("ranged1/a")!.Revision);

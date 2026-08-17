@@ -277,7 +277,7 @@ public sealed class TestUnhostedPartitionPurge : IDisposable
         (LockResponseType lockedB, _) = await node.Kahuna.LocateAndTryLock($"{spaceB}/res", owner, 60_000, LockDurability.Ephemeral, ct);
         Assert.Equal(LockResponseType.Locked, lockedB);
 
-        await manager.Locks.EvictUnhostedPartitionLocksAsync(partitionA);
+        await manager.Locks.EvictPartitionLocksAsync(partitionA);
 
         // The evicted partition's lease is gone — a different owner can acquire immediately —
         // while the other partition's lease still holds its owner out.

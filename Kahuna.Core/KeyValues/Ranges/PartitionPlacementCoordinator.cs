@@ -226,9 +226,23 @@ internal sealed class PartitionPlacementCoordinator : IDisposable
                 return;
 
             if (!await keyValues.PurgeUnhostedPartitionDataAsync(partitionId, StillUnhosted, CancellationToken.None))
-                return;
+            {
+                // The durable purge did not complete. If the cause was a re-gain, the incoming
+                // snapshot install invalidates the resident caches itself — and delivery has
+                // resumed, so evicting here could race live proposals. If the partition is still
+                // un-hosted (a durable step failed), delivery has stopped: drop the resident
+                // entries now so nothing stale can outlive this tenure; the durable leftovers are
+                // converged by the startup re-derivation.
+                if (StillUnhosted())
+                {
+                    await keyValues.EvictPartitionEntriesAsync(partitionId);
+                    await locks.EvictPartitionLocksAsync(partitionId);
+                }
 
-            await locks.EvictUnhostedPartitionLocksAsync(partitionId);
+                return;
+            }
+
+            await locks.EvictPartitionLocksAsync(partitionId);
         }
         catch (Exception ex)
         {

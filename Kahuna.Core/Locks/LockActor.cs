@@ -595,13 +595,14 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     }
     
     /// <summary>
-    /// Removes every resident lock entry owned by the partition carried in the request, after the
-    /// committed placement map stopped listing this node as one of its replicas. The persistent
-    /// lock rows are purged from the backend separately; this drops the actor-resident copies —
-    /// ephemeral locks included — so a later re-gain of the partition can never answer from a
-    /// stale resident lease (whose fencing token could sit below the freshly re-seeded backend
-    /// row, regressing the fencing contract). Lock resources route purely by key-space hash, so
-    /// the classification is the same hash the locator applies.
+    /// Removes every resident lock entry owned by the partition carried in the request: after the
+    /// committed placement map stopped listing this node as one of its replicas, or after a
+    /// whole-partition snapshot install replaced the partition's backend rows. The persistent
+    /// lock rows are purged/installed in the backend separately; this drops the actor-resident
+    /// copies — ephemeral locks included — so the node can never answer from a stale resident
+    /// lease (whose fencing token could sit below the freshly seeded backend row, regressing the
+    /// fencing contract). Lock resources route purely by key-space hash, so the classification is
+    /// the same hash the locator applies.
     /// </summary>
     private LockResponse EvictPartition(LockRequest message)
     {

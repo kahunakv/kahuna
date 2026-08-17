@@ -146,11 +146,14 @@ internal sealed class LockManager
     }
 
     /// <summary>
-    /// Broadcasts a partition eviction to every lock actor shard (ephemeral and persistent) after
-    /// this node stopped being one of the partition's replicas, so no shard retains a resident
-    /// lease for it. Completes when every shard has processed the eviction.
+    /// Broadcasts a partition eviction to every lock actor shard (ephemeral and persistent) so no
+    /// shard retains a resident lease for the partition. Invoked when this node stops being one of
+    /// the partition's replicas, and after a whole-partition snapshot install replaced the
+    /// partition's backend rows — in both cases a retained resident lease could later be served
+    /// (and minted from) ahead of newer committed state. Completes when every shard has processed
+    /// the eviction.
     /// </summary>
-    internal async Task EvictUnhostedPartitionLocksAsync(int partitionId)
+    internal async Task EvictPartitionLocksAsync(int partitionId)
     {
         LockRequest request = new(LockRequestType.EvictPartition, string.Empty, null, 0, LockDurability.Persistent, 0, partitionId, null);
 

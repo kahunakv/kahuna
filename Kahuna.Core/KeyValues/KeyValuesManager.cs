@@ -760,6 +760,14 @@ internal sealed class KeyValuesManager : IDisposable
             configuration.StorageRevision,
             logger);
 
+        // Mutations below a snapshot boundary reach this node only through the whole-partition
+        // install — the replicators never see them, so no cache-coherence apply advances a resident
+        // actor entry. Registering the eviction here makes every install drop the key-value
+        // residents of the installed partition; a stale resident entry would otherwise be served
+        // with precedence over the freshly installed backend rows. (The lock residents are
+        // registered by the composition root, which owns both managers.)
+        partitionStateTransfer.AddResidentStateInvalidationHook(EvictPartitionEntriesAsync);
+
         durableRecordRetentionTtl = configuration.TransactionOutcomeRetentionTtl;
         durableRecordGcMaxPerPass = configuration.DurableRecordGcMaxPerPass;
         completionReceiptRetentionTtl = configuration.CompletionReceiptRetentionTtl;

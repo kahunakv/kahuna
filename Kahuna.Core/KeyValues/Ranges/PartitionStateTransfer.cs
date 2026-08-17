@@ -39,16 +39,21 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <para>
 /// <b>Import discipline.</b> The whole stream is read and checksum-verified <i>before anything is
 /// mutated</i>, so a truncated or corrupt snapshot is a clean no-op. The install itself is
-/// purge-then-apply — merging instead of purging would resurrect keys deleted while this node was
-/// not a replica — and is bracketed by a durable install marker: the marker is created before the
-/// purge and removed only after the apply and the stores' durable snapshots complete, so a crash
-/// mid-install leaves the partition observably incomplete (<see cref="IsInstallIncomplete"/>) and
-/// the sender's retry re-drives the whole install rather than anything serving a half-installed
-/// range. Re-delivery of the same snapshot is idempotent: the purge clears whatever the previous
-/// attempt applied and the apply rewrites it. The stores' per-partition snapshots are persisted
-/// before returning because the WAL boundary installed right after compacts the very log entries
-/// the imported receipts/records/intents came from — without a durable store snapshot a cold
-/// restart could not reconstruct them.
+/// drain-then-purge-then-apply: the background writer is drained first so a queued pre-snapshot
+/// flush cannot land after the install and blindly overwrite an installed row, and the purge
+/// (rather than a merge) prevents resurrecting keys deleted while this node was not a replica.
+/// The sequence is bracketed by a durable install marker: the marker is created before the
+/// purge and removed only after the apply, the stores' durable snapshots, and the resident-state
+/// invalidation complete, so a crash mid-install leaves the partition observably incomplete
+/// (<see cref="IsInstallIncomplete"/>) and the sender's retry re-drives the whole install rather
+/// than anything serving a half-installed range. Re-delivery of the same snapshot is idempotent:
+/// the purge clears whatever the previous attempt applied and the apply rewrites it. The stores'
+/// per-partition snapshots are persisted before returning because the WAL boundary installed right
+/// after compacts the very log entries the imported receipts/records/intents came from — without a
+/// durable store snapshot a cold restart could not reconstruct them. Finally, node-local resident
+/// caches for the partition are invalidated (<see cref="residentStateInvalidationHooks"/>): every
+/// mutation below the boundary arrived only through this install, so resident lock leases and
+/// key-value entries are stale and must never again be served over the installed rows.
 /// </para>
 /// </summary>
 internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
@@ -66,6 +71,21 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     private SemaphoreSlim InstallGateOf(int partitionId) =>
         installGates.GetOrAdd(partitionId, static _ => new SemaphoreSlim(1, 1));
+
+    /// <summary>
+    /// Callbacks that drop node-local resident state (actor-cached lock leases and key-value
+    /// entries) for a partition after a snapshot install replaced its backend rows. Mutations below
+    /// the snapshot boundary reach this node only through the install — the replicators never see
+    /// them, so no cache-coherence apply ever advances a resident entry — and resident entries are
+    /// served with precedence over the backend (a lock grant mints fencingToken+1 straight from the
+    /// resident lease). Without this invalidation, a node re-seeded after falling behind or after a
+    /// replica move would, on a later leader promotion, mint fencing tokens below the installed
+    /// high-water mark — regressing and reusing tokens that were already granted.
+    /// </summary>
+    private readonly List<Func<int, Task>> residentStateInvalidationHooks = [];
+
+    /// <summary>Registers a resident-state invalidation callback; see <see cref="residentStateInvalidationHooks"/>.</summary>
+    internal void AddResidentStateInvalidationHook(Func<int, Task> hook) => residentStateInvalidationHooks.Add(hook);
 
     private readonly PartitionDataEnumerator enumerator;
 
@@ -271,6 +291,13 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         {
             MarkInstallIncomplete(partitionId);
 
+            // Flush the background writer before purging, exactly like the un-host purge: a write
+            // queued by a pre-snapshot apply and still unflushed would otherwise land after the
+            // install and overwrite a freshly installed row (backend stores are blind upserts keyed
+            // by key/resource), regressing the partition to pre-snapshot state — for locks, that
+            // resurrects an already-superseded fencing-token high-water mark.
+            await drainPersistence().ConfigureAwait(false);
+
             await PurgePartitionBackendRowsAsync(partitionId, ct).ConfigureAwait(false);
 
             if (kvItems.Count > 0 && !persistenceBackend.StoreKeyValues(kvItems))
@@ -297,6 +324,15 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 || !preparedIntentStore.PersistSnapshot(partitionId))
                 throw new KahunaServerException(
                     "ImportPartitionState: a durable store snapshot could not be persisted; the install is left marked incomplete for retry.");
+
+            // Drop resident actor state that predates the install; anything left resident would be
+            // served with precedence over the freshly installed rows. Runs while the partition's
+            // apply stream is quiescent (the install owns the partition's single-writer executor),
+            // so nothing can repopulate a stale entry concurrently. A failure propagates: the
+            // install stays marked incomplete and the sender re-drives it, because a half-invalidated
+            // node must not serve the partition.
+            foreach (Func<int, Task> hook in residentStateInvalidationHooks)
+                await hook(partitionId).ConfigureAwait(false);
 
             ClearInstallIncomplete(partitionId);
         }

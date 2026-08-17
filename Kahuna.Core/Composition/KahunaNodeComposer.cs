@@ -167,6 +167,13 @@ internal static class KahunaNodeComposer
         // export (which stays unsupported by design).
         raft.RegisterPartitionStateTransfer(keyValues.PartitionStateTransfer);
 
+        // A snapshot install must also drop the lock actors' resident leases for the installed
+        // partition (the key-value residents are registered inside the manager). A resident lease
+        // that predates the install is trusted unconditionally by the grant path — it would mint
+        // fencing tokens below the installed high-water mark on the next leader promotion,
+        // regressing and reusing tokens already granted by other replicas.
+        keyValues.PartitionStateTransfer.AddResidentStateInvalidationHook(locks.EvictPartitionLocksAsync);
+
         return new KahunaNodeComponents(
             persistenceBackend,
             backendReadScheduler,
