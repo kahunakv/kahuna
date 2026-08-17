@@ -14,10 +14,26 @@ namespace Kahuna.Communication.External;
 public static class ClusterLeave
 {
     /// <summary>
-    /// Upper bound on a decommission attempt. Consensus bounds its own attempt well below this;
-    /// the guard only exists so a wedged attempt cannot hold a request open indefinitely.
+    /// Margin added to the consensus-side bound to produce this request's deadline. Consensus
+    /// bounds its own attempt — a drain by <c>DecommissionDrainTimeout</c>, everything else well
+    /// below that — so this guard exists only so a wedged attempt cannot hold a request open
+    /// indefinitely, and must sit above the consensus bound rather than cut it short. Cancelling a
+    /// drain mid-flight would report a timeout for a departure that then commits anyway.
     /// </summary>
-    private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DeadlineMargin = TimeSpan.FromSeconds(30);
+
+    private static TimeSpan DeadlineFor(IRaft raft)
+    {
+        try
+        {
+            TimeSpan drainTimeout = raft.Configuration.DecommissionDrainTimeout;
+            return drainTimeout > TimeSpan.Zero ? drainTimeout + DeadlineMargin : DeadlineMargin;
+        }
+        catch (Exception)
+        {
+            return DeadlineMargin;
+        }
+    }
 
     /// <summary>
     /// Asks consensus to remove the local node from the roster and reports the outcome, never
@@ -29,7 +45,7 @@ public static class ClusterLeave
     /// </summary>
     public static async Task<LeaveClusterResult> ExecuteAsync(IRaft raft, CancellationToken cancellationToken)
     {
-        using CancellationTokenSource deadline = new(Deadline);
+        using CancellationTokenSource deadline = new(DeadlineFor(raft));
         using CancellationTokenSource linked =
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
 
@@ -76,7 +92,8 @@ public static class ClusterLeave
     /// <summary>
     /// HTTP status for the outcome. 200 means the node is out of the roster; 409 marks the
     /// permanent refusal so a caller that only reads status codes never retries it; 503 covers a
-    /// node that could not attempt the removal, and 504 an attempt that did not resolve in time.
+    /// node that could not attempt the removal — including one refused because another node is
+    /// mid-drain, which passes on its own; and 504 an attempt that did not resolve in time.
     /// </summary>
     public static int ToStatusCode(LeaveClusterOutcome outcome) => outcome switch
     {
@@ -85,6 +102,10 @@ public static class ClusterLeave
         LeaveClusterOutcome.RefusedInsufficientVoters => StatusCodes.Status409Conflict,
         LeaveClusterOutcome.NotInitialized => StatusCodes.Status503ServiceUnavailable,
         LeaveClusterOutcome.NoLeader => StatusCodes.Status503ServiceUnavailable,
+        // Deliberately not 409: that code is the contract for "never retry", and a drain already
+        // running elsewhere clears on its own.
+        LeaveClusterOutcome.RefusedDrainInProgress => StatusCodes.Status503ServiceUnavailable,
+        LeaveClusterOutcome.DrainTimedOut => StatusCodes.Status504GatewayTimeout,
         _ => StatusCodes.Status504GatewayTimeout
     };
 
@@ -100,6 +121,10 @@ public static class ClusterLeave
             "The node has not finished cluster initialization, so it has no roster entry to remove.",
         LeaveClusterOutcome.NoLeader =>
             "No system-partition leader could be reached, so the removal was not attempted.",
+        LeaveClusterOutcome.RefusedDrainInProgress =>
+            "Refused: another node is already draining, and only one decommission may run at a time. Nothing changed — retry once that drain finishes.",
+        LeaveClusterOutcome.DrainTimedOut =>
+            "The node's replicas were not fully evacuated before the drain deadline, so it stays in the roster and keeps serving. Replicas already moved stay moved — retry to resume the drain, or raise the drain timeout.",
         _ =>
             "The removal was not confirmed before the deadline. It may still commit — re-read the membership roster before deciding."
     };
@@ -107,6 +132,7 @@ public static class ClusterLeave
     public static KahunaClusterLeaveResponse ToResponse(LeaveClusterResult result) => new()
     {
         Left = result.Left,
+        Drained = result.Drained,
         Outcome = result.Outcome.ToString(),
         MembershipVersion = result.MembershipVersion,
         Retryable = IsRetryable(result.Outcome),

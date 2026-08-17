@@ -251,6 +251,10 @@ public sealed class TestClusterLeave : BaseCluster
     [InlineData(LeaveClusterOutcome.NotInitialized, StatusCodes.Status503ServiceUnavailable, false, true)]
     [InlineData(LeaveClusterOutcome.NoLeader, StatusCodes.Status503ServiceUnavailable, false, true)]
     [InlineData(LeaveClusterOutcome.Timeout, StatusCodes.Status504GatewayTimeout, false, true)]
+    // A drain refused because another is running clears on its own, so it must not answer 409 —
+    // that code is this surface's contract for "never retry".
+    [InlineData(LeaveClusterOutcome.RefusedDrainInProgress, StatusCodes.Status503ServiceUnavailable, false, true)]
+    [InlineData(LeaveClusterOutcome.DrainTimedOut, StatusCodes.Status504GatewayTimeout, false, true)]
     public void OutcomeMapping_IsStableAcrossTransports(
         LeaveClusterOutcome outcome, int expectedStatus, bool expectedLeft, bool expectedRetryable)
     {
@@ -263,6 +267,36 @@ public sealed class TestClusterLeave : BaseCluster
         Assert.Equal(outcome.ToString(), response.Outcome);
         Assert.Equal(42, response.MembershipVersion);
         Assert.NotEmpty(response.Reason);
+    }
+
+    /// <summary>
+    /// Every outcome needs its own explanation. A new one silently inheriting the catch-all
+    /// "not confirmed before the deadline" text would tell an operator the opposite of what
+    /// happened for a refusal or a rolled-back drain.
+    /// </summary>
+    [Fact]
+    public void EveryLeaveOutcome_HasItsOwnReason()
+    {
+        LeaveClusterOutcome[] outcomes = Enum.GetValues<LeaveClusterOutcome>();
+        HashSet<string> reasons = [.. outcomes.Select(ClusterLeave.ToReason)];
+
+        Assert.Equal(outcomes.Length, reasons.Count);
+    }
+
+    /// <summary>
+    /// The drain reported by consensus reaches the wire unchanged: an operator deciding whether the
+    /// departing node's ranges kept their redundancy reads this flag, not the outcome name.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DrainedFlag_ReachesTheResponse(bool drained)
+    {
+        KahunaClusterLeaveResponse response =
+            ClusterLeave.ToResponse(new(LeaveClusterOutcome.Committed, 7, drained));
+
+        Assert.True(response.Left);
+        Assert.Equal(drained, response.Drained);
     }
 
     /// <summary>

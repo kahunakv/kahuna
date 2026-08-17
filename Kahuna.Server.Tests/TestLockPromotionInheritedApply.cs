@@ -61,6 +61,7 @@ public sealed class TestLockPromotionInheritedApply : RaftTrackingTest
         public Task<JoinResponse> SendJoin(RaftManager m, RaftNode n, JoinRequest r) => inner.SendJoin(m, n, r);
         public Task<LeaveResponse> SendLeave(RaftManager m, RaftNode n, LeaveRequest r, CancellationToken ct = default) => inner.SendLeave(m, n, r, ct);
         public Task<GossipAck> SendGossip(RaftManager m, RaftNode n, GossipMessage d, CancellationToken ct = default) => inner.SendGossip(m, n, d, ct);
+        public Task<SetMemberRoleResponse> SendSetMemberRole(RaftManager m, RaftNode n, SetMemberRoleRequest r, CancellationToken ct = default) => inner.SendSetMemberRole(m, n, r, ct);
         public Task<Kommander.Gossip.PingResponse> SendPing(RaftManager m, RaftNode n, Kommander.Gossip.PingRequest r, CancellationToken ct = default) => inner.SendPing(m, n, r, ct);
         public Task<Kommander.Gossip.PingReqResponse> SendPingReq(RaftManager m, RaftNode n, Kommander.Gossip.PingReqRequest r, CancellationToken ct = default) => inner.SendPingReq(m, n, r, ct);
         public Task<long?> GetRemoteFollowerLag(RaftManager m, RaftNode n, int partitionId, string follower) => inner.GetRemoteFollowerLag(m, n, partitionId, follower);

@@ -358,6 +358,14 @@ public abstract class BaseCluster
             // Off by default so existing fixtures keep their static bootstrap placement; the placed
             // operation suites turn it on to run the same code paths a production RF cluster would.
             EnablePlacementRebalancer = enablePlacementRebalancer,
+            // Placement passes run on their own cadence, independent of the leader balancer (which
+            // these fixtures leave off). Scaled down from the 5 s production default so a placement
+            // change converges within a test's patience rather than after several wall seconds.
+            PlacementPassInterval = TimeSpan.FromMilliseconds((int)(100 * TimingScale)),
+            // A graceful leave waits this long for its replicas to be evacuated. Well below the
+            // 2-minute production default so a drain that cannot finish fails the test quickly
+            // instead of stalling it, but far above the few passes an evacuation needs here.
+            DecommissionDrainTimeout = TimeSpan.FromMilliseconds((int)(30_000 * TimingScale)),
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),

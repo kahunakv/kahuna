@@ -442,8 +442,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             LeaderBalancerQueueWeight = options.LeaderBalancerQueueWeight,
             ReplicationFactor = options.ReplicationFactor,
             EnablePlacementRebalancer = options.EnablePlacementRebalancer,
+            // Placement runs on its own cadence, so an embedded node with a replication factor
+            // converges without also enabling the leader balancer.
+            PlacementPassInterval = options.PlacementPassInterval,
             MaxReplicaMovesPerPass = options.MaxReplicaMovesPerPass,
             MaxConcurrentReplicaTransfers = options.MaxConcurrentReplicaTransfers,
+            MaxConcurrentReplicaRepairs = options.MaxConcurrentReplicaRepairs,
+            DecommissionDrainTimeout = options.DecommissionDrainTimeout,
             ReplicaCountDeadband = options.ReplicaCountDeadband,
             Zone = options.Zone,
             EnableLoadReports = options.EnableLoadReports

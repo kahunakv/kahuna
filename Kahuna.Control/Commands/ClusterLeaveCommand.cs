@@ -36,6 +36,13 @@ public static class ClusterLeaveCommand
                 Markup.Escape(nodeUrl), outcomeMarkup, response.MembershipVersion);
             AnsiConsole.MarkupLine(Markup.Escape(response.Reason));
 
+            // A node that left without draining took its replicas' redundancy with it, which an
+            // operator watching only the outcome would not see.
+            if (response.Left)
+                AnsiConsole.MarkupLine(response.Drained
+                    ? "[green]Replicas were evacuated onto surviving nodes before the removal committed.[/]"
+                    : "[yellow]No replicas were evacuated: either no range was placed on this node, or its ranges are now short a replica until placement repairs them.[/]");
+
             if (!response.Left && response.Retryable)
                 AnsiConsole.MarkupLine("[yellow]The node is still in the roster; re-check membership before stopping it.[/]");
 

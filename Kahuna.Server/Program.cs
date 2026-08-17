@@ -473,8 +473,11 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         SuggestionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuggestionTimeout),
         ReplicationFactor = opts.RaftReplicationFactor,
         EnablePlacementRebalancer = opts.RaftEnablePlacementRebalancer,
+        PlacementPassInterval = TimeSpan.FromMilliseconds(opts.RaftPlacementPassInterval),
         MaxReplicaMovesPerPass = opts.RaftMaxReplicaMovesPerPass,
         MaxConcurrentReplicaTransfers = opts.RaftMaxConcurrentReplicaTransfers,
+        MaxConcurrentReplicaRepairs = opts.RaftMaxConcurrentReplicaRepairs,
+        DecommissionDrainTimeout = TimeSpan.FromMilliseconds(opts.RaftDecommissionDrainTimeout),
         ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
         Zone = opts.RaftZone,
         EnableLoadReports = opts.RaftEnableLoadReports

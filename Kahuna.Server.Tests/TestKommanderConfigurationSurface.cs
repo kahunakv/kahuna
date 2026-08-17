@@ -94,8 +94,11 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.WalSingleFsyncCommit)] = nameof(KahunaCommandLineOptions.RaftWalSingleFsyncCommit),
         [nameof(RaftConfiguration.ReplicationFactor)] = nameof(KahunaCommandLineOptions.RaftReplicationFactor),
         [nameof(RaftConfiguration.EnablePlacementRebalancer)] = nameof(KahunaCommandLineOptions.RaftEnablePlacementRebalancer),
+        [nameof(RaftConfiguration.PlacementPassInterval)] = nameof(KahunaCommandLineOptions.RaftPlacementPassInterval),
         [nameof(RaftConfiguration.MaxReplicaMovesPerPass)] = nameof(KahunaCommandLineOptions.RaftMaxReplicaMovesPerPass),
         [nameof(RaftConfiguration.MaxConcurrentReplicaTransfers)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentReplicaTransfers),
+        [nameof(RaftConfiguration.MaxConcurrentReplicaRepairs)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentReplicaRepairs),
+        [nameof(RaftConfiguration.DecommissionDrainTimeout)] = nameof(KahunaCommandLineOptions.RaftDecommissionDrainTimeout),
         [nameof(RaftConfiguration.ReplicaCountDeadband)] = nameof(KahunaCommandLineOptions.RaftReplicaCountDeadband),
         [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone),
         [nameof(RaftConfiguration.EnableLoadReports)] = nameof(KahunaCommandLineOptions.RaftEnableLoadReports)

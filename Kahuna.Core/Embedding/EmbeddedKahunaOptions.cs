@@ -589,17 +589,46 @@ public sealed class EmbeddedKahunaOptions
     public bool EnablePlacementRebalancer { get; set; }
 
     /// <summary>
-    /// Maximum number of new replica moves (add or remove sequences) initiated per
-    /// placement-controller pass. Bounds the blast radius of a bad plan.
+    /// How often the P0 leader runs a placement-controller pass: drive in-flight replica
+    /// transitions to completion, then plan rebalancing moves. Independent of
+    /// <see cref="LeaderBalancerInterval"/> — placement runs with the leader balancer off. A
+    /// relocation costs roughly three passes (add learner, observe it caught up, promote) plus a
+    /// trim pass, so this interval bounds how fast placement converges. Non-positive disables the
+    /// timer; passes kicked by a replication-factor change or a roster removal still run.
     /// </summary>
-    public int MaxReplicaMovesPerPass { get; set; } = 2;
+    public TimeSpan PlacementPassInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Maximum number of new replica moves (add or remove sequences) initiated per
+    /// placement-controller pass, across all priorities. Bounds the blast radius of a bad plan.
+    /// Keep it at least <see cref="MaxConcurrentReplicaRepairs"/> +
+    /// <see cref="MaxConcurrentReplicaTransfers"/>, otherwise it binds before the per-class
+    /// budgets and silently starves repairs.
+    /// </summary>
+    public int MaxReplicaMovesPerPass { get; set; } = 4;
 
     /// <summary>
     /// Maximum number of ranges with an in-flight transitional replica (learner catching up or
-    /// removal awaiting final drop) at any time. Caps concurrent backfill/snapshot transfers so
-    /// rebalancing never starves client traffic.
+    /// removal awaiting final drop) initiated by <b>balance</b> moves at any time. Caps concurrent
+    /// backfill/snapshot transfers so rebalancing never starves client traffic. Durability repair
+    /// has its own budget, <see cref="MaxConcurrentReplicaRepairs"/>.
     /// </summary>
     public int MaxConcurrentReplicaTransfers { get; set; } = 1;
+
+    /// <summary>
+    /// Maximum number of in-flight <b>repair</b> moves (re-replicating under-replicated ranges and
+    /// shedding replicas stranded on evicted nodes) at any time. Split from
+    /// <see cref="MaxConcurrentReplicaTransfers"/> so restoring durability after a node loss is not
+    /// serialized behind the cosmetic-balance budget.
+    /// </summary>
+    public int MaxConcurrentReplicaRepairs { get; set; } = 3;
+
+    /// <summary>
+    /// How long a graceful leave waits for this node's replicas to be evacuated onto survivors
+    /// before giving up. On expiry the node is restored to a voter and the leave reports that the
+    /// drain timed out; replicas already moved stay moved, so retrying resumes it.
+    /// </summary>
+    public TimeSpan DecommissionDrainTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// Minimum per-node replica-count imbalance above the even-spread ceiling before the

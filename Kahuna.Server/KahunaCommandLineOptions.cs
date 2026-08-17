@@ -385,11 +385,20 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-enable-placement-rebalancer", Required = false, HelpText = "Master switch for the continual replica-placement rebalancer on the P0 leader. When false (default) no rebalancing moves are planned; in-flight replica transitions are still driven to completion. Initial placement at raft-replication-factor is applied regardless.", Default = false)]
     public bool RaftEnablePlacementRebalancer { get; set; }
 
-    [Option("raft-max-replica-moves-per-pass", Required = false, HelpText = "Maximum number of new replica moves (add or remove sequences) initiated per placement-controller pass. Bounds the blast radius of a bad plan.", Default = 2)]
-    public int RaftMaxReplicaMovesPerPass { get; set; } = 2;
+    [Option("raft-placement-pass-interval", Required = false, HelpText = "How often the P0 leader runs a placement-controller pass (drive in-flight replica transitions, plan rebalancing moves) in milliseconds. Independent of raft-leader-balancer-interval: placement runs with the leader balancer disabled. A relocation costs roughly three passes plus a trim pass, so this bounds convergence speed. 0 disables the timer; commit-driven passes still run.", Default = 5000)]
+    public int RaftPlacementPassInterval { get; set; } = 5000;
 
-    [Option("raft-max-concurrent-replica-transfers", Required = false, HelpText = "Maximum number of ranges with an in-flight transitional replica (learner catching up or removal awaiting final drop) at any time. Caps concurrent backfill/snapshot transfers so rebalancing never starves client traffic.", Default = 1)]
+    [Option("raft-max-replica-moves-per-pass", Required = false, HelpText = "Maximum number of new replica moves (add or remove sequences) initiated per placement-controller pass, across all priorities. Bounds the blast radius of a bad plan. Keep at least raft-max-concurrent-replica-repairs plus raft-max-concurrent-replica-transfers, otherwise it binds first and starves repairs.", Default = 4)]
+    public int RaftMaxReplicaMovesPerPass { get; set; } = 4;
+
+    [Option("raft-max-concurrent-replica-transfers", Required = false, HelpText = "Maximum number of ranges with an in-flight transitional replica initiated by balance moves (cosmetic skew spreading) at any time. Caps concurrent backfill/snapshot transfers so rebalancing never starves client traffic. Durability repair is budgeted separately by raft-max-concurrent-replica-repairs.", Default = 1)]
     public int RaftMaxConcurrentReplicaTransfers { get; set; } = 1;
+
+    [Option("raft-max-concurrent-replica-repairs", Required = false, HelpText = "Maximum number of in-flight repair moves (re-replicating under-replicated ranges and shedding replicas stranded on evicted nodes) at any time. Split from raft-max-concurrent-replica-transfers so restoring durability after a node loss is not serialized behind the cosmetic-balance budget.", Default = 3)]
+    public int RaftMaxConcurrentReplicaRepairs { get; set; } = 3;
+
+    [Option("raft-decommission-drain-timeout", Required = false, HelpText = "How long a graceful leave waits for this node's replicas to be evacuated onto survivors before giving up, in milliseconds. On expiry the node is restored to a voter and the leave reports DrainTimedOut; replicas already moved stay moved, so retrying resumes the drain. Size it from the data: an evacuation costs roughly three placement passes per range.", Default = 120000)]
+    public int RaftDecommissionDrainTimeout { get; set; } = 120000;
 
     [Option("raft-replica-count-deadband", Required = false, HelpText = "Minimum per-node replica-count imbalance above the even-spread ceiling before the placement planner emits balancing moves. Under-replicated ranges bypass the deadband.", Default = 1)]
     public int RaftReplicaCountDeadband { get; set; } = 1;

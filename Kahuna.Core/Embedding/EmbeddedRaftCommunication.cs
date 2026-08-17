@@ -36,6 +36,13 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
 
     private static readonly Task<GossipPingReqResponse> GossipPingReqResponseReached = Task.FromResult(new GossipPingReqResponse(true));
 
+    // An embedded node's only peers are the two synthetic witnesses, which run no coordinator, so
+    // no remote node can ever commit a roster role transition on its behalf. Refusing as
+    // "member not found" rather than reporting success keeps a decommission drain from believing
+    // it started: an embedded node has no survivor to evacuate its replicas onto anyway.
+    private static readonly Task<SetMemberRoleResponse> SetMemberRoleRefused =
+        Task.FromResult(new SetMemberRoleResponse(false, null, RaftOperationStatus.MemberNotFound));
+
     public Task<HandshakeResponse> Handshake(RaftManager manager, RaftNode node, HandshakeRequest request)
     {
         return HandshakeResponse;
@@ -71,6 +78,11 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
     public Task<LeaveResponse> SendLeave(RaftManager manager, RaftNode node, LeaveRequest request, CancellationToken cancellationToken = default)
     {
         return LeaveResponse;
+    }
+
+    public Task<SetMemberRoleResponse> SendSetMemberRole(RaftManager manager, RaftNode node, SetMemberRoleRequest request, CancellationToken cancellationToken = default)
+    {
+        return SetMemberRoleRefused;
     }
 
     public Task<GossipPingResponse> SendPing(RaftManager manager, RaftNode node, GossipPingRequest request, CancellationToken cancellationToken = default)

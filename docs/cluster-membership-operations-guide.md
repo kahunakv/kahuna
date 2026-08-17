@@ -157,11 +157,43 @@ routing to it. Stopping the process is your next step, and only when the answer 
 | `Committed` | 200 | It is out of the roster. Stop the process. |
 | `NotAMember` | 200 | It was already out (you retried, or it had been evicted). Nothing to do. |
 | `RefusedInsufficientVoters` | 409 | Removing it would leave zero Voters. **Never retry** — see the safety floor below. |
+| `RefusedDrainInProgress` | 503 | Another node is already draining, and only one decommission runs at a time. Nothing changed; retry once that one finishes. |
 | `NotInitialized` / `NoLeader` | 503 | It could not attempt the removal. Retry later. |
 | `Timeout` | 504 | Genuinely unresolved: the removal may still commit. **Re-read the roster** (§7) before deciding — do not assume either result. |
+| `DrainTimedOut` | 504 | Its replicas were not fully evacuated in time, so it stays in the roster and keeps serving. Replicas already moved stay moved — retry to resume, or raise the drain timeout. |
 
 The response carries a `retryable` flag saying the same thing, so a script can branch on one field.
-The CLI exits non-zero whenever the node is still in the roster.
+409 is the only status that is never worth retrying. The CLI exits non-zero whenever the node is
+still in the roster.
+
+### Draining a placed node before it leaves
+
+On a cluster running a [replication factor](replication-factor-guide.md), a departing node normally
+holds replicas that no survivor has a copy of. Removing it from the roster while the committed map
+still names it would leave those ranges a replica short, silently — the map would look healthy while
+the data was gone.
+
+So a leave on such a node **drains first**: it takes a transitional roster role, the placement
+controller evacuates its ranges onto survivors, and only then does the removal commit. The response's
+**`drained`** field reports whether that happened:
+
+- `drained: true` — every replica it held was copied to a survivor before it left. Redundancy was
+  preserved end to end.
+- `drained: false` on a `Committed` leave — nothing needed evacuating. That is the normal answer under
+  full replication (every survivor already holds the data) and for a node holding no replicas.
+
+Decide *whether to stop the process* from `left`; read `drained` to know whether per-partition
+durability was preserved by evacuation rather than left to post-hoc repair.
+
+A drain takes as long as the evacuation does — minutes for real data sets, since each range costs
+roughly three placement passes. `--raft-decommission-drain-timeout` (default 2 minutes) bounds the
+wait; on expiry the node is restored to a Voter and you get `DrainTimedOut`. Retrying resumes the
+drain, since replicas already evacuated stay evacuated.
+
+> **Decision — one drain at a time.** Two concurrent drains would take two Voters out of the
+> denominator before either evacuation finished. A second leave is refused with
+> `RefusedDrainInProgress` while one is in flight, so a scale-down script must remove nodes in
+> sequence, not in parallel.
 
 > **Decision — leaving and stopping are separate steps.** Coupling them (leave, then immediately exit)
 > would put you back where the failure-detector path already is: you would never learn whether the

@@ -2407,6 +2407,7 @@ public class GrpcCommunication : IKahunaCommunication
         return new KahunaClusterLeaveResponse
         {
             Left = response.Left,
+            Drained = response.Drained,
             Outcome = GrpcLeaveOutcomeToString(response.Outcome),
             MembershipVersion = response.MembershipVersion,
             Retryable = response.Retryable,
@@ -2425,6 +2426,8 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedInsufficientVoters => "RefusedInsufficientVoters",
         GrpcLeaveClusterOutcome.LeaveClusterOutcomeNotInitialized            => "NotInitialized",
         GrpcLeaveClusterOutcome.LeaveClusterOutcomeNoLeader                  => "NoLeader",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedDrainInProgress    => "RefusedDrainInProgress",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeDrainTimedOut             => "DrainTimedOut",
         _                                                                    => "Timeout"
     };
 

@@ -22,8 +22,10 @@ public sealed class TestPlacementConfiguration
         {
             ReplicationFactor = 3,
             EnablePlacementRebalancer = true,
-            MaxReplicaMovesPerPass = 4,
+            PlacementPassInterval = TimeSpan.FromSeconds(2),
+            MaxReplicaMovesPerPass = 6,
             MaxConcurrentReplicaTransfers = 2,
+            MaxConcurrentReplicaRepairs = 4,
             ReplicaCountDeadband = 3,
             Zone = "zone-a"
         };
@@ -32,10 +34,41 @@ public sealed class TestPlacementConfiguration
 
         Assert.Equal(3, configuration.ReplicationFactor);
         Assert.True(configuration.EnablePlacementRebalancer);
-        Assert.Equal(4, configuration.MaxReplicaMovesPerPass);
+        Assert.Equal(TimeSpan.FromSeconds(2), configuration.PlacementPassInterval);
+        Assert.Equal(6, configuration.MaxReplicaMovesPerPass);
         Assert.Equal(2, configuration.MaxConcurrentReplicaTransfers);
+        Assert.Equal(4, configuration.MaxConcurrentReplicaRepairs);
         Assert.Equal(3, configuration.ReplicaCountDeadband);
         Assert.Equal("zone-a", configuration.Zone);
+    }
+
+    /// <summary>
+    /// Placement passes are scheduled independently of the leader balancer: a node configured only
+    /// for placement must still run them, which is what makes a committed replication-factor target
+    /// converge. The predicate is Kommander's, but the wiring that reaches it is Kahuna's.
+    /// </summary>
+    [Fact]
+    public void EmbeddedRaftConfiguration_SchedulesPlacementPassesWithoutTheLeaderBalancer()
+    {
+        RaftConfiguration placed = EmbeddedKahunaNode.CreateRaftConfiguration(new()
+        {
+            ReplicationFactor = 3
+        });
+
+        Assert.False(placed.EnableLeaderBalancer);
+        Assert.True(placed.PlacementPassEnabled);
+        Assert.True(placed.PlacementPassInterval > TimeSpan.Zero);
+
+        // A per-range override on a cluster whose global factor is 0 also needs passes.
+        RaftConfiguration rebalancerOnly = EmbeddedKahunaNode.CreateRaftConfiguration(new()
+        {
+            EnablePlacementRebalancer = true
+        });
+
+        Assert.True(rebalancerOnly.PlacementPassEnabled);
+
+        // Neither: nothing can create placement work, so no timer is warranted.
+        Assert.False(EmbeddedKahunaNode.CreateRaftConfiguration(new()).PlacementPassEnabled);
     }
 
     [Fact]

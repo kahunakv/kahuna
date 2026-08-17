@@ -67,6 +67,7 @@ public sealed class ClusterService : Cluster.ClusterBase
         return new()
         {
             Left = result.Left,
+            Drained = result.Drained,
             Outcome = ToGrpcOutcome(result.Outcome),
             MembershipVersion = result.MembershipVersion,
             Retryable = ClusterLeave.IsRetryable(result.Outcome),
@@ -268,6 +269,8 @@ public sealed class ClusterService : Cluster.ClusterBase
         LeaveClusterOutcome.RefusedInsufficientVoters => GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedInsufficientVoters,
         LeaveClusterOutcome.NotInitialized            => GrpcLeaveClusterOutcome.LeaveClusterOutcomeNotInitialized,
         LeaveClusterOutcome.NoLeader                  => GrpcLeaveClusterOutcome.LeaveClusterOutcomeNoLeader,
+        LeaveClusterOutcome.RefusedDrainInProgress    => GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedDrainInProgress,
+        LeaveClusterOutcome.DrainTimedOut             => GrpcLeaveClusterOutcome.LeaveClusterOutcomeDrainTimedOut,
         // Anything unrecognised is treated as unresolved rather than as a success: the caller must
         // re-read the roster instead of concluding the node left.
         _                                             => GrpcLeaveClusterOutcome.LeaveClusterOutcomeTimeout

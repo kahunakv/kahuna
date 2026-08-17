@@ -64,7 +64,14 @@ kahuna-server \
 ```
 
 Embedded hosts use the equivalent `EmbeddedKahunaOptions` properties (`ReplicationFactor`,
-`EnablePlacementRebalancer`, `Zone`, `MaxConcurrentReplicaTransfers`).
+`EnablePlacementRebalancer`, `Zone`, `PlacementPassInterval`, `MaxConcurrentReplicaTransfers`,
+`MaxConcurrentReplicaRepairs`).
+
+**The leader balancer is not required.** Placement runs its own controller pass on its own
+`--raft-placement-pass-interval` (default 5 s), so a cluster with `--raft-enable-leader-balancer`
+off — the default — still repairs, trims and rebalances replicas. Earlier builds scheduled the pass
+from the leader balancer's timer, which meant a placement-only cluster never ran one: replica sets
+sat unchanged through node departures and replication-factor overrides alike.
 
 - **Initial placement is applied at bootstrap regardless of the rebalancer switch**: each data
   partition gets a replica set of RF nodes, spread evenly by replica count (and by zone when zones
@@ -121,6 +128,19 @@ successive configurations always overlap by a quorum.
 
 ## 5. Steering placement
 
+### Removing a node: it drains first
+
+`POST /v1/cluster/leave` on a placed node does **not** simply drop it from the roster. Its replicas
+are evacuated onto survivors first, and only then does the removal commit — otherwise every range it
+held would silently be a replica short the moment you stopped the process. The response's `drained`
+field reports whether evacuation actually happened; `--raft-decommission-drain-timeout` (default
+2 minutes) bounds the wait, and only one node may drain at a time. The full outcome table is in the
+[cluster membership guide](cluster-membership-operations-guide.md#5-removing-a-node).
+
+A node lost *without* a leave (crash, or eviction by the failure detector) gets the same replicas
+restored, but after the fact: the planner sees the under-replicated ranges and repairs them at
+priority 1, paced by `--raft-max-concurrent-replica-repairs`.
+
 ### Per-range replication-factor override
 
 ```bash
@@ -136,6 +156,10 @@ REST: `POST /v1/cluster/replication-factor` with `{"partitionId": 3, "replicatio
 - The change adjusts the **target only**. The rebalancer moves replicas toward it on later passes
   (so with the rebalancer off, the target changes and nothing else happens). Routing is unchanged
   until replicas actually move.
+- With the rebalancer on, a pass is kicked as soon as the change commits: watch the range's replica
+  set and generation in `GET /v1/cluster/placement` to see it converge, and the losing nodes log
+  `Stopped hosting`. If the target changes and the replica set never does, that is a bug, not
+  pacing — the pacing bound is in §5.
 
 ### Ranges created by a split
 
@@ -151,9 +175,18 @@ is covered in the
 
 | Flag | Default | What it bounds |
 |---|---|---|
-| `--raft-max-replica-moves-per-pass` | 2 | New moves initiated per controller pass — the blast radius of a bad plan. |
-| `--raft-max-concurrent-replica-transfers` | 1 | Ranges with an in-flight Learner/Removing replica at any time — caps concurrent backfill so rebalancing never starves client traffic. |
+| `--raft-placement-pass-interval` | 5000 ms | How often the controller pass runs. Independent of the leader balancer's interval. Every relocation costs several passes, so this sets the floor on convergence speed. |
+| `--raft-max-replica-moves-per-pass` | 4 | New moves initiated per controller pass, across all priorities — the blast radius of a bad plan. Keep it at or above repairs + transfers, or it binds first and starves repairs. |
+| `--raft-max-concurrent-replica-repairs` | 3 | In-flight **repair** moves: re-replicating under-replicated ranges and shedding replicas stranded on departed nodes. Separate from the balance budget so restoring durability is never serialized behind cosmetic rebalancing. |
+| `--raft-max-concurrent-replica-transfers` | 1 | Ranges with an in-flight Learner/Removing replica initiated by **balance** moves — caps concurrent backfill so skew-smoothing never starves client traffic. |
 | `--raft-replica-count-deadband` | 1 | Per-node imbalance tolerated above the even spread before balancing moves are planned. Under-replicated ranges bypass the deadband. |
+
+An in-flight transitional replica counts against **both** budgets, so total concurrent transfers
+stay bounded by the larger of the two and balance moves pause while a repair wave runs.
+
+A controller pass also runs immediately after the two events that create placement work — a
+committed replication-factor change and a committed roster removal — so neither waits out a full
+interval before converging.
 
 ---
 
@@ -182,11 +215,14 @@ Client-visible effect: operations on a range whose leadership or hosting changes
 the retryable `MustRetry`; clients that follow the documented retry contract see latency, not
 errors.
 
-**How long does convergence take?** Moves run at most `--raft-max-concurrent-replica-transfers` at
-a time, and each move costs roughly *seed time* (data-volume dependent; the dominant term) plus
-the promotion stable window plus two map commits. N pending moves therefore take about
-`N / max-concurrent-transfers × (seed + stable-window)`. Raise the transfer cap to converge faster
-at the cost of more concurrent backfill traffic.
+**How long does convergence take?** Repairs run at most `--raft-max-concurrent-replica-repairs` at
+a time and balance moves at most `--raft-max-concurrent-replica-transfers`, and each move costs
+roughly *seed time* (data-volume dependent; the dominant term) plus the promotion stable window
+plus two map commits — and, because each stage is decided on a separate pass, at least three
+`--raft-placement-pass-interval` ticks. N pending moves therefore take about
+`N / concurrency × (seed + stable-window + 3 × pass-interval)`. Raise the matching cap to converge
+faster at the cost of more concurrent backfill traffic; shorten the pass interval when the tick
+term dominates, which it does whenever ranges are small.
 
 ---
 
@@ -255,3 +291,4 @@ migration — is future work in the consensus layer.
 - No composed cluster-wide backup from per-node artifacts (§8); restores require full coverage.
 - Per-range RF override changes the target only; convergence needs the rebalancer on (§5).
 - A node hosting zero partitions is normal and ready (§3) — do not alarm on it.
+- Only one node can drain at a time; scale down in sequence, not in parallel (§5).

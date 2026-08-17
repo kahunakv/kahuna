@@ -27,6 +27,10 @@ message GrpcClusterLeaveResponse {
   // refusal and for outcomes that already succeeded.
   bool Retryable = 4;
   string Reason = 5;
+  // Whether the committed partition map stopped naming this node before its removal, i.e. its
+  // replicas were evacuated onto survivors first. False when it left without a drain (no range
+  // named it) or did not leave at all.
+  bool Drained = 6;
 }
 
 enum GrpcLeaveClusterOutcome {
@@ -38,6 +42,12 @@ enum GrpcLeaveClusterOutcome {
   LEAVE_CLUSTER_OUTCOME_NO_LEADER = 4;
   // Not confirmed before the deadline; the removal may still commit, so re-read the roster.
   LEAVE_CLUSTER_OUTCOME_TIMEOUT = 5;
+  // Another node is already draining; only one decommission runs at a time. Nothing committed,
+  // and the condition clears on its own — retry once that drain finishes.
+  LEAVE_CLUSTER_OUTCOME_REFUSED_DRAIN_IN_PROGRESS = 6;
+  // Evacuation did not finish before the drain deadline; the node stays in the roster and keeps
+  // serving. Replicas already moved stay moved, so retrying resumes the drain.
+  LEAVE_CLUSTER_OUTCOME_DRAIN_TIMED_OUT = 7;
 }
 
 message GrpcClusterMember {

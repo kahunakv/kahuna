@@ -10,7 +10,7 @@ namespace Kahuna.Shared.Communication.Rest;
 /// HTTP status carries the same information for callers that only look at the code: 200 when the
 /// node is out of the roster (committed, or already absent), 409 when the removal was permanently
 /// refused, 503 when the node could not attempt it, and 504 when the attempt did not resolve in
-/// time. Only 504 is worth retrying — see <see cref="Retryable"/>.
+/// time. Only 409 is never worth retrying — see <see cref="Retryable"/>.
 /// </para>
 /// </summary>
 public sealed class KahunaClusterLeaveResponse
@@ -20,8 +20,22 @@ public sealed class KahunaClusterLeaveResponse
     public bool Left { get; set; }
 
     /// <summary>
+    /// True when the committed partition map stopped naming this node before its removal — every
+    /// replica it hosted was evacuated onto a survivor first. False when it left without a drain
+    /// (no range named it, which is every full-replication cluster) or when it did not leave at all.
+    /// <para>
+    /// Decide whether it is safe to stop the process from <see cref="Left"/>; this additionally
+    /// says whether per-partition durability was preserved by evacuation rather than left to
+    /// post-hoc repair.
+    /// </para>
+    /// </summary>
+    [JsonPropertyName("drained")]
+    public bool Drained { get; set; }
+
+    /// <summary>
     /// What happened, as the outcome name reported by consensus: <c>Committed</c>, <c>NotAMember</c>,
-    /// <c>RefusedInsufficientVoters</c>, <c>NotInitialized</c>, <c>NoLeader</c> or <c>Timeout</c>.
+    /// <c>RefusedInsufficientVoters</c>, <c>RefusedDrainInProgress</c>, <c>DrainTimedOut</c>,
+    /// <c>NotInitialized</c>, <c>NoLeader</c> or <c>Timeout</c>.
     /// </summary>
     [JsonPropertyName("outcome")]
     public string Outcome { get; set; } = "";
