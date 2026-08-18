@@ -185,6 +185,38 @@ public sealed class TestPredicateLockLifecycle : RaftTrackingTest
         Assert.DoesNotContain(context.LocksByRange["exp"], l => l.TransactionId == abandonedTx);
     }
 
+    /// <summary>
+    /// An extend rewrites the entry's expiry, so a foreign range lock has to block it exactly as it
+    /// blocks a set or a delete. It did not: the extend path checked only the per-key write intent,
+    /// which a range-lock acquire stamps on the keys that happen to be resident — so an extend on a
+    /// key that lived only on disk slipped straight through the lock, including the lock a range
+    /// split holds while it moves the range's contents to another partition.
+    /// </summary>
+    [Fact]
+    public async Task ExtendOfKeyUnderForeignRangeLock_IsRefused()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp holderTx = now + 3_600_000;
+        InsertEntry(context, "ext/key", now);
+
+        context.LocksByRange["ext"] = [RangeLock(holderTx, now + 60_000, "ext/a", "ext/z")];
+
+        TryExtendHandler extend = new(context);
+
+        KeyValueResponse foreign = await extend.Execute(BuildRequest(
+            KeyValueRequestType.TryExtend, HLCTimestamp.Zero, key: "ext/key", expiresMs: 10_000));
+
+        Assert.Equal(KeyValueResponseType.MustRetry, foreign.Type);
+
+        // The lock's own holder is not blocked by it.
+        KeyValueResponse owner = await extend.Execute(BuildRequest(
+            KeyValueRequestType.TryExtend, holderTx, key: "ext/key", expiresMs: 10_000));
+
+        Assert.Equal(KeyValueResponseType.Extended, owner.Type);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static KeyValueEntry InsertEntry(KeyValueContext context, string key, HLCTimestamp now)

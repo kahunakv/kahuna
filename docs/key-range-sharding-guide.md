@@ -240,7 +240,7 @@ split will misroute:
 
 1. **`KeyValueLocator`** — routes a request to the right **leader node** (where do I send this
    operation?).
-2. **The leader-side direct-write resolver** (`BaseHandler.TryResolveDirectWritePartition`) — once on the
+2. **The leader-side direct-write resolver** (`BaseHandler.ResolveDirectWritePartition`) — once on the
    leader, re-derives and fences the partition to **replicate into** (which Raft log do I append to?).
 
 If only one of these consulted the descriptor map and the other still hashed, a write could be
@@ -332,11 +332,31 @@ Step by step:
    checksum verified on import. Import buffers the whole stream and applies only after a clean
    checksum, so a crash mid-read is a no-op.
 
-4. **Quiesce** the range during the catch-up→cutover window so no write is lost. Two layers:
-   - The **exclusive range lock** blocks concurrent **2PC** commits on `[K, E)`.
-   - `RangeQuiesceStore` blocks **direct (non-2PC)** writes: the splitter marks
-     `[K, E)` quiesced right after taking the range lock; the locator checks `IsQuiesced`
-     pre-route and bounces direct writes to a quiescing range with `MustRetry`.
+4. **Quiesce** the range during the catch-up→cutover window so no write is lost. Two layers,
+   complementary rather than redundant:
+   - The **exclusive range lock** on `[K, E)`. It is installed by a message on the source
+     partition leader's key-value actor, which is the same single-threaded mailbox every write for
+     that key space passes through — so it is exactly ordered against writes already in flight: one
+     admitted before the lock is already proposed, one admitted after is refused. It blocks 2PC
+     commits and direct sets, deletes and extends alike.
+   - The **descriptor quiesce**: `RangeDescriptor.QuiescedUntil` / `QuiesceOwner` /
+     `QuiesceStartKey` / `QuiesceEndKey`, published by `RangeMapStore.QuiesceRangeAsync` right
+     after the lock is taken. Because it rides the replicated map it is enforced on **every** node,
+     and — unlike the lock, which is in-memory and leader-local — it survives a leadership change
+     on the source partition: a newly promoted leader holds no lock but still refuses writes into
+     a range whose contents are being copied elsewhere.
+
+   It is checked in two places. `KeyValueLocator` bounces a set pre-route, which keeps a doomed
+   write off the wire; `RangeRouting.ResolveForDirectWrite` refuses it on the partition leader at
+   admission, which is the binding one — every direct persistent write passes through it just
+   before proposing, whichever node the client happened to talk to. `DirectWriteRouting` reports
+   *which* guard refused (`Quiesced` vs `GenerationFenced`), because the two cover opposite sides
+   of the cutover and conflating them hides which fired.
+
+   The quiesce carries a **deadline**, not a flag: a split executor that dies mid-window leaves a
+   range that reopens on its own rather than one that refuses writes forever. The release is scoped
+   to the split's own transaction id, so a straggling release cannot reopen a *later* split's
+   window, and a successful cutover clears the quiesce atomically by replacing the descriptor.
 
 5. **Atomic cutover.** One `MutateAsync` meta-transaction on P0: bump generations,
    write the two new descriptors (`[S,K)@P` and `[K,E)@P'`), remove the old one. Because
@@ -614,11 +634,12 @@ Putting it all together, here's a write to a key-range space, start to finish:
 3. Locator routes the request to partition 6's LEADER NODE,
    stamping it with routedGeneration = 42.
 
-4. On the leader, the direct-write path (BaseHandler.TryResolveDirectWritePartition)
-   re-derives the partition (same RangeRouting.Locate → partition 6) and, just before
-   replicating, calls TryFenceKeyRange:
-     - current descriptor for "users/0300" is still gen 42 on P6?  → OK, proceed.
-     - (if a split had bumped it to 43 or moved it)  → reject MustRetry.
+4. On the leader, the direct-write path (BaseHandler.ResolveDirectWritePartition →
+   RangeRouting.ResolveForDirectWrite) re-derives the partition (partition 6) and checks it
+   just before replicating:
+     - is [users/0300] inside a quiesced sub-range?              → Quiesced, reject MustRetry.
+     - current descriptor for "users/0300" still gen 42 on P6?   → Ok, proceed.
+     - (if a split had bumped it to 43 or moved it)              → GenerationFenced, MustRetry.
 
 5. The write replicates through partition 6's Raft log, applies to the
    node-global store, and the client promise resolves Set.
@@ -627,7 +648,8 @@ Putting it all together, here's a write to a key-range space, start to finish:
 
 6. RangeSplitter, on the P0 leader (system + meta):
      - creates partition 8 (CreatePartitionAsync, P0 leader),
-     - quiesces [users/0500, users/0700) (range lock + RangeQuiesceStore),
+     - quiesces [users/0500, users/0700) (range lock on P6's leader + a replicated
+       QuiescedUntil deadline on the descriptor, visible on every node),
      - bulk + catch-up exports that slice to P8,
      - MutateAsync cutover on P0: P6 keeps [0250,0500) gen 43,
        P8 gets [0500,0700) gen 43, old descriptor removed,
@@ -654,11 +676,14 @@ The foundational gap and its consequences:
   still stores everything.
 
 - Because of that, several correctness windows are currently **masked rather than fixed**:
-  - The direct-write quiesce (§6 step 4) is best-effort and only catches writes entering on the
-    split-executor node — a write entering elsewhere during the window would be lost *if* the
-    store were partition-scoped. Today it isn't, so P and P' share the store and the write is
-    still readable.
-  - The merge late-write window is similarly masked.
+  - The **merge** late-write window is masked. `RangeMerger` takes no quiesce of any kind, and its
+    class summary justifies that with the shared store. That justification does not hold once a
+    replication factor places the two partitions on different nodes, which is exactly what makes
+    the loss observable — see the split-side note below.
+  - The **split** direct-write window is closed (§6 step 4), not masked. It was worth re-checking
+    on a replication-factor fixture rather than trusting the shared-store argument: with each data
+    partition on its own node, a write stranded on the source is genuinely unreachable after
+    cutover, and that is the fixture the split quiesce is tested against.
   - Orphan retention "works" only because the source's copy is the same physical row P' reads.
 
 ### The next major piece: partition-scoped storage
@@ -676,8 +701,8 @@ Once storage is partition-scoped, the follow-on work becomes *real* instead of v
   readable from another P' replica.
 - **Re-enable the source delete** — drop `[K,E)` from P after a *successful* cutover, partition-
   scoped and prefix-bounded, replacing orphan retention.
-- **Re-validate the masked windows** — the direct-write and merge quiesce windows become genuine
-  loss windows; confirm the quiesce actually closes them.
+- **Re-validate the masked windows** — the merge window becomes a genuine loss window (the split's
+  is already closed and tested against a replication-factor fixture); confirm a quiesce closes it.
 
 ### Other deferred work
 
@@ -706,7 +731,7 @@ A condensed checklist — violating any of these silently corrupts the system:
    to the correct partition — never double-applies. The descriptor `Generation` is the fence,
    and it's a Kahuna mechanism, not Kommander's.
 4. **Both routing call sites must agree.** `KeyValueLocator` and the leader-side direct-write resolver
-   (`BaseHandler.TryResolveDirectWritePartition`) both go through `RangeRouting.Locate`. The local
+   (`BaseHandler.ResolveDirectWritePartition`) both go through `RangeRouting.Locate`. The local
    worker-actor hash router is a different thing — leave it alone.
 5. **Never range-split the schema log.** `{db}/meta` (CamusDB's DDL log) must stay
    single-partition for total ordering — the registry rejects ranging it.
@@ -730,13 +755,13 @@ Everything lives under `Kahuna.Core/KeyValues/Ranges/` unless noted.
 | `RoutingMode.cs` | The `Hash` / `KeyRange` enum. |
 | `KeySpaceRegistry.cs` | Per-key-space mode lookup (prefix before last `/`). |
 | `DataPartitionRouter.cs` | Kahuna's hash assignment over user partitions `[1, N]`. |
-| `RangeRouting.cs` | The single routing funnel: `Locate`, `IsKeyRange`, `TryFenceKeyRange`. |
+| `RangeRouting.cs` | The single routing funnel: `Locate`, `IsKeyRange`, `TryFenceKeyRange`, and the leader-side `ResolveForDirectWrite` (quiesce + generation fence). |
 | `KvStateMachineTransfer.cs` | `ExportRangeAsync` / `ImportRangeAsync`; paged, checksummed snapshot transfer. |
 | `RangeSplitter.cs` | The split transaction: create → transfer → quiesce → atomic cutover. |
 | `RangeSplitPolicy.cs` | Split-key selection (median / hot-tail), thresholds, min-size guard. |
 | `RangeSplitTrigger.cs`, `RangeSplitCheckerActor.cs` | Auto-split sampling + orchestration. |
 | `RangeMerger.cs` | The merge transaction (inverse of split). |
 | `RangeMergeTrigger.cs`, `RangeMergeCheckerActor.cs` | Auto-merge candidate-finding + orchestration + `pendingRemovals` retry. |
-| `RangeQuiesceStore.cs` | Best-effort direct-write quiesce during a split window. |
+| `RangeDescriptor.cs` | The routing record, including the replicated quiesce (`QuiescedUntil`, `QuiesceOwner`, and the quiesced sub-range). |
 | `KeyValueLocator.cs` *(parent dir)* | Request routing: `LocateRange`, multi-range scans/buckets, range locks. |
-| `Handlers/BaseHandler.cs` *(parent dir)* | The leader-side direct-write resolver (`TryResolveDirectWritePartition`) — the second routing site + the write-path generation fence. |
+| `Handlers/BaseHandler.cs` *(parent dir)* | The leader-side direct-write resolver (`ResolveDirectWritePartition`) — the second routing site, the write-path generation fence, and the binding quiesce refusal. |

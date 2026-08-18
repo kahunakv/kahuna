@@ -65,22 +65,25 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Resolves the target partition for a direct write and, for a key-range space, fences it against the
-    /// routed descriptor generation. Returns false when the range moved/split since routing so the caller
-    /// rejects with MustRetry before installing any intent; hash spaces are never fenced. Shared by the
-    /// per-key dispatch (<see cref="CreateProposal"/>) and the batched staging paths so they cannot drift.
+    /// Resolves the target partition for a direct write and, for a key-range space, refuses it while the
+    /// range is quiesced for a data move and fences it against the routed descriptor generation. Any
+    /// answer other than <see cref="DirectWriteRouting.Ok"/> means the caller rejects with MustRetry
+    /// before installing any intent; hash spaces are neither quiesced nor fenced. Shared by the per-key
+    /// dispatch (<see cref="CreateProposal"/>) and the batched staging paths so they cannot drift.
     /// </summary>
-    protected bool TryResolveDirectWritePartition(KeyValueRequest message, out int partitionId, out long fenceGeneration)
+    protected DirectWriteRouting ResolveDirectWritePartition(
+        KeyValueRequest message, HLCTimestamp currentTime, out int partitionId, out long fenceGeneration)
     {
         // Capture the live descriptor generation even when the inbound write carried none (delete/extend
         // route with no routed generation): the deferred flush fence needs the real admission-time
         // generation to detect a range move during linger, not the zero that would disable it.
-        return RangeRouting.TryResolveForDirectWrite(
+        return RangeRouting.ResolveForDirectWrite(
             context.KeySpaceRegistry,
             context.RangeMapStore.Current,
             dataPartitionRouter,
             message.Key,
             message.RoutedGeneration,
+            currentTime,
             out partitionId,
             out fenceGeneration);
     }
@@ -145,11 +148,24 @@ internal abstract class BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        // Resolve and fence the partition before installing any intent: a key-range write whose routed
-        // generation no longer matches the live descriptor (range moved/split since routing) is rejected with
-        // MustRetry, leaving nothing pinned. The proposal actor no longer fences — it only replicates.
-        if (!TryResolveDirectWritePartition(message, out int partitionId, out long fenceGeneration))
+        // Resolve and fence the partition before installing any intent: a key-range write into a range
+        // that is quiesced for a data move, or whose routed generation no longer matches the live
+        // descriptor (range moved/split since routing), is rejected with MustRetry, leaving nothing
+        // pinned. The proposal actor no longer fences — it only replicates.
+        DirectWriteRouting routing = ResolveDirectWritePartition(message, currentTime, out int partitionId, out long fenceGeneration);
+
+        if (routing != DirectWriteRouting.Ok)
+        {
+            // Say which guard refused: the quiesce covers the window before a cutover, the
+            // generation fence the routing that went stale after one. Same MustRetry to the client,
+            // very different thing to chase when one of them fires unexpectedly.
+            if (context.Logger.IsEnabled(LogLevel.Debug))
+                context.Logger.LogDebug(
+                    "Refusing direct write to {Key} on partition {Partition}: {Reason}",
+                    message.Key, partitionId, routing);
+
             return new(KeyValueResponseType.MustRetry, 0);
+        }
 
         int currentProposalId = RentProposalId();
 

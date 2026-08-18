@@ -1,4 +1,27 @@
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues.Ranges;
+
+/// <summary>
+/// Why a leader-side direct write was not admitted onto its range. Reported instead of a bare
+/// failure so the two independent guards stay attributable: the generation fence catches routing
+/// that went stale <i>after</i> a split cut over, the quiesce covers the window <i>before</i> it.
+/// Every non-<see cref="Ok"/> value is retryable — the caller answers MustRetry.
+/// </summary>
+internal enum DirectWriteRouting
+{
+    /// <summary>Admitted: the key routes here and the range is open for writes.</summary>
+    Ok,
+
+    /// <summary>No descriptor covers the key any more — the range moved out from under the write.</summary>
+    NoDescriptor,
+
+    /// <summary>The range split or moved since the write was routed (routed generation ≠ live).</summary>
+    GenerationFenced,
+
+    /// <summary>The range's data is being moved to another partition and it is refusing writes.</summary>
+    Quiesced
+}
 
 /// <summary>
 /// The single source of truth for resolving a key to <c>(partitionId, generation)</c>.
@@ -6,7 +29,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <list type="number">
 /// <item><see cref="KeyValueLocator"/> — routes a request to the right <b>leader node</b> (via every
 /// <c>GetPartitionKey</c> / <c>GetPrefixPartitionKey</c> call).</item>
-/// <item>The leader-side direct-write path (<c>BaseHandler.TryResolveDirectWritePartition</c>) — re-derives
+/// <item>The leader-side direct-write path (<c>BaseHandler.ResolveDirectWritePartition</c>) — re-derives
 /// and fences the partition to <b>replicate into</b> once on the leader, just before proposing.</item>
 /// </list>
 /// If those two disagree for a ranged key, a split replicates into the stale partition. Both funnel through
@@ -40,17 +63,19 @@ internal static class RangeRouting
         DataPartitionRouter dataPartitionRouter,
         string key)
     {
-        (int partitionId, long generation, _) = LocateWithMode(registry, rangeMap, dataPartitionRouter, key);
+        (int partitionId, long generation, _, _) = LocateWithMode(registry, rangeMap, dataPartitionRouter, key);
         return (partitionId, generation);
     }
 
     /// <summary>
     /// As <see cref="Locate"/>, additionally reporting whether the key belongs to a key-range
-    /// space. Classifies the key exactly once (a single scan for the key-space boundary and one
-    /// span-keyed registry probe), so callers that branch on the routing mode don't pay a second
-    /// classification through <see cref="IsKeyRange"/>. Nothing is allocated on either branch.
+    /// space and, for one, the descriptor it resolved through — so a router can consult the range's
+    /// quiesce state without paying for a second map lookup. Classifies the key exactly once (a
+    /// single scan for the key-space boundary and one span-keyed registry probe), so callers that
+    /// branch on the routing mode don't pay a second classification through
+    /// <see cref="IsKeyRange"/>. Nothing is allocated on either branch.
     /// </summary>
-    public static (int PartitionId, long Generation, bool IsKeyRange) LocateWithMode(
+    public static (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) LocateWithMode(
         KeySpaceRegistry registry,
         RangeMap rangeMap,
         DataPartitionRouter dataPartitionRouter,
@@ -67,29 +92,38 @@ internal static class RangeRouting
                 throw new KahunaServerException(
                     $"No range descriptor covers key '{key}' in key-range space '{keySpace.ToString()}'.");
 
-            return (descriptor.PartitionId, descriptor.Generation, true);
+            return (descriptor.PartitionId, descriptor.Generation, true, descriptor);
         }
 
         // Hash-routed: Kahuna's own assignment over the data partitions (2..N); no generation fence.
-        return (dataPartitionRouter.Locate(key), 0L, false);
+        return (dataPartitionRouter.Locate(key), 0L, false, null);
     }
 
     /// <summary>
     /// Single-pass classification + resolution + fence for a leader-side direct write; the shape of
-    /// <c>BaseHandler.TryResolveDirectWritePartition</c> lives here so it funnels through the same
+    /// <c>BaseHandler.ResolveDirectWritePartition</c> lives here so it funnels through the same
     /// module as <see cref="Locate"/> and cannot drift from it. A key-range key resolves its live
-    /// descriptor and fences it against <paramref name="routedGeneration"/> (zero = the request
-    /// carried none — route without fencing, but still report the live generation so a deferred
-    /// flush can re-fence). A hash key resolves through <paramref name="dataPartitionRouter"/> and
-    /// is never fenced. Returns false (⇒ caller surfaces MustRetry) when the range moved or split
-    /// since routing.
+    /// descriptor, refuses it while the range is quiesced for a data move, and fences it against
+    /// <paramref name="routedGeneration"/> (zero = the request carried none — route without fencing,
+    /// but still report the live generation so a deferred flush can re-fence). A hash key resolves
+    /// through <paramref name="dataPartitionRouter"/> and is neither quiesced nor fenced.
+    ///
+    /// <para>
+    /// This is the last gate every direct persistent write passes on the partition leader before it
+    /// is proposed, which is what makes it the authoritative place to enforce a quiesce: the write
+    /// reaches it no matter which node the client happened to talk to, and it holds even on a leader
+    /// promoted mid-move that never saw the in-memory range lock covering the same window.
+    /// <paramref name="now"/> is only compared against a deadline that is actually set, so an open
+    /// range costs nothing.
+    /// </para>
     /// </summary>
-    public static bool TryResolveForDirectWrite(
+    public static DirectWriteRouting ResolveForDirectWrite(
         KeySpaceRegistry registry,
         RangeMap rangeMap,
         DataPartitionRouter dataPartitionRouter,
         string key,
         long routedGeneration,
+        HLCTimestamp now,
         out int partitionId,
         out long fenceGeneration)
     {
@@ -104,18 +138,23 @@ internal static class RangeRouting
             {
                 partitionId = 0;
                 fenceGeneration = 0;
-                return false;
+                return DirectWriteRouting.NoDescriptor;
             }
 
             partitionId = descriptor.PartitionId;
             fenceGeneration = descriptor.Generation;
 
-            return routedGeneration == 0 || descriptor.Generation == routedGeneration;
+            if (descriptor.IsQuiescedAt(key, now))
+                return DirectWriteRouting.Quiesced;
+
+            return routedGeneration == 0 || descriptor.Generation == routedGeneration
+                ? DirectWriteRouting.Ok
+                : DirectWriteRouting.GenerationFenced;
         }
 
         partitionId = dataPartitionRouter.Locate(key);
         fenceGeneration = 0; // hash space: never fenced at flush.
-        return true;
+        return DirectWriteRouting.Ok;
     }
 
     /// <summary>True when <paramref name="key"/> belongs to a key-range-routed space.</summary>

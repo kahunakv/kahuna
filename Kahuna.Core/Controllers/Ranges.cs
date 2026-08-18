@@ -35,8 +35,6 @@ public sealed partial class KahunaManager
     /// <summary>The per-node key-space routing registry.</summary>
     internal KeySpaceRegistry KeySpaceRegistry => keyValues.KeySpaceRegistry;
 
-    /// <summary>The quiesce store — for test inspection only.</summary>
-    internal RangeQuiesceStore RangeQuiesceStore => keyValues.RangeQuiesceStore;
 
     /// <inheritdoc/>
     public void RegisterKeyRange(string keySpace) => keyValues.KeySpaceRegistry.RegisterKeyRange(keySpace);

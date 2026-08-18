@@ -59,13 +59,19 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         // The standalone quorum is formed by phantom witnesses that persist nothing and auto-ACK
         // every AppendLogs — they exist only to grant a ceremonial majority so the sole real node
-        // can elect itself leader. After a cold restart the leader restores its committed index from
-        // its own durable WAL, yet the witnesses are seeded at the election-time log id and look far
-        // behind. With the default backfill trigger this streams every historical WAL entry to the
-        // witnesses in small batches on startup, one bounded WAL read per round, only for them to
-        // discard it — a large, pointless startup stall. Disable backfill here: the witnesses never
-        // need real data, and the leader's own commit progress does not depend on their catch-up.
-        raftConfiguration.BackfillThreshold = int.MaxValue;
+        // can elect itself leader. Nothing here ever needs catching up: the witnesses discard every
+        // entry, no read is served from one, and the leader's own commit progress does not depend
+        // on their catch-up. Left enabled, every apparent gap costs a bounded WAL read per witness
+        // per heartbeat, and — once the readable floor has moved above the anchor — a full
+        // partition-state export shipped into a transport that rejects it. The gap is easy to
+        // manufacture: after a cold restart the leader restores a high committed index from its own
+        // WAL while the witnesses are seeded at the election-time log id, so a startup's worth of
+        // history is streamed out and thrown away.
+        //
+        // This must be BackfillEnabled and not a large BackfillThreshold: the threshold gates only
+        // the actively-behind trigger, leaving the idle-tail and crash-restart-regression triggers
+        // to fire the moment writes pause — the exact state an embedded node spends its life in.
+        raftConfiguration.BackfillEnabled = false;
 
         this.Raft = new RaftManager(
             raftConfiguration,

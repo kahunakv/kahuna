@@ -84,6 +84,13 @@ internal sealed class TryExtendHandler : BaseHandler
             }
         }
         
+        // Validate if the key falls within any active range lock from another transaction. An extend
+        // mutates the entry's expiry, so it conflicts with a range lock exactly as a set or a delete
+        // does — and skipping the check let an extend slip through a range being moved for a split,
+        // whose per-key write intents only cover the keys that happened to be resident.
+        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime))
+            return KeyValueStaticResponses.MustRetryResponse;
+
         // Temporarily store the value in the MVCC entry if the transaction ID is set
         if (message.TransactionId != HLCTimestamp.Zero)
         {

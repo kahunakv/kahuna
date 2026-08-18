@@ -638,7 +638,6 @@ internal sealed class KeyValuesManager : IDisposable
 
     private readonly IActorRef<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest> preparedIntentRecovery;
 
-    private readonly RangeQuiesceStore rangeQuiesceStore = new();
 
     private readonly KvStateMachineTransfer kvStateMachineTransfer;
 
@@ -860,7 +859,7 @@ internal sealed class KeyValuesManager : IDisposable
             logger
         );
 
-        locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, rangeQuiesceStore, logger);
+        locator = new(this, configuration, raft, interNodeCommunication, keySpaceRegistry, logger);
 
         // Now that the locator exists, wire the anchor/key → data-partition resolvers the durable-intent stores
         // fence their coordinator-driven mutations on.
@@ -895,7 +894,7 @@ internal sealed class KeyValuesManager : IDisposable
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
-        rangeSplitter     = new(raft, rangeMapStore, rangeQuiesceStore, this, logger);
+        rangeSplitter     = new(raft, rangeMapStore, this, logger);
         rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, this, writeFrequencyRegistry, configuration, logger);
         rangeMerger       = new(raft, rangeMapStore, this, logger);
         rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, writeFrequencyRegistry, configuration, logger);
@@ -1085,7 +1084,6 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     internal KeySpaceRegistry KeySpaceRegistry => keySpaceRegistry;
 
-    internal RangeQuiesceStore RangeQuiesceStore => rangeQuiesceStore;
 
     /// <summary>
     /// Generation stamped on an auto-seeded initial descriptor. Must be &gt;= 1 so it acts as a real
@@ -1215,11 +1213,14 @@ internal sealed class KeyValuesManager : IDisposable
         if (keySpace.EndsWith("/meta", StringComparison.Ordinal))
             return false;
 
-        // Transient rejection: a split quiesce window is open. The window is short; the caller
-        // should wait and retry. We prefer a coarse IsEmpty check over a per-key lookup because
-        // the quiesce store has no space-scoped query — only per-key IsQuiesced and IsEmpty.
-        if (!rangeQuiesceStore.IsEmpty)
-            return false;
+        // Transient rejection: a range of this space is mid-move and quiesced, so its descriptors
+        // are about to be rewritten by the cutover. Deleting them now would race that rewrite; the
+        // window is short, so the caller waits and retries.
+        HLCTimestamp quiesceProbeTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        foreach (RangeDescriptor descriptor in rangeMapStore.Current.FindAll(keySpace))
+            if (descriptor.IsQuiescedAt(quiesceProbeTime))
+                return false;
 
         if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
         {
@@ -1348,7 +1349,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// Handles the full <c>allocate → CreatePartitionAsync → SplitAsync</c> sequence internally, so
     /// callers do not need to manage partition IDs. Optionally invokes
     /// <paramref name="duringQuiesce"/> inside the quiesce window (after catch-up import, before
-    /// cutover) for F3-style race tests.
+    /// cutover) so a test can race an operation into it.
     /// <para>
     /// Runs through <see cref="RangeSplitTrigger"/> rather than allocating here, so it shares the
     /// automatic cadences' serialization: two branches allocating a partition ID concurrently could

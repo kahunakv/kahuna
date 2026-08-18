@@ -28,22 +28,23 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Quiesce scope (F3).</b> The exclusive range lock blocks concurrent 2PC commits on
-/// <c>[K,E)</c> during the catch-up window. F3 adds a best-effort quiesce for direct
-/// (non-2PC) writes via <see cref="RangeQuiesceStore"/>: between the lock acquisition and its
-/// release, the locator pre-route check on the split-executor node returns <c>MustRetry</c> for
-/// any direct write that falls in <c>[K,E)</c>. The client retries after cutover and is then
-/// routed to P'.
+/// <b>Quiesce scope.</b> Two guards cover the window between the catch-up export and the cutover,
+/// and they are complementary rather than redundant. The <b>exclusive range lock</b> on
+/// <c>[K,E)</c> is installed by a message on P's leader's key-value actor — the same
+/// single-threaded mailbox every write for that key space passes through — so it is exactly
+/// ordered against in-flight writes: one admitted before the lock is already proposed, one after is
+/// refused. The <b>descriptor quiesce</b> (<see cref="RangeDescriptor.QuiescedUntil"/>, published
+/// through <see cref="RangeMapStore.QuiesceRangeAsync"/>) rides the replicated range map, so it
+/// reaches every node and, unlike the lock, survives a leadership change on P: a promoted leader
+/// holds no in-memory lock but still refuses writes into <c>[K,E)</c>. A refused client retries
+/// after cutover and is then routed to P'.
 /// </para>
 ///
 /// <para>
-/// <b>Remaining cross-node gap.</b> The quiesce check is performed in the locator on the node
-/// running the split. A direct write that arrives on a <em>different</em> node during the same
-/// window bypasses the check: it routes to P (generation fence passes), commits on P, is absent
-/// from the catch-up snapshot, and after cutover routes to P' — where it never arrives. That
-/// write is silently lost. Fully closing the window requires replicating the quiesce state to the
-/// data-partition proposal actor so the check can be enforced on every replica. <b>Deferred to
-/// a future partition-scoped storage design.</b>
+/// The descriptor quiesce carries a deadline rather than relying on this method's <c>finally</c> to
+/// end it, so a split executor that dies mid-window leaves a range that reopens on its own instead
+/// of one that refuses writes forever. A successful cutover replaces the descriptor outright, which
+/// clears the quiesce atomically with the routing change.
 /// </para>
 ///
 /// <para>
@@ -77,25 +78,27 @@ internal sealed class RangeSplitter
     /// <summary>Minimum keys a range must have to be splittable (both halves must be non-empty).</summary>
     public const int MinRangeKeys = 2;
 
-    /// <summary>TTL for the quiesce range lock (ms). Long enough to cover the catch-up export.</summary>
-    private const int QuiesceLockTtlMs = 30_000;
+    /// <summary>
+    /// How long the quiesce window may stay open (ms). Long enough to cover the catch-up export, and
+    /// short enough that a split executor which dies mid-window costs the range a bounded stretch of
+    /// refused writes. Applied to both guards — the range lock's TTL and the replicated descriptor
+    /// deadline — so neither outlives the other and reopens the window while the split still runs.
+    /// </summary>
+    private const int QuiesceTtlMs = 30_000;
 
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
-    private readonly RangeQuiesceStore quiesceStore;
     private readonly KeyValuesManager manager;
     private readonly ILogger<IKahuna> logger;
 
     public RangeSplitter(
         IRaft raft,
         RangeMapStore rangeMapStore,
-        RangeQuiesceStore quiesceStore,
         KeyValuesManager manager,
         ILogger<IKahuna> logger)
     {
         this.raft = raft;
         this.rangeMapStore = rangeMapStore;
-        this.quiesceStore = quiesceStore;
         this.manager = manager;
         this.logger = logger;
     }
@@ -128,9 +131,8 @@ internal sealed class RangeSplitter
 
     /// <summary>
     /// Internal overload for tests: <paramref name="duringQuiesce"/> is invoked between the
-    /// catch-up import and the cutover commit, while the range is quiesced. Used by
-    /// <c>Split_DirectWriteDuringQuiesce_MustRetry</c> (F3) to race a direct write into
-    /// the quiesce window.
+    /// catch-up import and the cutover commit, while the range is quiesced. It exists so a test can
+    /// race an operation into that window, which is otherwise too short to hit deliberately.
     /// </summary>
     internal async Task<SplitOutcome> SplitAsync(
         string keySpace,
@@ -222,7 +224,7 @@ internal sealed class RangeSplitter
             keySpace,
             splitKey, true,
             descriptor.EndKey, false,
-            QuiesceLockTtlMs,
+            QuiesceTtlMs,
             KeyValueDurability.Persistent,
             ct);
 
@@ -233,8 +235,28 @@ internal sealed class RangeSplitter
             return SplitOutcome.QuiesceFailed;
         }
 
-        // F3: quiesce direct (non-2PC) writes to [K,E) for the duration of the split window.
-        quiesceStore.Quiesce(keySpace, splitKey, descriptor.EndKey);
+        // Publish the quiesce on the descriptor itself so it is enforced wherever a write lands and
+        // wherever P's leadership ends up, not only in this node's router. Fail the split if it does
+        // not commit: proceeding would copy the range while it is still accepting writes.
+        HLCTimestamp quiescedUntil =
+            raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) + QuiesceTtlMs;
+
+        bool quiescePublished = await rangeMapStore.QuiesceRangeAsync(
+            keySpace, splitKey, descriptor.EndKey, splitTxId, quiescedUntil, ct);
+
+        if (!quiescePublished)
+        {
+            logger.LogError("RangeSplitter: could not publish the quiesce for {Space} [{Key},{End})",
+                keySpace, splitKey, descriptor.EndKey ?? "+inf");
+
+            // Undo the lock on an uncancellable token: a cancelled split must not leave the range
+            // locked for the lock's whole TTL.
+            await manager.ReleaseExclusiveRangeLockOnPartitionLeaderAsync(
+                descriptor.PartitionId, splitTxId, keySpace, splitKey, true, descriptor.EndKey, false,
+                KeyValueDurability.Persistent, CancellationToken.None);
+
+            return SplitOutcome.QuiesceFailed;
+        }
 
         try
         {
@@ -319,7 +341,7 @@ internal sealed class RangeSplitter
                 return SplitOutcome.TransferFailed;
             }
 
-            // F3 test seam: allow the caller to race a direct write while quiesced.
+            // Test seam: let the caller race an operation into the quiesce window.
             if (duringQuiesce is not null)
                 await duringQuiesce();
 
@@ -346,12 +368,25 @@ internal sealed class RangeSplitter
                         return existing;
                     }
 
+                    // Drop the range being split by identity, not by value: the descriptor read at
+                    // step 1 predates the quiesce stamped onto it since, so a value comparison would
+                    // no longer recognise it and the map would end up holding both the old range and
+                    // its two halves.
                     List<RangeDescriptor> next = existing
-                        .Where(d => d != descriptor)
+                        .Where(d => !ReferenceEquals(d, live))
                         .ToList();
 
-                    // Left half: [S, K) stays on P with bumped generation.
-                    next.Add(descriptor with { EndKey = splitKey, Generation = newGeneration });
+                    // Left half: [S, K) stays on P with bumped generation, and reopens — the cutover
+                    // is the end of the window the quiesce was protecting.
+                    next.Add(live with
+                    {
+                        EndKey = splitKey,
+                        Generation = newGeneration,
+                        QuiescedUntil = HLCTimestamp.Zero,
+                        QuiesceOwner = HLCTimestamp.Zero,
+                        QuiesceStartKey = null,
+                        QuiesceEndKey = null
+                    });
 
                     // Right half: [K, E) moves to P' with bumped generation.
                     next.Add(new RangeDescriptor
@@ -404,8 +439,11 @@ internal sealed class RangeSplitter
         }
         finally
         {
-            // F3: release the direct-write quiesce before releasing the range lock.
-            quiesceStore.Release(keySpace, splitKey, descriptor.EndKey);
+            // Reopen the range before releasing the lock. Scoped to this split's own id, so it is a
+            // no-op after a successful cutover (the descriptor it stamped no longer exists) and can
+            // never reopen a window a later split opened over the same bounds. If it cannot commit —
+            // this node lost the meta leadership — the deadline stamped above ends the window instead.
+            await rangeMapStore.ReleaseQuiesceAsync(splitTxId, CancellationToken.None);
 
             // ── 9. Release quiesce lock on the ORIGINAL partition by ID ──────────
             // After cutover the locator routes [K,E) to P' — using LocateAndTryRelease

@@ -142,6 +142,22 @@ GitHub Actions starts the server cluster before running the end-to-end suite thr
 
 ---
 
+## Jepsen Tests
+
+Kahuna is tested with [Jepsen](https://jepsen.io/), a framework designed to verify the correctness of distributed systems under real-world failure conditions such as network partitions, process crashes, and clock skew.
+
+The Jepsen test suite for Kahuna lives at [kahunakv/kahuna-jepsen](https://github.com/kahunakv/kahuna-jepsen). It exercises Kahuna's transactional guarantees, locking semantics, and replication behavior by injecting faults into a running cluster and checking that the system's observable history remains consistent. These tests are essential for building confidence that Kahuna upholds its safety properties — serializability, linearizability, and durability — not just in the happy path but under adversarial conditions that are difficult to reproduce with conventional test suites.
+
+---
+
+## Kubernetes Operator (Alpha)
+
+The [Kahuna Kubernetes Operator](https://github.com/kahunakv/kahuna-k8s-operator) automates deploying and managing Kahuna clusters on Kubernetes. It handles cluster provisioning, scaling, and lifecycle operations through a custom resource definition, letting you run Kahuna as a native Kubernetes workload.
+
+> **Note:** This operator is currently in alpha. APIs and behavior may change between releases.
+
+---
+
 ## Contributing
 
 We welcome contributions from the community! For detailed guidelines, 

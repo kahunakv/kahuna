@@ -1,5 +1,6 @@
 using Kommander;
 using Kommander.Data;
+using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Replication;
@@ -170,6 +171,134 @@ internal sealed class RangeMapStore : IDisposable
         {
             mutateGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Opens a quiesce window over <c>[startKey, endKey)</c> of <paramref name="keySpace"/>: keys in
+    /// that interval stop accepting writes until <paramref name="until"/>, on every node, because the
+    /// map is replicated. Used by a range move to close the window between copying the range's
+    /// contents and cutting routing over to their new partition.
+    ///
+    /// <para>
+    /// The deadline is what makes the quiesce safe to publish: an owner that dies mid-move leaves a
+    /// window that lapses instead of a range that refuses writes forever. <paramref name="owner"/>
+    /// stamps the move that opened it so only that move's release can close it.
+    /// </para>
+    ///
+    /// <para>
+    /// Returns false when the interval covers no descriptor at all (the map moved under the caller)
+    /// or the mutation could not be committed — in both cases the caller must not proceed as if the
+    /// range were quiesced.
+    /// </para>
+    /// </summary>
+    public async Task<bool> QuiesceRangeAsync(
+        string keySpace,
+        string? startKey,
+        string? endKey,
+        HLCTimestamp owner,
+        HLCTimestamp until,
+        CancellationToken cancellationToken = default)
+    {
+        bool matched = false;
+
+        bool committed = await MutateAsync(existing =>
+        {
+            List<RangeDescriptor> next = new(existing.Count);
+
+            foreach (RangeDescriptor descriptor in existing)
+            {
+                // Every descriptor the interval touches is stamped, not only one whose bounds match
+                // it exactly: a split quiesces the half of a range it is moving, which is a strict
+                // sub-interval of the descriptor that still covers it, and a caller quiescing a whole
+                // key space spans however many descriptors it has been split into.
+                if (string.Equals(descriptor.KeySpace, keySpace, StringComparison.Ordinal)
+                    && Overlaps(descriptor, startKey, endKey))
+                {
+                    matched = true;
+                    next.Add(descriptor with
+                    {
+                        QuiescedUntil = until,
+                        QuiesceOwner = owner,
+                        QuiesceStartKey = startKey,
+                        QuiesceEndKey = endKey
+                    });
+
+                    continue;
+                }
+
+                next.Add(descriptor);
+            }
+
+            // Leave the map untouched when nothing matched: MutateAsync commits it either way, and
+            // re-replicating the identical map is a harmless no-op the caller detects via `matched`.
+            return next;
+        }, cancellationToken).ConfigureAwait(false);
+
+        if (!committed || !matched)
+            logger.LogWarning(
+                "Could not quiesce {Space} [{Start},{End}) — committed: {Committed}, descriptor found: {Matched}",
+                keySpace, startKey ?? "-inf", endKey ?? "+inf", committed, matched);
+
+        return committed && matched;
+    }
+
+    /// <summary>
+    /// True when <paramref name="descriptor"/>'s half-open interval intersects
+    /// <c>[startKey, endKey)</c>. A null bound on either side is that side's infinity, so it always
+    /// intersects.
+    /// </summary>
+    private static bool Overlaps(RangeDescriptor descriptor, string? startKey, string? endKey)
+    {
+        if (startKey is not null && descriptor.EndKey is not null
+            && string.CompareOrdinal(startKey, descriptor.EndKey) >= 0)
+            return false;
+
+        if (endKey is not null && descriptor.StartKey is not null
+            && string.CompareOrdinal(endKey, descriptor.StartKey) <= 0)
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Closes every quiesce window opened by <paramref name="owner"/>. Owner-scoped rather than
+    /// bounds-scoped so a move that already cut over (its descriptor is gone) or gave up part-way
+    /// clears exactly what it opened and nothing else — in particular it can never open the window
+    /// of a later move over the same bounds.
+    ///
+    /// <para>
+    /// Best-effort by design: the deadline stamped at <see cref="QuiesceRangeAsync"/> is the real
+    /// guarantee that the window ends, so a release that cannot commit (this node lost the meta
+    /// leadership, say) costs latency until the deadline lapses, not correctness.
+    /// </para>
+    /// </summary>
+    public async Task<bool> ReleaseQuiesceAsync(HLCTimestamp owner, CancellationToken cancellationToken = default)
+    {
+        if (owner == HLCTimestamp.Zero)
+            return true;
+
+        bool anyHeld = current.Descriptors.Any(d => d.QuiesceOwner == owner);
+
+        if (!anyHeld)
+            return true; // nothing of ours is quiesced (cutover already replaced the descriptor).
+
+        return await MutateAsync(existing =>
+        {
+            List<RangeDescriptor> next = new(existing.Count);
+
+            foreach (RangeDescriptor descriptor in existing)
+                next.Add(descriptor.QuiesceOwner == owner
+                    ? descriptor with
+                    {
+                        QuiescedUntil = HLCTimestamp.Zero,
+                        QuiesceOwner = HLCTimestamp.Zero,
+                        QuiesceStartKey = null,
+                        QuiesceEndKey = null
+                    }
+                    : descriptor);
+
+            return next;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -357,7 +486,13 @@ internal sealed class RangeMapStore : IDisposable
             {
                 KeySpace = descriptor.KeySpace,
                 PartitionId = descriptor.PartitionId,
-                Generation = descriptor.Generation
+                Generation = descriptor.Generation,
+                QuiescedUntilNode     = descriptor.QuiescedUntil.N,
+                QuiescedUntilPhysical = descriptor.QuiescedUntil.L,
+                QuiescedUntilCounter  = descriptor.QuiescedUntil.C,
+                QuiesceOwnerNode     = descriptor.QuiesceOwner.N,
+                QuiesceOwnerPhysical = descriptor.QuiesceOwner.L,
+                QuiesceOwnerCounter  = descriptor.QuiesceOwner.C
             };
 
             if (descriptor.StartKey is not null)
@@ -365,6 +500,12 @@ internal sealed class RangeMapStore : IDisposable
 
             if (descriptor.EndKey is not null)
                 descriptorMessage.EndKey = descriptor.EndKey;
+
+            if (descriptor.QuiesceStartKey is not null)
+                descriptorMessage.QuiesceStartKey = descriptor.QuiesceStartKey;
+
+            if (descriptor.QuiesceEndKey is not null)
+                descriptorMessage.QuiesceEndKey = descriptor.QuiesceEndKey;
 
             message.Descriptors.Add(descriptorMessage);
         }
@@ -382,7 +523,17 @@ internal sealed class RangeMapStore : IDisposable
                 StartKey = descriptorMessage.HasStartKey ? descriptorMessage.StartKey : null,
                 EndKey = descriptorMessage.HasEndKey ? descriptorMessage.EndKey : null,
                 PartitionId = descriptorMessage.PartitionId,
-                Generation = descriptorMessage.Generation
+                Generation = descriptorMessage.Generation,
+                QuiescedUntil = new(
+                    descriptorMessage.QuiescedUntilNode,
+                    descriptorMessage.QuiescedUntilPhysical,
+                    descriptorMessage.QuiescedUntilCounter),
+                QuiesceOwner = new(
+                    descriptorMessage.QuiesceOwnerNode,
+                    descriptorMessage.QuiesceOwnerPhysical,
+                    descriptorMessage.QuiesceOwnerCounter),
+                QuiesceStartKey = descriptorMessage.HasQuiesceStartKey ? descriptorMessage.QuiesceStartKey : null,
+                QuiesceEndKey = descriptorMessage.HasQuiesceEndKey ? descriptorMessage.QuiesceEndKey : null
             };
         }
     }

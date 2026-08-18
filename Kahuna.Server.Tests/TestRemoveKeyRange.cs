@@ -436,8 +436,11 @@ public sealed class TestRemoveKeyRange : RaftTrackingTest
             foreach (Node node in nodes)
                 await WaitUntilDescriptorPresent(node, "t:r");
 
-            // Simulate a split window by quiescing the space on the leader.
-            leader.Kahuna.RangeQuiesceStore.Quiesce("t:r", null, null);
+            // Stand in for a split window by quiescing the space's whole-space descriptor.
+            HLCTimestamp owner = leader.Raft.HybridLogicalClock.TrySendOrLocalEvent(leader.Raft.GetLocalNodeId());
+            HLCTimestamp until = leader.Raft.HybridLogicalClock.TrySendOrLocalEvent(leader.Raft.GetLocalNodeId()) + 30_000;
+
+            Assert.True(await leader.Kahuna.RangeMapStore.QuiesceRangeAsync("t:r", null, null, owner, until, ct));
             try
             {
                 bool result = await leader.Kahuna.RemoveKeyRangeAsync("t:r", ct);
@@ -450,7 +453,7 @@ public sealed class TestRemoveKeyRange : RaftTrackingTest
             }
             finally
             {
-                leader.Kahuna.RangeQuiesceStore.Release("t:r", null, null);
+                Assert.True(await leader.Kahuna.RangeMapStore.ReleaseQuiesceAsync(owner, ct));
             }
 
             // After the quiesce is released the removal must succeed.

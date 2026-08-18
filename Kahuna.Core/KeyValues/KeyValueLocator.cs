@@ -29,7 +29,6 @@ internal sealed class KeyValueLocator
 
     private readonly KeySpaceRegistry keySpaceRegistry;
 
-    private readonly RangeQuiesceStore quiesceStore;
 
     private readonly DataPartitionRouter dataPartitionRouter;
 
@@ -41,7 +40,6 @@ internal sealed class KeyValueLocator
         IRaft raft,
         IInterNodeCommunication interNodeCommunication,
         KeySpaceRegistry keySpaceRegistry,
-        RangeQuiesceStore quiesceStore,
         ILogger<IKahuna> logger
     )
     {
@@ -50,7 +48,6 @@ internal sealed class KeyValueLocator
         this.raft = raft;
         this.interNodeCommunication = interNodeCommunication;
         this.keySpaceRegistry = keySpaceRegistry;
-        this.quiesceStore = quiesceStore;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.logger = logger;
     }
@@ -59,15 +56,26 @@ internal sealed class KeyValueLocator
     /// The key-order router: resolves <paramref name="key"/> to <c>(partitionId,
     /// generation)</c> through the range-descriptor map for key-range spaces, or falls back to the
     /// hash router (<c>GetPartitionKey</c>) for hash spaces. Both this router and the leader-side direct-write
-    /// resolver (<c>BaseHandler.TryResolveDirectWritePartition</c>) go through the same
+    /// resolver (<c>BaseHandler.ResolveDirectWritePartition</c>) go through the same
     /// <see cref="RangeRouting.Locate"/> so the two routing sites cannot drift.
     /// </summary>
     public (int PartitionId, long Generation) LocateRange(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
 
     /// <summary>Routes a key and reports its routing mode in the same single classification pass.</summary>
-    private (int PartitionId, long Generation, bool IsKeyRange) LocateRangeWithMode(string key) =>
+    private (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) LocateRangeWithMode(string key) =>
         RangeRouting.LocateWithMode(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
+
+    /// <summary>
+    /// True when <paramref name="key"/> lands in the part of <paramref name="descriptor"/> that is
+    /// currently refusing writes. Reading the clock costs a mint, so the deadline is tested for being
+    /// set at all first — a range that is not being moved, which is every range almost all the time,
+    /// never pays for it.
+    /// </summary>
+    private bool IsRangeQuiesced(RangeDescriptor? descriptor, string key) =>
+        descriptor is not null
+        && descriptor.QuiescedUntil != HLCTimestamp.Zero
+        && descriptor.IsQuiescedAt(key, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
 
     /// <summary>Routes a per-key operation via <see cref="RangeRouting.Locate"/>.</summary>
     private int RouteKey(string key) =>
@@ -202,16 +210,19 @@ internal sealed class KeyValueLocator
         // generation is preserved so the remote fence checks against the coordinator's view, catching the
         // case where the coordinator is fresher (split applied there but not yet here) or staler (split
         // applied here but not there — fence fails → MustRetry → coordinator re-resolves).
-        (int partitionId, long freshGeneration, bool isKeyRange) = LocateRangeWithMode(key);
+        (int partitionId, long freshGeneration, bool isKeyRange, RangeDescriptor? descriptor) = LocateRangeWithMode(key);
         if (isKeyRange)
         {
             if (routedGeneration == 0)
                 routedGeneration = freshGeneration;
 
-            // F3: direct writes to a range currently being split are blocked pre-route.
-            // The quiesce is set by RangeSplitter between the catch-up export and the cutover
-            // commit; clients retry after cutover and the locator resolves the new partition.
-            if (quiesceStore.IsQuiesced(key))
+            // A range being moved to another partition refuses writes for the window between the
+            // catch-up export and the cutover, so a write cannot land on the source after its
+            // contents were copied. Bouncing here keeps the doomed write off the wire; the binding
+            // refusal is the leader-side one at admission, which also covers writes routed by a node
+            // whose map had not yet applied the quiesce. Clients retry after cutover and are then
+            // routed to the partition that owns the range.
+            if (IsRangeQuiesced(descriptor, key))
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         }
 
@@ -277,18 +288,33 @@ internal sealed class KeyValueLocator
         Dictionary<string, List<KahunaSetKeyValueRequestItem>> acquisitionPlan = [];
 
         Dictionary<int, string> leaderByPartition = [];
+
+        List<KahunaSetKeyValueResponseItem>? quiesced = null;
         
         foreach (KahunaSetKeyValueRequestItem key in setManyItems)
         {
             if (string.IsNullOrEmpty(key.Key))
                 return [new KahunaSetKeyValueResponseItem { Key = key.Key, Type = KeyValueResponseType.InvalidInput, Durability = key.Durability }];
 
-            (int partitionId, long freshGeneration, bool isKeyRange) = LocateRangeWithMode(key.Key);
+            (int partitionId, long freshGeneration, bool isKeyRange, RangeDescriptor? descriptor) = LocateRangeWithMode(key.Key);
             // Preserve a coordinator-supplied generation (non-zero = already redirected once);
             // on the first call resolve fresh and stamp it so the remote fence can check it.
             // Hash path: no generation fence, RoutedGeneration stays 0.
             if (isKeyRange && key.RoutedGeneration == 0)
                 key.RoutedGeneration = freshGeneration;
+
+            // One key in a range being moved bounces only that key: the rest of the batch may sit in
+            // ranges that are perfectly writable, and failing them all would turn one split into a
+            // batch-wide retry.
+            if (isKeyRange && IsRangeQuiesced(descriptor, key.Key))
+            {
+                quiesced ??= [];
+                quiesced.Add(new KahunaSetKeyValueResponseItem
+                {
+                    Key = key.Key, Type = KeyValueResponseType.MustRetry, Durability = key.Durability
+                });
+                continue;
+            }
 
             string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
@@ -309,6 +335,9 @@ internal sealed class KeyValueLocator
             tasks.Add(TrySetManyNodeKeyValue(leader, localNode, items, lockSync, responses, cancellationToken));
         
         await Task.WhenAll(tasks);
+
+        if (quiesced is not null)
+            responses.AddRange(quiesced);
 
         return responses;
     }

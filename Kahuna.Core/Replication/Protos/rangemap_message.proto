@@ -9,6 +9,17 @@ message RangeDescriptorMessage {
   optional string endKey = 3;    // absent = +inf within keySpace
   int32 partitionId = 4;
   int64 generation = 5;
+  // Quiesce window: this range refuses writes until quiescedUntil because its data is being
+  // moved. Absent/zero = open for writes. quiesceOwner identifies the move that opened it, so
+  // only that move's release closes it.
+  int32  quiescedUntilNode     = 6;
+  int64  quiescedUntilPhysical = 7;
+  uint32 quiescedUntilCounter  = 8;
+  int32  quiesceOwnerNode      = 9;
+  int64  quiesceOwnerPhysical  = 10;
+  uint32 quiesceOwnerCounter   = 11;
+  optional string quiesceStartKey = 12;  // absent = -inf; only the moving sub-range is quiesced
+  optional string quiesceEndKey   = 13;  // absent = +inf
 }
 
 // A full snapshot of the range-descriptor map, replicated on the meta partition.

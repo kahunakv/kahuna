@@ -113,7 +113,6 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
             raft,
             interNodeCommunication: null!,
             keySpaceRegistry: null!,
-            quiesceStore: null!,
             NullLogger<IKahuna>.Instance);
 
     /// <summary>
