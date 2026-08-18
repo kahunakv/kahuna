@@ -433,6 +433,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         MaxPreAuthRequestBodyBytes = opts.RaftMaxPreAuthRequestBodyBytes,
         GrpcEnableAppendLogsCoalescing = opts.RaftGrpcEnableAppendLogsCoalescing,
         GrpcAppendLogsMaxCoalesceBatch = opts.RaftGrpcAppendLogsMaxCoalesceBatch,
+        BackfillEnabled = opts.RaftBackfillEnabled,
         BackfillThreshold = opts.RaftBackfillThreshold,
         MaxBackfillEntriesPerRound = opts.RaftMaxBackfillEntriesPerRound,
         FollowerSaturationBackoff = TimeSpan.FromMilliseconds(opts.RaftFollowerSaturationBackoff),

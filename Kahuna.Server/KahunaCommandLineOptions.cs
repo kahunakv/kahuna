@@ -295,6 +295,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-pre-auth-request-body-bytes", Required = false, HelpText = "Ceiling on a Raft REST request body before it is authenticated/signed, in bytes. Bounds buffering independent of the host's own request-size limit.", Default = 32L * 1024 * 1024)]
     public long RaftMaxPreAuthRequestBodyBytes { get; set; } = 32L * 1024 * 1024;
 
+    [Option("raft-backfill-enabled", Required = false, HelpText = "Whether a leader ships catch-up batches (and falls back to a snapshot transfer) to lagging followers. Turning it off makes a follower that misses entries permanently stale — only set it false when the deployment owns its peers' catch-up story.", Default = true)]
+    public bool RaftBackfillEnabled { get; set; } = true;
+
     [Option("raft-backfill-threshold", Required = false, HelpText = "Committed entries a follower may trail the leader before active backfill kicks in", Default = 10)]
     public int RaftBackfillThreshold { get; set; } = 10;
 

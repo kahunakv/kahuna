@@ -277,6 +277,8 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
 
         public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => throw new NotImplementedException();
 
+        public IReadOnlyList<RaftBackfillStatus> GetBackfillStatuses(int partitionId) => throw new NotImplementedException();
+
         public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
     }
 }

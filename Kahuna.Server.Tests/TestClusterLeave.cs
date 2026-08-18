@@ -369,6 +369,9 @@ public sealed class TestClusterLeave : BaseCluster
         public double GetPartitionCommitWaitMs(int partitionId) => throw new NotImplementedException();
         public long GetStaleProposedSkippedCount(int partitionId) => throw new NotImplementedException();
         public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => throw new NotImplementedException();
+
+        public IReadOnlyList<RaftBackfillStatus> GetBackfillStatuses(int partitionId) => throw new NotImplementedException();
+
         public bool HostsPartition(int partitionId) => throw new NotImplementedException();
         public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
         public long GetCommitIndex(int partitionId) => throw new NotImplementedException();

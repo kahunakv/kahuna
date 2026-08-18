@@ -246,6 +246,9 @@ public sealed class TestPartitionLeaderResolver
         public double GetPartitionCommitWaitMs(int partitionId) => throw new NotImplementedException();
         public long GetStaleProposedSkippedCount(int partitionId) => throw new NotImplementedException();
         public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => throw new NotImplementedException();
+
+        public IReadOnlyList<RaftBackfillStatus> GetBackfillStatuses(int partitionId) => throw new NotImplementedException();
+
         public string? GetPartitionLeaderHint(int partitionId) => LeaderHint;
         public long GetCommitIndex(int partitionId) => throw new NotImplementedException();
         public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => throw new NotImplementedException();

@@ -316,6 +316,7 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 
 | Flag | Controls | Default |
 |---|---|---|
+| `--raft-backfill-enabled` | Whether the leader ships catch-up batches at all (off leaves lagging followers permanently stale) | `true` |
 | `--raft-backfill-threshold` | How far behind a follower can be before catch-up kicks in | `10` |
 | `--raft-max-backfill-entries-per-round` | Max log entries shipped per catch-up round | `128` |
 | `--raft-learner-promotion-lag` | How close a Learner must get before it's eligible for promotion | `10` |

@@ -638,6 +638,9 @@ public sealed class TestMembership : BaseCluster
         public long GetCommitIndex(int partitionId) => 0;
         public long GetStaleProposedSkippedCount(int partitionId) => 0;
         public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => Array.Empty<RaftSnapshotStatus>();
+
+        public IReadOnlyList<RaftBackfillStatus> GetBackfillStatuses(int partitionId) => Array.Empty<RaftBackfillStatus>();
+
         public bool HostsPartition(int partitionId) => true;
         public string? GetPartitionLeaderHint(int partitionId) => null;
         public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
@@ -745,6 +748,9 @@ public sealed class TestMembership : BaseCluster
         public long GetCommitIndex(int partitionId) => 0;
         public long GetStaleProposedSkippedCount(int partitionId) => 0;
         public IReadOnlyList<RaftSnapshotStatus> GetSnapshotStatuses(int partitionId) => Array.Empty<RaftSnapshotStatus>();
+
+        public IReadOnlyList<RaftBackfillStatus> GetBackfillStatuses(int partitionId) => Array.Empty<RaftBackfillStatus>();
+
         public bool HostsPartition(int partitionId) => true;
         public string? GetPartitionLeaderHint(int partitionId) => null;
         public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
