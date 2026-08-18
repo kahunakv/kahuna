@@ -678,7 +678,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntents(
         string node,
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         CancellationToken cancellationToken
     )
     {

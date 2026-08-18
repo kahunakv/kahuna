@@ -297,8 +297,14 @@ internal sealed class RangeMerger
     /// under-min merge candidate. With a committed replica set the pages read through the locator
     /// (the range's leader) — this node may not host the range, and a local read would answer an
     /// empty count that wrongly qualifies a populated range for merging.
+    ///
+    /// <para>Returns whether the count is <c>Complete</c>. A page that could not be served ends the walk
+    /// with whatever was counted so far, and that partial total says nothing about the range's size — a
+    /// busy range whose first page is refused (a live transactional write in the window makes the whole
+    /// page retryable) would otherwise count as under-min and be merged. Merging moves data, so an
+    /// incomplete count must never decide it.</para>
     /// </summary>
-    internal async Task<int> CountRangeKeysAsync(
+    internal async Task<(int Count, bool Complete)> CountRangeKeysAsync(
         RangeDescriptor descriptor,
         int maxCount,
         CancellationToken ct = default)
@@ -350,7 +356,12 @@ internal sealed class RangeMerger
                     HLCTimestamp.Zero,
                     KeyValueDurability.Persistent);
 
-            if (page.Type != KeyValueResponseType.Get || page.Items.Count == 0)
+            // A refused page (anything but Get) leaves the count unfinished; an empty Get page is the
+            // genuine end of the range.
+            if (page.Type != KeyValueResponseType.Get)
+                return (count, false);
+
+            if (page.Items.Count == 0)
                 break;
 
             count  += page.Items.Count;
@@ -358,7 +369,7 @@ internal sealed class RangeMerger
             hasMore = page.HasMore;
         }
 
-        return count;
+        return (count, true);
     }
 
     /// <summary>
@@ -385,15 +396,20 @@ internal sealed class RangeMerger
         if (all.Count < 2)
             return [];
 
-        // Count keys for each descriptor; cache to avoid double-counting adjacent pairs.
-        var counts = new int[all.Count];
+        // Count keys for each descriptor; cache to avoid double-counting adjacent pairs. A range whose
+        // count could not be completed is not a candidate: an incomplete count is systematically low, so
+        // treating it as a size would merge exactly the busy ranges that refused to be counted.
+        var undersized = new bool[all.Count];
         for (int i = 0; i < all.Count; i++)
-            counts[i] = await CountRangeKeysAsync(all[i], minMergeSize, ct);
+        {
+            (int count, bool complete) = await CountRangeKeysAsync(all[i], minMergeSize, ct);
+            undersized[i] = complete && count < minMergeSize;
+        }
 
         var result = new List<(RangeDescriptor, RangeDescriptor)>();
         for (int i = 0; i + 1 < all.Count; i++)
         {
-            if (counts[i] < minMergeSize && counts[i + 1] < minMergeSize)
+            if (undersized[i] && undersized[i + 1])
             {
                 result.Add((all[i], all[i + 1]));
                 i++; // skip i+1: it was consumed as "right"; re-evaluate it next tick

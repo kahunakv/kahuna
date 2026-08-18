@@ -1243,7 +1243,7 @@ internal sealed class TransactionCoordinator : IDisposable
             // any read a decided commit has already made stale. Failure sets the Aborted result.
             if (RequiresReadSetValidation(context) && (context.ReadObservationConflict || context.ReadKeys is { Count: > 0 }))
             {
-                if (!await CheckReadSetForConflicts(context, cancellationToken))
+                if (!await CheckCommitConflicts(context, cancellationToken))
                     return;
 
                 await ValidateReadSet(context, cancellationToken);
@@ -1346,8 +1346,10 @@ internal sealed class TransactionCoordinator : IDisposable
             if (!await ValidateReadSet(context, cancellationToken))
                 return;
 
-            // Place write intents before checking for concurrent writers on the read set so that a
-            // racing peer's conflict check sees them and aborts — preventing write-skew anomalies.
+            // Place write intents before probing for commit conflicts so that a racing peer's own probe sees
+            // them and aborts — preventing write-skew anomalies. The probe also fences these writes against a
+            // foreign range lock acquired since they were staged; the ephemeral prepare handler does not check
+            // range locks either, so this path carries the same hole as the durable one.
             (bool success, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? mutationsPrepared) = await PrepareMutations(
                 context,
                 cancellationToken
@@ -1365,7 +1367,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 return;
             }
 
-            if (!await CheckReadSetForConflicts(context, cancellationToken))
+            if (!await CheckCommitConflicts(context, cancellationToken))
             {
                 if (context.AsyncRelease)
                     _ = RollbackMutations(context, mutationsPrepared, CancellationToken.None);
@@ -1617,9 +1619,16 @@ internal sealed class TransactionCoordinator : IDisposable
             return DurableFinalizeResult.MustRetry;
         }
 
-        // Post-prepare read-set validation: the write-intent probe catches a concurrent in-flight writer, and the
-        // revision-comparison check (intent-aware — it reads current committed state through the durable-intent-aware
-        // read path) catches a read that a concurrent commit made stale. Both must pass to commit.
+        // Post-prepare commit validation: the batched probe catches a concurrent in-flight writer on a read key
+        // and a foreign range lock covering a written key, and the revision-comparison check (intent-aware — it
+        // reads current committed state through the durable-intent-aware read path) catches a read that a
+        // concurrent commit made stale. Both must pass to commit.
+        //
+        // This is where the range-lock fence has to run, and post-prepare is the point: the anomaly it exists to
+        // stop is a lock acquired *after* the write was staged, so a write-time check is blind to it by
+        // construction. It is also the one barrier both finalize protocols share — the one-phase bundle validates
+        // here before proposing, and a failed validation there falls back to the standard 2PC flow, which
+        // re-validates after the prepares are durable.
         //
         // The concurrent-writer probe runs FIRST, and the order is load-bearing: it answers immediately for an
         // undecided foreign intent, while the revision check's read waits for one to resolve. Two transactions that
@@ -1642,7 +1651,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 validateReadSet: async ct =>
                 {
                     DurableTransactionMetrics.FinalizeReadSetKeys.Record(context.ReadKeys?.Count ?? 0);
-                    return await CheckReadSetForConflicts(context, ct).ConfigureAwait(false)
+                    return await CheckCommitConflicts(context, ct).ConfigureAwait(false)
                         && await ValidateReadSet(context, ct).ConfigureAwait(false);
                 },
                 opId,
@@ -2102,35 +2111,60 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
-    /// Probes the read-set for concurrent writers (write-skew guard) — optimistic transactions only.
+    /// Probes for the two conflicts that must not exist when the transaction commits, in one batched call:
+    ///
+    /// <list type="bullet">
+    /// <item>a concurrent writer on any key in the <b>read set</b> — the write-skew guard, which only optimistic
+    /// (or explicitly read-validating) transactions need, since exclusive key locks already serialize the rest;</item>
+    /// <item>a foreign range lock covering any key in the <b>write set</b> — the fence against a range lock
+    /// acquired after the write was staged. The write-time fence cannot see it (no lock existed then) and the
+    /// acquire deliberately does not conflict with an existing write intent, deferring to exactly this check.
+    /// It is ungated by locking mode: a range lock steps around a held key lock just as it does a write intent,
+    /// so a pessimistic transaction is no less exposed.</item>
+    /// </list>
+    ///
+    /// The two sets are disjoint — a read key that was also written is validated as a write — so a flagged
+    /// answer is attributed by which set the key came from.
     /// </summary>
-    private async Task<bool> CheckReadSetForConflicts(TransactionContext context, CancellationToken cancellationToken)
+    private async Task<bool> CheckCommitConflicts(TransactionContext context, CancellationToken cancellationToken)
     {
-        if (!RequiresReadSetValidation(context) || context.ReadKeys is null || context.ReadKeys.Count == 0)
-            return true;
+        List<KeyValueConflictProbe> probeKeys = [];
 
-        List<KeyValueTransactionReadKey> toCheck = [];
-
-        foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+        // Read keys ask only about concurrent write intents: a range lock covering a key this transaction
+        // merely read is not a conflict for it.
+        if (RequiresReadSetValidation(context) && context.ReadKeys is { Count: > 0 })
         {
-            if (string.IsNullOrEmpty(readKey.Key))
-                continue;
+            foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+            {
+                if (string.IsNullOrEmpty(readKey.Key))
+                    continue;
 
-            if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
-                continue;
+                if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
+                    continue;
 
-            toCheck.Add(readKey);
+                probeKeys.Add(new(readKey.Key!, readKey.Durability, KeyValueConflictChecks.WriteIntent));
+            }
         }
 
-        if (toCheck.Count == 0)
+        // Write keys ask only about foreign range locks. Deliberately not about write intents: a foreign
+        // in-memory intent on a key this transaction writes is the durable prepare's conflict to resolve —
+        // it retries and helps the blocker settle — and flagging it here would turn that retryable contention
+        // into a hard abort.
+        if (context.ModifiedKeys is not null)
+        {
+            foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
+            {
+                if (string.IsNullOrEmpty(key))
+                    continue;
+
+                probeKeys.Add(new(key, durability, KeyValueConflictChecks.ForeignRangeLock));
+            }
+        }
+
+        if (probeKeys.Count == 0)
             return true;
 
-        List<(string key, KeyValueDurability durability)> probeKeys = new(toCheck.Count);
-
-        foreach (KeyValueTransactionReadKey readKey in toCheck)
-            probeKeys.Add((readKey.Key!, readKey.Durability));
-
-        // One probe per node owning part of the read set, rather than one per key: a read set spread over remote
+        // One probe per node owning part of the set, rather than one per key: a working set spread over remote
         // partitions otherwise costs a network round trip per key.
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
             await manager.LocateAndTryCheckManyWriteIntents(context.TransactionId, probeKeys, cancellationToken);
@@ -2147,17 +2181,23 @@ internal sealed class TransactionCoordinator : IDisposable
             byKey[(key, durability)] = type;
         }
 
-        foreach ((string key, KeyValueDurability durability) in probeKeys)
+        foreach ((string key, KeyValueDurability durability, KeyValueConflictChecks checks) in probeKeys)
         {
-            // A key that was probed but has no answer means the probe did not actually cover the read set. That
-            // is a broken contract rather than a transient outcome, and treating an unanswered key as "no
-            // conflict" would silently disable the write-skew guard, so it aborts like a detected conflict.
+            // Which set the key came from, read off the question that was asked about it rather than off its
+            // position in the list: only the read set asks about write intents.
+            bool isReadKey = checks == KeyValueConflictChecks.WriteIntent;
+
+            // A key that was probed but has no answer means the probe did not actually cover the set. That is a
+            // broken contract rather than a transient outcome, and treating an unanswered key as "no conflict"
+            // would silently disable the guard it was asked about, so it aborts like a detected conflict.
             if (!byKey.TryGetValue((key, durability), out KeyValueResponseType type))
             {
                 context.Result = new()
                 {
                     Type = KeyValueResponseType.Aborted,
-                    Reason = $"Write intent probe returned no result for read key {key}"
+                    Reason = isReadKey
+                        ? $"Write intent probe returned no result for read key {key}"
+                        : $"Range lock probe returned no result for written key {key}"
                 };
 
                 logger.LogWriteSkewGuardAborted(context.TransactionId, key);
@@ -2168,10 +2208,15 @@ internal sealed class TransactionCoordinator : IDisposable
             if (type != KeyValueResponseType.Aborted)
                 continue;
 
+            if (!isReadKey)
+                DurableTransactionMetrics.RangeLockFenceAborts.Add(1);
+
             context.Result = new()
             {
                 Type = KeyValueResponseType.Aborted,
-                Reason = $"Concurrent write intent detected on read key {key}"
+                Reason = isReadKey
+                    ? $"Concurrent write intent detected on read key {key}"
+                    : $"Foreign range lock covers written key {key}"
             };
 
             logger.LogWriteSkewGuardAborted(context.TransactionId, key);

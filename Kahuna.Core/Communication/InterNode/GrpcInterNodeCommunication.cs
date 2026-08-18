@@ -701,7 +701,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntents(
         string node,
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         CancellationToken cancellationToken
     )
     {
@@ -712,11 +712,12 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
 
-        foreach ((string key, KeyValueDurability durability) in keys)
+        foreach (KeyValueConflictProbe probe in keys)
             request.Items.Add(new GrpcTryCheckManyWriteIntentsRequestItem
             {
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability
+                Key = probe.Key,
+                Durability = (GrpcKeyValueDurability)probe.Durability,
+                Checks = (uint)probe.Checks
             });
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);

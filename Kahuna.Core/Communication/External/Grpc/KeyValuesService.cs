@@ -780,10 +780,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     private async Task<GrpcTryCheckManyWriteIntentsResponse> TryCheckManyWriteIntentsCore(GrpcTryCheckManyWriteIntentsRequest request, ServerCallContext context)
     {
-        List<(string key, KeyValueDurability durability)> keys = new(request.Items.Count);
+        List<KeyValueConflictProbe> keys = new(request.Items.Count);
 
         foreach (GrpcTryCheckManyWriteIntentsRequestItem item in request.Items)
-            keys.Add((item.Key, (KeyValueDurability)item.Durability));
+            keys.Add(new(item.Key, (KeyValueDurability)item.Durability, (KeyValueConflictChecks)item.Checks));
 
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
             await keyValues.TryCheckManyWriteIntentValues(

@@ -5,7 +5,13 @@ using Kommander.Time;
 namespace Kahuna.Server.KeyValues.Handlers;
 
 /// <summary>
-/// Commit-time conflict probe for optimistic transactions.
+/// Commit-time conflict probe.
+///
+/// Answers the conflict classes the caller selected in <see cref="KeyValueRequest.ConflictChecks"/>, so one
+/// batched probe can ask different questions of different keys: a transaction's read set asks about concurrent
+/// write intents (the write-skew guard below), while its write set asks whether a foreign range lock covers the
+/// key — the fence that catches a range lock acquired after the write was staged, which the write-time fence in
+/// TrySetHandler/TryDeleteHandler cannot see.
 ///
 /// Checks whether a key carries a live write intent from a transaction other than the caller.
 /// A positive result indicates that a concurrent transaction is preparing or has prepared a
@@ -22,8 +28,11 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// are never blocked by write intents (read-committed semantics), while the commit protocol
 /// can still detect concurrent writers as a best-effort serialization guard.
 ///
-/// Called only during TwoPhaseCommit for optimistic transactions, after ValidateReadSet passes.
-/// Not used by pessimistic transactions (exclusive locks provide full serializability there).
+/// The write-intent check is called during TwoPhaseCommit for optimistic transactions only, after
+/// ValidateReadSet passes; pessimistic transactions do not need it (exclusive locks provide full
+/// serializability there). The range-lock check applies to every transaction's write set regardless of
+/// locking mode, because a range lock acquired mid-transaction steps around a key lock just as it does an
+/// optimistic write intent.
 /// </summary>
 internal sealed class TryCheckWriteIntentHandler : BaseHandler
 {
@@ -34,6 +43,17 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
     public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        // Foreign range lock covering the key — the write set's decide-time fence. Answered before (and without)
+        // the entry load: the bounds check needs only the key's bucket, which is derived from the key itself. An
+        // entry-derived bucket would answer "no lock" for a phantom insert or a key that is not resident, exactly
+        // the cases a range lock exists to cover.
+        if ((message.ConflictChecks & KeyValueConflictChecks.ForeignRangeLock) != 0
+            && RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, GetBucket(message.Key), message.TransactionId, currentTime))
+            return KeyValueStaticResponses.AbortedResponse;
+
+        if ((message.ConflictChecks & KeyValueConflictChecks.WriteIntent) == 0)
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 

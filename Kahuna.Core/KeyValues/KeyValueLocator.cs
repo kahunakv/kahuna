@@ -839,7 +839,7 @@ internal sealed class KeyValueLocator
     /// </summary>
     public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         CancellationToken cancellationToken
     )
     {
@@ -850,27 +850,27 @@ internal sealed class KeyValueLocator
             return BuildManyWriteIntentRejection(keys, KeyValueResponseType.MustRetry);
 
         string localNode = raft.GetLocalEndpoint();
-        Dictionary<string, List<(string key, KeyValueDurability durability)>> probePlan = [];
+        Dictionary<string, List<KeyValueConflictProbe>> probePlan = [];
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(keys.Count);
 
         Dictionary<int, string> leaderByPartition = [];
-        
-        foreach ((string key, KeyValueDurability durability) item in keys)
+
+        foreach (KeyValueConflictProbe item in keys)
         {
             // A malformed key is reported against that key alone; the rest of the set is still probed, so one
             // bad entry cannot quietly cancel the write-skew guard for every other read dependency.
-            if (string.IsNullOrEmpty(item.key))
+            if (string.IsNullOrEmpty(item.Key))
             {
-                responses.Add((KeyValueResponseType.InvalidInput, item.key, item.durability));
+                responses.Add((KeyValueResponseType.InvalidInput, item.Key, item.Durability));
                 continue;
             }
 
-            int partitionId = RouteKey(item.key);
+            int partitionId = RouteKey(item.Key);
             string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return BuildManyWriteIntentRejection(keys, KeyValueResponseType.MustRetry);
 
-            if (probePlan.TryGetValue(leader, out List<(string key, KeyValueDurability durability)>? list))
+            if (probePlan.TryGetValue(leader, out List<KeyValueConflictProbe>? list))
                 list.Add(item);
             else
                 probePlan[leader] = [item];
@@ -879,7 +879,7 @@ internal sealed class KeyValueLocator
         Lock lockSync = new();
         List<Task> tasks = new(probePlan.Count);
 
-        foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in probePlan)
+        foreach ((string leader, List<KeyValueConflictProbe> xkeys) in probePlan)
             tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
@@ -892,7 +892,7 @@ internal sealed class KeyValueLocator
         string leader,
         string localNode,
         Dictionary<int, string> leaderByPartition,
-        List<(string key, KeyValueDurability durability)> xkeys,
+        List<KeyValueConflictProbe> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
         CancellationToken cancellationToken
@@ -921,14 +921,14 @@ internal sealed class KeyValueLocator
     /// leader. Callers correlate results by key, so a rejection has to name every key it covers.
     /// </summary>
     private static List<(KeyValueResponseType type, string key, KeyValueDurability durability)> BuildManyWriteIntentRejection(
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         KeyValueResponseType type
     )
     {
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> rejected = new(keys.Count);
 
-        foreach ((string key, KeyValueDurability durability) in keys)
-            rejected.Add((type, key, durability));
+        foreach (KeyValueConflictProbe probe in keys)
+            rejected.Add((type, probe.Key, probe.Durability));
 
         return rejected;
     }

@@ -2390,7 +2390,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         CancellationToken cancellationToken
     )
     {
@@ -4578,7 +4578,7 @@ internal sealed class KeyValuesManager : IDisposable
     /// </summary>
     public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys
+        List<KeyValueConflictProbe> keys
     )
     {
         Task<(KeyValueResponseType, string, KeyValueDurability)>[] tasks = new Task<(KeyValueResponseType, string, KeyValueDurability)>[keys.Count];
@@ -4588,23 +4588,25 @@ internal sealed class KeyValuesManager : IDisposable
 
         return [.. await Task.WhenAll(tasks)];
 
-        async Task<(KeyValueResponseType, string, KeyValueDurability)> CheckWriteIntent((string key, KeyValueDurability durability) item)
+        async Task<(KeyValueResponseType, string, KeyValueDurability)> CheckWriteIntent(KeyValueConflictProbe item)
         {
-            KeyValueResponseType type = await TryCheckWriteIntentValue(transactionId, item.key, item.durability);
+            KeyValueResponseType type = await TryCheckWriteIntentValue(transactionId, item.Key, item.Durability, item.Checks);
 
-            return (type, item.key, item.durability);
+            return (type, item.Key, item.Durability);
         }
     }
 
     /// <summary>
-    /// Checks whether the given key has a live write intent from a transaction other than the caller.
-    /// Used at commit time by optimistic transactions to detect concurrent writers (write-skew guard).
-    /// Returns Aborted when a conflicting write intent is found; DoesNotExist otherwise.
+    /// Checks the given key for the conflict classes named in <paramref name="checks"/>: a live write intent
+    /// from another transaction (the write-skew guard optimistic transactions apply to their read set) and/or a
+    /// foreign range lock covering the key (the decide-time fence applied to a write set).
+    /// Returns Aborted when a conflict is found; DoesNotExist otherwise.
     /// </summary>
     public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
         HLCTimestamp transactionId,
         string key,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -4624,11 +4626,15 @@ internal sealed class KeyValuesManager : IDisposable
             null
         );
 
+        request.ConflictChecks = checks;
+
         try
         {
             // Resolve a remote-anchor concurrent writer's decision off the mailbox first, so a committed/aborted
             // intent whose record lives on another node is not mis-flagged as a live undecided conflict here.
-            await TryRouteForeignDecision(request, key, transactionId, durability, alreadyAttempted: false);
+            // Only the write-intent check consults foreign intents; a range-lock-only probe needs no lookup.
+            if ((checks & KeyValueConflictChecks.WriteIntent) != 0)
+                await TryRouteForeignDecision(request, key, transactionId, durability, alreadyAttempted: false);
 
             KeyValueResponse? response = durability == KeyValueDurability.Ephemeral
                 ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)

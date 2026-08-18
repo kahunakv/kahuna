@@ -363,6 +363,17 @@ public sealed partial class KahunaManager
             Reason = "Refused by policy: one of the two halves holds no keys. The map is untouched."
         },
 
+        // Nothing was attempted, so the answer is final for routing — but it says nothing about the
+        // range itself, only that this attempt could not read it. Retrying is the whole remedy.
+        SplitStatus.ProbeIndeterminate => new()
+        {
+            Status = nameof(SplitStatus.ProbeIndeterminate),
+            Determinate = true,
+            Reason = "Could not determine whether both halves hold keys — a scan of the range could not be "
+                   + "served (an in-flight transactional write, a leadership change, a restoring partition). "
+                   + "The map is untouched; retry."
+        },
+
         // The map is untouched, so the answer is final as far as routing is concerned — but the
         // destination partition may exist and now be unreferenced, which is not a clean rollback and
         // should not be described as one.

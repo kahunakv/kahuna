@@ -391,6 +391,10 @@ message GrpcTryCheckManyWriteIntentsRequest {
 message GrpcTryCheckManyWriteIntentsRequestItem {
   string Key = 1;
   GrpcKeyValueDurability Durability = 2;
+  // KeyValueConflictChecks bit set: which conflict classes to answer for this key
+  // (1 = concurrent write intent, 2 = foreign range lock). Selected per key because one probe
+  // carries a transaction's read set and its write set, which ask different questions.
+  uint32 Checks = 3;
 }
 
 message GrpcTryCheckManyWriteIntentsResponse {

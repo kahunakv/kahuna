@@ -40,6 +40,17 @@ internal static class DurableTransactionMetrics
             description: "Durable commits rejected because the attempt passed the frozen decision deadline.");
 
     /// <summary>
+    /// Transactions aborted at the commit barrier because a foreign range lock covered a key they had written —
+    /// a range lock acquired after the write was staged, which the write-time fence cannot see. Each occurrence
+    /// is a prevented phantom write. A sustained rate means real contention between writers and range-locking
+    /// readers (or a long-running range split, whose quiesce window is a range lock), not a defect.
+    /// </summary>
+    internal static readonly Counter<long> RangeLockFenceAborts =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.range_lock_fence_aborts",
+            description: "Transactions aborted because a foreign range lock covered one of their written keys.");
+
+    /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying
     /// [record init + anchor prepare + commit decision], taken when the participant set collapses to the
     /// locally-led anchor partition, no foreign durable intent holds any written key, and read-set

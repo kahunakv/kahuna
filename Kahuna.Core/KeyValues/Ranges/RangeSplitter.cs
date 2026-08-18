@@ -164,13 +164,24 @@ internal sealed class RangeSplitter
 
         HLCTimestamp probeTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        bool leftHasKeys = await HalfHasKeysAsync(keySpace, descriptor.StartKey, splitKey, probeTs, placedSource, ct);
-        bool rightHasKeys = await HalfHasKeysAsync(keySpace, splitKey, descriptor.EndKey, probeTs, placedSource, ct);
+        HalfProbe leftProbe = await ProbeHalfAsync(keySpace, descriptor.StartKey, splitKey, probeTs, placedSource, ct);
+        HalfProbe rightProbe = await ProbeHalfAsync(keySpace, splitKey, descriptor.EndKey, probeTs, placedSource, ct);
 
-        if (!leftHasKeys || !rightHasKeys)
+        // A probe that could not be answered is not evidence of an empty half. Report it as its own
+        // retryable outcome so the next cadence (or the operator) tries again, instead of telling the
+        // caller this range is too small to split — a permanent-sounding property of the data.
+        if (leftProbe == HalfProbe.Indeterminate || rightProbe == HalfProbe.Indeterminate)
         {
             logger.LogWarning(
-                "RangeSplitter: refusing split — left has keys: {L}, right has keys: {R}", leftHasKeys, rightHasKeys);
+                "RangeSplitter: split probe indeterminate — left: {L}, right: {R}; retrying later", leftProbe, rightProbe);
+            return SplitOutcome.ProbeIndeterminate;
+        }
+
+        if (leftProbe == HalfProbe.Empty || rightProbe == HalfProbe.Empty)
+        {
+            logger.LogWarning(
+                "RangeSplitter: refusing split — left has keys: {L}, right has keys: {R}",
+                leftProbe == HalfProbe.HasKeys, rightProbe == HalfProbe.HasKeys);
             return SplitOutcome.BelowMinRangeSize;
         }
 
@@ -421,7 +432,7 @@ internal sealed class RangeSplitter
     /// retryable answer counts as empty, which safely refuses the split for this round — the
     /// trigger retries on its next tick.
     /// </summary>
-    private async Task<bool> HalfHasKeysAsync(
+    private async Task<HalfProbe> ProbeHalfAsync(
         string keySpace, string? startKey, string? endKey, HLCTimestamp ts, bool routeThroughLeader, CancellationToken ct)
     {
         KeyValueGetByRangeResult result = routeThroughLeader
@@ -432,7 +443,16 @@ internal sealed class RangeSplitter
                 HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
                 KeyValueDurability.Persistent).ConfigureAwait(false);
 
-        return result.Items.Count > 0;
+        if (result.Items.Count > 0)
+            return HalfProbe.HasKeys;
+
+        // An empty answer only means "no keys" when the scan actually ran: a successful page is Get with
+        // zero items. Every other type is a scan that could not be served — a live foreign write intent in
+        // the window makes the whole page retryable, and so do a leadership change or a partition still
+        // restoring. Reading those as "this half is empty" refuses the split for a structural reason that
+        // is not true, and the halves most likely to carry an in-flight write are the busy ones this exists
+        // to split.
+        return result.Type == KeyValueResponseType.Get ? HalfProbe.Empty : HalfProbe.Indeterminate;
     }
 
     private static bool ValidateSplitKey(RangeDescriptor descriptor, string splitKey, out string? error)
@@ -486,6 +506,17 @@ internal sealed class RangeSplitter
     }
 }
 
+/// <summary>
+/// Whether one half of a range being split holds any key. <see cref="Indeterminate"/> is the answer a
+/// scan gives when it could not be served at all, which must not be confused with an empty half.
+/// </summary>
+internal enum HalfProbe
+{
+    HasKeys,
+    Empty,
+    Indeterminate
+}
+
 /// <summary>Terminal status for a <see cref="RangeSplitter.SplitAsync"/> call.</summary>
 internal enum SplitStatus
 {
@@ -493,6 +524,7 @@ internal enum SplitStatus
     NoRange,
     InvalidSplitKey,
     BelowMinRangeSize,
+    ProbeIndeterminate,
     PartitionCreationFailed,
     TransferFailed,
     QuiesceFailed,
@@ -519,6 +551,7 @@ internal readonly struct SplitOutcome
     public static SplitOutcome NoRange => new(SplitStatus.NoRange);
     public static SplitOutcome InvalidSplitKey => new(SplitStatus.InvalidSplitKey);
     public static SplitOutcome BelowMinRangeSize => new(SplitStatus.BelowMinRangeSize);
+    public static SplitOutcome ProbeIndeterminate => new(SplitStatus.ProbeIndeterminate);
     public static SplitOutcome PartitionCreationFailed => new(SplitStatus.PartitionCreationFailed);
     public static SplitOutcome TransferFailed => new(SplitStatus.TransferFailed);
     public static SplitOutcome QuiesceFailed => new(SplitStatus.QuiesceFailed);

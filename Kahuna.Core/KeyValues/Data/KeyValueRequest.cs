@@ -64,6 +64,14 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <summary>Mode for range-lock acquire requests (Exclusive = 0 default, Shared = 1).</summary>
     public RangeLockMode RangeLockMode { get; internal set; }
 
+    /// <summary>
+    /// Which conflict classes a <c>TryCheckWriteIntent</c> probe must answer for this key. Set explicitly by
+    /// every probe caller (the read set asks for concurrent write intents, the write set for foreign range
+    /// locks), so the pooled default of <see cref="KeyValueConflictChecks.None"/> is never what a probe runs on.
+    /// Unused by every other request type.
+    /// </summary>
+    public KeyValueConflictChecks ConflictChecks { get; internal set; }
+
     /// <summary>Lock entries to inject into LocksByRange for ImportRangeLocks requests.</summary>
     public List<KeyValueRangeLock>? RangeLockImportList { get; internal set; }
 
@@ -272,6 +280,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         StartInclusive = false;
         EndInclusive = false;
         RangeLockMode = RangeLockMode.Exclusive;
+        ConflictChecks = KeyValueConflictChecks.None;
         RangeLockImportList = null;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;

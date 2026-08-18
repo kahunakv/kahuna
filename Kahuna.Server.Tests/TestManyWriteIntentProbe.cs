@@ -79,12 +79,12 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
         PreparedIntentStore store = ((KahunaManager)node.Kahuna).DurablePreparedIntentStore;
         store.Apply(new PrepareIntentCommand(UndecidedIntent("probe/many/conflicted")));
 
-        List<(string key, KeyValueDurability durability)> keys =
+        List<KeyValueConflictProbe> keys =
         [
-            ("probe/many/clean-a", KeyValueDurability.Persistent),
-            ("probe/many/conflicted", KeyValueDurability.Persistent),
-            ("probe/many/clean-b", KeyValueDurability.Persistent),
-            ("probe/many/clean-c", KeyValueDurability.Persistent)
+            new("probe/many/clean-a", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+            new("probe/many/conflicted", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+            new("probe/many/clean-b", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+            new("probe/many/clean-c", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent)
         ];
 
         HLCTimestamp otherTransaction = new(0, 500, 0);
@@ -118,11 +118,11 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
         PreparedIntentStore store = ((KahunaManager)node.Kahuna).DurablePreparedIntentStore;
         store.Apply(new PrepareIntentCommand(UndecidedIntent("probe/malformed/conflicted")));
 
-        List<(string key, KeyValueDurability durability)> keys =
+        List<KeyValueConflictProbe> keys =
         [
-            ("", KeyValueDurability.Persistent),
-            ("probe/malformed/conflicted", KeyValueDurability.Persistent),
-            ("probe/malformed/clean", KeyValueDurability.Persistent)
+            new("", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+            new("probe/malformed/conflicted", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+            new("probe/malformed/clean", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent)
         ];
 
         Dictionary<string, KeyValueResponseType> byKey =
@@ -163,14 +163,14 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
         {
             const int keyCount = 60;
             string prefix = "probe/cluster/" + Guid.NewGuid().ToString("N")[..8];
-            List<(string key, KeyValueDurability durability)> keys = new(keyCount);
+            List<KeyValueConflictProbe> keys = new(keyCount);
 
             // Partition routing hashes the key-space prefix (everything before the last '/'), so keys
             // sharing one prefix would all land on a single partition and the "spread beyond the local
             // node" premise below would hinge on which node happens to lead that one partition. Give
             // every key its own key space so the set genuinely hashes across all partitions.
             for (int i = 0; i < keyCount; i++)
-                keys.Add(($"{prefix}/{i}/v", KeyValueDurability.Persistent));
+                keys.Add(new($"{prefix}/{i}/v", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent));
 
             HLCTimestamp probeTransaction = new(0, 500, 0);
 
@@ -185,8 +185,8 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
             await caller.LocateAndTryCheckManyWriteIntents(probeTransaction, keys, ct);
 
             int perKeyBefore = transport.CheckWriteIntentCallCount;
-            foreach ((string key, KeyValueDurability durability) in keys)
-                await caller.LocateAndTryCheckWriteIntent(probeTransaction, key, durability, ct);
+            foreach (KeyValueConflictProbe probe in keys)
+                await caller.LocateAndTryCheckWriteIntent(probeTransaction, probe.Key, probe.Durability, ct);
             int perKeyRemoteCalls = transport.CheckWriteIntentCallCount - perKeyBefore;
 
             int groupedBefore = transport.CheckManyWriteIntentsCallCount;
@@ -243,11 +243,11 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
             foreach (IKahuna node in new[] { kahuna1, kahuna2, kahuna3 })
                 ((KahunaManager)node).DurablePreparedIntentStore.Apply(new PrepareIntentCommand(UndecidedIntent(conflicted)));
 
-            List<(string key, KeyValueDurability durability)> keys =
+            List<KeyValueConflictProbe> keys =
             [
-                ($"{prefix}/clean-a", KeyValueDurability.Persistent),
-                (conflicted, KeyValueDurability.Persistent),
-                ($"{prefix}/clean-b", KeyValueDurability.Persistent)
+                new($"{prefix}/clean-a", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+                new(conflicted, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+                new($"{prefix}/clean-b", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent)
             ];
 
             Dictionary<string, KeyValueResponseType> byKey =
@@ -400,7 +400,7 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
     private static async Task<Dictionary<string, KeyValueResponseType>> ProbeByKey(
         IKahuna kahuna,
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         CancellationToken cancellationToken)
     {
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =

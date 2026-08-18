@@ -195,7 +195,7 @@ public sealed class TestWriteSkewUnderKeyRangeRouting
         TransactionHandle other = await StartSession(node, $"{KeySpace}-tx/prober-{rangeRouted}-{readBeforeWrite}", ct);
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> manyProbe =
             await node.Kahuna.LocateAndTryCheckManyWriteIntents(
-                other.TransactionId, [(key, KeyValueDurability.Persistent)], ct);
+                other.TransactionId, [new(key, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent)], ct);
 
         Assert.Single(manyProbe);
         Assert.Equal(KeyValueResponseType.Aborted, manyProbe[0].type);

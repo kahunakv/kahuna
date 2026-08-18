@@ -2,6 +2,7 @@
 using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Data;
@@ -480,6 +481,80 @@ public sealed class TestRangeMerge : BaseCluster
                 Assert.Null(descriptors[0].StartKey);
                 Assert.Null(descriptors[0].EndKey);
             }
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
+    // ── FindMergeCandidates_IncompleteCount ──────────────────────────────────
+
+    /// <summary>
+    /// A range whose key count could not be finished must not be proposed for merging. The count pages
+    /// through range reads, and a page whose window holds a live uncommitted write is refused — ending
+    /// the walk early with a partial total. That total is systematically *low*, so treating it as the
+    /// range's size makes a busy range look under-min and merges it. Unlike the split case, which merely
+    /// declines to act, this one acts wrongly: a merge moves data.
+    ///
+    /// <para>Both ranges here are otherwise empty, so they would both qualify without the in-flight write —
+    /// which is what makes the assertion meaningful rather than vacuous.</para>
+    /// </summary>
+    [Fact]
+    public async Task FindMergeCandidates_RangeWithInFlightWrite_IsNotACandidate()
+    {
+        const string spaceInflight = "t:minf";
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 5, raftLogger, kahunaLogger);
+
+        (IRaft, KahunaManager)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(spaceInflight);
+
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            const string boundary = spaceInflight + "/k010";
+            RangeDescriptor dA = new() { KeySpace = spaceInflight, StartKey = null, EndKey = boundary, PartitionId = 2, Generation = 1 };
+            RangeDescriptor dB = new() { KeySpace = spaceInflight, StartKey = boundary, EndKey = null, PartitionId = 3, Generation = 1 };
+
+            Assert.True(await metaLeader.RangeMapStore.MutateAsync(_ => [dA, dB], ct));
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(spaceInflight).Count == 2);
+
+            // Both ranges are empty, so both qualify as under-min right now.
+            List<(RangeDescriptor Left, RangeDescriptor Right)> before =
+                await metaLeader.RangeMerger.FindMergeCandidatesAsync(spaceInflight, minMergeSize: 10, ct);
+            Assert.Single(before);
+
+            (KeyValueResponseType startType, TransactionHandle writer) = await metaLeader.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = "t:minf-tx/in-flight",
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    ReadValidation = ReadValidation.TrackAndValidate,
+                    DecisionDurability = DecisionDurability.Durable,
+                    Timeout = 30_000
+                }, ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            // Staged into the lower range, never committed.
+            (KeyValueResponseType writeType, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+                writer.TransactionId, spaceInflight + "/k005", Encoding.UTF8.GetBytes("staged"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct,
+                coordinatorKey: writer.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            List<(RangeDescriptor Left, RangeDescriptor Right)> after =
+                await metaLeader.RangeMerger.FindMergeCandidatesAsync(spaceInflight, minMergeSize: 10, ct);
+
+            Assert.Empty(after);
         }
         finally
         {

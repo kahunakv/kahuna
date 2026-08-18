@@ -1,6 +1,7 @@
 using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Data;
@@ -262,25 +263,81 @@ public sealed class TestRangeSplit : BaseCluster
             (int _, long freshGen) = dataLeader.LocateRange(Space + "/p");
             Assert.Equal(outcome.NewGeneration, freshGen);
 
-            // The split moved the right half onto a partition that never existed before, so its Raft
-            // group is newly elected and can still answer MustRetry for a moment — the retryable
-            // outcome, not a fence rejection. Retry until it commits; a genuine fence failure would
-            // keep failing and time out here.
-            KeyValueResponseType retried = KeyValueResponseType.MustRetry;
+            // The split moved the right half onto a partition that never existed before, so its
+            // Raft group must bootstrap and elect before it can commit — until then the write path
+            // answers MustRetry (the retryable outcome, not a fence rejection). On loaded CI
+            // runners that settling window can stretch well past a couple of seconds, so retry
+            // against the scaled deadline, re-resolving the leader and live generation each
+            // attempt; a genuine fence failure keeps answering MustRetry and still fails below.
+            (KeyValueResponseType retried, _, _) = await RetryOnMustRetryAsync(
+                async () =>
+                {
+                    (IRaft _, KahunaManager newLeader) = await LeaderOf(outcome.NewPartitionId, nodes);
+                    (int _, long currentGen) = newLeader.LocateRange(Space + "/p");
 
-            for (int attempt = 0; attempt < 20 && retried == KeyValueResponseType.MustRetry; attempt++)
-            {
-                (IRaft _, KahunaManager newLeader) = await LeaderOf(outcome.NewPartitionId, nodes);
-                (int _, long currentGen) = newLeader.LocateRange(Space + "/p");
-
-                (retried, _, _) = await newLeader.TrySetKeyValueRanged(
-                    HLCTimestamp.Zero, Space + "/p", V("fresh"), currentGen);
-
-                if (retried == KeyValueResponseType.MustRetry)
-                    await Task.Delay(100, TestContext.Current.CancellationToken);
-            }
+                    return await newLeader.TrySetKeyValueRanged(
+                        HLCTimestamp.Zero, Space + "/p", V("fresh"), currentGen);
+                },
+                r => r.Item1);
 
             Assert.Equal(KeyValueResponseType.Set, retried);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── Split_ProbeIndeterminate ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// A half that cannot be read is not an empty half. The non-empty check is a limit-1 scan, and a scan
+    /// whose window holds a live uncommitted write refuses the whole page — so reading "no items" as "no
+    /// keys" would decline the split with <see cref="SplitStatus.BelowMinRangeSize"/>, a permanent-sounding
+    /// property of data that is neither empty nor small. The ranges most likely to carry an in-flight write
+    /// are the busy ones a split exists to relieve, so this is the common case, not a corner.
+    ///
+    /// <para>The transaction here stages its write and never commits, which is exactly the state a
+    /// transaction is in for the duration of its own commit path.</para>
+    /// </summary>
+    [Fact]
+    public async Task Split_WithInFlightWriteInAHalf_IsProbeIndeterminate()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Both halves hold a committed key, so the only thing that can make one look empty is the probe.
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, KahunaManager _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+        try
+        {
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            (KeyValueResponseType startType, TransactionHandle writer) = await metaLeader.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = "t:s-tx/in-flight",
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    ReadValidation = ReadValidation.TrackAndValidate,
+                    DecisionDurability = DecisionDurability.Durable,
+                    Timeout = 30_000
+                }, ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            // Staged, never committed: the intent stays live in the upper half for the rest of the test.
+            (KeyValueResponseType writeType, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+                writer.TransactionId, Space + "/zz-inflight", V("staged"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct,
+                coordinatorKey: writer.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(
+                Space, Space + "/m", RangeMapStore.FirstDataPartitionId + 10, ct);
+
+            Assert.Equal(SplitStatus.ProbeIndeterminate, outcome.Status);
+
+            // Nothing was attempted, so the map is untouched — the caller can simply try again.
+            Assert.True(dataLeader.RangeMapStore.Current.IsValid);
+            Assert.Equal(1, dataLeader.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space));
         }
         finally
         {
@@ -782,20 +839,14 @@ public sealed class TestRangeSplit : BaseCluster
             Assert.Equal(KeyValueResponseType.MustRetry, duringQuiesceResult);
 
             // After the split the quiesce is released — the same write now succeeds. The key sits in
-            // the moved half, whose partition was created by this split, so the first attempts can
-            // still be answered MustRetry while that Raft group elects; retry until it commits
-            // rather than asserting on the settling window.
-            KeyValueResponseType afterRt = KeyValueResponseType.MustRetry;
-
-            for (int attempt = 0; attempt < 20 && afterRt == KeyValueResponseType.MustRetry; attempt++)
-            {
-                (afterRt, _, _) = await metaLeader.LocateAndTrySetKeyValue(
+            // the moved half, whose partition was created by this split, so attempts are answered
+            // MustRetry while that brand-new Raft group bootstraps and elects; retry against the
+            // scaled deadline rather than asserting on the settling window.
+            (KeyValueResponseType afterRt, _, _) = await RetryOnMustRetryAsync(
+                () => metaLeader.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, key, V(val),
-                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
-
-                if (afterRt == KeyValueResponseType.MustRetry)
-                    await Task.Delay(100, ct);
-            }
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct),
+                r => r.Item1);
 
             Assert.Equal(KeyValueResponseType.Set, afterRt);
         }

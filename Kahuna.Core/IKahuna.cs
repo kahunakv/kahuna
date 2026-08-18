@@ -44,7 +44,7 @@ public interface IKahuna
 
     /// <summary>Probes many keys for concurrent write intents in one pass, grouped by owning node. Returns one
     /// result per requested key, unordered — callers correlate by key and durability.</summary>
-    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancellationToken);
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(HLCTimestamp transactionId, List<KeyValueConflictProbe> keys, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
@@ -117,10 +117,11 @@ public interface IKahuna
     /// confirmed (the caller re-routes), never "no state".</summary>
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken);
 
-    public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability);
+    public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent);
 
-    /// <summary>Probes many locally owned keys for concurrent write intents, one result per requested key.</summary>
-    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys);
+    /// <summary>Probes many locally owned keys for the conflict classes each one asks for, one result per
+    /// requested key.</summary>
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(HLCTimestamp transactionId, List<KeyValueConflictProbe> keys);
 
     public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 

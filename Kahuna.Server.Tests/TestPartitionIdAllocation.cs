@@ -228,13 +228,16 @@ public sealed class TestPartitionIdAllocation : BaseCluster
 
             await MergeBackAsync(nodes, space, retiredId, ct);
 
+            // Re-drive the trigger until the split fires, against the scaled deadline: right after
+            // the merge the trigger can transiently decline (leadership settling, map propagation),
+            // and on loaded CI runners that window outlives a fixed short retry budget.
             int splits = 0;
-            for (int attempt = 0; attempt < 20 && splits == 0; attempt++)
+            await WaitUntilAsync(async () =>
             {
                 (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
                 splits = await metaLeader.TriggerAutoSplitAsync(threshold: 4, minRangeSize: 2, ct);
-                if (splits == 0) await Task.Delay(100, ct);
-            }
+                return splits != 0;
+            });
 
             Assert.Equal(1, splits);
 

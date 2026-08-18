@@ -134,7 +134,7 @@ public sealed partial class KahunaManager
 
     public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys,
+        List<KeyValueConflictProbe> keys,
         CancellationToken cancellationToken
     )
     {
@@ -448,15 +448,16 @@ public sealed partial class KahunaManager
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(
         HLCTimestamp transactionId,
         string key,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent
     )
     {
-        return keyValues.TryCheckWriteIntentValue(transactionId, key, durability);
+        return keyValues.TryCheckWriteIntentValue(transactionId, key, durability, checks);
     }
 
     public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(
         HLCTimestamp transactionId,
-        List<(string key, KeyValueDurability durability)> keys
+        List<KeyValueConflictProbe> keys
     )
     {
         return keyValues.TryCheckManyWriteIntentValues(transactionId, keys);
