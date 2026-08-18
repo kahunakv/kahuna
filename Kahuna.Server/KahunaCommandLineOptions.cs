@@ -454,6 +454,9 @@ public sealed class KahunaCommandLineOptions
     [Option("dirty-objects-writer-delay", Required = false, HelpText = "Specifies how often the dirty object writer flushes ti disk (in milliseconds)", Default = 200)]
     public int DirtyObjectsWriterDelay { get; set; } = 200;
 
+    [Option("checkpoint-interval", Required = false, HelpText = "Period in seconds at which a dirty partition checkpoints, advancing its WAL retention floor so the Raft log can compact. Higher means fewer checkpoints and a larger WAL; lower means more snapshot rewrites. Default 30.", Default = 30)]
+    public int CheckpointIntervalSeconds { get; set; } = 30;
+
     [Option("persistent-revision-retention-count", Required = false, HelpText = "Maximum persisted key/value revisions to keep per key (0 = keep forever)", Default = 0)]
     public int PersistentRevisionRetentionCount { get; set; }
 

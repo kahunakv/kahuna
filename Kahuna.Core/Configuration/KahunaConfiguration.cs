@@ -550,9 +550,12 @@ public sealed class KahunaConfiguration
     public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
-    /// Minimum age a dirty partition must reach before the background writer advances its WAL retention floor
-    /// with a checkpoint. The receipt and decision snapshots that gate that checkpoint are written on the same
-    /// cadence, so a committed receipt/decision stays replayable in the WAL until this interval elapses.
+    /// How long a partition stays dirty before the background writer advances its WAL retention floor with a
+    /// checkpoint. Measured from the moment the partition first went dirty after its previous checkpoint, so
+    /// this is the period at which a continuously-written partition checkpoints — and therefore the period at
+    /// which its Raft WAL becomes compactable. The receipt and decision snapshots that gate that checkpoint are
+    /// written on the same cadence, so a committed receipt/decision stays replayable in the WAL until this
+    /// interval elapses. Longer means fewer checkpoints and a larger WAL; shorter means more snapshot rewrites.
     /// </summary>
     public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(30);
 

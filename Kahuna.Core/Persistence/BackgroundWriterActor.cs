@@ -108,9 +108,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private readonly ConcurrentDictionary<int, HLCTimestamp> maxEnqueuedHlc = new();
     
     /// <summary>
-    /// Partition IDs that are being tracked for checkpointing.
+    /// Partitions awaiting a checkpoint, mapped to the moment each one first went dirty after its
+    /// last checkpoint. The stamp is written once per checkpoint cycle and deliberately NOT moved
+    /// forward by later writes: the checkpoint gate measures the interval from this stamp, so
+    /// refreshing it on every write would turn <see cref="KahunaConfiguration.CheckpointInterval"/>
+    /// into "this partition has been quiet for that long" — a condition a continuously-written
+    /// partition never meets, leaving its WAL uncompactable forever. The entry is removed when the
+    /// partition checkpoints, so the next write starts a fresh interval.
     /// </summary>
-    private readonly Dictionary<int, DateTime> partitionIds = [];
+    private readonly Dictionary<int, DateTime> partitionDirtySince = [];
     
     private readonly Stopwatch stopwatch = Stopwatch.StartNew();
     
@@ -285,10 +291,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 break;
             
             case BackgroundWriteType.Flush:
-                await CheckpointPartitions();
+                // The checkpoint runs LAST, after the flush it depends on: it advances the WAL
+                // retention floor, so it must only ever see state whose data has already landed in
+                // the backend. Running it first made it self-defeating — under sustained load a tick
+                // practically always begins with something queued, so the checkpoint bailed out on
+                // its own dirty-queue guard and the flush that would have cleared that guard ran
+                // immediately afterwards, one instant too late. A busy partition then never
+                // checkpointed and its Raft WAL never compacted.
                 await FlushLocks();
                 await FlushKeyValues();
                 await AdvanceDurabilityFloors(forceSnapshotCapture: false);
+                await CheckpointPartitions();
                 await RunTargetedRevisionCleanup();
                 await RunFullRevisionSweep();
                 UpdatePitrHorizon();
@@ -357,7 +370,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         HashSet<int>? toForget = null;
 
-        foreach (int partitionId in partitionIds.Keys)
+        foreach (int partitionId in partitionDirtySince.Keys)
             if (!raft.HostsPartition(partitionId))
                 (toForget ??= []).Add(partitionId);
 
@@ -381,7 +394,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         foreach (int partitionId in toForget)
         {
-            partitionIds.Remove(partitionId);
+            partitionDirtySince.Remove(partitionId);
             maxEnqueuedHlc.TryRemove(partitionId, out _);
             lastPersistedFloors.Remove(partitionId);
             durabilityTracker?.Forget(partitionId);
@@ -389,7 +402,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             logger.LogDroppedUnhostedPartitionBookkeeping(partitionId);
         }
 
-        if (partitionIds.Count == 0)
+        if (partitionDirtySince.Count == 0)
             pendingCheckpoint = false;
     }
 
@@ -399,70 +412,139 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// Test/observability only.
     /// </summary>
     internal bool HasPartitionBookkeeping(int partitionId) =>
-        partitionIds.ContainsKey(partitionId)
+        partitionDirtySince.ContainsKey(partitionId)
         || maxEnqueuedHlc.ContainsKey(partitionId)
         || lastPersistedFloors.ContainsKey(partitionId);
 
     /// <summary>
-    /// Performs a checkpoint operation on partitions to ensure their state is up-to-date and synchronized.
-    /// This method checks if any pending checkpoints can be completed by iterating over tracked partitions.
-    /// Partitions that have exceeded the allowed checkpoint interval are processed, ensuring they are in a consistent state.
-    /// If the actor is no longer the leader for a partition, the partition is removed from tracking.
-    /// Successfully checked partitions are updated, and the checkpoint status is cleared when no partitions remain.
+    /// Checkpoints the partitions whose checkpoint interval has elapsed since they went dirty, which
+    /// is what lets Kommander compact their WAL: compaction is anchored on the last checkpoint, so a
+    /// partition that never checkpoints keeps every log entry it ever wrote.
+    /// <para>
+    /// Runs at the end of the flush tick, never at its start, and skips a partition whose own writes
+    /// are still queued or still being retried: a checkpoint advances the WAL retention floor, and
+    /// entries whose data has not reached the backend must stay replayable. The gate is per-partition
+    /// so one busy (or stuck) partition cannot hold every other partition's WAL open — the coarse
+    /// "anything dirty at all" form of this check is what made checkpoints depend on catching the
+    /// whole node idle.
+    /// </para>
+    /// If this node is no longer the leader for a partition, the partition is dropped from tracking;
+    /// the leader that owns it checkpoints it instead.
     /// </summary>
     /// <returns>A value task representing the asynchronous checkpoint operation.</returns>
     private async ValueTask CheckpointPartitions()
     {
-        if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
-            return;
-
         if (!pendingCheckpoint)
             return;
-
-        HashSet<int> partitionsToRemove = [];
 
         DateTime currentTime = DateTime.UtcNow;
         TimeSpan maxTime = configuration.CheckpointInterval;
 
-        foreach (KeyValuePair<int, DateTime> kv in partitionIds)
+        List<int>? duePartitions = null;
+
+        foreach ((int partitionId, DateTime dirtySince) in partitionDirtySince)
         {
-            if ((currentTime - kv.Value) < maxTime)
+            if ((currentTime - dirtySince) >= maxTime)
+                (duePartitions ??= []).Add(partitionId);
+        }
+
+        if (duePartitions is null)
+            return;
+
+        // Only computed when a partition is actually due — once per checkpoint interval per
+        // partition — so scanning the queues never runs on the per-tick path.
+        HashSet<int> unflushed = CollectPartitionsWithUnflushedWrites(duePartitions);
+
+        HashSet<int> partitionsToRemove = [];
+
+        foreach (int partitionId in duePartitions)
+        {
+            if (unflushed.Contains(partitionId))
                 continue;
 
-            if (!await raft.AmILeaderIfHosted(kv.Key, CancellationToken.None))
+            if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             {
-                //logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", kv.Key);
+                //logger.LogWarning("No longer leader to checkpoint partition #{PartitionId}", partitionId);
 
-                partitionsToRemove.Add(kv.Key);
+                partitionsToRemove.Add(partitionId);
                 continue;
             }
 
             // Capture this partition's receipts and decision records durably before its checkpoint advances the
             // WAL retention floor: past the floor the receipt/decision-bearing log entries are compacted and can
-            // no longer be replayed. Every dirty key-value write has already flushed (guarded above), so the
-            // snapshots are consistent with the backend. If either cannot be made durable, skip this partition's
-            // checkpoint and retry next cycle rather than compacting away the only proof of a commit or decision.
-            if (!TryCaptureCheckpointSnapshots(kv.Key))
+            // no longer be replayed. Every dirty key-value write of this partition has already flushed (guarded
+            // above), so the snapshots are consistent with the backend. If either cannot be made durable, skip this
+            // partition's checkpoint and retry next cycle rather than compacting away the only proof of a commit
+            // or decision.
+            if (!TryCaptureCheckpointSnapshots(partitionId))
             {
-                logger.LogWarning("Skipping checkpoint of partition #{PartitionId}: snapshot capture not durable", kv.Key);
+                logger.LogWarning("Skipping checkpoint of partition #{PartitionId}: snapshot capture not durable", partitionId);
                 continue;
             }
 
-            RaftReplicationResult result = await raft.ReplicateCheckpoint(kv.Key);
+            RaftReplicationResult result = await raft.ReplicateCheckpoint(partitionId);
 
             if (result.Success)
             {
-                logger.LogSuccessfullyCheckpointedPartition(kv.Key);
+                logger.LogSuccessfullyCheckpointedPartition(partitionId);
 
-                partitionsToRemove.Add(kv.Key);
+                partitionsToRemove.Add(partitionId);
             }
         }
 
         foreach (int partitionToRemove in partitionsToRemove)
-            partitionIds.Remove(partitionToRemove);
+            partitionDirtySince.Remove(partitionToRemove);
 
-        if (partitionIds.Count == 0)
+        if (partitionDirtySince.Count == 0)
             pendingCheckpoint = false;
+    }
+
+    /// <summary>
+    /// The partitions holding writes that have not reached the backend yet: everything still queued
+    /// after the flush cycle (the flush drains under a time budget, so a saturated tick can leave a
+    /// tail behind) plus the partitions of a batch that exhausted its retries and is retained for the
+    /// next cycle. Checkpointing such a partition would advance its WAL retention floor past entries
+    /// whose only durable copy is still that log entry.
+    /// <para>
+    /// A retained failed batch keeps only the serialized items, which carry no partition, so every
+    /// tracked partition is reported as unflushed while one is outstanding. That is deliberately
+    /// conservative: it delays checkpoints for as long as the backend is rejecting writes, which is
+    /// exactly when nothing should be compacted.
+    /// </para>
+    /// </summary>
+    /// <param name="duePartitions">The partitions whose answer the caller actually needs. Once all of
+    /// them are known to be unflushed the scan stops, since nothing it could still find would change
+    /// a decision — that bound matters because a backlogged queue is scanned on every tick for as
+    /// long as it keeps a due partition blocked. Pass <c>null</c> to scan the queues in full.</param>
+    internal HashSet<int> CollectPartitionsWithUnflushedWrites(List<int>? duePartitions = null)
+    {
+        HashSet<int> unflushed = [];
+
+        if (pendingLockItems is not null || pendingKeyValuesItems is not null)
+        {
+            foreach (int partitionId in partitionDirtySince.Keys)
+                unflushed.Add(partitionId);
+
+            return unflushed;
+        }
+
+        int dueRemaining = duePartitions?.Count ?? int.MaxValue;
+
+        foreach (BackgroundWriteRequest request in dirtyLocks)
+        {
+            if (request.PartitionId >= 0 && unflushed.Add(request.PartitionId)
+                && duePartitions is not null && duePartitions.Contains(request.PartitionId) && --dueRemaining == 0)
+                return unflushed;
+        }
+
+        foreach (BackgroundWriteRequest request in dirtyKeyValues)
+        {
+            if (request.PartitionId >= 0 && unflushed.Add(request.PartitionId)
+                && duePartitions is not null && duePartitions.Contains(request.PartitionId) && --dueRemaining == 0)
+                return unflushed;
+        }
+
+        return unflushed;
     }
 
     /// <summary>
@@ -660,16 +742,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                 while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
                 {
+                    // Stamped only when the partition is not already awaiting a checkpoint: the stamp
+                    // marks when this checkpoint interval started, not when the partition was last
+                    // written (see partitionDirtySince).
                     if (lockRequest.PartitionId >= 0)
-                    {
-                        if (partitionIds.TryGetValue(lockRequest.PartitionId, out DateTime currentTimestamp))
-                        {
-                            if (timestamp >= currentTimestamp)
-                                partitionIds[lockRequest.PartitionId] = timestamp;
-                        }
-                        else
-                            partitionIds.Add(lockRequest.PartitionId, timestamp);
-                    }
+                        partitionDirtySince.TryAdd(lockRequest.PartitionId, timestamp);
 
                     items.Add(new(
                         lockRequest.Key,
@@ -795,16 +872,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                 while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
                 {
+                    // Stamped only when the partition is not already awaiting a checkpoint: the stamp
+                    // marks when this checkpoint interval started, not when the partition was last
+                    // written (see partitionDirtySince).
                     if (keyValueRequest.PartitionId >= 0)
-                    {
-                        if (partitionIds.TryGetValue(keyValueRequest.PartitionId, out DateTime currentTimestamp))
-                        {
-                            if (timestamp >= currentTimestamp)
-                                partitionIds[keyValueRequest.PartitionId] = timestamp;
-                        }
-                        else
-                            partitionIds.Add(keyValueRequest.PartitionId, timestamp);
-                    }
+                        partitionDirtySince.TryAdd(keyValueRequest.PartitionId, timestamp);
 
                     items.Add(new(
                         keyValueRequest.Key,

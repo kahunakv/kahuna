@@ -376,8 +376,9 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan BaseSnapshotInterval { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
-    /// Minimum age a dirty partition must reach before its WAL retention floor advances via a checkpoint; the
-    /// gating receipt/decision snapshots are written on the same cadence.
+    /// Period at which a dirty partition checkpoints, advancing its WAL retention floor so the log can compact.
+    /// Measured from the moment the partition first went dirty after its previous checkpoint, so continuous
+    /// write load does not postpone it. The gating receipt/decision snapshots are written on the same cadence.
     /// </summary>
     public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(30);
 

@@ -85,6 +85,12 @@ public static class ConfigurationValidator
         if (configuration.CollectionInterval <= TimeSpan.Zero)
             configuration.CollectionInterval = TimeSpan.FromSeconds(60);
 
+        // A non-positive checkpoint interval makes every dirty partition due on every flush tick, so each tick
+        // rewrites the receipt/record/intent snapshots that gate the checkpoint — throughput collapses for no
+        // retention benefit.
+        if (configuration.CheckpointInterval <= TimeSpan.Zero)
+            configuration.CheckpointInterval = TimeSpan.FromSeconds(30);
+
         if (configuration.CollectBatchMax <= 0)
             configuration.CollectBatchMax = configuration.CacheEntriesToRemove > 0 ? configuration.CacheEntriesToRemove : 1_000;
 

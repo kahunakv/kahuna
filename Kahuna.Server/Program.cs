@@ -241,6 +241,7 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     KeyValueWriteMaxQueueDelayMs = opts.KeyValueWriteMaxQueueDelayMs,
     MaxKeyValueWriteAggregatorInboxSize = opts.MaxKeyValueWriteAggregatorInboxSize,
     DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay,
+    CheckpointInterval = TimeSpan.FromSeconds(opts.CheckpointIntervalSeconds),
     PersistentRevisionRetentionCount = opts.PersistentRevisionRetentionCount,
     PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
     PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),

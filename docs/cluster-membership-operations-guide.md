@@ -281,6 +281,13 @@ needs. A joining Learner catches up by replaying log entries from where it left 
 has already compacted past the point a Learner needs to start from, there is nothing to replay it
 forward from, and the join cannot complete.**
 
+> **Concept — what makes a log compactable.** Compaction never runs on its own: a partition's log can
+> only be trimmed below its most recent **checkpoint**, which the background writer takes once a
+> partition has been dirty for `--checkpoint-interval` (default 30 s) and its writes have reached
+> storage. Raise the interval and each partition keeps a longer log between trims; lower it and the
+> node pays for more frequent checkpoints. A partition that is never written to never checkpoints,
+> and it does not need to — it has nothing to trim.
+
 When this happens, the join does **not** hang silently or run a half-joined node — it **fails fast with
 a clear error** pointing at the compaction floor as the cause. That's the signal to use one of the two
 remedies:
