@@ -31,6 +31,12 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     private bool disposed;
 
+    /// <summary>
+    /// Seed endpoints of a running cluster to join at <see cref="StartAsync"/> instead of
+    /// bootstrapping; null for the ordinary static-roster boot. Cluster constructor only.
+    /// </summary>
+    private readonly List<string>? joinExistingSeeds;
+
     public IKahuna Kahuna { get; }
 
     public IRaft Raft { get; }
@@ -41,6 +47,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         ValidateOptions(options);
         EnsureStorageDirectories(options);
+
+        // The phantom-witness quorum below IS the whole cluster; there is nothing to join, and
+        // silently ignoring the seeds would boot a node the caller believes is a member of an
+        // existing cluster as an isolated single-node one.
+        if (options.JoinExistingSeeds is { Count: > 0 })
+            throw new ArgumentException(
+                $"{nameof(options.JoinExistingSeeds)} requires the cluster constructor (external communication and discovery); " +
+                "the standalone constructor bootstraps its own single-node quorum",
+                nameof(options));
 
         loggerFactory ??= NullLoggerFactory.Instance;
 
@@ -120,6 +135,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // The caller owns discovery here, so the seed node count is unknown at this layer.
         ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: null, raftLogger);
 
+        joinExistingSeeds = options.JoinExistingSeeds is { Count: > 0 } seeds ? seeds : null;
+
         actorSystem = new(logger: raftLogger);
 
         this.sharedResources = CreateSharedResources(options);
@@ -163,7 +180,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             standaloneComm.SetNodes(new() { { localEndpoint, Kahuna } });
         }
 
-        await Raft.JoinCluster().ConfigureAwait(false);
+        // Joining a running cluster is an explicit choice, never inferred: with seeds the node
+        // enters the existing roster (as a learner first, promoted once caught up); without them
+        // it boots via its discovery's static roster.
+        if (joinExistingSeeds is not null)
+            await Raft.JoinCluster(joinExistingSeeds, cancellationToken).ConfigureAwait(false);
+        else
+            await Raft.JoinCluster().ConfigureAwait(false);
+
         started = true;
 
         await Raft.WaitForLeader(0, cancellationToken).ConfigureAwait(false);

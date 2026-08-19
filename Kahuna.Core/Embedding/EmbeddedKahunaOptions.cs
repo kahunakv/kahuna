@@ -649,4 +649,17 @@ public sealed class EmbeddedKahunaOptions
     /// replication factor is enabled; this flag only matters to opt in without any of those.
     /// </summary>
     public bool EnableLoadReports { get; set; }
+
+    // ── Cluster membership ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Seed endpoints (<c>host:raftPort</c>) of a <b>running</b> cluster this node should join as
+    /// a new member instead of bootstrapping one. Null or empty (the default) boots the node via
+    /// its discovery's static roster — the embedded equivalent of the server's explicit
+    /// <c>--join-existing</c> flag, and like that flag it is never guessed: a fresh node must not
+    /// decide on its own whether it is forming a cluster or joining one. Only meaningful with the
+    /// cluster constructor (external communication and discovery); the standalone constructor's
+    /// phantom-witness quorum has no cluster to join and rejects it at startup.
+    /// </summary>
+    public List<string>? JoinExistingSeeds { get; set; }
 }

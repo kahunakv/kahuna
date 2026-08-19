@@ -98,6 +98,21 @@ internal sealed class RangeMerger
 
         logger.LogRangeMergerMerging(keySpace, left.StartKey ?? "-inf", left.EndKey, left.PartitionId, right.StartKey, right.EndKey ?? "+inf", right.PartitionId);
 
+        // -- 1b. Settle the moving range's durable intents before the copy --------
+        // A committed value can exist only as a decided-but-unsettled prepared intent (deferred
+        // settlement); the copy below captures base rows. Settle the moving range first so the copy
+        // carries materialized rows; an intent still undecided inside its window refuses this merge
+        // attempt (the trigger retries next tick). Unlike the split there is no quiesce here, so an
+        // intent can still race in after this barrier — the durable-state handoff below remains the
+        // backstop that moves any straggler onto the survivor.
+        if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, right.EndKey, ct))
+        {
+            logger.LogWarning(
+                "RangeMerger: moving range [{Start},{End}) holds unsettled durable intents; refusing this merge attempt",
+                right.StartKey, right.EndKey ?? "+inf");
+            return MergeOutcome.UnsettledMovingIntents;
+        }
+
         // -- 2. Bulk copy [B,C) at snapshotTs -> survivor -------------------------
         // Routed through partition leaders: the right range is paged via the locator and every
         // page is replicated onto the survivor's Raft log, so the copy is correct even when this
@@ -428,6 +443,7 @@ internal enum MergeStatus
     TransferFailed,
     CutoverFailed,
     ConcurrentChange,
+    UnsettledMovingIntents,
 }
 
 /// <summary>Result of <see cref="RangeMerger.MergeAsync"/>.</summary>
@@ -450,4 +466,5 @@ internal readonly struct MergeOutcome
     public static MergeOutcome TransferFailed => new(MergeStatus.TransferFailed);
     public static MergeOutcome CutoverFailed  => new(MergeStatus.CutoverFailed);
     public static MergeOutcome ConcurrentChange => new(MergeStatus.ConcurrentChange);
+    public static MergeOutcome UnsettledMovingIntents => new(MergeStatus.UnsettledMovingIntents);
 }

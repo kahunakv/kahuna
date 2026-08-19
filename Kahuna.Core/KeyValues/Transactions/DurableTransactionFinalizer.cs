@@ -174,6 +174,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // Null disables the up-front staged-base check (protocol tests that fabricate intents).
     private readonly ValidateStagedBasesDelegate? validateStagedBases;
 
+    // Resolves a key's CURRENT data partition at resolution time, so a materialize running after a range
+    // split/merge lands on the key's new owner instead of the partition frozen at prepare time. Null keeps
+    // the frozen target (protocol tests, deployments without key-range routing).
+    private readonly Func<string, int>? resolveCurrentPartition;
+
     // Mints a fresh HLC immediately before the terminal transition, used as the attempt's AttemptHlc so elapsed
     // prepare/validate time can actually trip the frozen decision deadline. Null keeps the deprecated behaviour of
     // reusing the operation id as the attempt HLC — used only by protocol tests that supply an explicit late opId.
@@ -205,9 +210,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         long maxMaterializationBatchBytes = 4 * 1024 * 1024,
         ResolveDecidedBlockersDelegate? resolveDecidedBlockers = null,
         ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle = null,
-        ValidateStagedBasesDelegate? validateStagedBases = null)
+        ValidateStagedBasesDelegate? validateStagedBases = null,
+        Func<string, int>? resolveCurrentPartition = null)
     {
         this.validateStagedBases = validateStagedBases;
+        this.resolveCurrentPartition = resolveCurrentPartition;
         this.recordStore = recordStore;
         this.intentStore = intentStore;
         this.replicateOnePhaseBundle = replicateOnePhaseBundle;
@@ -697,6 +704,73 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         SemaphoreSlim localApplyGate,
         CancellationToken cancellationToken)
     {
+        // The partition id was frozen at prepare time; a range split/merge between the decision and this
+        // resolution can have moved some keys to another partition. Materializing into the frozen partition
+        // would write the committed value where readers no longer look (its Raft group and replicas no longer
+        // serve the key), permanently hiding an acknowledged commit under placement. Re-resolve each intent's
+        // current partition and resolve per current owner; the frozen id is kept when no resolver is wired or
+        // nothing moved.
+        if (commit && resolveCurrentPartition is not null)
+        {
+            // One resolver call per intent: resolving again for a second pass could observe a map that
+            // moved in between and drop or double-resolve an intent.
+            List<PreparedIntent>? stayed = null;
+            Dictionary<int, List<PreparedIntent>>? regrouped = null;
+
+            foreach (PreparedIntent intent in partition.Intents)
+            {
+                int current = ResolveCurrentPartitionSafe(intent.Key, partition.PartitionId);
+                if (current == partition.PartitionId)
+                {
+                    (stayed ??= []).Add(intent);
+                    continue;
+                }
+
+                regrouped ??= [];
+                if (!regrouped.TryGetValue(current, out List<PreparedIntent>? moved))
+                    regrouped[current] = moved = [];
+                moved.Add(intent);
+            }
+
+            if (regrouped is not null)
+            {
+                List<Task> resolves = new(regrouped.Count + 1);
+
+                if (stayed is { Count: > 0 })
+                    resolves.Add(ResolvePartitionCoreAsync(partition with { Intents = stayed }, commit, localApplyGate, cancellationToken));
+
+                foreach ((int current, List<PreparedIntent> moved) in regrouped)
+                    resolves.Add(ResolvePartitionCoreAsync(partition with { PartitionId = current, Intents = moved }, commit, localApplyGate, cancellationToken));
+
+                await Task.WhenAll(resolves).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        await ResolvePartitionCoreAsync(partition, commit, localApplyGate, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The intent's current data partition per the wired resolver; the frozen fallback when the
+    /// resolver is absent or throws (routing momentarily unavailable — the frozen target keeps the recovery
+    /// semantics it always had).</summary>
+    private int ResolveCurrentPartitionSafe(string key, int frozenPartitionId)
+    {
+        try
+        {
+            return resolveCurrentPartition?.Invoke(key) ?? frozenPartitionId;
+        }
+        catch
+        {
+            return frozenPartitionId;
+        }
+    }
+
+    private async Task ResolvePartitionCoreAsync(
+        DurablePartitionPrepare partition,
+        bool commit,
+        SemaphoreSlim localApplyGate,
+        CancellationToken cancellationToken)
+    {
         // Only an intent whose terminal effect is durably applied may be settled (resolved + removed). On
         // commit that means its value is materialized: settling an intent whose materialization did not commit
         // would delete the only durable copy of an already-committed value, so a false/thrown materialization
@@ -720,6 +794,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     cancellationToken).ConfigureAwait(false);
 
             settleable = partition.Intents.Where((_, index) => materialized[index]).ToList();
+
+            // Every intent left behind stays committed-but-unsettled until the recovery sweep — a window in
+            // which the value is visible only through the intent overlay. Surface the rate: settlement being
+            // refused (a quiesced range, backpressure, a forwarding failure) is otherwise completely silent.
+            int settleFailures = partition.Intents.Count - settleable.Count;
+            if (settleFailures > 0)
+                DurableTransactionMetrics.ResolutionSettleFailures.Add(settleFailures);
         }
         else
         {

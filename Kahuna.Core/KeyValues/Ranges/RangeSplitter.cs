@@ -260,17 +260,45 @@ internal sealed class RangeSplitter
 
         try
         {
+            // ── 6b. Settle the moving range's durable intents before the catch-up copy ──────────
+            // Under deferred settlement a committed value can exist only as a decided-but-unsettled
+            // prepared intent: the copies capture base rows, so cutting over now would move the range
+            // while its newest committed values still ride intents — any leg of the intent handoff or
+            // overlay that fails then serves the prior revision from the child (observed by Jepsen as
+            // read skew with no faults injected). The quiesce above blocks new prepares, so settling
+            // here is stable: decided intents materialize into the source range and the catch-up copy
+            // carries the rows. An intent still undecided inside its window refuses this attempt —
+            // the trigger retries once its coordinator has decided.
+            if (!await manager.SettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, descriptor.EndKey, ct))
+            {
+                logger.LogWarning(
+                    "RangeSplitter: moving range [{Key},{End}) holds unsettled durable intents; refusing this split attempt",
+                    splitKey, descriptor.EndKey ?? "+inf");
+                return SplitOutcome.UnsettledMovingIntents;
+            }
+
             // ── 7. Final catch-up copy: capture writes since snapshotTs ──────────
             // Read as the quiesce lock's owner: the exclusive range lock stamped a write intent
             // on every resident key of [K,E), and a foreign snapshot read meeting those live
             // intents answers MustRetry forever.
             HLCTimestamp catchupTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-            if (!await manager.CopyRangeToPartitionAsync(
-                    keySpace, splitKey, descriptor.EndKey, catchupTs, descriptor.PartitionId, newPartitionId,
-                    splitTxId, ct))
+            try
             {
-                logger.LogError("RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
+                if (!await manager.CopyRangeToPartitionAsync(
+                        keySpace, splitKey, descriptor.EndKey, catchupTs, descriptor.PartitionId, newPartitionId,
+                        splitTxId, ct))
+                {
+                    logger.LogError("RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
+                        keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                    return SplitOutcome.TransferFailed;
+                }
+            }
+            catch (Exception ex)
+            {
+                // A refused export page throws rather than truncating the snapshot; the split is
+                // retryable, exactly as a failed bulk copy.
+                logger.LogError(ex, "RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
                     keySpace, splitKey, descriptor.EndKey ?? "+inf");
                 return SplitOutcome.TransferFailed;
             }
@@ -568,6 +596,7 @@ internal enum SplitStatus
     QuiesceFailed,
     CutoverFailed,
     ConcurrentSplit,
+    UnsettledMovingIntents,
 }
 
 /// <summary>Result of <see cref="RangeSplitter.SplitAsync"/>.</summary>
@@ -595,4 +624,5 @@ internal readonly struct SplitOutcome
     public static SplitOutcome QuiesceFailed => new(SplitStatus.QuiesceFailed);
     public static SplitOutcome CutoverFailed => new(SplitStatus.CutoverFailed);
     public static SplitOutcome ConcurrentSplit => new(SplitStatus.ConcurrentSplit);
+    public static SplitOutcome UnsettledMovingIntents => new(SplitStatus.UnsettledMovingIntents);
 }

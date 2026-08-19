@@ -5347,8 +5347,12 @@ internal sealed class KeyValuesManager : IDisposable
     {
         if (!IsPlacedPartition(sourcePartitionId) && !IsPlacedPartition(destinationPartitionId))
         {
+            // The reader identity matters here exactly as on the paged path below: a split's catch-up
+            // export runs under its own quiesce range lock, and a tx-zero read meeting the lock's
+            // write intents would answer MustRetry for every resident key of the range.
             Stream snapshot = await kvStateMachineTransfer.ExportRangeAsync(
-                keySpace, startKey, endKey, snapshotTs, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
+                keySpace, startKey, endKey, snapshotTs, KeyValueDurability.Persistent, cancellationToken,
+                readerTransactionId).ConfigureAwait(false);
 
             await kvStateMachineTransfer.ImportRangeAsync(snapshot, cancellationToken).ConfigureAwait(false);
             return true;
@@ -6029,6 +6033,44 @@ internal sealed class KeyValuesManager : IDisposable
 
         DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
         return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The pre-cutover settlement barrier of a range split/merge: gathers the moving range's prepared intents
+    /// from the source partition's leader (the authoritative store) and settles every decided one through the
+    /// recovery path, so the data copy that follows carries materialized rows instead of values that exist only
+    /// as intents. Returns true when the moving range holds no unsettled durable intent; false — the caller must
+    /// refuse this move attempt and retry later — when an intent is still undecided inside its window, a settle
+    /// could not complete, or the gather could not reach the source leader. Without this barrier a cutover races
+    /// deferred settlement: the copied rows predate the commit and the child range serves the prior revision.
+    /// </summary>
+    internal async Task<bool> SettleMovingRangeIntentsAsync(
+        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        const int maxPasses = 3;
+
+        for (int pass = 0; pass < maxPasses; pass++)
+        {
+            (bool ok, _, _, IReadOnlyList<PreparedIntent> intents) =
+                await GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+            if (!ok)
+                return false;
+
+            if (intents.Count == 0)
+                return true;
+
+            DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            if (await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false) > 0)
+                return false;
+
+            // Loop to re-gather: the settles above replicated through the source partition, so the next
+            // gather confirms they landed (and catches an intent that raced in before the caller's fence).
+        }
+
+        return false;
     }
 
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(

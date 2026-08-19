@@ -75,13 +75,18 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// at <paramref name="snapshotTs"/> (MVCC: entries modified after it are excluded). Null bounds
     /// mean the whole key space. The returned stream is positioned at 0.
     /// </summary>
+    /// <param name="readerTransactionId">The identity the pages are read under. A split's catch-up
+    /// export runs while its quiesce range lock has stamped a write intent on every resident key of
+    /// the range; a foreign snapshot read meeting those live intents answers MustRetry forever, so
+    /// that export must read as the lock's owner. Zero for reads outside a quiesce window.</param>
     public async Task<Stream> ExportRangeAsync(
         string keySpacePrefix,
         string? startKey,
         string? endKey,
         HLCTimestamp snapshotTs,
         KeyValueDurability durability,
-        CancellationToken ct)
+        CancellationToken ct,
+        HLCTimestamp readerTransactionId = default)
     {
         // Persistent only. Export reads the memory+disk merge (so it sees the latest committed
         // writes), but import writes the backend only and does not warm the target's in-memory actor
@@ -102,7 +107,7 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
             ct.ThrowIfCancellationRequested();
 
             KeyValueGetByRangeResult page = await manager.GetByRange(
-                HLCTimestamp.Zero,
+                readerTransactionId,
                 keySpacePrefix,
                 cursorKey, cursorInclusive,
                 endKey, false,
@@ -110,9 +115,19 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
                 snapshotTs,
                 durability).ConfigureAwait(false);
 
-            if (page.Type != KeyValueResponseType.Get && page.Items.Count == 0)
+            // A page that could not be served (MustRetry from a live write intent or an undecided
+            // durable intent, WaitingForReplication, a leadership change) is NOT evidence the range
+            // is empty. Treating it as "no data" silently truncates the export — the importer sees a
+            // clean terminal sentinel over a snapshot that is missing every key past the cursor — and
+            // the cutover then moves a range whose copy lost data. Fail the export; the split/merge
+            // reports a retryable transfer failure instead of cutting over a partial copy.
+            if (page.Type != KeyValueResponseType.Get)
+                throw new KahunaServerException(
+                    $"ExportRange: page for [{cursorKey ?? "-inf"},{endKey ?? "+inf"}) could not be served ({page.Type}); refusing to emit a truncated snapshot.");
+
+            if (page.Items.Count == 0)
             {
-                // No data (empty range or not-yet-ready): emit a single terminal empty page so the
+                // Genuinely empty (a served page with no rows): emit the terminal empty page so the
                 // importer always sees a hasMore=false sentinel and never has to detect EOF.
                 WritePage(stream, [], hasMore: false);
                 break;

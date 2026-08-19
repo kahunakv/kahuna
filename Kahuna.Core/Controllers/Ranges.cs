@@ -413,6 +413,14 @@ public sealed partial class KahunaManager
                    + "one landed."
         },
 
+        SplitStatus.UnsettledMovingIntents => new()
+        {
+            Status = nameof(SplitStatus.UnsettledMovingIntents),
+            Determinate = true,
+            Reason = "The moving half holds durable transaction intents that could not be settled yet "
+                   + "(a commit still finalizing, or settlement in flight). The map is untouched; retry."
+        },
+
         // An unrecognised status is treated as unresolved rather than as a failure: a new outcome
         // added upstream must not silently read as "the split definitely did not happen".
         _ => new()

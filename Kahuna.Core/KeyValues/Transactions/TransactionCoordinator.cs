@@ -1436,7 +1436,11 @@ internal sealed class TransactionCoordinator : IDisposable
         replicateOnePhaseBundle: manager.ReplicateDurableOnePhaseBundleThroughSchedulerFenced,
         // Write-side compare-and-set before anything durable: a staged base that moved while the in-memory
         // write-intent lease lapsed aborts truthfully instead of silently discarding the other writer's commit.
-        validateStagedBases: ValidateStagedBasesAsync);
+        validateStagedBases: ValidateStagedBasesAsync,
+        // Re-resolve each intent's current data partition at resolution time: a range split/merge between the
+        // decision and a (deferred or retried) materialization moves the key's ownership, and materializing
+        // into the frozen partition would hide the committed value from every reader of the new range.
+        resolveCurrentPartition: key => manager.LocateDurablePartition(key).PartitionId);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task

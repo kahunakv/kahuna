@@ -62,6 +62,19 @@ internal static class DurableTransactionMetrics
             description: "Durable transactions committed via the single-batch one-phase fast path.");
 
     /// <summary>
+    /// A committed transaction's resolution failed to materialize or leader-apply an intent's value, leaving
+    /// it committed-but-unsettled until the recovery sweep retries. Each failure extends the window in which
+    /// the committed value exists only as a prepared intent — visible solely through the intent overlay, and
+    /// the state a range move must settle before it may cut over. A sustained rate means settlement is being
+    /// refused somewhere (scheduler backpressure, a quiesced range, a forwarding failure) and the deferred
+    /// path is silently leaning on recovery.
+    /// </summary>
+    internal static readonly Counter<long> ResolutionSettleFailures =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.resolution_settle_failures",
+            description: "Intents a commit resolution could not materialize/apply; recovery completes them.");
+
+    /// <summary>
     /// One-phase-eligible transactions that fell back to the standard 2PC flow (remote anchor leader, a
     /// foreign durable intent on a written key, failed up-front validation, or a scheduler rejection).
     /// A high rate relative to <see cref="OnePhaseCommits"/> means the fast path's gate rarely opens and

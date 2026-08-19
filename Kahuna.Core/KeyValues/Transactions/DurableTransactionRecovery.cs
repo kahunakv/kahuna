@@ -152,6 +152,74 @@ internal sealed class DurableTransactionRecovery
         return settled;
     }
 
+    /// <summary>
+    /// Settles a supplied set of prepared intents — the pre-cutover barrier of a range split/merge, run over
+    /// the intents gathered from the moving range's partition leader. Each intent whose canonical decision is
+    /// terminal (or whose own resolution already is) is resolved through the sweep's idempotent path:
+    /// materialize + leader apply + settle for a commit, clear + settle for an abort. An intent that is still
+    /// undecided <b>inside</b> its decision window is left alone — a live coordinator must not be
+    /// presumed-aborted by a data move — and counts as unsettled; one undecided <b>past</b> its recovery
+    /// deadline is driven through the ordinary presumed-abort protocol, exactly as the periodic sweep would.
+    /// Returns how many intents could not be settled: zero means the range carries no unsettled durable state
+    /// and the caller may proceed to copy and cut over.
+    /// </summary>
+    public async Task<int> SettleSuppliedIntentsAsync(
+        int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp now, CancellationToken cancellationToken)
+    {
+        int unsettled = 0;
+
+        foreach (IGrouping<(HLCTimestamp, long, string), PreparedIntent> group in
+            intents.GroupBy(i => (i.TransactionId, i.Epoch, i.RecordAnchorKey)))
+        {
+            PreparedIntent representative = group.First();
+
+            // An intent already resolved (deferred removal lag) settles by its own terminal resolution; a
+            // pending one defers to the canonical record — and, past its recovery deadline, to the
+            // presumed-abort drive DecideAsync owns.
+            bool? commit;
+            switch (representative.Resolution)
+            {
+                case PreparedIntentResolution.Committed:
+                    commit = true;
+                    break;
+
+                case PreparedIntentResolution.Aborted:
+                    commit = false;
+                    break;
+
+                default:
+                {
+                    TransactionRecord? record = await lookupRecord(
+                        representative.TransactionId, representative.Epoch, representative.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+
+                    commit = record?.Decision switch
+                    {
+                        TransactionDecision.Commit => true,
+                        TransactionDecision.Abort => false,
+                        // Undecided or not-yet-initialized: inside the intent's recovery window the
+                        // coordinator may still be deciding (a non-anchor prepare can even be durable
+                        // before the record init commits) — never presume-abort it for a data move.
+                        // Past the window, DecideAsync drives the ordinary presumed-abort protocol.
+                        _ => representative.RecoveryDeadline != HLCTimestamp.Zero && representative.RecoveryDeadline <= now
+                            ? await DecideAsync(representative, now, cancellationToken).ConfigureAwait(false)
+                            : null
+                    };
+                    break;
+                }
+            }
+
+            if (commit is null)
+            {
+                unsettled += group.Count();
+                continue;
+            }
+
+            await ResolveGroupAsync(partitionId, group, commit.Value, cancellationToken).ConfigureAwait(false);
+        }
+
+        return unsettled;
+    }
+
     private async Task<bool?> DecideAsync(PreparedIntent intent, HLCTimestamp now, CancellationToken cancellationToken)
     {
         TransactionRecord? record = await lookupRecord(intent.TransactionId, intent.Epoch, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
