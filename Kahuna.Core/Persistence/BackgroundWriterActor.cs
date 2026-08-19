@@ -679,6 +679,14 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             // Writer queue saturated: skip this cycle; the floors are retried on the next flush tick.
             return;
         }
+        catch (Exception ex)
+        {
+            // Same skip-and-retry treatment for any storage failure (e.g. a full disk): the floor
+            // list is recomputed from the tracker every cycle, so nothing is lost by returning —
+            // while an escaped exception would abort the rest of the flush pass.
+            logger.LogError(ex, "Persisting {Count} advanced durability floors failed; retrying next flush cycle", floorsToPersist.Count);
+            return;
+        }
 
         if (!stored)
         {
@@ -795,6 +803,14 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     // Writer queue at its depth limit — treat as a failed attempt so the backoff loop retries,
                     // and the post-loop failure path keeps the batch in pendingLockItems. Never dropped.
                     success = false;
+                }
+                catch (Exception ex)
+                {
+                    // Any storage failure (e.g. a RocksDB write hitting a full disk) must take the
+                    // same retry-then-repark path — an escaped exception would drop the dequeued
+                    // batch and freeze the durability floor of every partition it references.
+                    success = false;
+                    logger.LogError(ex, "Storing a batch of {Count} locks failed", items.Count);
                 }
                 if (success)
                     break;
@@ -926,6 +942,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     // Writer queue at its depth limit — treat as a failed attempt so the backoff loop retries,
                     // and the post-loop failure path keeps the batch in pendingKeyValuesItems. Never dropped.
                     success = false;
+                }
+                catch (Exception ex)
+                {
+                    // Any storage failure (e.g. a RocksDB write hitting a full disk) must take the
+                    // same retry-then-repark path. An exception that escapes this loop loses the
+                    // dequeued batch: its WAL indexes stay pending forever, which freezes the
+                    // partition's durability floor and with it WAL compaction — a permanent wedge
+                    // from a transient fault.
+                    success = false;
+                    logger.LogError(ex, "Storing a batch of {Count} key-values failed", items.Count);
                 }
                 if (success)
                     break;

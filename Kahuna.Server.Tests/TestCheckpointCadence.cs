@@ -210,6 +210,65 @@ public sealed class TestCheckpointCadence
         Assert.Equal([1, 2], raft.CheckpointedPartitions.Order());
     }
 
+    /// <summary>Throws from every key-value store call, modeling a backend that does NOT honor the
+    /// "false on failure" contract — the shape a raw storage-engine exception (e.g. ENOSPC) takes.</summary>
+    private sealed class KeyValueThrowingBackend(MemoryPersistenceBackend inner) : IPersistenceBackend
+    {
+        public bool ThrowOnKeyValues { get; set; } = true;
+
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) =>
+            ThrowOnKeyValues ? throw new InvalidOperationException("simulated storage write failure (disk full)") : inner.StoreKeyValues(items);
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+            inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
+            inner.GetKeyValueByRange(prefix, startKey, limit);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge,
+            int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
+            inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+    }
+
+    /// <summary>
+    /// A backend that THROWS (instead of returning false) must get the exact same treatment as a
+    /// rejecting one: the batch is retained for the next cycle, the checkpoint is held back, and
+    /// the write lands once the fault clears. Before the writer's catch was widened, the exception
+    /// escaped the retry loop, the dequeued batch was silently dropped, and the partition's
+    /// durability floor froze forever — this test fails against that behavior.
+    /// </summary>
+    [Fact]
+    public async Task ThrowingFailedBatch_IsRetainedNotDropped_AndLandsWhenTheFaultClears()
+    {
+        // Like the rejecting-backend test above, exhausting the retry schedule costs ~fifteen
+        // seconds inside the first flush.
+        KeyValueThrowingBackend backend = new(new MemoryPersistenceBackend());
+        TestBackupService.StubRaft raft = MakeLeaderRaft(1);
+
+        using WriterHarness harness = new(raft, Config(TimeSpan.FromMilliseconds(1)), backend);
+
+        await harness.Writer.Receive(LockWrite(1, "thrown/lock", logIndex: 1));
+        await harness.Writer.Receive(KeyValueWrite(1, "thrown/k1", logIndex: 2));
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        // The thrown batch must be retained — the partition still reports unflushed writes,
+        // and no checkpoint may be published over data the WAL is the only durable copy of.
+        Assert.Contains(1, harness.Writer.CollectPartitionsWithUnflushedWrites());
+        Assert.Empty(raft.CheckpointedPartitions);
+
+        // Fault clears (space freed): the retained batch lands and the checkpoint follows.
+        backend.ThrowOnKeyValues = false;
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Empty(harness.Writer.CollectPartitionsWithUnflushedWrites());
+        Assert.Equal([1], raft.CheckpointedPartitions);
+    }
+
     [Fact]
     public async Task RetainedFailedBatch_HoldsTheCheckpointBack_UntilTheWriteLands()
     {

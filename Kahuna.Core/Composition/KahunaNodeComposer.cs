@@ -41,7 +41,7 @@ internal static class KahunaNodeComposer
     {
         return configuration.Storage switch
         {
-            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision, sharedResources, configuration.RocksDbDirectReads, configuration.RocksDbStatistics),
+            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision, sharedResources, configuration.RocksDbDirectReads, configuration.RocksDbStatistics, logger),
             "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision, logger),
             "memory" => new MemoryPersistenceBackend(),
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
