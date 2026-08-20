@@ -91,19 +91,11 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
     public bool IsStale(IWriteRangeFence fence) => fence.IsStale(Key, FenceGeneration, PartitionId);
 
     /// <summary>Batch committed: send <c>CompleteProposal</c> (apply) to the originating key actor — the only
-    /// component that mutates the entry and resolves the caller's promise.</summary>
+    /// component that mutates the entry and resolves the caller's promise. The pooled request transfers
+    /// ownership to the actor, which recycles it after handling.</summary>
     public void Complete(IReadOnlyList<long>? entryLogIndices) =>
-        KeyValueActor.Send(new(
-            KeyValueRequestType.CompleteProposal,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
+        KeyValueActor.Send(KeyValueRequestPool.RentCompleteProposal(
             Key,
-            null,
-            null,
-            -1,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
             Durability,
             ProposalId,
             PartitionId,
@@ -112,19 +104,12 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
 
     /// <summary>Batch did not commit (or released before dispatch): send <c>ReleaseProposal</c> (unwind) to the
     /// originating key actor. A transient failure releases with <see cref="KeyValueFlags.ReplicationRetry"/> so
-    /// the caller retries.</summary>
+    /// the caller retries. The pooled request transfers ownership to the actor, which recycles it after
+    /// handling.</summary>
     public void Release(bool transient) =>
-        KeyValueActor.Send(new(
-            KeyValueRequestType.ReleaseProposal,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
+        KeyValueActor.Send(KeyValueRequestPool.RentReleaseProposal(
             Key,
-            null,
-            null,
-            -1,
             transient ? KeyValueFlags.ReplicationRetry : KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
             Durability,
             ProposalId,
             PartitionId,

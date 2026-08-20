@@ -14,6 +14,8 @@
 #   KAHUNA_PARTITIONS           initial cluster partitions (default 3; 128 is cluster-scale)
 #   KAHUNA_DATA_DIR             base directory for data/WAL when using rocksdb (default /tmp/kahuna-standalone)
 #   KAHUNA_BACKUP_DIR           root directory for PITR backup artifacts; leave unset to disable backup
+#   KAHUNA_LOG_LEVEL            console log level for the Kahuna and Kommander categories
+#                               (default Warning; use Debug to restore the verbose output)
 #   KAHUNA_RESTORE_STORAGE_PATH when set, use this directory as the storage path instead of DATA_DIR/data.
 #                               Point this at the target-dir produced by "kahuna-control --restore".
 #                               Must be used with the same KAHUNA_STORAGE type that created the backup.
@@ -30,6 +32,7 @@ PARTITIONS="${KAHUNA_PARTITIONS:-3}"
 DATA_DIR="${KAHUNA_DATA_DIR:-/tmp/kahuna-standalone}"
 BACKUP_DIR="${KAHUNA_BACKUP_DIR:-}"
 RESTORE_STORAGE_PATH="${KAHUNA_RESTORE_STORAGE_PATH:-}"
+LOG_LEVEL="${KAHUNA_LOG_LEVEL:-Warning}"
 
 PUBLISH_DIR="/tmp/kahuna-standalone-bin"
 
@@ -83,4 +86,9 @@ else
 fi
 
 echo ">> Starting standalone node on https://127.0.0.1:${HTTPS_PORT} (http ${HTTP_PORT})"
-exec dotnet Kahuna.Server.dll "${ARGS[@]}"
+# env passes the logging override directly to the child process, bypassing the CommandLine
+# argument parser, which rejects unknown --Key:Sub=Value flags. The published appsettings.json
+# sets both categories to Debug, which floods the console on every request and Raft tick.
+exec env "Logging__LogLevel__Kahuna=${LOG_LEVEL}" \
+         "Logging__LogLevel__Kommander=${LOG_LEVEL}" \
+         dotnet Kahuna.Server.dll "${ARGS[@]}"

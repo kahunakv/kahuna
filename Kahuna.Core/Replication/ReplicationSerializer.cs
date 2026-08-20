@@ -35,6 +35,63 @@ public static class ReplicationSerializer
     public static KeyValueMessage UnserializeKeyValueMessage(ReadOnlySpan<byte> serializedData) =>
         KeyValueMessage.Parser.ParseFrom(serializedData);
 
+    /// <summary>
+    /// Message shell reused by <see cref="UnserializeKeyValueMessageThreadCached"/> on this thread.
+    /// </summary>
+    [ThreadStatic]
+    private static KeyValueMessage? threadCachedKeyValueMessage;
+
+    /// <summary>
+    /// Parses a <see cref="KeyValueMessage"/> into a thread-cached instance instead of a fresh
+    /// allocation, for the per-log-entry apply hot path. The returned instance is only valid until the
+    /// next call on the same thread: the caller must copy every field it needs out before then, must not
+    /// retain the instance, and must not hand it to another thread. Byte payloads extracted from it are
+    /// safe to keep — each parse creates fresh ByteStrings; only the shell is reused.
+    /// </summary>
+    public static KeyValueMessage UnserializeKeyValueMessageThreadCached(ReadOnlySpan<byte> serializedData)
+    {
+        KeyValueMessage message = threadCachedKeyValueMessage ??= new();
+
+        ResetKeyValueMessage(message);
+        message.MergeFrom(serializedData);
+
+        return message;
+    }
+
+    /// <summary>
+    /// Restores every field of a reused <see cref="KeyValueMessage"/> to its default before a merge.
+    /// The reset must be complete: proto3 omits default-valued fields from the wire and
+    /// <c>MergeFrom</c> leaves omitted fields untouched, so any field missed here would leak the
+    /// previous record's value into the next one (a delete inheriting the prior set's value, a
+    /// non-transactional write inheriting the prior transaction id). A new proto field must be added
+    /// here too — the reset-completeness unit test fails when one is missed.
+    /// </summary>
+    private static void ResetKeyValueMessage(KeyValueMessage message)
+    {
+        message.Type = 0;
+        message.Key = string.Empty;
+        message.ClearValue();
+        message.Revision = 0;
+        message.ExpireNode = 0;
+        message.ExpirePhysical = 0;
+        message.ExpireCounter = 0;
+        message.LastUsedNode = 0;
+        message.LastUsedPhysical = 0;
+        message.LastUsedCounter = 0;
+        message.LastModifiedNode = 0;
+        message.LastModifiedPhysical = 0;
+        message.LastModifiedCounter = 0;
+        message.TimeNode = 0;
+        message.TimePhysical = 0;
+        message.TimeCounter = 0;
+        message.ClearNoRevision();
+        message.TransactionIdNode = 0;
+        message.TransactionIdPhysical = 0;
+        message.TransactionIdCounter = 0;
+        message.ClearRecordAnchorKey();
+        message.ClearEmbeddedDecision();
+    }
+
     public static byte[] Serialize(RangeMapMessage message)
     {
         return Encode(message);

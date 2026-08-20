@@ -136,36 +136,14 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal InvalidateOrApplyData? InvalidateOrApplyData { get; set; }
 
     /// <summary>
-    /// Constructs an <c>InvalidateOrApply</c> message with named fields carried in
-    /// <see cref="InvalidateOrApplyData"/> rather than punned into general-purpose fields.
+    /// Ownership-transfer marker for pooled fire-and-forget messages: the receiving actor returns the
+    /// request to <see cref="KeyValueRequestPool"/> after handling it, because the sender has no
+    /// completion to await. Set only by the pool's rent helpers for message types whose sender keeps no
+    /// reference after the send; requests whose lifetime the sender controls (every <c>Ask</c> path)
+    /// leave it false and are returned by the caller — a receiver return there would hand the same
+    /// object to two owners.
     /// </summary>
-    internal static KeyValueRequest ForInvalidateOrApply(
-        string key, long revision, byte[]? value,
-        HLCTimestamp expires, HLCTimestamp lastUsed, HLCTimestamp lastModified, KeyValueState state,
-        bool forceResident = false, HLCTimestamp transactionId = default, int partitionId = 0, bool noRevision = false,
-        bool isRollback = false)
-    {
-        KeyValueRequest req = new(
-            KeyValueRequestType.InvalidateOrApply,
-            HLCTimestamp.Zero,
-            HLCTimestamp.Zero,
-            key,
-            null,
-            null,
-            -1,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            0,
-            0,
-            null
-        );
-
-        req.InvalidateOrApplyData = new(revision, value, expires, lastUsed, lastModified, state, forceResident, transactionId, partitionId, noRevision, isRollback);
-        
-        return req;
-    }
+    internal bool ReturnToPoolOnReceive { get; set; }
 
     /// <summary>
     /// Creates a type-only request (e.g. periodic cache collection).
@@ -291,6 +269,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         InvalidateOrApplyData = null;
         RoutedGeneration = 0;
         RecordAnchorKey = null;
+        ReturnToPoolOnReceive = false;
     }
 
     public int GetHash()

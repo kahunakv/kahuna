@@ -29,6 +29,16 @@ internal abstract class BaseHandler
     protected static int RentProposalId() => Interlocked.Increment(ref proposalId);
 
     /// <summary>
+    /// Message shell reused across <see cref="SerializeProposal"/> calls on this thread: the message is
+    /// built, serialized, and abandoned within one synchronous call, so a per-call allocation buys
+    /// nothing. Reuse is sound only while this instance stays private to that method — it sets every
+    /// field it uses on every call (and clears the presence-tracked value), so the fields it never
+    /// touches (transaction id, record anchor, embedded decision) remain at their defaults forever.
+    /// </summary>
+    [ThreadStatic]
+    private static KeyValueMessage? serializeProposalMessage;
+
+    /// <summary>
     /// Serializes a proposal into the committed <see cref="KeyValueMessage"/> log record. The bytes are
     /// independent of how many writes share a Raft proposal, so an item aggregated into a bulk batch applies on
     /// followers and restores exactly as a single-key set/delete would. Used by the direct-write path for set,
@@ -36,30 +46,33 @@ internal abstract class BaseHandler
     /// </summary>
     internal static byte[] SerializeProposal(KeyValueRequestType type, KeyValueProposal proposal, HLCTimestamp currentTime)
     {
-        KeyValueMessage kvm = new()
-        {
-            Type = (int)type,
-            Key = proposal.Key,
-            Revision = proposal.Revision,
-            ExpireNode = proposal.Expires.N,
-            ExpirePhysical = proposal.Expires.L,
-            ExpireCounter = proposal.Expires.C,
-            LastUsedNode = proposal.LastUsed.N,
-            LastUsedPhysical = proposal.LastUsed.L,
-            LastUsedCounter = proposal.LastUsed.C,
-            LastModifiedNode = proposal.LastModified.N,
-            LastModifiedPhysical = proposal.LastModified.L,
-            LastModifiedCounter = proposal.LastModified.C,
-            TimeNode = currentTime.N,
-            TimePhysical = currentTime.L,
-            TimeCounter = currentTime.C,
-            // The follower apply/restore path (KeyValueReplicator) reads NoRevision; carry it so a
-            // SetNoRevision write suppresses revision history on followers exactly as it does on the leader.
-            NoRevision = proposal.NoRevision
-        };
+        KeyValueMessage kvm = serializeProposalMessage ??= new();
 
+        kvm.Type = (int)type;
+        kvm.Key = proposal.Key;
+        kvm.Revision = proposal.Revision;
+        kvm.ExpireNode = proposal.Expires.N;
+        kvm.ExpirePhysical = proposal.Expires.L;
+        kvm.ExpireCounter = proposal.Expires.C;
+        kvm.LastUsedNode = proposal.LastUsed.N;
+        kvm.LastUsedPhysical = proposal.LastUsed.L;
+        kvm.LastUsedCounter = proposal.LastUsed.C;
+        kvm.LastModifiedNode = proposal.LastModified.N;
+        kvm.LastModifiedPhysical = proposal.LastModified.L;
+        kvm.LastModifiedCounter = proposal.LastModified.C;
+        kvm.TimeNode = currentTime.N;
+        kvm.TimePhysical = currentTime.L;
+        kvm.TimeCounter = currentTime.C;
+        // The follower apply/restore path (KeyValueReplicator) reads NoRevision; carry it so a
+        // SetNoRevision write suppresses revision history on followers exactly as it does on the leader.
+        kvm.NoRevision = proposal.NoRevision;
+
+        // The value is presence-tracked: a value-less record (delete) must clear it, or the reused
+        // shell would carry the previous write's value onto the wire.
         if (proposal.Value is not null)
             kvm.Value = UnsafeByteOperations.UnsafeWrap(proposal.Value);
+        else
+            kvm.ClearValue();
 
         return ReplicationSerializer.Serialize(kvm);
     }

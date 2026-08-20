@@ -107,18 +107,23 @@ internal sealed class KeyValueReplicator
         HLCTimestamp transactionId,
         bool noRevision)
     {
+        // Fire-and-forget with ownership transfer: the actor returns the pooled request after
+        // handling it, so no reference may be kept past the send.
         persistentRouter.Send(
-            KeyValueRequest.ForInvalidateOrApply(
-                key, 
-                revision, 
-                value, 
-                expires, 
-                lastUsed, 
-                lastModified, 
+            KeyValueRequestPool.RentInvalidateOrApply(
+                key,
+                revision,
+                value,
+                expires,
+                lastUsed,
+                lastModified,
                 state,
-                transactionId: transactionId, 
-                partitionId: partitionId, 
-                noRevision: noRevision
+                forceResident: false,
+                transactionId: transactionId,
+                partitionId: partitionId,
+                noRevision: noRevision,
+                isRollback: false,
+                returnToPoolOnReceive: true
             )
         );
     }
@@ -213,7 +218,10 @@ internal sealed class KeyValueReplicator
         
         try
         {
-            KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
+            // Thread-cached shell: valid only within this synchronous call — every field is copied out
+            // below before the next entry on this thread reuses it. The extracted value array belongs
+            // to this parse's ByteString, not to the shell, so it is safe to hand onward.
+            KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessageThreadCached(log.LogData);
 
             switch ((KeyValueRequestType)keyValueMessage.Type)
             {

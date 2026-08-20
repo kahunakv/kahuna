@@ -2,56 +2,58 @@
 
 <img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="250" alt="kahuna">
 
-Distributed systems can become highly complex due to the many reasons: execution may be non-deterministic, unexpected edge cases, and specific scenarios that make it difficult to reason about solid solutions that ensure system robustness.
+Distributed systems are difficult to build correctly. Execution can be non-deterministic. Edge cases are hard to predict. These factors make it difficult to reason about correct solutions.
 
-Kahuna is an open-source project aimed at providing out-of-the-box solutions for developers and applications that need to solve common problems related to distributed systems.
+Kahuna is an open-source project. It gives developers ready-made solutions for three common problems in distributed systems:
 
-It is primarily focused on the following areas: distributed locking, a distributed key/value store and a distributed sequencer.
+- Distributed locking
+- A distributed key/value store
+- A distributed sequencer
 
 ### **Distributed Locking**
-Kahuna addresses the challenge of synchronizing access to shared resources across multiple nodes or processes, ensuring consistency and preventing race conditions. Its locking mechanism ensures efficient coordination for many use cases.
+
+Multiple nodes or processes often need access to the same resource. Kahuna synchronizes that access to prevent race conditions and to keep data consistent.
 
 [More](https://kahunakv.github.io/docs/distributed-locks)
 
 ### **Distributed Key/Value Store**
-Beyond locking, Kahuna operates as a distributed key/value store, enabling fault-tolerant, 
-high-performance storage and retrieval of structured data. This makes it a powerful tool 
-for managing metadata, caching, and application state in distributed environments.
+
+Kahuna stores and retrieves structured data across a cluster. The store is fault-tolerant and has high throughput. Use it for metadata, caches, or application state.
 
 [More](https://kahunakv.github.io/docs/distributed-keyvalue-store)
 
 ### **Distributed Sequencer**
-Kahuna also functions as a distributed sequencer, providing a globally ordered execution 
-of events or transactions. This capability is essential for use cases such as distributed 
-databases, message queues, and event-driven systems that require precise ordering of 
-operations.
+
+Kahuna generates globally ordered identifiers. Distributed databases, message queues, and event-driven systems use these identifiers to order their operations.
 
 [More](https://kahunakv.github.io/docs/distributed-sequencer)
 
-By seamlessly integrating these three functionalities, Kahuna provides a comprehensive 
-foundation for building reliable and scalable distributed applications.
+These three capabilities work together. They give you a foundation for reliable and scalable distributed applications.
 
-> _Kahuna_ is a Hawaiian word that refers to an expert in any field. Historically,
-it has been used to refer to doctors, surgeons and dentists,
-as well as priests, ministers, and sorcerers.
+> _Kahuna_ is a Hawaiian word for an expert in any field.
+Historically, it referred to doctors, surgeons, dentists, priests, ministers, and sorcerers.
 
-Check the [documentation](https://kahunakv.github.io/) for more information on architecture, installation, and usage examples.
+Read the [documentation](https://kahunakv.github.io/) for architecture details, installation steps, and usage examples.
 
 ## Installation
 
-The quickest way to get a node running is the .NET global tool:
+The quickest way to start a node is the .NET global tool:
 
 ```bash
 dotnet tool install -g Kahuna.Server
 kahuna-server
 ```
 
-With no arguments this starts a standalone node on HTTP port 2070. Its key-value data and Raft
-write-ahead log go under the per-user data directory — `~/.local/share/kahuna` on Linux/macOS,
-`%LOCALAPPDATA%\kahuna` on Windows — and both resolved paths are printed at startup. Set
-`KAHUNA_HOME` to relocate them, or pass `--storage-path` / `--wal-path` explicitly.
+With no arguments, this command starts a standalone node on HTTP port 2070. The node stores
+key-value data and the Raft write-ahead log under the per-user data directory:
 
-A node started this way serves **HTTP only**: HTTPS binds only when you supply a certificate.
+- Linux / macOS: `~/.local/share/kahuna`
+- Windows: `%LOCALAPPDATA%\kahuna`
+
+The node prints both paths at startup. Set `KAHUNA_HOME` to change the location. You can also
+pass `--storage-path` or `--wal-path` directly.
+
+A node started this way serves HTTP only. HTTPS binds only when you supply a certificate:
 
 ```bash
 kahuna-server --https-certificate /path/to/certificate.pfx --https-ports 2071
@@ -73,38 +75,65 @@ scripts in `scripts/`.
 
 ### Distributed Storage Engine
 
-Kahuna's architecture operates as a highly scalable, fault-tolerant distributed system that combines lock management, key-value storage, and sequencing capabilities. At its foundation lies a distributed key-value storage model where data is organized into discrete partitions similar to sharding mechanisms in other distributed systems. These partitions function as independent units that can be distributed and managed across the entire node cluster.
+Kahuna is a scalable, fault-tolerant distributed system. It combines lock management, key-value
+storage, and a sequencer.
 
-The system implements Multi-Version Concurrency Control (MVCC) to maintain multiple versions of data simultaneously. This versioning mechanism enables snapshot isolation for transactions, allowing the system to provide consistent read operations even while concurrent write operations are being processed on the same data. This approach eliminates read-write conflicts that would otherwise impact performance in high-concurrency environments.
+Data is organized into partitions. A partition is an independent shard that can be distributed
+across the node cluster. The system moves and manages each partition independently.
+
+Kahuna uses Multi-Version Concurrency Control (MVCC). MVCC keeps multiple versions of each value.
+This makes snapshot isolation possible: read operations return consistent data even while
+concurrent writes change the same keys. MVCC eliminates read-write conflicts that would otherwise
+reduce throughput.
 
 ### Raft-Based Consensus
-Consensus across the distributed system is achieved through the Raft protocol, with each partition in Kahuna being governed by its own Raft group. This protocol ensures consistent replication of all changes across multiple nodes, thereby establishing the foundation for Kahuna's fault tolerance and high availability characteristics.
 
-Within each Raft group, the consensus mechanism designates one node as the leader through an election process. This leader node coordinates all write operations for its assigned partition. To maintain consistency, all operations are recorded as log entries which are systematically replicated to follower nodes. This replication process ensures that data remains consistent across all nodes responsible for a particular partition.
+Each partition has its own Raft group. Raft is a consensus protocol. It replicates all changes
+across multiple nodes and provides fault tolerance and high availability.
+
+Within each Raft group, one node is elected leader. The leader coordinates all write operations
+for its partition. Every write becomes a log entry. The leader replicates each log entry to
+follower nodes. This process keeps data consistent across all nodes that hold a given partition.
 
 ### Transactional Model
-Kahuna implements a transaction management system that combines a two-phase commit protocol with MVCC. This transactional framework operates in distinct phases:
 
-During the prewrite phase, locks are acquired on affected keys and tentative write operations are recorded in the system but not yet confirmed. Following successful preliminary operations, the commit phase activates, during which the system finalizes these changes across replicas to ensure atomic transaction completion.
+Kahuna combines a two-phase commit (2PC) protocol with MVCC. A transaction proceeds in two phases:
 
-The system supports both optimistic and pessimistic concurrency control approaches. With optimistic concurrency control, transactions operate on consistent snapshots of data while deferring conflict resolution until commit time. This approach optimizes performance in scenarios where conflicts are rare. Alternatively, when using pessimistic concurrency control, locks are acquired in advance of modifications, effectively preventing conflicts that might otherwise arise from concurrent operations on identical keys.
+1. **Prewrite** — the system acquires locks on the affected keys and records tentative writes.
+2. **Commit** — the system finalizes the changes across replicas. The transaction completes
+   atomically.
+
+Kahuna supports two concurrency control modes:
+
+- **Optimistic** — transactions read from a consistent snapshot. The system checks for conflicts at
+  commit time. This mode is faster when conflicts are rare.
+- **Pessimistic** — the system acquires locks before it modifies keys. This mode prevents conflicts
+  on contended keys.
 
 ### Scalability and Fault Tolerance
-Horizontal scalability is achieved through dynamic partition management. Partitions can be automatically split and redistributed across nodes to achieve optimal load balancing. This architecture can support linear scalability as additional nodes are integrated into the cluster, allowing Kahuna to expand its capacity proportionally with infrastructure growth.
 
-High availability is ensured through Raft-based replication mechanisms. The system maintains operation even when individual nodes fail, as data remains accessible through replicas. Kahuna's recovery processes are designed to restore system integrity after failures without compromising committed transactions, maintaining both data consistency and service availability.
+Kahuna scales horizontally through dynamic partition management. Partitions split and redistribute
+across nodes automatically to balance load. More nodes give proportionally more capacity.
+
+Raft-based replication ensures high availability. The system continues to operate when individual
+nodes fail. Data stays accessible through replicas. The recovery process restores consistency
+after failures and does not lose committed transactions.
 
 ### Performance Optimizations
-While Kahuna maintains strong consistency guarantees through the Raft protocol, it also incorporates various performance optimizations. Asynchronous replication techniques are employed where appropriate to enhance data replication efficiency and minimize read operation latency without sacrificing consistency requirements.
 
-Background maintenance processes continuously perform compaction and garbage collection operations to reclaim storage space and memory resources. These automated maintenance routines help preserve system performance by systematically removing obsolete data versions that are no longer needed for transaction isolation or recovery purposes.
+Kahuna maintains strong consistency through Raft. It also applies several optimizations. Where
+appropriate, asynchronous replication reduces read latency without a loss of consistency.
+
+Background processes run compaction and garbage collection continuously. These processes reclaim
+storage space and memory. They remove obsolete data versions that the system no longer needs for
+transaction isolation or recovery.
 
 ---
 
 ## Running Tests
 
-The `Kahuna.Client.Tests` project holds end-to-end tests that connect to a running Kahuna
-cluster. Start the Docker cluster before running those tests locally:
+The `Kahuna.Client.Tests` project holds end-to-end tests that connect to a live Kahuna cluster.
+Start the Docker cluster before you run those tests:
 
 ```bash
 docker compose -f docker/local.yml up -d
@@ -124,43 +153,53 @@ Then run the tests:
 dotnet test Kahuna.Client.Tests/Kahuna.Client.Tests.csproj
 ```
 
-When finished, stop the cluster with:
+When you finish, stop the cluster:
 
 ```bash
 docker compose -f docker/local.yml down
 ```
 
-The `Kahuna.Server.Tests` project uses embedded, in-process nodes and does not require the
-external Docker cluster:
+The `Kahuna.Server.Tests` project uses embedded, in-process nodes. It does not need the Docker
+cluster:
 
 ```bash
 dotnet test Kahuna.Server.Tests/Kahuna.Server.Tests.csproj
 ```
 
-GitHub Actions starts the server cluster before running the end-to-end suite through
-`scripts/run-server.sh`.
+GitHub Actions starts the server cluster before it runs the end-to-end suite. The startup script
+is `scripts/run-server.sh`.
 
 ---
 
 ## Jepsen Tests
 
-Kahuna is tested with [Jepsen](https://jepsen.io/), a framework designed to verify the correctness of distributed systems under real-world failure conditions such as network partitions, process crashes, and clock skew.
+Kahuna is tested with [Jepsen](https://jepsen.io/). Jepsen is a framework that verifies
+correctness of distributed systems under real-world failures: network partitions, process crashes,
+and clock skew.
 
-The Jepsen test suite for Kahuna lives at [kahunakv/kahuna-jepsen](https://github.com/kahunakv/kahuna-jepsen). It exercises Kahuna's transactional guarantees, locking semantics, and replication behavior by injecting faults into a running cluster and checking that the system's observable history remains consistent. These tests are essential for building confidence that Kahuna upholds its safety properties — serializability, linearizability, and durability — not just in the happy path but under adversarial conditions that are difficult to reproduce with conventional test suites.
+The test suite lives at [kahunakv/kahuna-jepsen](https://github.com/kahunakv/kahuna-jepsen). It
+exercises transactional guarantees, lock semantics, and replication behavior. The suite injects
+faults into a cluster and checks that the observed history stays consistent.
+
+These tests verify that Kahuna upholds its safety properties — serializability, linearizability,
+and durability — under adversarial conditions, not only on the happy path.
 
 ---
 
 ## Kubernetes Operator (Alpha)
 
-The [Kahuna Kubernetes Operator](https://github.com/kahunakv/kahuna-k8s-operator) automates deploying and managing Kahuna clusters on Kubernetes. It handles cluster provisioning, scaling, and lifecycle operations through a custom resource definition, letting you run Kahuna as a native Kubernetes workload.
+The [Kahuna Kubernetes Operator](https://github.com/kahunakv/kahuna-k8s-operator) automates
+deployment and management of Kahuna clusters on Kubernetes. It provisions clusters, scales them,
+and manages their lifecycle through a custom resource definition. You can run Kahuna as a native
+Kubernetes workload.
 
-> **Note:** This operator is currently in alpha. APIs and behavior may change between releases.
+> **Note:** This operator is in alpha. APIs and behavior can change between releases.
 
 ---
 
 ## Contributing
 
-We welcome contributions from the community! For detailed guidelines, 
+We welcome contributions from the community. For detailed guidelines,
 refer to our [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
 ---
@@ -168,4 +207,3 @@ refer to our [CONTRIBUTING.md](CONTRIBUTING.md) file.
 ## License
 
 Kahuna is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-

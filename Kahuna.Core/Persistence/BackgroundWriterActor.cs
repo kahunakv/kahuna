@@ -143,6 +143,34 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private List<(int PartitionId, long LogIndex)>? pendingKeyValueIndexes;
 
     /// <summary>
+    /// Lock batch list reused across flush cycles: the wide-struct backing array is allocated once
+    /// and kept at its converged capacity, instead of a fresh list per batch that regrows through
+    /// repeated doubling. Invariant: a list parked here is empty. The field is taken (and nulled) at
+    /// batch start; on success the consumed batch is cleared and parked back; on failure the batch
+    /// is surrendered to <see cref="pendingLockItems"/> for retry and this field stays null, so the
+    /// next batch can never alias a parked retry batch.
+    /// </summary>
+    private List<PersistenceRequestItem>? reusableLockItems;
+
+    /// <summary>
+    /// Key/value analog of <see cref="reusableLockItems"/>; surrendered to
+    /// <see cref="pendingKeyValuesItems"/> on failure.
+    /// </summary>
+    private List<PersistenceRequestItem>? reusableKeyValuesItems;
+
+    /// <summary>
+    /// Reused WAL-index list for lock batches; same invariant and surrender rule as
+    /// <see cref="reusableLockItems"/>.
+    /// </summary>
+    private List<(int PartitionId, long LogIndex)>? reusableLockIndexes;
+
+    /// <summary>
+    /// Reused WAL-index list for key/value batches; same invariant and surrender rule as
+    /// <see cref="reusableKeyValuesItems"/>.
+    /// </summary>
+    private List<(int PartitionId, long LogIndex)>? reusableKeyValueIndexes;
+
+    /// <summary>
     /// Per-partition floors already persisted to the backend, so a flush cycle only writes floors
     /// that actually advanced.
     /// </summary>
@@ -741,7 +769,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
             else
             {
-                items = [];
+                items = reusableLockItems ?? [];
+                reusableLockItems = null;
                 batchIndexes = null;
 
                 long size = 0;
@@ -775,7 +804,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     // Carry the WAL index so the durability floor advances when this batch lands;
                     // travels beside the items so the retry path keeps the linkage.
                     if (lockRequest.LogIndex >= 0 && lockRequest.PartitionId >= 0)
-                        (batchIndexes ??= []).Add((lockRequest.PartitionId, lockRequest.LogIndex));
+                    {
+                        if (batchIndexes is null)
+                        {
+                            batchIndexes = reusableLockIndexes ?? [];
+                            reusableLockIndexes = null;
+                        }
+
+                        batchIndexes.Add((lockRequest.PartitionId, lockRequest.LogIndex));
+                    }
 
                     if (lockRequest.Value is not null)
                         size += lockRequest.Value.Length;
@@ -831,6 +868,18 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             ResolveFlushedIndexes(batchIndexes);
 
+            // The batch is fully consumed — recycle its lists for the next cycle (a retried batch
+            // that finally landed is adopted the same way). Clear drops the value references, so
+            // nothing stays pinned between flushes.
+            items.Clear();
+            reusableLockItems = items;
+
+            if (batchIndexes is not null)
+            {
+                batchIndexes.Clear();
+                reusableLockIndexes = batchIndexes;
+            }
+
             pendingCheckpoint = true;
 
             if (!drainFully && (Environment.TickCount64 - startTick) >= budgetMs)
@@ -878,7 +927,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
             else
             {
-                items = [];
+                items = reusableKeyValuesItems ?? [];
+                reusableKeyValuesItems = null;
                 batchIndexes = null;
 
                 long size = 0;
@@ -914,7 +964,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     // Carry the WAL index so the durability floor advances when this batch lands;
                     // travels beside the items so the retry path keeps the linkage.
                     if (keyValueRequest.LogIndex >= 0 && keyValueRequest.PartitionId >= 0)
-                        (batchIndexes ??= []).Add((keyValueRequest.PartitionId, keyValueRequest.LogIndex));
+                    {
+                        if (batchIndexes is null)
+                        {
+                            batchIndexes = reusableKeyValueIndexes ?? [];
+                            reusableKeyValueIndexes = null;
+                        }
+
+                        batchIndexes.Add((keyValueRequest.PartitionId, keyValueRequest.LogIndex));
+                    }
 
                     if (keyValueRequest.Value is not null)
                         size += keyValueRequest.Value.Length;
@@ -989,6 +1047,18 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
                         pendingRevisionCleanupKeys.Add(item.Key);
                 }
+            }
+
+            // The batch is fully consumed — recycle its lists for the next cycle (a retried batch
+            // that finally landed is adopted the same way). Clear drops the value references, so
+            // nothing stays pinned between flushes.
+            items.Clear();
+            reusableKeyValuesItems = items;
+
+            if (batchIndexes is not null)
+            {
+                batchIndexes.Clear();
+                reusableKeyValueIndexes = batchIndexes;
             }
 
             pendingCheckpoint = true;
