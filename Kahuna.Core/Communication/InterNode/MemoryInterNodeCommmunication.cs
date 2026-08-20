@@ -909,12 +909,19 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         string? startKey, bool startInclusive,
         string? endKey, bool endInclusive,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        int? targetPartitionId = null
     )
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            // A partition-pinned release executes on the receiver's own actor state: the sender
+            // targeted the node where the lock was acquired, and re-routing through the receiver's
+            // locator would misdirect the release after a split/merge cutover moved the bounds.
+            if (targetPartitionId is not null)
+                return await kahunaNode.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
             return await kahunaNode.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
         }

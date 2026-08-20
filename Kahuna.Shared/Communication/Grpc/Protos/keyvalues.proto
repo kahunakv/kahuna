@@ -539,6 +539,11 @@ message GrpcTryReleaseExclusiveRangeLockRequest {
   optional string EndKey        = 7;
   bool   EndInclusive           = 8;
   GrpcKeyValueDurability Durability = 9;
+  // When set, the receiver runs the release on its own local actor state instead of re-routing
+  // through its locator. The sender targeted the node where the lock was acquired (a split/merge
+  // quiesce release); after a cutover the receiver's range map routes the bounds to the new
+  // partition, which would misdirect the release and strand its per-key write intents.
+  optional int32 TargetPartitionId = 10;
 }
 
 message GrpcTryReleaseExclusiveRangeLockResponse {

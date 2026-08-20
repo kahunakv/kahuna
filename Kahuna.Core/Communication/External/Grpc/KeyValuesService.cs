@@ -1096,6 +1096,23 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         string? startKey = request.HasStartKey ? request.StartKey : null;
         string? endKey   = request.HasEndKey   ? request.EndKey   : null;
 
+        // A partition-pinned release executes on this node's own actor state: the sender targeted
+        // the node where the lock was acquired (a split/merge quiesce release), and re-routing
+        // through the locator would misdirect the release after a cutover moved the bounds to a
+        // new partition — stranding the lock's per-key write intents until their lease expires.
+        if (request.HasTargetPartitionId)
+        {
+            KeyValueResponseType pinnedType = await keyValues.TryReleaseExclusiveRangeLock(
+                new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+                request.Prefix,
+                startKey, request.StartInclusive,
+                endKey,   request.EndInclusive,
+                (KeyValueDurability)request.Durability
+            );
+
+            return new() { Type = (GrpcKeyValueResponseType)pinnedType };
+        }
+
         KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusiveRangeLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Prefix,

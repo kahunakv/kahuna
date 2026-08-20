@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 using Nixie;
 
 using Kommander;
@@ -28,6 +30,12 @@ namespace Kahuna.Server.KeyValues;
 /// configuration predicate, because spawning one unconditionally would start background work on a node that
 /// opted out. Do not reorder.
 /// </summary>
+[SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "This is a transient constructor-scoped helper. Every disposable field it builds is copied " +
+                    "out into KeyValuesManager immediately after construction, and KeyValuesManager.Dispose() " +
+                    "owns their teardown from that point on.")]
 internal sealed class KeyValuesManagerBuilder
 {
     // Wiring results, handed to the manager. Named as the manager names them so the sequence below is

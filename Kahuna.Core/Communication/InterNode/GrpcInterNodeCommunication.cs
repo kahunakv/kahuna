@@ -981,7 +981,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        int? targetPartitionId = null
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -999,6 +1000,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         if (startKey is not null) request.StartKey = startKey;
         if (endKey   is not null) request.EndKey   = endKey;
+        if (targetPartitionId is not null) request.TargetPartitionId = targetPartitionId.Value;
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryReleaseExclusiveRangeLockResponse remoteResponse = response.TryReleaseExclusiveRangeLock!;

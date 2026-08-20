@@ -16,27 +16,51 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <b>Step sequence:</b>
 /// <list type="number">
 ///   <item>Validate adjacency: <c>left.EndKey == right.StartKey</c>.</item>
-///   <item>Bulk transfer: export <c>[B,C)</c> at a fixed MVCC snapshot, import into the
-///       survivor (P1). Because the persistence backend is node-global the import is a no-op for
-///       correctness today, but the export/import path keeps the merge symmetric with the split and
-///       prepares for future partition-scoped storage.</item>
+///   <item>Quiesce window: acquire an exclusive range lock on <c>[B,C)</c> at P2's leader, then
+///       publish the same window on the replicated descriptor.</item>
+///   <item>Settle the moving range's decided intents, then copy <c>[B,C)</c> at a fixed MVCC
+///       snapshot into the survivor (P1).</item>
 ///   <item>Atomic cutover: <see cref="RangeMapStore.MutateAsync"/> replaces <c>{left, right}</c>
-///       with <c>[A,C)@P1 gen+1</c>.</item>
-///   <item>Return <see cref="MergeOutcome"/> carrying the retired partition ID. The caller must
-///       call <see cref="IRaft.RemovePartitionAsync"/> from the system-partition (0) leader.</item>
+///       with <c>[A,C)@P1 gen+1</c>, which also clears the quiesce.</item>
+///   <item>Release the range lock on P2 by partition id, and return <see cref="MergeOutcome"/>
+///       carrying the retired partition ID. The caller must call
+///       <see cref="IRaft.RemovePartitionAsync"/> from the system-partition (0) leader.</item>
 /// </list>
 /// </para>
 ///
 /// <para>
-/// <b>No quiesce lock.</b> The split uses a range lock to quiesce 2PC commits during the
-/// catch-up window. The merge does not, because
-/// <c>LocateAndTryAcquireExclusiveRangeLock</c> rejects prefix ops over split keyspaces (the
-/// partial-result safety guard). With today's node-global persistence
-/// backend, a write to <c>[B,C)</c> that commits after the snapshot and before the cutover is
-/// still visible on P1 (P1 and P2 share the same store; the export/import is a no-op as noted
-/// above). The correctness gap only materialises under future partition-scoped storage.
-/// Accepting the current gap is reasonable for under-min ranges (very few keys, low load); full
-/// per-descriptor lock support is deferred.
+/// <b>Quiesce scope.</b> <c>[B,C)</c> must accept no write between the copy and the cutover: one
+/// that commits on P2 in that window is absent from the copy and unreachable once <c>[B,C)</c>
+/// routes to P1 and P2 retires — acknowledged to the client, then gone. Each data partition has its
+/// own replica set and its own backend, so P1 cannot see it. Two guards cover the window, and they
+/// are complementary rather than redundant. The <b>exclusive range lock</b> on <c>[B,C)</c> is
+/// installed by a message on P2's leader's key-value actor — the same single-threaded mailbox every
+/// write for that key space passes through — so it is exactly ordered against in-flight writes: one
+/// admitted before the lock is already proposed, one after is refused. The <b>descriptor quiesce</b>
+/// (<see cref="RangeDescriptor.QuiescedUntil"/>, published through
+/// <see cref="RangeMapStore.QuiesceRangeAsync"/>) rides the replicated range map, so it reaches
+/// every node and, unlike the lock, survives a leadership change on P2: a promoted leader holds no
+/// in-memory lock but still refuses writes into <c>[B,C)</c>. A refused client retries after cutover
+/// and is then routed to P1.
+/// </para>
+///
+/// <para>
+/// The window closes on three independent terms. A successful cutover replaces both descriptors,
+/// which clears the quiesce atomically with the routing change; the <c>finally</c> releases it by
+/// owner on every other path; and the deadline stamped on the descriptor lapses on its own, so a
+/// merge executor that dies mid-window leaves a range that reopens instead of one that refuses
+/// writes forever.
+/// </para>
+///
+/// <para>
+/// <b>One copy, not two.</b> The split copies in bulk first and catches up inside its window,
+/// because it splits ranges that are large or hot by definition. A merge candidate is an under-min
+/// range, so a single copy inside the window is enough and the window stays short.
+/// </para>
+///
+/// <para>
+/// <b>Orphan rows.</b> The <c>[B,C)</c> rows stay physically present on P2's replicas — they are not
+/// deleted. Nothing routes to P2 after cutover and the partition is retired, so they affect nothing.
 /// </para>
 ///
 /// <para>
@@ -51,6 +75,15 @@ internal sealed class RangeMerger
 {
     /// <summary>Page size for key-count sampling (also used for export paging).</summary>
     private const int CountPageSize = 512;
+
+    /// <summary>
+    /// How long the quiesce window may stay open (ms). Long enough to cover the settle and the copy
+    /// of an under-min range, and short enough that a merge executor which dies mid-window costs the
+    /// range a bounded stretch of refused writes. Applied to both guards — the range lock's TTL and
+    /// the replicated descriptor deadline — so neither outlives the other and reopens the window
+    /// while the merge still runs.
+    /// </summary>
+    private const int QuiesceTtlMs = 30_000;
 
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
@@ -79,10 +112,23 @@ internal sealed class RangeMerger
     /// the system-partition (0) leader.
     /// </para>
     /// </summary>
-    public async Task<MergeOutcome> MergeAsync(
+    public Task<MergeOutcome> MergeAsync(
         string keySpace,
         RangeDescriptor left,
         RangeDescriptor right,
+        CancellationToken ct = default) =>
+        MergeAsync(keySpace, left, right, null, ct);
+
+    /// <summary>
+    /// Internal overload for tests: <paramref name="duringQuiesce"/> is invoked between the durable
+    /// transaction-state handoff and the cutover commit, while the range is quiesced. It exists so a
+    /// test can race an operation into that window, which is otherwise too short to hit deliberately.
+    /// </summary>
+    internal async Task<MergeOutcome> MergeAsync(
+        string keySpace,
+        RangeDescriptor left,
+        RangeDescriptor right,
+        Func<Task>? duringQuiesce,
         CancellationToken ct = default)
     {
         // -- 1. Validate adjacency -----------------------------------------------
@@ -98,13 +144,113 @@ internal sealed class RangeMerger
 
         logger.LogRangeMergerMerging(keySpace, left.StartKey ?? "-inf", left.EndKey, left.PartitionId, right.StartKey, right.EndKey ?? "+inf", right.PartitionId);
 
-        // -- 1b. Settle the moving range's durable intents before the copy --------
-        // A committed value can exist only as a decided-but-unsettled prepared intent (deferred
-        // settlement); the copy below captures base rows. Settle the moving range first so the copy
-        // carries materialized rows; an intent still undecided inside its window refuses this merge
-        // attempt (the trigger retries next tick). Unlike the split there is no quiesce here, so an
-        // intent can still race in after this barrier — the durable-state handoff below remains the
-        // backstop that moves any straggler onto the survivor.
+        HLCTimestamp mergeTxId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        // -- 1b. Refuse a pair another move is already moving ---------------------
+        // Checked over the whole merged span, not just [B,C): the cutover destroys both descriptors,
+        // so a split part-way through moving a piece of the left range would lose its destination.
+        // Refusing costs nothing — the pair is re-evaluated on the next tick, by which time the other
+        // move has finished or its deadline has lapsed.
+        if (rangeMapStore.IsQuiescedByAnotherMove(keySpace, left.StartKey, right.EndKey, mergeTxId))
+        {
+            logger.LogWarning(
+                "RangeMerger: [{Start},{End}) is being moved by another range move; refusing this merge attempt",
+                left.StartKey ?? "-inf", right.EndKey ?? "+inf");
+            return MergeOutcome.ConcurrentMove;
+        }
+
+        // -- 1c. Quiesce: exclusive range lock on [B,C) ---------------------------
+        // Route to the DATA partition leader (not the local actor) so the lock is recorded where the
+        // writes and 2PC handlers for [B,C) run. Uses the merge's own HLC as the lock's transaction
+        // id, which is also the quiesce owner below.
+        (KeyValueResponseType lockResult, _) = await manager.LocateAndTryAcquireExclusiveRangeLock(
+            mergeTxId,
+            keySpace,
+            right.StartKey, true,
+            right.EndKey, false,
+            QuiesceTtlMs,
+            KeyValueDurability.Persistent,
+            ct);
+
+        // Only Locked will do. AlreadyLocked names a foreign holder — a re-entrant acquire under the
+        // same transaction id answers Locked — so treating it as success would run the merge while
+        // another transaction holds a conflicting lock over part of [B,C), which is what this lock
+        // exists to prevent. A merge is opportunistic housekeeping: refusing and retrying on the next
+        // tick costs nothing.
+        if (lockResult != KeyValueResponseType.Locked)
+        {
+            logger.LogError("RangeMerger: failed to acquire quiesce lock — {Result}", lockResult);
+            return MergeOutcome.QuiesceFailed;
+        }
+
+        // Publish the quiesce on the descriptor itself so it is enforced wherever a write lands and
+        // wherever P2's leadership ends up, not only in this node's router. Fail the merge if it does
+        // not commit: proceeding would copy the range while it is still accepting writes.
+        HLCTimestamp quiescedUntil =
+            raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) + QuiesceTtlMs;
+
+        bool quiescePublished = await rangeMapStore.QuiesceRangeAsync(
+            keySpace, right.StartKey, right.EndKey, mergeTxId, quiescedUntil, ct);
+
+        if (!quiescePublished)
+        {
+            logger.LogError("RangeMerger: could not publish the quiesce for {Space} [{Start},{End})",
+                keySpace, right.StartKey, right.EndKey ?? "+inf");
+
+            // Undo the lock on an uncancellable token: a cancelled merge must not leave the range
+            // locked for the lock's whole TTL.
+            await manager.ReleaseExclusiveRangeLockOnPartitionLeaderAsync(
+                right.PartitionId, mergeTxId, keySpace, right.StartKey, true, right.EndKey, false,
+                KeyValueDurability.Persistent, CancellationToken.None);
+
+            return MergeOutcome.QuiesceFailed;
+        }
+
+        try
+        {
+            return await MergeUnderQuiesceAsync(keySpace, left, right, mergeTxId, duringQuiesce, ct);
+        }
+        finally
+        {
+            // Reopen the range before releasing the lock. Scoped to this merge's own id, so it is a
+            // no-op after a successful cutover (the descriptor it stamped no longer exists) and can
+            // never reopen a window a later move opened. If it cannot commit — this node lost the meta
+            // leadership — the deadline stamped above ends the window instead.
+            await rangeMapStore.ReleaseQuiesceAsync(mergeTxId, CancellationToken.None);
+
+            // Release the lock on the RETIRING partition by id. After cutover [B,C) routes to the
+            // survivor, so a located release would be sent there and leave the lock stranded on P2.
+            await manager.ReleaseExclusiveRangeLockOnPartitionLeaderAsync(
+                right.PartitionId,
+                mergeTxId,
+                keySpace,
+                right.StartKey, true,
+                right.EndKey, false,
+                KeyValueDurability.Persistent,
+                CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// The part of the merge that runs with <c>[B,C)</c> quiesced: settle, copy, hand off the
+    /// range's transaction state, and cut over. Split out so the caller's <c>finally</c> owns
+    /// closing the window on every path out of it.
+    /// </summary>
+    private async Task<MergeOutcome> MergeUnderQuiesceAsync(
+        string keySpace,
+        RangeDescriptor left,
+        RangeDescriptor right,
+        HLCTimestamp mergeTxId,
+        Func<Task>? duringQuiesce,
+        CancellationToken ct)
+    {
+        // -- 2. Settle the moving range's durable intents before the copy ---------
+        // Under deferred settlement a committed value can exist only as a decided-but-unsettled
+        // prepared intent, and the copy below captures base rows: cutting over now would move the
+        // range while its newest committed values still ride intents. The quiesce blocks new
+        // prepares, so settling here is stable — decided intents materialize into the moving range
+        // and the copy carries the rows. An intent still undecided inside its window refuses this
+        // attempt; the trigger retries once its coordinator has decided.
         if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, right.EndKey, ct))
         {
             logger.LogWarning(
@@ -113,11 +259,12 @@ internal sealed class RangeMerger
             return MergeOutcome.UnsettledMovingIntents;
         }
 
-        // -- 2. Bulk copy [B,C) at snapshotTs -> survivor -------------------------
+        // -- 3. Copy [B,C) at snapshotTs -> survivor ------------------------------
         // Routed through partition leaders: the right range is paged via the locator and every
         // page is replicated onto the survivor's Raft log, so the copy is correct even when this
-        // node hosts neither side. Under legacy full replication the copy degenerates to the
-        // historical local export/import (a physical no-op on a node-global backend).
+        // node hosts neither side. Read as the quiesce lock's owner: the exclusive range lock
+        // stamped a write intent on every resident key of [B,C), and a foreign snapshot read meeting
+        // those live intents answers MustRetry forever.
         HLCTimestamp snapshotTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         bool placedRight = raft.GetPartitionReplicas(right.PartitionId).Count > 0;
@@ -126,7 +273,7 @@ internal sealed class RangeMerger
         {
             if (!await manager.CopyRangeToPartitionAsync(
                     keySpace, right.StartKey, right.EndKey, snapshotTs, right.PartitionId, left.PartitionId,
-                    HLCTimestamp.Zero, ct))
+                    mergeTxId, ct))
             {
                 logger.LogError(
                     "RangeMerger: bulk copy failed for {Space} [{Start},{End})",
@@ -142,15 +289,20 @@ internal sealed class RangeMerger
             return MergeOutcome.TransferFailed;
         }
 
-        // -- 2b. Transfer range locks: clamp right's live locks, inject into left leader --
+        // -- 3b. Transfer range locks: clamp right's live locks, inject into left leader --
         // Locks are actor-local (not Raft-replicated). Read from the right partition leader and
         // inject into the left (survivor) leader before cutover so writes to [B,C) routed to
-        // the survivor after the merge are still blocked by any live range locks.
-        // The pre-cutover import is followed by a post-cutover confirm-and-reimport loop
-        // (EnsureLocksOnDestinationLeaderAsync) to handle a left-leadership change during the window.
-        // Range locks are actor-local (not Raft-replicated); their transfer stays best-effort and is hardened
-        // after cutover by the confirm-and-reimport loop. Correctness metadata (receipts, decisions) is not
+        // the survivor after the merge are still blocked by any live range locks. The pre-cutover
+        // import is followed by a post-cutover confirm-and-reimport loop
+        // (EnsureLocksOnDestinationLeaderAsync) to handle a left-leadership change during the window,
+        // so the transfer stays best-effort. Correctness metadata (receipts, decisions) is not
         // best-effort — see below.
+        //
+        // This set is usually empty, and that is by design rather than an oversight: the quiesce lock
+        // above is exclusive over the same interval, so a foreign lock overlapping [B,C) would have
+        // made that acquire fail and this merge refuse. What survives is what can still appear after
+        // it — a lock imported onto the retiring partition by another range move in the same window.
+        // Keep the transfer for those; do not read an empty set as proof it is unreachable.
         List<KeyValueRangeLock> clampedLocks = [];
 
         try
@@ -160,8 +312,11 @@ internal sealed class RangeMerger
             List<KeyValueRangeLock> rightLocks = await manager.GetRangeLocksFromPartitionLeaderAsync(
                 keySpace, right.PartitionId, ct);
 
+            // mergeTxId (the quiesce lock) is excluded — it is released independently in the caller's
+            // finally. Transferring it would move this merge's own lock onto the survivor, where it
+            // would block writes to [B,C) after cutover until its TTL lapsed.
             clampedLocks = KvStateMachineTransfer.FilterAndClamp(
-                rightLocks, right.StartKey, right.EndKey, lockNow);
+                rightLocks, right.StartKey, right.EndKey, lockNow, mergeTxId);
 
             if (clampedLocks.Count > 0)
                 await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, left.PartitionId, clampedLocks, ct);
@@ -233,8 +388,13 @@ internal sealed class RangeMerger
             return MergeOutcome.TransferFailed;
         }
 
-        // -- 3. Atomic cutover ----------------------------------------------------
-        // Replace {left, right} with [A,C)@P1 gen+1.
+        // Test seam: let the caller race an operation into the quiesce window.
+        if (duringQuiesce is not null)
+            await duringQuiesce();
+
+        // -- 4. Atomic cutover ----------------------------------------------------
+        // Replace {left, right} with [A,C)@P1 gen+1. The merged descriptor carries no quiesce, so the
+        // cutover ends the window atomically with the routing change it was protecting.
         long newGeneration = Math.Max(left.Generation, right.Generation) + 1;
 
         bool raceDetected = false;
@@ -256,8 +416,12 @@ internal sealed class RangeMerger
                     return existing;
                 }
 
+                // Drop the two ranges by identity, not by value: the descriptors read by the caller
+                // predate the quiesce stamped onto the right one since, and a value comparison over a
+                // record's every field is one field's drift away from matching the wrong element or
+                // none at all. Both come out of `existing`, so reference identity is exact.
                 List<RangeDescriptor> next = existing
-                    .Where(d => d != liveLeft && d != liveRight)
+                    .Where(d => !ReferenceEquals(d, liveLeft) && !ReferenceEquals(d, liveRight))
                     .ToList();
 
                 // Merged range: [A,C) on the survivor (P1) with bumped generation.
@@ -309,9 +473,13 @@ internal sealed class RangeMerger
     /// <summary>
     /// Counts keys in the given descriptor's range by paging range reads, stopping early once
     /// <paramref name="maxCount"/> keys have been found. Used to decide whether a range is an
-    /// under-min merge candidate. With a committed replica set the pages read through the locator
-    /// (the range's leader) — this node may not host the range, and a local read would answer an
-    /// empty count that wrongly qualifies a populated range for merging.
+    /// under-min merge candidate. The pages always read through the locator (the range's partition
+    /// leader), never this node's local store. Under a committed replica set this node may not host
+    /// the range, and a local read would answer an empty count that wrongly qualifies a populated
+    /// range for merging. Even on a hosting node, a live write intent — the signal that makes a
+    /// busy page refuse and this count end incomplete — is in-memory state on the leader's actor
+    /// only, invisible to a follower-local scan, and a follower's replicated state can also lag.
+    /// When this node is the range's confirmed leader the locator degenerates to the local read.
     ///
     /// <para>Returns whether the count is <c>Complete</c>. A page that could not be served ends the walk
     /// with whatever was counted so far, and that partial total says nothing about the range's size — a
@@ -327,8 +495,6 @@ internal sealed class RangeMerger
         int count      = 0;
         string? cursor = null;
         bool hasMore   = true;
-
-        bool routeThroughLeader = raft.GetPartitionReplicas(descriptor.PartitionId).Count > 0;
 
         while (hasMore && count < maxCount)
         {
@@ -348,28 +514,17 @@ internal sealed class RangeMerger
                 pageStartInclusive = false;
             }
 
-            KeyValueGetByRangeResult page = routeThroughLeader
-                ? await manager.LocateAndGetByRange(
-                    HLCTimestamp.Zero,
-                    descriptor.KeySpace,
-                    pageStart,
-                    pageStartInclusive,
-                    descriptor.EndKey,
-                    false,
-                    Math.Min(CountPageSize, maxCount - count),
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent,
-                    ct)
-                : await manager.GetByRange(
-                    HLCTimestamp.Zero,
-                    descriptor.KeySpace,
-                    pageStart,
-                    pageStartInclusive,
-                    descriptor.EndKey,
-                    false,
-                    Math.Min(CountPageSize, maxCount - count),
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent);
+            KeyValueGetByRangeResult page = await manager.LocateAndGetByRange(
+                HLCTimestamp.Zero,
+                descriptor.KeySpace,
+                pageStart,
+                pageStartInclusive,
+                descriptor.EndKey,
+                false,
+                Math.Min(CountPageSize, maxCount - count),
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                ct);
 
             // A refused page (anything but Get) leaves the count unfinished; an empty Get page is the
             // genuine end of the range.
@@ -441,8 +596,10 @@ internal enum MergeStatus
     Succeeded,
     NotAdjacent,
     TransferFailed,
+    QuiesceFailed,
     CutoverFailed,
     ConcurrentChange,
+    ConcurrentMove,
     UnsettledMovingIntents,
 }
 
@@ -464,7 +621,9 @@ internal readonly struct MergeOutcome
 
     public static MergeOutcome NotAdjacent    => new(MergeStatus.NotAdjacent);
     public static MergeOutcome TransferFailed => new(MergeStatus.TransferFailed);
+    public static MergeOutcome QuiesceFailed  => new(MergeStatus.QuiesceFailed);
     public static MergeOutcome CutoverFailed  => new(MergeStatus.CutoverFailed);
     public static MergeOutcome ConcurrentChange => new(MergeStatus.ConcurrentChange);
+    public static MergeOutcome ConcurrentMove => new(MergeStatus.ConcurrentMove);
     public static MergeOutcome UnsettledMovingIntents => new(MergeStatus.UnsettledMovingIntents);
 }

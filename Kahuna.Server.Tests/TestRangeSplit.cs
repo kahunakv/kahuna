@@ -125,12 +125,18 @@ public sealed class TestRangeSplit : BaseCluster
         (IRaft _, KahunaManager dataLeader) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
         (IRaft _, KahunaManager sysLeader) = await LeaderOf(SystemPartition, nodes);
 
-        // Write keys below and above the eventual split point.
+        // Write keys below and above the eventual split point. Seed writes retry on MustRetry:
+        // it is the documented no-durable-effect retryable outcome, and a freshly assembled
+        // cluster under suite-parallel load can still be settling leaderships when the first
+        // write lands.
         foreach (string key in keysBelow.Concat(keysAbove))
         {
-            (KeyValueResponseType type, _, _) = await dataLeader.TrySetKeyValue(
-                HLCTimestamp.Zero, key, V("v"), null, -1, KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent);
+            string k = key;
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryAsync(
+                () => dataLeader.TrySetKeyValue(
+                    HLCTimestamp.Zero, k, V("v"), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent),
+                r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, type);
         }
 

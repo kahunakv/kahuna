@@ -215,10 +215,13 @@ public sealed class TestRangeMerge : BaseCluster
     /// enforced on the surviving left partition (P2) after the merge. A foreign Exclusive
     /// attempt on the merged range → AlreadyLocked.
     /// </summary>
-    [Fact(Skip = "Best-effort: a left-partition leadership change during the merge " +
-                 "window can strand the in-memory, non-replicated lock. Re-enable when range locks are " +
-                 "replicated through the partition Raft log, which makes the guarantee " +
-                 "deterministic.")]
+    [Fact(Skip = "Two reasons, and the first one now makes this scenario unreachable: the merge takes " +
+                 "its own exclusive lock over the moving range to quiesce it, so a foreign lock held " +
+                 "over that range makes the merge refuse and retry later instead of transferring the " +
+                 "lock. Rewrite this around a lock that does not overlap the moving range before " +
+                 "re-enabling it. The original reason also stands: a left-partition leadership change " +
+                 "during the merge window can strand the in-memory, non-replicated lock, which stays " +
+                 "best-effort until range locks are replicated through the partition Raft log.")]
     public Task Lock_OnMergedPartition_Enforced() => RetryMergeTransfer(async () =>
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -267,10 +270,13 @@ public sealed class TestRangeMerge : BaseCluster
     /// After a merge, releasing the transferred lock via the survivor left partition cleans
     /// up the clamped entry. A subsequent Exclusive on the same range → Locked.
     /// </summary>
-    [Fact(Skip = "Best-effort: a left-partition leadership change during the merge " +
-                 "window can strand the in-memory, non-replicated lock. Re-enable when range locks are " +
-                 "replicated through the partition Raft log, which makes the guarantee " +
-                 "deterministic.")]
+    [Fact(Skip = "Two reasons, and the first one now makes this scenario unreachable: the merge takes " +
+                 "its own exclusive lock over the moving range to quiesce it, so a foreign lock held " +
+                 "over that range makes the merge refuse and retry later instead of transferring the " +
+                 "lock. Rewrite this around a lock that does not overlap the moving range before " +
+                 "re-enabling it. The original reason also stands: a left-partition leadership change " +
+                 "during the merge window can strand the in-memory, non-replicated lock, which stays " +
+                 "best-effort until range locks are replicated through the partition Raft log.")]
     public Task Lock_OnMergedPartition_ReleaseCleansSurvivor() => RetryMergeTransfer(async () =>
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

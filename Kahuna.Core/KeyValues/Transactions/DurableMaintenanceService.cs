@@ -519,6 +519,13 @@ internal sealed class DurableMaintenanceService
         if (leader == raft.GetLocalEndpoint())
             return await TryReleaseExclusiveRangeLock(transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability).ConfigureAwait(false);
 
-        return await interNodeCommunication.TryReleaseExclusiveRangeLock(leader, transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken).ConfigureAwait(false);
+        // The receiver must run the release on its own actor state, not re-route it through the
+        // locator: this call targets the node where the lock was acquired, and after a split or
+        // merge cutover the receiver's range map routes these bounds to the NEW partition — a
+        // re-locate then misdirects (or refuses) the release and strands the lock's per-key write
+        // intents on this partition's leader for the rest of their lease, refusing every snapshot
+        // scan of the moved range that lands there. Pinning the target partition tells the
+        // receiver to execute locally.
+        return await interNodeCommunication.TryReleaseExclusiveRangeLock(leader, transactionId, keySpace, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken, targetPartitionId: partitionId).ConfigureAwait(false);
     }
 }

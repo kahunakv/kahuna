@@ -186,9 +186,19 @@ internal sealed class RangeMapStore : IDisposable
     /// </para>
     ///
     /// <para>
-    /// Returns false when the interval covers no descriptor at all (the map moved under the caller)
-    /// or the mutation could not be committed — in both cases the caller must not proceed as if the
-    /// range were quiesced.
+    /// Returns false when the interval covers no descriptor at all (the map moved under the caller),
+    /// when a descriptor it touches is already quiesced by a different move, or when the mutation
+    /// could not be committed. In all three cases the caller must not proceed as if the range were
+    /// quiesced.
+    /// </para>
+    ///
+    /// <para>
+    /// Refusing to stamp over another owner's live window is what keeps two concurrent moves from
+    /// corrupting each other. A quiesce does not bump the generation, so a cutover's generation race
+    /// guard cannot see one move overwrite another's owner — and the overwriting move's release, which
+    /// is owner-scoped, would then reopen a range the first move is still copying. The first mover
+    /// wins and the second is told to come back later; nothing waits, because the deadline already
+    /// bounds how long "later" can be.
     /// </para>
     /// </summary>
     public async Task<bool> QuiesceRangeAsync(
@@ -200,9 +210,27 @@ internal sealed class RangeMapStore : IDisposable
         CancellationToken cancellationToken = default)
     {
         bool matched = false;
+        bool heldByAnother = false;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         bool committed = await MutateAsync(existing =>
         {
+            // Re-publishing under the same owner is an extension of that move's own window, not a
+            // conflict. Anyone else's live window is, and the whole map is left untouched — a partial
+            // stamp would leave the interval half quiesced.
+            foreach (RangeDescriptor descriptor in existing)
+            {
+                if (string.Equals(descriptor.KeySpace, keySpace, StringComparison.Ordinal)
+                    && Overlaps(descriptor, startKey, endKey)
+                    && descriptor.QuiesceOwner != owner
+                    && descriptor.IsQuiescedAt(now))
+                {
+                    heldByAnother = true;
+                    return existing;
+                }
+            }
+
             List<RangeDescriptor> next = new(existing.Count);
 
             foreach (RangeDescriptor descriptor in existing)
@@ -234,12 +262,35 @@ internal sealed class RangeMapStore : IDisposable
             return next;
         }, cancellationToken).ConfigureAwait(false);
 
-        if (!committed || !matched)
+        if (!committed || !matched || heldByAnother)
             logger.LogWarning(
-                "Could not quiesce {Space} [{Start},{End}) — committed: {Committed}, descriptor found: {Matched}",
-                keySpace, startKey ?? "-inf", endKey ?? "+inf", committed, matched);
+                "Could not quiesce {Space} [{Start},{End}) — committed: {Committed}, descriptor found: {Matched}, held by another move: {Held}",
+                keySpace, startKey ?? "-inf", endKey ?? "+inf", committed, matched, heldByAnother);
 
-        return committed && matched;
+        return committed && matched && !heldByAnother;
+    }
+
+    /// <summary>
+    /// True when any descriptor of <paramref name="keySpace"/> touching <c>[startKey, endKey)</c> is
+    /// currently quiesced by a move other than <paramref name="owner"/>. Lets a caller refuse before
+    /// it does the expensive part of a move, rather than discovering the conflict at the publish.
+    /// Advisory only — the authoritative check is inside <see cref="QuiesceRangeAsync"/>, which runs
+    /// under the mutate gate.
+    /// </summary>
+    public bool IsQuiescedByAnotherMove(string keySpace, string? startKey, string? endKey, HLCTimestamp owner)
+    {
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        foreach (RangeDescriptor descriptor in current.Descriptors)
+        {
+            if (string.Equals(descriptor.KeySpace, keySpace, StringComparison.Ordinal)
+                && Overlaps(descriptor, startKey, endKey)
+                && descriptor.QuiesceOwner != owner
+                && descriptor.IsQuiescedAt(now))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

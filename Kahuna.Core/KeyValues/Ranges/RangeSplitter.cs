@@ -159,15 +159,14 @@ internal sealed class RangeSplitter
         // ── 3. Check both halves are non-empty (min-range-size guard) ────────────
         // We probe by exporting exactly one key from each half at "now". An empty export means
         // that half is empty — splitting would produce a gap or a vacuous range.
-        // With a committed replica set on the source, the probe must read through the locator
-        // (the source partition's leader): this node may not host the range, and a local read
-        // would answer empty for a populated half.
+        // placedSource: whether the source partition has a committed replica set. It decides how
+        // step 7c gathers the moving range's transaction state (leader read vs local stores).
         bool placedSource = raft.GetPartitionReplicas(descriptor.PartitionId).Count > 0;
 
         HLCTimestamp probeTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        HalfProbe leftProbe = await ProbeHalfAsync(keySpace, descriptor.StartKey, splitKey, probeTs, placedSource, ct);
-        HalfProbe rightProbe = await ProbeHalfAsync(keySpace, splitKey, descriptor.EndKey, probeTs, placedSource, ct);
+        HalfProbe leftProbe = await ProbeHalfAsync(keySpace, descriptor.StartKey, splitKey, probeTs, ct);
+        HalfProbe rightProbe = await ProbeHalfAsync(keySpace, splitKey, descriptor.EndKey, probeTs, ct);
 
         // A probe that could not be answered is not evidence of an empty half. Report it as its own
         // retryable outcome so the next cadence (or the operator) tries again, instead of telling the
@@ -494,20 +493,20 @@ internal sealed class RangeSplitter
 
     /// <summary>
     /// Probes whether the half-open interval [start,end) within keySpace has at least one key.
-    /// With a committed replica set the probe reads through the locator (the range's leader); a
-    /// retryable answer counts as empty, which safely refuses the split for this round — the
-    /// trigger retries on its next tick.
+    /// The probe always reads through the locator (the range's partition leader), never this
+    /// node's local store. Under a committed replica set this node may not host the range at all;
+    /// even when it does, a live write intent — the signal that makes a busy page refuse and this
+    /// probe answer <see cref="HalfProbe.Indeterminate"/> — is in-memory state on the leader's
+    /// actor only, invisible to a follower-local scan, and a follower's replicated state can also
+    /// lag the leader. When this node is the range's confirmed leader the locator degenerates to
+    /// the local read, so the collocated case keeps its cost.
     /// </summary>
     private async Task<HalfProbe> ProbeHalfAsync(
-        string keySpace, string? startKey, string? endKey, HLCTimestamp ts, bool routeThroughLeader, CancellationToken ct)
+        string keySpace, string? startKey, string? endKey, HLCTimestamp ts, CancellationToken ct)
     {
-        KeyValueGetByRangeResult result = routeThroughLeader
-            ? await manager.LocateAndGetByRange(
-                HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
-                KeyValueDurability.Persistent, ct).ConfigureAwait(false)
-            : await manager.GetByRange(
-                HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
-                KeyValueDurability.Persistent).ConfigureAwait(false);
+        KeyValueGetByRangeResult result = await manager.LocateAndGetByRange(
+            HLCTimestamp.Zero, keySpace, startKey, true, endKey, false, 1, ts,
+            KeyValueDurability.Persistent, ct).ConfigureAwait(false);
 
         if (result.Items.Count > 0)
             return HalfProbe.HasKeys;

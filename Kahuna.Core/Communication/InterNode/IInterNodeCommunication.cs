@@ -71,7 +71,15 @@ public interface IInterNodeCommunication
     
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(string node, HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken);
+    /// <summary>
+    /// Releases an exclusive range lock on <paramref name="node"/>. With
+    /// <paramref name="targetPartitionId"/> set, the receiver runs the release on its own local
+    /// actor state instead of re-routing through its locator: the caller targeted the node where
+    /// the lock was acquired (a split/merge quiesce release), and after a cutover the receiver's
+    /// range map routes the bounds to the new partition, which would misdirect the release and
+    /// strand the lock's per-key write intents until their lease expires.
+    /// </summary>
+    public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken, int? targetPartitionId = null);
 
     public Task TryReleaseNodeExclusiveLocks(string node, HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses, CancellationToken cancellationToken);
 

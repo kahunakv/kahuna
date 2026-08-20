@@ -202,7 +202,17 @@ public sealed class TestRangeAdminTransports
         Assert.Equal(split.NewPartitionId, descriptors[1].PartitionId);
 
         // Two keys per half is under the default minimum, so the pass folds them straight back.
+        // The pass counts each range through the range's partition leader, and the split-created
+        // partition may still be electing right after the cutover — a refused count skips the pair
+        // for that pass (the auto-merge trigger simply retries on its next tick), so this drives
+        // the pass until the pair folds instead of asserting the very first attempt.
         KahunaMergeRangesResponse merged = await client.MergeRanges(cancellationToken: ct);
+        long mergeDeadline = Environment.TickCount64 + 10_000;
+        while (merged is { Success: true, Merges: 0 } && Environment.TickCount64 < mergeDeadline)
+        {
+            await Task.Delay(100, ct);
+            merged = await client.MergeRanges(cancellationToken: ct);
+        }
         Assert.True(merged.Success, $"merge refused: {merged.Status} — {merged.Reason}");
         Assert.Equal(1, merged.Merges);
 
