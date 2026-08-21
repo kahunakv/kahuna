@@ -176,9 +176,9 @@ internal sealed partial class KeyValuesManager : IDisposable
         CancellationToken cancellationToken) =>
         localKeyValues.TryRouteForeignScanDecisions(windowIntents, scanTransactionId, cancellationToken);
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter => routers.Ephemeral;
+    private KeyValueActorRing ephemeralKeyValuesRouter => routers.Ephemeral;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter => routers.Persistent;
+    private KeyValueActorRing persistentKeyValuesRouter => routers.Persistent;
 
     private IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances => routers.EphemeralInstances;
 
@@ -199,7 +199,7 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// retryable <c>MustRetry</c> response.
     /// </summary>
     private static Task<KeyValueResponse?> AskKeyValueActor(
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+        KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
     private readonly KeyValueRestorer restorer;

@@ -53,9 +53,9 @@ internal sealed class LocalScanOperations
 
     private IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances => runtime.Routers.PersistentInstances;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
+    private KeyValueActorRing ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter => runtime.Routers.Persistent;
+    private KeyValueActorRing persistentKeyValuesRouter => runtime.Routers.Persistent;
 
     private Task<IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>?> TryRouteForeignScanDecisions(
         IReadOnlyList<PreparedIntent> windowIntents,
@@ -64,7 +64,7 @@ internal sealed class LocalScanOperations
         localKeyValues.TryRouteForeignScanDecisions(windowIntents, scanTransactionId, cancellationToken);
 
     private static Task<KeyValueResponse?> AskKeyValueActor(
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+        KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
 

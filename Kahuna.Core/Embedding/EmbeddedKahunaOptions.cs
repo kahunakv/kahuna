@@ -78,17 +78,27 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool RocksDbStatistics { get; set; }
 
-    public int LocksWorkers { get; set; } = Environment.ProcessorCount;
+    /// <summary>
+    /// Number of lock actors per ring (ephemeral and persistent each get this many). Each resource is
+    /// consistent-hash routed to one of them and served single-threaded, so this is the shard count of
+    /// the lock space, not a thread count. A value &lt;= 0 auto-sizes to max(32, CPU cores × 4).
+    /// </summary>
+    public int LocksWorkers { get; set; }
 
-    public int KeyValueWorkers { get; set; } = Environment.ProcessorCount;
+    /// <summary>
+    /// Number of key/value actors per ring (ephemeral and persistent each get this many). Each key is
+    /// consistent-hash routed to one of them and served single-threaded, so this is the shard count of
+    /// the key space, not a thread count. A value &lt;= 0 auto-sizes to max(32, CPU cores × 4).
+    /// </summary>
+    public int KeyValueWorkers { get; set; }
 
     public int BackgroundWriterWorkers { get; set; } = 1;
 
     /// <summary>
     /// Number of sequence actors. Each sequence name is consistent-hash routed to one of them and served
-    /// single-threaded. A value &lt;= 0 auto-sizes.
+    /// single-threaded. A value &lt;= 0 auto-sizes to max(8, CPU cores).
     /// </summary>
-    public int SequencerWorkers { get; set; } = Environment.ProcessorCount;
+    public int SequencerWorkers { get; set; }
 
     /// <summary>
     /// Values reserved from a sequence's durable record per compare-and-swap. Allocations inside the

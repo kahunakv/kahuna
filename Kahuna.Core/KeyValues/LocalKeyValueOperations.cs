@@ -44,15 +44,15 @@ internal sealed class LocalKeyValueOperations
 
     private PreparedIntentStore preparedIntentStore => runtime.PreparedIntentStore;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
+    private KeyValueActorRing ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter => runtime.Routers.Persistent;
+    private KeyValueActorRing persistentKeyValuesRouter => runtime.Routers.Persistent;
 
     private Task<TransactionRecord?> LookupDurableRecordRouted(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         runtime.DurableReplication.LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken);
 
     private static Task<KeyValueResponse?> AskKeyValueActor(
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+        KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
 

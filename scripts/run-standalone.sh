@@ -11,6 +11,7 @@
 #   KAHUNA_STORAGE              storage backend: rocksdb (default, persistent) or memory (ephemeral)
 #   KAHUNA_HTTP_PORT            HTTP port  (default 8081)
 #   KAHUNA_HTTPS_PORT           HTTPS port (default 8082)
+#   KAHUNA_H2C_PORT             cleartext HTTP/2 port for gRPC without TLS (default 8083; set empty to disable)
 #   KAHUNA_PARTITIONS           initial cluster partitions (default 3; 128 is cluster-scale)
 #   KAHUNA_DATA_DIR             base directory for data/WAL when using rocksdb (default /tmp/kahuna-standalone)
 #   KAHUNA_BACKUP_DIR           root directory for PITR backup artifacts; leave unset to disable backup
@@ -28,6 +29,7 @@ REPO_ROOT="$(pwd)"
 STORAGE="${KAHUNA_STORAGE:-rocksdb}"
 HTTP_PORT="${KAHUNA_HTTP_PORT:-8081}"
 HTTPS_PORT="${KAHUNA_HTTPS_PORT:-8082}"
+H2C_PORT="${KAHUNA_H2C_PORT-8083}"
 PARTITIONS="${KAHUNA_PARTITIONS:-3}"
 DATA_DIR="${KAHUNA_DATA_DIR:-/tmp/kahuna-standalone}"
 BACKUP_DIR="${KAHUNA_BACKUP_DIR:-}"
@@ -53,6 +55,10 @@ ARGS=(
   --https-certificate "${PUBLISH_DIR}/certificate.pfx"
   --initial-cluster-partitions "${PARTITIONS}"
 )
+
+if [ -n "${H2C_PORT}" ]; then
+  ARGS+=(--grpc-cleartext-ports "${H2C_PORT}")
+fi
 
 if [ "${STORAGE}" = "memory" ]; then
   # Fully ephemeral: the embedded standalone engine supports an in-memory WAL too.
@@ -85,7 +91,7 @@ else
   echo ">> Backup: disabled (set KAHUNA_BACKUP_DIR to enable PITR)"
 fi
 
-echo ">> Starting standalone node on https://127.0.0.1:${HTTPS_PORT} (http ${HTTP_PORT})"
+echo ">> Starting standalone node on https://127.0.0.1:${HTTPS_PORT} (http ${HTTP_PORT}, h2c ${H2C_PORT:-disabled})"
 # env passes the logging override directly to the child process, bypassing the CommandLine
 # argument parser, which rejects unknown --Key:Sub=Value flags. The published appsettings.json
 # sets both categories to Debug, which floods the console on every request and Raft tick.

@@ -20,9 +20,20 @@
 #                       pairing with the fast path). Raise to re-enable cross-write fsync coalescing.
 #
 # Port layout (all on 127.0.0.1):
-#   Node 1 — HTTP :8081  HTTPS/Raft :8082
-#   Node 2 — HTTP :8083  HTTPS/Raft :8084
-#   Node 3 — HTTP :8085  HTTPS/Raft :8086
+#   Node 1 — HTTP :8081  HTTPS/Raft :8082  cleartext-gRPC :8087
+#   Node 2 — HTTP :8083  HTTPS/Raft :8084  cleartext-gRPC :8088
+#   Node 3 — HTTP :8085  HTTPS/Raft :8086  cleartext-gRPC :8089
+#
+# The cleartext-gRPC ports speak HTTP/2 without TLS (for gRPC clients that skip the TLS cost,
+# e.g. kahuna-bench -c "http://127.0.0.1:8087,..."). They reject HTTP/1.1, so REST stays on
+# the HTTP/HTTPS ports.
+#
+#   KAHUNA_RAFT_CLEARTEXT  set to 1 to run INTER-NODE traffic (Raft + leader forwarding) over the
+#                       cleartext-gRPC ports too: the advertised Raft endpoints move to :8087-:8089
+#                       and both inter-node layers dial peers with http://. Dev only — Raft payloads
+#                       cross the network unencrypted. A node's identity is host:raft-port, so a
+#                       persisted rocksdb store from the TLS layout will not match; combine with
+#                       KAHUNA_WIPE=1 (or KAHUNA_STORAGE=memory) when toggling.
 #
 set -euo pipefail
 
@@ -32,6 +43,7 @@ REPO_ROOT="$(pwd)"
 STORAGE="${KAHUNA_STORAGE:-rocksdb}"
 PARTITIONS="${KAHUNA_PARTITIONS:-3}"
 DATA_DIR="${KAHUNA_DATA_DIR:-/tmp/kahuna-cluster}"
+RAFT_CLEARTEXT="${KAHUNA_RAFT_CLEARTEXT:-0}"
 
 PUBLISH_DIR="/tmp/kahuna-cluster-bin"
 HOST="127.0.0.1"
@@ -100,22 +112,34 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # ── Node launcher ─────────────────────────────────────────────────────────────
-# Usage: start_node <id> <http_port> <https_port> <peer1_addr> <peer2_addr>
+# Usage: start_node <id> <http_port> <https_port> <h2c_port> <peer1_addr> <peer2_addr>
 start_node() {
-    local id=$1 http_port=$2 https_port=$3 peer1=$4 peer2=$5
+    local id=$1 http_port=$2 https_port=$3 h2c_port=$4 peer1=$5 peer2=$6
+
+    # With cleartext inter-node, the advertised Raft endpoint is the h2c listener and peers are
+    # dialed with http:// on both inter-node layers (Kommander Raft + Kahuna forwarding).
+    local raft_port="${https_port}"
+    if [ "${RAFT_CLEARTEXT}" = "1" ]; then
+        raft_port="${h2c_port}"
+    fi
 
     local args=(
         --raft-nodename        "kahuna${id}"
         --raft-nodeid          "${id}"
         --raft-host            "${HOST}"
-        --raft-port            "${https_port}"
+        --raft-port            "${raft_port}"
         --http-ports           "${http_port}"
         --https-ports          "${https_port}"
+        --grpc-cleartext-ports "${h2c_port}"
         --https-certificate    "${PUBLISH_DIR}/certificate.pfx"
         --raft-allow-insecure-certificate-validation
         --initial-cluster      "${peer1}" "${peer2}"
         --initial-cluster-partitions "${PARTITIONS}"
     )
+
+    if [ "${RAFT_CLEARTEXT}" = "1" ]; then
+        args+=(--raft-grpc-scheme "http://")
+    fi
 
     # Diagnostic knob: force a single gRPC stream per peer to remove cross-stream reordering
     # of AppendLogs (set KAHUNA_GRPC_CHANNELS=1). Unset => server default (4).
@@ -166,20 +190,28 @@ start_node() {
         > "$out_fifo" 2> "$err_fifo" &
     local pid=$!
     pids+=($pid)
-    echo ">> kahuna${id} started (PID ${pid})  HTTP :${http_port}  HTTPS/Raft :${https_port}"
+    echo ">> kahuna${id} started (PID ${pid})  HTTP :${http_port}  HTTPS/Raft :${https_port}  cleartext-gRPC :${h2c_port}"
 }
 
 # ── Start the three nodes ────────────────────────────────────────────────────
-# Each node's --initial-cluster lists the OTHER two nodes' Raft endpoints.
-start_node 1  8081 8082  "${HOST}:8084" "${HOST}:8086"
-start_node 2  8083 8084  "${HOST}:8082" "${HOST}:8086"
-start_node 3  8085 8086  "${HOST}:8082" "${HOST}:8084"
+# Each node's --initial-cluster lists the OTHER two nodes' Raft endpoints. Those endpoints follow
+# the advertised Raft ports, so they move to the h2c listeners under KAHUNA_RAFT_CLEARTEXT=1.
+if [ "${RAFT_CLEARTEXT}" = "1" ]; then
+    echo ">> KAHUNA_RAFT_CLEARTEXT=1: inter-node traffic uses cleartext HTTP/2 (dev only)"
+    RP1=8087; RP2=8088; RP3=8089
+else
+    RP1=8082; RP2=8084; RP3=8086
+fi
+
+start_node 1  8081 8082 8087  "${HOST}:${RP2}" "${HOST}:${RP3}"
+start_node 2  8083 8084 8088  "${HOST}:${RP1}" "${HOST}:${RP3}"
+start_node 3  8085 8086 8089  "${HOST}:${RP1}" "${HOST}:${RP2}"
 
 echo ""
 echo ">> 3-node cluster running. Press Ctrl+C to stop all nodes."
-echo "   Node 1 — http://localhost:8081   https://localhost:8082"
-echo "   Node 2 — http://localhost:8083   https://localhost:8084"
-echo "   Node 3 — http://localhost:8085   https://localhost:8086"
+echo "   Node 1 — http://localhost:8081   https://localhost:8082   cleartext-gRPC http://localhost:8087"
+echo "   Node 2 — http://localhost:8083   https://localhost:8084   cleartext-gRPC http://localhost:8088"
+echo "   Node 3 — http://localhost:8085   https://localhost:8086   cleartext-gRPC http://localhost:8089"
 echo ""
 
 wait "${pids[@]}"

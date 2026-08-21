@@ -66,7 +66,7 @@ internal sealed class KeySpaceAdminService
 
     private Kahuna.Server.Communication.Internode.IInterNodeCommunication interNodeCommunication => runtime.InterNodeCommunication;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter => runtime.Routers.Persistent;
+    private KeyValueActorRing persistentKeyValuesRouter => runtime.Routers.Persistent;
 
     /// <summary>
     /// Generation stamped on an auto-seeded initial descriptor. Must be &gt;= 1 so it acts as a real

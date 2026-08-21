@@ -18,6 +18,9 @@ public sealed class KahunaCommandLineOptions
     
     [Option("https-ports", Required = false, HelpText = "Ports to bind incoming HTTPs connections to")]
     public IEnumerable<string>? HttpsPorts { get; set; }
+
+    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead")]
+    public IEnumerable<string>? GrpcCleartextPorts { get; set; }
     
     [Option("https-certificate", Required = false, HelpText = "Path to the HTTPs certificate")]
     public string HttpsCertificate { get; set; } = "";
@@ -88,17 +91,17 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-port", Required = false, HelpText = "Port to bind incoming Raft consensus and replication requests", Default = 2070)]
     public int RaftPort { get; set; } = 2070;
     
-    [Option("locks-workers", Required = false, HelpText = "Number of lock ephemeral/consistent workers", Default = 128)]
-    public int LocksWorkers { get; set; } = 128;
+    [Option("locks-workers", Required = false, HelpText = "Number of lock ephemeral/consistent workers (0 = auto-size: max(32, CPU cores x 4))", Default = 0)]
+    public int LocksWorkers { get; set; }
     
-    [Option("keyvalue-workers", Required = false, HelpText = "Number of key/value ephemeral/consistent workers", Default = 128)]
-    public int KeyValueWorkers { get; set; } = 128;
+    [Option("keyvalue-workers", Required = false, HelpText = "Number of key/value ephemeral/consistent workers (0 = auto-size: max(32, CPU cores x 4))", Default = 0)]
+    public int KeyValueWorkers { get; set; }
     
     [Option("background-writer-workers", Required = false, HelpText = "Number of background writers workers", Default = 1)]
     public int BackgroundWritersWorkers { get; set; } = 1;
 
-    [Option("sequencer-workers", Required = false, HelpText = "Number of sequence workers", Default = 128)]
-    public int SequencerWorkers { get; set; } = 128;
+    [Option("sequencer-workers", Required = false, HelpText = "Number of sequence workers (0 = auto-size: max(8, CPU cores))", Default = 0)]
+    public int SequencerWorkers { get; set; }
 
     [Option("sequencer-block-size", Required = false, HelpText = "Values reserved per sequence compare-and-swap; one Raft commit is amortized over this many values. 1 = gap-free (one commit per value)", Default = 1000)]
     public int SequencerBlockSize { get; set; } = 1000;

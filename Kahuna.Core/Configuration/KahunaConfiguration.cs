@@ -10,7 +10,15 @@ public sealed class KahunaConfiguration
     public string HttpsTrustedThumbprint { get; set; } = "";
     
     public string HttpsCertificatePassword { get; set; } = "";
-    
+
+    /// <summary>
+    /// URL scheme prepended to bare peer endpoints when this node opens inter-node gRPC channels
+    /// (leader forwarding, sequencer allocation). Fed from the same flag as Kommander's Raft channel
+    /// scheme so both inter-node layers dial peers the same way. With "http://" the target ports
+    /// must be cleartext HTTP/2 listeners; payloads then cross the network unencrypted.
+    /// </summary>
+    public string InterNodeGrpcScheme { get; set; } = "https://";
+
     public int LocksWorkers { get; set; }
     
     public int KeyValueWorkers { get; set; }

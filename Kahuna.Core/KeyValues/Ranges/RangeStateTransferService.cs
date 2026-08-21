@@ -80,9 +80,9 @@ internal sealed class RangeStateTransferService
 
     private IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter => runtime.BackgroundWriter;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
+    private KeyValueActorRing ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter => runtime.Routers.Persistent;
+    private KeyValueActorRing persistentKeyValuesRouter => runtime.Routers.Persistent;
 
     private Writes.DurableReplicationGateway durableReplication => runtime.DurableReplication;
 
@@ -95,7 +95,7 @@ internal sealed class RangeStateTransferService
         manager.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
 
     private static Task<KeyValueResponse?> AskKeyValueActor(
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+        KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
     /// <summary>

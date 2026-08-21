@@ -1,7 +1,6 @@
 
 using System.Runtime.InteropServices;
 using Nixie;
-using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
@@ -32,7 +31,7 @@ internal sealed class KeyValueReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentRouter;
+    private readonly KeyValueActorRing persistentRouter;
 
     private readonly IRaft raft;
 
@@ -50,7 +49,7 @@ internal sealed class KeyValueReplicator
 
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentRouter,
+        KeyValueActorRing persistentRouter,
         IRaft raft,
         KeyWriteFrequencyRegistry writeFrequencyRegistry,
         KeySpaceRegistry keySpaceRegistry,

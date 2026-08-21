@@ -174,6 +174,16 @@ builder.WebHost.ConfigureKestrel(options =>
                 listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
             });
 
+    // Cleartext HTTP/2 (h2c) for gRPC. Kestrel only accepts prior-knowledge HTTP/2 without
+    // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
+    // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
+    if (opts.GrpcCleartextPorts is not null)
+        foreach (string port in opts.GrpcCleartextPorts)
+            options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
+            {
+                listenOptions.Protocols = HttpProtocols.Http2;
+            });
+
     if (!httpsConfigured)
         return;
 
@@ -205,6 +215,7 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
 {
     HttpsCertificate = opts.HttpsCertificate,
     HttpsCertificatePassword = opts.HttpsCertificatePassword,
+    InterNodeGrpcScheme = opts.RaftGrpcScheme,
     LocksWorkers = opts.LocksWorkers,
     KeyValueWorkers = opts.KeyValueWorkers,
     BackgroundWriterWorkers = opts.BackgroundWritersWorkers,

@@ -2262,14 +2262,25 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     }
 
     // Qualified: the Kahuna.Server.Sequencer namespace would otherwise shadow the generated client.
-    private static global::Sequencer.SequencerClient GetSequencerClient(string node)
+    private global::Sequencer.SequencerClient GetSequencerClient(string node)
     {
-        return new(SharedChannels.GetChannel(node));
+        return new(SharedChannels.GetChannel(ResolveNodeUrl(node)));
     }
+
+    /// <summary>
+    /// Qualifies a bare peer endpoint (host:port) with the configured inter-node gRPC scheme.
+    /// Without this, the shared channel pool defaults bare endpoints to https, which pins
+    /// Kahuna's inter-node traffic to TLS even when the cluster dials its Raft channels over
+    /// cleartext HTTP/2. An endpoint that already carries a scheme passes through unchanged.
+    /// </summary>
+    private string ResolveNodeUrl(string node) =>
+        node.StartsWith("https://", StringComparison.Ordinal) || node.StartsWith("http://", StringComparison.Ordinal)
+            ? node
+            : configuration.InterNodeGrpcScheme + node;
 
     private GrpcServerBatcher GetSharedBatcher(string url)
     {
-        Lazy<GrpcServerBatcher> lazyBatcher = batchers.GetOrAdd(url, static (u, self) => self.GetSharedBatchers(u), this);
+        Lazy<GrpcServerBatcher> lazyBatcher = batchers.GetOrAdd(ResolveNodeUrl(url), static (u, self) => self.GetSharedBatchers(u), this);
         return lazyBatcher.Value;
     }
 

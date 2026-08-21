@@ -104,7 +104,11 @@ TextWriter diag = isConsoleFormat ? Console.Out : Console.Error;
 // ── client construction ───────────────────────────────────────────────────────
 
 bool insecure = opts.Insecure || endpoints.All(IsLocalhost);
-KahunaOptions kahunaOptions = new() { AllowInsecureCertificateValidation = insecure };
+KahunaOptions kahunaOptions = new()
+{
+    AllowInsecureCertificateValidation = insecure,
+    GrpcChannelPoolSize = Math.Max(1, opts.GrpcChannels)
+};
 KahunaClient client = new(endpoints, null, null, kahunaOptions);
 
 // ── run ───────────────────────────────────────────────────────────────────────

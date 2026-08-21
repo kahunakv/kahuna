@@ -50,12 +50,12 @@ internal sealed class LocalMutationTicketOperations
 
     private KeyValueLocator locator => runtime.Locator;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
+    private KeyValueActorRing ephemeralKeyValuesRouter => runtime.Routers.Ephemeral;
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter => runtime.Routers.Persistent;
+    private KeyValueActorRing persistentKeyValuesRouter => runtime.Routers.Persistent;
 
     private static Task<KeyValueResponse?> AskKeyValueActor(
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+        KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
     /// <summary>

@@ -19,6 +19,7 @@ WORKDIR /app
 # expose the ports
 EXPOSE 2070
 EXPOSE 2071
+EXPOSE 2072
 
 # copy the built program
 COPY --from=build-env /app .
@@ -33,7 +34,9 @@ ARG KAHUNA_RAFT_HOST
 ARG KAHUNA_RAFT_PORT
 ARG KAHUNA_HTTP_PORTS
 ARG KAHUNA_HTTPS_PORTS
+ARG KAHUNA_GRPC_CLEARTEXT_PORTS
 ARG KAHUNA_INITIAL_CLUSTER
+ARG KAHUNA_RAFT_SCHEME="https://"
 
 ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
 ENV KAHUNA_RAFT_NODENAME="$KAHUNA_RAFT_NODENAME"
@@ -42,7 +45,9 @@ ENV KAHUNA_RAFT_HOST="$KAHUNA_RAFT_HOST"
 ENV KAHUNA_RAFT_PORT="$KAHUNA_RAFT_PORT"
 ENV KAHUNA_HTTP_PORTS="$KAHUNA_HTTP_PORTS"
 ENV KAHUNA_HTTPS_PORTS="$KAHUNA_HTTPS_PORTS"
+ENV KAHUNA_GRPC_CLEARTEXT_PORTS="$KAHUNA_GRPC_CLEARTEXT_PORTS"
 ENV KAHUNA_INITIAL_CLUSTER="$KAHUNA_INITIAL_CLUSTER"
+ENV KAHUNA_RAFT_SCHEME="$KAHUNA_RAFT_SCHEME"
 
 # Extra server flags, appended verbatim to the command line and word-split by the shell. Empty by default,
 # so a stock cluster is byte-for-byte what it was. Set it per service in the compose file (a runtime
@@ -62,9 +67,16 @@ COPY --chmod=755 <<'EOT' /app/entrypoint.sh
 mkdir -p /storage/data
 mkdir -p /storage/wal
 
-echo "kahuna --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation $KAHUNA_EXTRA_ARGS"
+# The cleartext HTTP/2 flag is only valid with a value; when the variable is empty, omit the
+# flag entirely so the command-line parser does not see a bare option.
+H2C_ARGS=""
+if [ -n "$KAHUNA_GRPC_CLEARTEXT_PORTS" ]; then
+    H2C_ARGS="--grpc-cleartext-ports $KAHUNA_GRPC_CLEARTEXT_PORTS"
+fi
 
-dotnet /app/Kahuna.Server.dll --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation $KAHUNA_EXTRA_ARGS
+echo "kahuna --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --raft-grpc-scheme $KAHUNA_RAFT_SCHEME --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS $H2C_ARGS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation $KAHUNA_EXTRA_ARGS"
+
+dotnet /app/Kahuna.Server.dll --raft-nodename $KAHUNA_RAFT_NODENAME --raft-nodeid $KAHUNA_RAFT_NODEID --raft-host $KAHUNA_RAFT_HOST --raft-port $KAHUNA_RAFT_PORT --raft-grpc-scheme $KAHUNA_RAFT_SCHEME --http-ports $KAHUNA_HTTP_PORTS --https-ports $KAHUNA_HTTPS_PORTS $H2C_ARGS --https-certificate /app/certificate.pfx --initial-cluster $KAHUNA_INITIAL_CLUSTER --storage rocksdb --storage-path /storage/data --storage-revision v1 --wal-storage rocksdb --wal-path /storage/wal --wal-revision v3 --disable-wal-sync-writes --raft-allow-insecure-certificate-validation $KAHUNA_EXTRA_ARGS
 EOT
 
 # when starting the container, run dotnet with the built dll

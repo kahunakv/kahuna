@@ -59,6 +59,9 @@ public static class ConfigurationValidator
                 Directory.CreateDirectory(walPath);
         }
 
+        if (string.IsNullOrEmpty(configuration.InterNodeGrpcScheme))
+            configuration.InterNodeGrpcScheme = "https://";
+
         if (configuration.LocksWorkers <= 0)
             configuration.LocksWorkers = Math.Max(32, Environment.ProcessorCount * 4);
         

@@ -1,4 +1,11 @@
 
+# Inter-node traffic (Raft + leader forwarding) uses TLS by default. To run it over the cleartext
+# HTTP/2 listeners instead (dev only — payloads cross the docker network unencrypted), move every
+# Raft endpoint to the h2c port and flip the scheme, then rebuild (these are build args):
+#   KAHUNA_RAFT_PORT1=2072 KAHUNA_RAFT_PORT2=2072 KAHUNA_RAFT_PORT3=2072 \
+#   KAHUNA_RAFT_SCHEME=http:// docker compose -f docker/local.yml up -d --build
+# A node's identity is host:raft-port, so wipe the volumes first when toggling an existing
+# cluster: docker compose -f docker/local.yml down -v
 name: kahuna
 services:
   kahuna1:
@@ -9,14 +16,17 @@ services:
         KAHUNA_RAFT_NODENAME: kahuna1
         KAHUNA_RAFT_NODEID: 1
         KAHUNA_RAFT_HOST: 172.30.0.2
-        KAHUNA_RAFT_PORT: 8082
+        KAHUNA_RAFT_PORT: ${KAHUNA_RAFT_PORT1:-8082}
         KAHUNA_HTTP_PORTS: 2070 8081
         KAHUNA_HTTPS_PORTS: 2071 8082
-        KAHUNA_INITIAL_CLUSTER: 172.30.0.3:8084 172.30.0.4:8086
+        KAHUNA_GRPC_CLEARTEXT_PORTS: 2072
+        KAHUNA_RAFT_SCHEME: ${KAHUNA_RAFT_SCHEME:-https://}
+        KAHUNA_INITIAL_CLUSTER: 172.30.0.3:${KAHUNA_RAFT_PORT2:-8084} 172.30.0.4:${KAHUNA_RAFT_PORT3:-8086}
     container_name: kahuna1
     ports:
       - "8081:2070"
       - "8082:2071"
+      - "8087:2072"
     volumes:
       - kahuna1-data:/storage
     environment:
@@ -40,14 +50,17 @@ services:
         KAHUNA_RAFT_NODENAME: kahuna2
         KAHUNA_RAFT_NODEID: 2
         KAHUNA_RAFT_HOST: 172.30.0.3
-        KAHUNA_RAFT_PORT: 8084
+        KAHUNA_RAFT_PORT: ${KAHUNA_RAFT_PORT2:-8084}
         KAHUNA_HTTP_PORTS: 2070 8083
         KAHUNA_HTTPS_PORTS: 2071 8084
-        KAHUNA_INITIAL_CLUSTER: 172.30.0.2:8082 172.30.0.4:8086
+        KAHUNA_GRPC_CLEARTEXT_PORTS: 2072
+        KAHUNA_RAFT_SCHEME: ${KAHUNA_RAFT_SCHEME:-https://}
+        KAHUNA_INITIAL_CLUSTER: 172.30.0.2:${KAHUNA_RAFT_PORT1:-8082} 172.30.0.4:${KAHUNA_RAFT_PORT3:-8086}
     container_name: kahuna2
     ports:
       - "8083:2070"
       - "8084:2071"
+      - "8088:2072"
     volumes:
       - kahuna2-data:/storage
     environment:
@@ -71,14 +84,17 @@ services:
         KAHUNA_RAFT_NODENAME: kahuna3
         KAHUNA_RAFT_NODEID: 3
         KAHUNA_RAFT_HOST: 172.30.0.4
-        KAHUNA_RAFT_PORT: 8086
+        KAHUNA_RAFT_PORT: ${KAHUNA_RAFT_PORT3:-8086}
         KAHUNA_HTTP_PORTS: 2070 8085
         KAHUNA_HTTPS_PORTS: 2071 8086
-        KAHUNA_INITIAL_CLUSTER: 172.30.0.2:8082 172.30.0.3:8084
+        KAHUNA_GRPC_CLEARTEXT_PORTS: 2072
+        KAHUNA_RAFT_SCHEME: ${KAHUNA_RAFT_SCHEME:-https://}
+        KAHUNA_INITIAL_CLUSTER: 172.30.0.2:${KAHUNA_RAFT_PORT1:-8082} 172.30.0.3:${KAHUNA_RAFT_PORT2:-8084}
     container_name: kahuna3
     ports:
       - "8085:2070"
       - "8086:2071"
+      - "8089:2072"
     volumes:
       - kahuna3-data:/storage
     environment:

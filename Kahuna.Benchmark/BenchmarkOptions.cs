@@ -88,6 +88,10 @@ internal sealed class BenchmarkOptions
         HelpText = "Skip TLS validation for self-signed dev/standalone certs")]
     public bool Insecure { get; set; }
 
+    [Option("grpc-channels", Default = 2,
+        HelpText = "HTTP/2 connections the client opens per endpoint. Each connection is one serialized duplex stream on both sides, so this is the client-side parallelism knob")]
+    public int GrpcChannels { get; set; } = 2;
+
     [Option("seed", Default = 0,
         HelpText = "RNG seed for reproducible key/value selection (0 = time-based)")]
     public int Seed { get; set; } = 0;

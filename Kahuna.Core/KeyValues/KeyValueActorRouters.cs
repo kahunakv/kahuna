@@ -1,5 +1,4 @@
 using Nixie;
-using Nixie.Routers;
 
 using Kommander;
 
@@ -25,19 +24,19 @@ internal sealed class KeyValueActorRouters
 
     private readonly ILogger<IKahuna> logger;
 
-    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> ephemeralKeyValuesRouter;
+    private readonly KeyValueActorRing ephemeralKeyValuesRouter;
 
-    private readonly IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> persistentKeyValuesRouter;
+    private readonly KeyValueActorRing persistentKeyValuesRouter;
 
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> ephemeralInstances = [];
 
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
 
     /// <summary>The ephemeral (in-memory only) actor ring.</summary>
-    internal IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> Ephemeral => ephemeralKeyValuesRouter;
+    internal KeyValueActorRing Ephemeral => ephemeralKeyValuesRouter;
 
     /// <summary>The persistent (Raft-replicated, disk-backed) actor ring.</summary>
-    internal IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> Persistent => persistentKeyValuesRouter;
+    internal KeyValueActorRing Persistent => persistentKeyValuesRouter;
 
     internal IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> EphemeralInstances => ephemeralInstances;
 
@@ -107,26 +106,28 @@ internal sealed class KeyValueActorRouters
             or KeyValueRequestType.GetSafeTimestamp;
 
     /// <summary>
-    /// Sends a request to a bounded key-value actor router, mapping the actor's inbox-full backpressure
-    /// (<see cref="ActorBusyException"/>, thrown when a hot actor is saturated with ordinary requests)
-    /// to a retryable <c>MustRetry</c> response. Control messages are exempt from the bound and never
-    /// reach this path. The message was never enqueued, so retrying is unconditionally safe.
+    /// Cached completed task for the inbox-full rejection path, so backpressure allocates nothing.
     /// </summary>
-    internal static async Task<KeyValueResponse?> AskKeyValueActor(
-        IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> router,
+    private static readonly Task<KeyValueResponse?> MustRetryTask =
+        Task.FromResult<KeyValueResponse?>(KeyValueStaticResponses.MustRetryResponse);
+
+    /// <summary>
+    /// Sends a request to a bounded key-value actor ring, mapping inbox-full backpressure (a hot
+    /// actor saturated with ordinary requests) to a retryable <c>MustRetry</c> response. Control
+    /// messages are exempt from the bound and never reach this path. A rejected message was never
+    /// enqueued, so retrying is unconditionally safe.
+    /// </summary>
+    internal static Task<KeyValueResponse?> AskKeyValueActor(
+        KeyValueActorRing router,
         KeyValueRequest request)
     {
-        try
-        {
-            return await router.Ask(request);
-        }
-        catch (ActorBusyException)
-        {
-            return new KeyValueResponse(KeyValueResponseType.MustRetry);
-        }
+        if (router.TryAsk(request, out Task<KeyValueResponse?>? reply))
+            return reply;
+
+        return MustRetryTask;
     }
 
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetEphemeralRouter(
+    private KeyValueActorRing GetEphemeralRouter(
         KahunaConfiguration configuration
     )
     {
@@ -167,7 +168,7 @@ internal sealed class KeyValueActorRouters
                 ephemeralTransactionRecordStore
             ));
 
-        return actorSystem.CreateConsistentHashRouter(ephemeralInstances);
+        return new KeyValueActorRing(ephemeralInstances);
     }
 
     /// <summary>
@@ -177,7 +178,7 @@ internal sealed class KeyValueActorRouters
     /// <param name="persistence"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRef<ConsistentHashActor<KeyValueActor, KeyValueRequest, KeyValueResponse>, KeyValueRequest, KeyValueResponse> GetConsistentRouter(
+    private KeyValueActorRing GetConsistentRouter(
         KahunaConfiguration configuration
     )
     {
@@ -204,6 +205,6 @@ internal sealed class KeyValueActorRouters
                 transactionRecordStore
             ));
 
-        return actorSystem.CreateConsistentHashRouter(persistentInstances);
+        return new KeyValueActorRing(persistentInstances);
     }
 }
