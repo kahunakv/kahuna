@@ -19,7 +19,7 @@ public sealed class KahunaCommandLineOptions
     [Option("https-ports", Required = false, HelpText = "Ports to bind incoming HTTPs connections to")]
     public IEnumerable<string>? HttpsPorts { get; set; }
 
-    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead")]
+    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead. A standalone node defaults to 2072; a node joining a cluster binds nothing unless this option is given")]
     public IEnumerable<string>? GrpcCleartextPorts { get; set; }
     
     [Option("https-certificate", Required = false, HelpText = "Path to the HTTPs certificate")]

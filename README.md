@@ -44,8 +44,18 @@ dotnet tool install -g Kahuna.Server
 kahuna-server
 ```
 
-With no arguments, this command starts a standalone node on HTTP port 2070. The node stores
-key-value data and the Raft write-ahead log under the per-user data directory:
+With no arguments, this command starts a standalone node on two listeners:
+
+| Port | Protocol | Serves |
+|---|---|---|
+| 2070 | HTTP/1.1, HTTP/2, HTTP/3 | REST and gRPC |
+| 2072 | cleartext HTTP/2 (h2c) | gRPC only |
+
+Port 2072 exists because a gRPC client cannot negotiate HTTP/2 on the plain HTTP port without
+TLS. It carries no encryption and no authentication, so keep it on a trusted network. Pass
+`--grpc-cleartext-ports <port>` to move it to another port.
+
+The node stores key-value data and the Raft write-ahead log under the per-user data directory:
 
 - Linux / macOS: `~/.local/share/kahuna`
 - Windows: `%LOCALAPPDATA%\kahuna`
@@ -53,10 +63,17 @@ key-value data and the Raft write-ahead log under the per-user data directory:
 The node prints both paths at startup. Set `KAHUNA_HOME` to change the location. You can also
 pass `--storage-path` or `--wal-path` directly.
 
-A node started this way serves HTTP only. HTTPS binds only when you supply a certificate:
+A node started this way serves cleartext only. HTTPS binds on a third port, 2071, only when you
+supply a certificate:
 
 ```bash
 kahuna-server --https-certificate /path/to/certificate.pfx --https-ports 2071
+```
+
+A node that joins a cluster does not bind the cleartext gRPC port. Ask for it explicitly:
+
+```bash
+kahuna-server --initial-cluster host2:2071 host3:2071 --grpc-cleartext-ports 2072
 ```
 
 The command-line client is a separate tool:

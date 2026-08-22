@@ -177,7 +177,20 @@ builder.WebHost.ConfigureKestrel(options =>
     // Cleartext HTTP/2 (h2c) for gRPC. Kestrel only accepts prior-knowledge HTTP/2 without
     // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
     // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
-    if (opts.GrpcCleartextPorts is not null)
+    //
+    // A standalone node with no explicit ports binds 2072, so a gRPC client can reach it out of
+    // the box: HTTPS needs a certificate the node does not have by default, and the plain HTTP
+    // listener negotiates HTTP/1.1 without ALPN. A node joining a cluster keeps the listener off
+    // unless it is asked for — the port carries no TLS and no authentication.
+    if (opts.GrpcCleartextPorts is null || !opts.GrpcCleartextPorts.Any())
+    {
+        if (standalone)
+            options.Listen(IPAddress.Any, 2072, listenOptions =>
+            {
+                listenOptions.Protocols = HttpProtocols.Http2;
+            });
+    }
+    else
         foreach (string port in opts.GrpcCleartextPorts)
             options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
             {
