@@ -9,7 +9,6 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 using Nixie;
-using Nixie.Routers;
 
 namespace Kahuna.Server.Locks;
 
@@ -22,7 +21,7 @@ internal sealed class LockReplicator
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse>? persistentLocksRouter;
+    private readonly LockActorRing? persistentLocksRouter;
 
     private readonly IRaft raft;
 
@@ -47,7 +46,7 @@ internal sealed class LockReplicator
         ILogger<IKahuna> logger,
         UnflushedLockWritesIndex? unflushedLockWrites = null,
         PartitionDurabilityTracker? durabilityTracker = null,
-        IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse>? persistentLocksRouter = null)
+        LockActorRing? persistentLocksRouter = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
@@ -74,16 +73,15 @@ internal sealed class LockReplicator
         HLCTimestamp lastModified,
         LockState state)
     {
-        persistentLocksRouter?.Send(new(
-            LockRequestType.InvalidateOrApply,
+        persistentLocksRouter?.Send(LockRequestPool.RentInvalidateOrApply(
             resource,
             owner,
-            0,
-            LockDurability.Persistent,
-            0,
             partitionId,
-            null,
-            invalidateOrApplyData: new(fencingToken, expires, lastUsed, lastModified, state)
+            fencingToken,
+            expires,
+            lastUsed,
+            lastModified,
+            state
         ));
     }
 

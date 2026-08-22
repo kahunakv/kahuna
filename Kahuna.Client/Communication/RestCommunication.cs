@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -246,17 +247,22 @@ public class RestCommunication : IKahunaCommunication
 
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
         
+        // The server maps every transient failure of a release — a leader flip, an unresolved leader,
+        // a storage stall — to MustRetry, so MustRetry is the normal shape of a release that has not
+        // failed. The loop is bounded by a deadline, not by an attempt count: a fixed count of attempts
+        // spends its whole budget in the first few milliseconds, and a release that gives up leaves the
+        // lock held until its expiry.
         int retries = 0;
-        KahunaLockResponse? response;
-        
-        do
+        long retryDeadline = 0;
+
+        while (true)
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
         
-            response = await retryPolicy.ExecuteAsync(() => 
+            KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
                 url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/locks/try-unlock")
@@ -275,16 +281,20 @@ public class RestCommunication : IKahunaCommunication
 
             if (response.Type == LockResponseType.LockDoesNotExist)
                 return false;
-            
-            if (++retries >= 5)
+
+            // Report the code the server actually sent. A retry budget must never overwrite it.
+            if (response.Type != LockResponseType.MustRetry)
+                throw new KahunaException("Failed to unlock: " + response.Type, response.Type);
+
+            if (retries == 0)
+                retryDeadline = GetLockRetryDeadline();
+            else if (Stopwatch.GetTimestamp() >= retryDeadline)
                 throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
 
-            if (response.Type == LockResponseType.MustRetry)
-                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
+            await WaitBeforeMustRetry(retries, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == LockResponseType.MustRetry);
-        
-        throw new KahunaException("Failed to unlock: " + response.Type, response.Type);
+            retries++;
+        }
     }
 
     /// <summary>
@@ -315,17 +325,19 @@ public class RestCommunication : IKahunaCommunication
         
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
 
+        // See TryUnlock: MustRetry is a transient server condition, so the loop is bounded by a
+        // deadline instead of a fixed count of attempts that all fall inside the same few milliseconds.
         int retries = 0;
-        KahunaLockResponse? response;
-        
-        do
+        long retryDeadline = 0;
+
+        while (true)
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
             
-            response = await retryPolicy.ExecuteAsync(() => 
+            KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/locks/try-extend")
@@ -341,16 +353,20 @@ public class RestCommunication : IKahunaCommunication
             
             if (response.Type == LockResponseType.Extended)
                 return (true, response.FencingToken);
-            
-            if (++retries >= 5)
+
+            // Report the code the server actually sent. A retry budget must never overwrite it.
+            if (response.Type != LockResponseType.MustRetry)
+                throw new KahunaException("Failed to extend lock: " + response.Type, response.Type);
+
+            if (retries == 0)
+                retryDeadline = GetLockRetryDeadline();
+            else if (Stopwatch.GetTimestamp() >= retryDeadline)
                 throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
 
-            if (response.Type == LockResponseType.MustRetry)
-                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
+            await WaitBeforeMustRetry(retries, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == LockResponseType.MustRetry);
-        
-        throw new KahunaException("Failed to extend lock", response.Type);
+            retries++;
+        }
     }
 
     /// <summary>
@@ -377,17 +393,19 @@ public class RestCommunication : IKahunaCommunication
 
         string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
 
+        // See TryUnlock: MustRetry is a transient server condition, so the loop is bounded by a
+        // deadline instead of a fixed count of attempts that all fall inside the same few milliseconds.
         int retries = 0;
-        KahunaGetLockResponse? response;
+        long retryDeadline = 0;
 
-        do
+        while (true)
         {
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
             AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
 
-            response = await retryPolicy.ExecuteAsync(() =>
+            KahunaGetLockResponse? response = await retryPolicy.ExecuteAsync(() =>
                     url
                         .WithOAuthBearerToken("xxx")
                         .AppendPathSegments("v1/locks/get-info")
@@ -403,16 +421,20 @@ public class RestCommunication : IKahunaCommunication
 
             if (response.Type == LockResponseType.Got)
                 return new(response.Owner, response.Expires, response.FencingToken);
-            
-            if (++retries >= 5)
+
+            // Report the code the server actually sent. A retry budget must never overwrite it.
+            if (response.Type != LockResponseType.MustRetry)
+                throw new KahunaException("Failed to get lock information: " + response.Type, response.Type);
+
+            if (retries == 0)
+                retryDeadline = GetLockRetryDeadline();
+            else if (Stopwatch.GetTimestamp() >= retryDeadline)
                 throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
 
-            if (response.Type == LockResponseType.MustRetry)
-                await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
+            await WaitBeforeMustRetry(retries, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == LockResponseType.MustRetry);
-        
-        throw new KahunaException("Failed to get lock information", response.Type);
+            retries++;
+        }
     }
 
     /// <summary>
@@ -1735,6 +1757,23 @@ public class RestCommunication : IKahunaCommunication
     /// contention they are waiting out. Allocation-free and stateless, so every retry loop in this transport
     /// can share one policy.
     /// </summary>
+    /// <summary>
+    /// How long a lock release, extension or read keeps re-issuing a request the server answered with
+    /// MustRetry. Acquisition retries without a bound, because the caller chose to wait for the lock.
+    /// The other three verbs need a bound: <see cref="KahunaLock.DisposeAsync"/> releases with
+    /// <see cref="CancellationToken.None"/>, so an unbounded loop there would hang the disposal of an
+    /// <c>await using</c> block. The bound is a deadline rather than an attempt count, because a leader
+    /// flip or a storage stall clears on a wall-clock scale, not after a fixed number of round trips.
+    /// </summary>
+    private static readonly TimeSpan LockMustRetryDeadline = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Returns the <see cref="Stopwatch"/> timestamp at which the MustRetry loop of a lock release,
+    /// extension or read gives up.
+    /// </summary>
+    private static long GetLockRetryDeadline() =>
+        Stopwatch.GetTimestamp() + (long)(LockMustRetryDeadline.TotalSeconds * Stopwatch.Frequency);
+
     private static Task WaitBeforeMustRetry(int attempt, CancellationToken cancellationToken)
     {
         int baseMs = MustRetryDelaysMs[Math.Min(attempt, MustRetryDelaysMs.Length - 1)];

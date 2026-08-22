@@ -1,6 +1,5 @@
 
 using Nixie;
-using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
@@ -24,7 +23,7 @@ internal sealed class LockRestorer
 {
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse>? persistentLocksRouter;
+    private readonly LockActorRing? persistentLocksRouter;
 
     private readonly IRaft raft;
 
@@ -49,7 +48,7 @@ internal sealed class LockRestorer
         ILogger<IKahuna> logger,
         UnflushedLockWritesIndex? unflushedLockWrites = null,
         PartitionDurabilityTracker? durabilityTracker = null,
-        IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse>? persistentLocksRouter = null)
+        LockActorRing? persistentLocksRouter = null)
     {
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
@@ -76,16 +75,15 @@ internal sealed class LockRestorer
         HLCTimestamp lastModified,
         LockState state)
     {
-        persistentLocksRouter?.Send(new(
-            LockRequestType.InvalidateOrApply,
+        persistentLocksRouter?.Send(LockRequestPool.RentInvalidateOrApply(
             resource,
             owner,
-            0,
-            LockDurability.Persistent,
-            0,
             partitionId,
-            null,
-            invalidateOrApplyData: new(fencingToken, expires, lastUsed, lastModified, state)
+            fencingToken,
+            expires,
+            lastUsed,
+            lastModified,
+            state
         ));
     }
 

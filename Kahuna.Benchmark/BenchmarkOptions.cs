@@ -92,6 +92,14 @@ internal sealed class BenchmarkOptions
         HelpText = "HTTP/2 connections the client opens per endpoint. Each connection is one serialized duplex stream on both sides, so this is the client-side parallelism knob")]
     public int GrpcChannels { get; set; } = 2;
 
+    [Option("batch-coalescing-threshold", Default = 10,
+        HelpText = "Client batcher: batches at or above this size skip the coalescing delay (1 disables coalescing entirely)")]
+    public int BatchCoalescingThreshold { get; set; } = 10;
+
+    [Option("batch-coalescing-delay", Default = 2,
+        HelpText = "Client batcher: max milliseconds the dispatch loop sleeps after a small batch to let more requests accumulate (0 disables the delay)")]
+    public int BatchCoalescingDelayMs { get; set; } = 2;
+
     [Option("seed", Default = 0,
         HelpText = "RNG seed for reproducible key/value selection (0 = time-based)")]
     public int Seed { get; set; } = 0;

@@ -112,9 +112,16 @@ cache hits; a larger one spreads load and lowers the hit rate.
 - **errors** — failed requests (exceptions / non-success responses). In the **console** table this
   column **includes timeouts**; the JSON/CSV output reports `errors` and `timeouts` as separate
   fields. So console `errors` = JSON `errors + timeouts`.
-- **misses** — reads that found no value (`get`/`mixed` only). High misses usually means the
-  key-space is larger than what was seeded (seeding caps at 100 000 keys) — not a server problem,
-  just that the benchmark is reading keys that were never written.
+- **misses** — requests the server answered correctly with "nothing here". Two workloads report it:
+  - `get` / `mixed` / `delete` — a read that found no value. High misses usually means the
+    key-space is larger than what was seeded (seeding caps at 100 000 keys) — not a server problem,
+    just that the benchmark is reading keys that were never written.
+  - `lock` — an acquisition the server answered `Busy`, because another owner held the resource.
+    The `lock` workload does not wait, so it gives up at once. This is contention, not a fault, so
+    it is not an error. Lower the concurrency or raise the key-space to reduce it.
+
+  A miss is excluded from the latency percentiles, so the histogram describes successful
+  operations only.
 
 **Live status line** (console format only) updates once per second during the run:
 

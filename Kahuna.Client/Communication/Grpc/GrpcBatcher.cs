@@ -93,6 +93,14 @@ internal sealed class GrpcBatcher
     private int processing = 1;
 
     /// <summary>
+    /// Waker for an in-progress coalescing pause. Published by the dispatch loop before it pauses
+    /// and signaled by <see cref="TryProcessQueue"/> after every enqueue, so a request that arrives
+    /// mid-pause cuts the pause short instead of queueing behind it. Null whenever no pause is
+    /// active.
+    /// </summary>
+    private volatile TaskCompletionSource? pauseWaker;
+
+    /// <summary>
     /// Efficiently batches and processes gRPC requests to a specified host using bidirectional streaming.
     /// Reduces connection and HTTP/2 stream overhead by multiplexing multiple operations over a single stream.
     /// </summary>
@@ -347,6 +355,11 @@ internal sealed class GrpcBatcher
 
         inbox.Enqueue(grpcBatcherItem);
 
+        // If the dispatch loop is inside a coalescing pause, wake it now: admission must never
+        // wait for the pause to expire. A null waker means no pause is active (or the pause
+        // published its waker after this read — the pause re-checks the inbox for that case).
+        pauseWaker?.TrySetResult();
+
         if (cancellationToken.CanBeCanceled)
         {
             // Register a local-cleanup callback so that cancelling the caller's token (or the
@@ -416,10 +429,42 @@ internal sealed class GrpcBatcher
 
     private async Task Receive(List<GrpcBatcherItem> requests)
     {
+        // Capture the size before RunBatch: its finally returns the list to the pool, so the
+        // list must not be read afterwards.
+        int batchCount = requests.Count;
+
         await RunBatch(requests);
 
-        if (coalescingThreshold > 1 && requests.Count < coalescingThreshold && coalescingDelayMs > 0)
-            await Task.Delay(Random.Shared.Next(1, coalescingDelayMs + 1));
+        if (coalescingThreshold > 1 && batchCount < coalescingThreshold && coalescingDelayMs > 0)
+            await CoalescingPause();
+    }
+
+    /// <summary>
+    /// Pauses the dispatch loop after a small batch so the next drain can pick up more requests,
+    /// without ever making a request wait for the pause: the pause is skipped when the inbox
+    /// already holds a request, and a request that arrives mid-pause signals the waker and ends
+    /// the pause immediately. The configured delay is only the upper bound for an idle pause.
+    /// </summary>
+    private async Task CoalescingPause()
+    {
+        TaskCompletionSource waker = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        pauseWaker = waker;
+
+        try
+        {
+            // Re-check after the waker is visible: an enqueue that read a null waker could not
+            // signal it, but its item is already visible in the inbox by then, so this check
+            // observes it and the pause is skipped.
+            if (!inbox.IsEmpty)
+                return;
+
+            await Task.WhenAny(waker.Task, Task.Delay(Random.Shared.Next(1, coalescingDelayMs + 1)));
+        }
+        finally
+        {
+            pauseWaker = null;
+        }
     }
 
     /// <summary>

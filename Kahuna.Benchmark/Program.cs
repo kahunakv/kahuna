@@ -107,7 +107,9 @@ bool insecure = opts.Insecure || endpoints.All(IsLocalhost);
 KahunaOptions kahunaOptions = new()
 {
     AllowInsecureCertificateValidation = insecure,
-    GrpcChannelPoolSize = Math.Max(1, opts.GrpcChannels)
+    GrpcChannelPoolSize = Math.Max(1, opts.GrpcChannels),
+    BatchCoalescingThreshold = Math.Max(1, opts.BatchCoalescingThreshold),
+    BatchCoalescingDelayMs = Math.Max(0, opts.BatchCoalescingDelayMs)
 };
 KahunaClient client = new(endpoints, null, null, kahunaOptions);
 
