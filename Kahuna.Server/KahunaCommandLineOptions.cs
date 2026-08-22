@@ -295,6 +295,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-allow-legacy-snapshot-senders", Required = false, HelpText = "Accept snapshot chunks that leave the sender's session-metadata fields empty, treating them as a sender that pre-dates those fields. Temporary compatibility switch for a mixed-version cluster.", Default = false)]
     public bool RaftAllowLegacySnapshotSenders { get; set; }
 
+    [Option("raft-snapshot-transfer-step-timeout", Required = false, HelpText = "Upper bound on one awaited step of an outbound snapshot transfer (an export call, one stream read, or one chunk send), in milliseconds. A step that makes progress resets the clock; only a step that stalls trips the timeout.", Default = 120000)]
+    public int RaftSnapshotTransferStepTimeout { get; set; } = 120000;
+
     [Option("raft-max-pre-auth-request-body-bytes", Required = false, HelpText = "Ceiling on a Raft REST request body before it is authenticated/signed, in bytes. Bounds buffering independent of the host's own request-size limit.", Default = 32L * 1024 * 1024)]
     public long RaftMaxPreAuthRequestBodyBytes { get; set; } = 32L * 1024 * 1024;
 
