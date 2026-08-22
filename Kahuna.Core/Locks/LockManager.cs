@@ -51,22 +51,18 @@ internal sealed class LockManager
     private readonly IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter;
 
     /// <summary>
-    /// A router responsible for managing and dispatching ephemeral lock-related requests
-    /// to a dynamic pool of <see cref="LockActor"/> instances. This router handles the
-    /// consistency and routing of <see cref="LockRequest"/> messages that pertain to locks
-    /// with ephemeral durability, ensuring non-persistent, transient lock operations
-    /// are processed efficiently.
+    /// The ring of ephemeral lock actors. The ring resolves the owning actor by consistent hash
+    /// at the call site, so an ephemeral lock operation reaches its actor without a router-actor
+    /// mailbox hop.
     /// </summary>
-    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> ephemeralLocksRouter;
+    private readonly LockActorRing ephemeralLocksRouter;
 
     /// <summary>
-    /// A router used to manage persistent lock actors for handling lock requests
-    /// and responses for locks with persistent durability. This router ensures
-    /// that lock operations are consistently hashed, enabling efficient and
-    /// deterministic routing of lock requests to the appropriate lock actor
-    /// instances.
+    /// The ring of persistent lock actors. The ring resolves the owning actor by consistent hash
+    /// at the call site, so a persistent lock operation reaches its actor without a router-actor
+    /// mailbox hop.
     /// </summary>
-    private readonly IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> persistentLocksRouter;
+    private readonly LockActorRing persistentLocksRouter;
 
     /// <summary>
     /// Routes a resource to its data partition so lock operations can validate leadership and
@@ -175,8 +171,8 @@ internal sealed class LockManager
     /// <param name="persistenceBackend"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetEphemeralRouter(
-        IPersistenceBackend persistenceBackend, 
+    private LockActorRing GetEphemeralRouter(
+        IPersistenceBackend persistenceBackend,
         KahunaConfiguration configuration
     )
     {
@@ -192,7 +188,7 @@ internal sealed class LockManager
                 logger
             ));
 
-        return actorSystem.CreateConsistentHashRouter(ephemeralLockInstances);
+        return new(ephemeralLockInstances);
     }
 
     /// <summary>
@@ -202,8 +198,8 @@ internal sealed class LockManager
     /// <param name="persistenceBackend"></param>
     /// <param name="workers"></param>
     /// <returns></returns>
-    private IActorRef<ConsistentHashActor<LockActor, LockRequest, LockResponse>, LockRequest, LockResponse> GetPersistentRouter(
-        IPersistenceBackend persistenceBackend, 
+    private LockActorRing GetPersistentRouter(
+        IPersistenceBackend persistenceBackend,
         KahunaConfiguration configuration
     )
     {
@@ -219,7 +215,7 @@ internal sealed class LockManager
                 logger
             ));
 
-        return actorSystem.CreateConsistentHashRouter(persistentLockInstances);
+        return new(persistentLockInstances);
     }
 
     private IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> GetProposalRouter(
@@ -358,7 +354,7 @@ internal sealed class LockManager
         if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             return (LockResponseType.MustRetry, 0);
 
-        LockRequest request = new(
+        LockRequest request = LockRequestPool.Rent(
             LockRequestType.TryLock,
             resource,
             owner,
@@ -369,26 +365,35 @@ internal sealed class LockManager
             null
         );
 
-        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
-        for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
+        // Caller-owned rented request: each Ask completes before the next send, so the retry loop
+        // reuses one instance safely; the finally returns it only after the last reply arrived.
+        try
         {
-            LockResponse? response;
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
+            {
+                LockResponse? response;
 
-            if (durability == LockDurability.Ephemeral)
-                response = await ephemeralLocksRouter.Ask(request);
-            else
-                response = await persistentLocksRouter.Ask(request);
+                if (durability == LockDurability.Ephemeral)
+                    response = await ephemeralLocksRouter.Ask(request);
+                else
+                    response = await persistentLocksRouter.Ask(request);
 
-            if (response is null)
-                return (LockResponseType.Errored, 0);
+                if (response is null)
+                    return (LockResponseType.Errored, 0);
 
-            if (response.Type != LockResponseType.WaitingForReplication)
-                return (response.Type, response.FencingToken);
+                if (response.Type != LockResponseType.WaitingForReplication)
+                    return (response.Type, response.FencingToken);
 
-            if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
+                if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
+            }
+
+            return (LockResponseType.MustRetry, 0);
         }
-
-        return (LockResponseType.MustRetry, 0);
+        finally
+        {
+            LockRequestPool.Return(request);
+        }
     }
 
     /// <summary>
@@ -407,7 +412,7 @@ internal sealed class LockManager
         if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             return (LockResponseType.MustRetry, 0);
 
-        LockRequest request = new(
+        LockRequest request = LockRequestPool.Rent(
             LockRequestType.TryExtendLock,
             resource,
             owner,
@@ -418,26 +423,34 @@ internal sealed class LockManager
             null
         );
 
-        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
-        for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
+        // See TryLock for the rented-request ownership contract.
+        try
         {
-            LockResponse? response;
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
+            {
+                LockResponse? response;
 
-            if (durability == LockDurability.Ephemeral)
-                response = await ephemeralLocksRouter.Ask(request);
-            else
-                response = await persistentLocksRouter.Ask(request);
+                if (durability == LockDurability.Ephemeral)
+                    response = await ephemeralLocksRouter.Ask(request);
+                else
+                    response = await persistentLocksRouter.Ask(request);
 
-            if (response is null)
-                return (LockResponseType.Errored, 0);
+                if (response is null)
+                    return (LockResponseType.Errored, 0);
 
-            if (response.Type != LockResponseType.WaitingForReplication)
-                return (response.Type, response.FencingToken);
+                if (response.Type != LockResponseType.WaitingForReplication)
+                    return (response.Type, response.FencingToken);
 
-            if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
+                if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
+            }
+
+            return (LockResponseType.MustRetry, 0);
         }
-
-        return (LockResponseType.MustRetry, 0);
+        finally
+        {
+            LockRequestPool.Return(request);
+        }
     }
 
     /// <summary>
@@ -455,7 +468,7 @@ internal sealed class LockManager
         if (!await raft.AmILeaderIfHosted(partitionId, CancellationToken.None))
             return LockResponseType.MustRetry;
 
-        LockRequest request = new(
+        LockRequest request = LockRequestPool.Rent(
             LockRequestType.TryUnlock,
             resource,
             owner,
@@ -466,26 +479,34 @@ internal sealed class LockManager
             null
         );
 
-        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
-        for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
+        // See TryLock for the rented-request ownership contract.
+        try
         {
-            LockResponse? response;
+            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
+            {
+                LockResponse? response;
 
-            if (durability == LockDurability.Ephemeral)
-                response = await ephemeralLocksRouter.Ask(request);
-            else
-                response = await persistentLocksRouter.Ask(request);
+                if (durability == LockDurability.Ephemeral)
+                    response = await ephemeralLocksRouter.Ask(request);
+                else
+                    response = await persistentLocksRouter.Ask(request);
 
-            if (response is null)
-                return LockResponseType.Errored;
+                if (response is null)
+                    return LockResponseType.Errored;
 
-            if (response.Type != LockResponseType.WaitingForReplication)
-                return response.Type;
+                if (response.Type != LockResponseType.WaitingForReplication)
+                    return response.Type;
 
-            if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
+                if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
+            }
+
+            return LockResponseType.MustRetry;
         }
-
-        return LockResponseType.MustRetry;
+        finally
+        {
+            LockRequestPool.Return(request);
+        }
     }
     
     /// <summary>
@@ -503,7 +524,7 @@ internal sealed class LockManager
         if (!await raft.ConfirmLeadershipIfHosted(partitionId, CancellationToken.None))
             return (LockResponseType.MustRetry, null);
 
-        LockRequest request = new(
+        LockRequest request = LockRequestPool.Rent(
             LockRequestType.Get,
             resource,
             null,
@@ -514,16 +535,24 @@ internal sealed class LockManager
             null
         );
 
-        LockResponse? response;
-        
-        if (durability == LockDurability.Ephemeral)
-            response = await ephemeralLocksRouter.Ask(request);
-        else
-            response = await persistentLocksRouter.Ask(request);
-        
-        if (response is null)
-            return (LockResponseType.Errored, null);
-        
-        return (response.Type, response.Context);
+        // See TryLock for the rented-request ownership contract.
+        try
+        {
+            LockResponse? response;
+
+            if (durability == LockDurability.Ephemeral)
+                response = await ephemeralLocksRouter.Ask(request);
+            else
+                response = await persistentLocksRouter.Ask(request);
+
+            if (response is null)
+                return (LockResponseType.Errored, null);
+
+            return (response.Type, response.Context);
+        }
+        finally
+        {
+            LockRequestPool.Return(request);
+        }
     }
 }

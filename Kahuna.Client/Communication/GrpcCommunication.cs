@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Security;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -105,6 +106,23 @@ public class GrpcCommunication : IKahunaCommunication
         public void Dispose() => sequence.Dispose();
     }
 
+    /// <summary>
+    /// How long a lock release, extension or read keeps re-issuing a request the server answered with
+    /// MustRetry. Acquisition retries without a bound, because the caller chose to wait for the lock.
+    /// The other three verbs need a bound: <see cref="KahunaLock.DisposeAsync"/> releases with
+    /// <see cref="CancellationToken.None"/>, so an unbounded loop there would hang the disposal of an
+    /// <c>await using</c> block. The bound is a deadline rather than an attempt count, because a leader
+    /// flip or a storage stall clears on a wall-clock scale, not after a fixed number of round trips.
+    /// </summary>
+    private static readonly TimeSpan LockMustRetryDeadline = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Returns the <see cref="Stopwatch"/> timestamp at which the MustRetry loop of a lock release,
+    /// extension or read gives up.
+    /// </summary>
+    private static long GetLockRetryDeadline() =>
+        Stopwatch.GetTimestamp() + (long)(LockMustRetryDeadline.TotalSeconds * Stopwatch.Frequency);
+
     private readonly ConcurrentDictionary<string, Lazy<GrpcBatcher>> batchers = new();
 
     private readonly KahunaOptions? options;
@@ -154,8 +172,7 @@ public class GrpcCommunication : IKahunaCommunication
         // backoff grows from ~1ms toward ~10ms over the first 10 retries, then stays capped at the
         // last value, so a stuck server is not busy-polled. The backoff sequence is only allocated
         // on the first MustRetry, keeping the common first-attempt success allocation-free.
-        IEnumerator<TimeSpan>? mustRetryBackoff = null;
-        TimeSpan mustRetryDelay = TimeSpan.FromMilliseconds(1);
+        MustRetryBackoff? mustRetryBackoff = null;
 
         try
         {
@@ -177,15 +194,9 @@ public class GrpcCommunication : IKahunaCommunication
                 if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
                     throw new KahunaException("Failed to lock", (LockResponseType)response.Type);
 
-                mustRetryBackoff ??= Backoff
-                    .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
-                    .GetEnumerator();
+                mustRetryBackoff ??= new();
 
-                if (mustRetryBackoff.MoveNext())
-                    mustRetryDelay = mustRetryBackoff.Current;
-                // else: keep the last (capped) delay for all subsequent retries
-
-                await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
+                await mustRetryBackoff.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
         }
         finally
@@ -215,37 +226,58 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        int retries = 0;
-        GrpcUnlockResponse? response;
-        
         GrpcBatcher batcher = GetSharedBatcher(url);
-        
-        do
+
+        // The server maps every transient failure of a release — a leader flip, an unresolved leader,
+        // a storage stall — to MustRetry, so MustRetry is the normal shape of a release that has not
+        // failed. Back off between attempts and bound the loop by a deadline. Retrying without a delay
+        // spends the whole budget inside the same instant that produced the first MustRetry, and a
+        // release that gives up leaves the lock held until its expiry.
+        MustRetryBackoff? mustRetryBackoff = null;
+        long retryDeadline = 0;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-            
-            GrpcBatcherResponse batchResponse;
-                              
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.Unlock;
+            while (true)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", LockResponseType.Errored);
 
-            if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
-                
-            if (response.Type == GrpcLockResponseType.LockResponseTypeUnlocked)
-                return true;
-            
-            if (response.Type is GrpcLockResponseType.LockResponseTypeInvalidOwner or GrpcLockResponseType.LockResponseTypeLockDoesNotExist)
-                return false;
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
-        
-        throw new KahunaException("Failed to unlock: " + response.Type, (LockResponseType)response.Type);
+                GrpcUnlockResponse? response = batchResponse.Unlock;
+
+                if (response is null)
+                    throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                if (response.Type == GrpcLockResponseType.LockResponseTypeUnlocked)
+                    return true;
+
+                if (response.Type is GrpcLockResponseType.LockResponseTypeInvalidOwner or GrpcLockResponseType.LockResponseTypeLockDoesNotExist)
+                    return false;
+
+                // Report the code the server actually sent. A retry budget must never overwrite it.
+                if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
+                    throw new KahunaException("Failed to unlock: " + response.Type, (LockResponseType)response.Type);
+
+                if (mustRetryBackoff is null)
+                {
+                    mustRetryBackoff = new();
+                    retryDeadline = GetLockRetryDeadline();
+                }
+                else if (Stopwatch.GetTimestamp() >= retryDeadline)
+                {
+                    // The condition is still transient. Say so, so the caller can release again.
+                    throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
+                }
+
+                await mustRetryBackoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            mustRetryBackoff?.Dispose();
+        }
     }
 
     /// <summary>
@@ -271,34 +303,51 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        int retries = 0;
-        GrpcExtendLockResponse? response;
-        
         GrpcBatcher batcher = GetSharedBatcher(url);
-        
-        do
+
+        // See TryUnlock: MustRetry is a transient server condition, so back off between attempts and
+        // bound the loop by a deadline instead of a fixed count of immediate re-issues.
+        MustRetryBackoff? mustRetryBackoff = null;
+        long retryDeadline = 0;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-            
-            GrpcBatcherResponse batchResponse;
-                              
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.ExtendLock;
+            while (true)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", LockResponseType.Errored);
 
-            if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
-                
-            if (response.Type == GrpcLockResponseType.LockResponseTypeExtended)
-                return (true, response.FencingToken);
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
-        
-        throw new KahunaException("Failed to extend", (LockResponseType)response.Type);
+                GrpcExtendLockResponse? response = batchResponse.ExtendLock;
+
+                if (response is null)
+                    throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                if (response.Type == GrpcLockResponseType.LockResponseTypeExtended)
+                    return (true, response.FencingToken);
+
+                // Report the code the server actually sent. A retry budget must never overwrite it.
+                if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
+                    throw new KahunaException("Failed to extend: " + response.Type, (LockResponseType)response.Type);
+
+                if (mustRetryBackoff is null)
+                {
+                    mustRetryBackoff = new();
+                    retryDeadline = GetLockRetryDeadline();
+                }
+                else if (Stopwatch.GetTimestamp() >= retryDeadline)
+                {
+                    throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
+                }
+
+                await mustRetryBackoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            mustRetryBackoff?.Dispose();
+        }
     }
 
     /// <summary>
@@ -320,36 +369,51 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcLockDurability)durability
         };
         
-        int retries = 0;
-        GrpcGetLockResponse? response;
-        
         GrpcBatcher batcher = GetSharedBatcher(url);
-        
-        do
+
+        // See TryUnlock: MustRetry is a transient server condition, so back off between attempts and
+        // bound the loop by a deadline instead of a fixed count of immediate re-issues.
+        MustRetryBackoff? mustRetryBackoff = null;
+        long retryDeadline = 0;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-        
-            //response = await client.GetLockAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
-            
-            GrpcBatcherResponse batchResponse;
-                              
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.GetLock;
+            while (true)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", LockResponseType.Errored);
 
-            if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
-                
-            if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
-                return new(response.Owner?.ToByteArray(), new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", LockResponseType.Aborted);
+                GrpcBatcherResponse batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == GrpcLockResponseType.LockResponseTypeMustRetry);
-        
-        throw new KahunaException("Failed to get lock information", (LockResponseType)response.Type);
+                GrpcGetLockResponse? response = batchResponse.GetLock;
+
+                if (response is null)
+                    throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
+                    return new(response.Owner?.ToByteArray(), new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
+
+                // Report the code the server actually sent. A retry budget must never overwrite it.
+                if (response.Type != GrpcLockResponseType.LockResponseTypeMustRetry)
+                    throw new KahunaException("Failed to get lock information: " + response.Type, (LockResponseType)response.Type);
+
+                if (mustRetryBackoff is null)
+                {
+                    mustRetryBackoff = new();
+                    retryDeadline = GetLockRetryDeadline();
+                }
+                else if (Stopwatch.GetTimestamp() >= retryDeadline)
+                {
+                    throw new KahunaException("Retries exhausted.", LockResponseType.MustRetry);
+                }
+
+                await mustRetryBackoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            mustRetryBackoff?.Dispose();
+        }
     }
 
     /// <summary>

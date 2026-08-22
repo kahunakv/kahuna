@@ -49,9 +49,11 @@ public sealed class LocksService : Locker.LockerBase
         this.logger = logger;
     }
     
-    public override async Task<GrpcTryLockResponse> TryLock(GrpcTryLockRequest request, ServerCallContext context)
+    // The unary overrides return the guarded task directly: an async wrapper here would only
+    // re-await it, adding one state machine and one wrapper task per call.
+    public override Task<GrpcTryLockResponse> TryLock(GrpcTryLockRequest request, ServerCallContext context)
     {
-        return await TryLockInternal(request, context);
+        return TryLockInternal(request, context);
     }
 
     private async Task<GrpcTryLockResponse> TryLockCore(GrpcTryLockRequest request, ServerCallContext context)
@@ -82,9 +84,9 @@ public sealed class LocksService : Locker.LockerBase
         };
     }
     
-    public override async Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)
+    public override Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)
     {
-        return await TryExtendLockInternal(request, context);
+        return TryExtendLockInternal(request, context);
     }
 
     private async Task<GrpcExtendLockResponse> TryExtendLockCore(GrpcExtendLockRequest request, ServerCallContext context)
@@ -115,9 +117,9 @@ public sealed class LocksService : Locker.LockerBase
         };
     }
     
-    public override async Task<GrpcUnlockResponse> Unlock(GrpcUnlockRequest request, ServerCallContext context)
+    public override Task<GrpcUnlockResponse> Unlock(GrpcUnlockRequest request, ServerCallContext context)
     {
-        return await UnlockInternal(request, context);
+        return UnlockInternal(request, context);
     }
 
     private async Task<GrpcUnlockResponse> UnlockCore(GrpcUnlockRequest request, ServerCallContext context)
@@ -146,9 +148,9 @@ public sealed class LocksService : Locker.LockerBase
         };
     }
     
-    public override async Task<GrpcGetLockResponse> GetLock(GrpcGetLockRequest request, ServerCallContext context)
+    public override Task<GrpcGetLockResponse> GetLock(GrpcGetLockRequest request, ServerCallContext context)
     {
-        return await GetLockInternal(request, context);
+        return GetLockInternal(request, context);
     }
 
     private async Task<GrpcGetLockResponse> GetLockCore(GrpcGetLockRequest request, ServerCallContext context)

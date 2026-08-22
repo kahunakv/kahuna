@@ -258,13 +258,19 @@ internal static class WorkloadGenerator
                     }
 
                     case "lock":
-                        await using (KahunaLock lk = await client.GetOrCreateLock(
-                            key, TimeSpan.FromSeconds(5), lockDur, ct))
-                        {
-                            if (!lk.IsAcquired)
-                                throw new KahunaException($"Lock not acquired: {key}", LockResponseType.Busy);
-                        }
+                    {
+                        // This overload does not wait, so the server answers Busy as soon as another
+                        // owner holds the resource. That is a normal outcome of the workload, not a
+                        // fault, so it counts beside a not-found read. An error count that stays at
+                        // zero under contention keeps its meaning: something actually went wrong.
+                        await using KahunaLock lk = await client.GetOrCreateLock(
+                            key, TimeSpan.FromSeconds(5), lockDur, ct);
+
+                        if (!lk.IsAcquired)
+                            return (opType, OpOutcome.Miss, ElapsedMicros(startTs));
+
                         break;
+                    }
 
                     case "sequence":
                         await client.NextSequenceValue("bench:seq:0",
@@ -316,11 +322,13 @@ internal static class WorkloadGenerator
         _errorCategories.AddOrUpdate(category, count, (_, c) => c + count);
 
     /// <summary>Buckets a thrown exception into a human-readable category: a Kahuna response code when
-    /// the client surfaced one, otherwise the exception type name.</summary>
+    /// the client surfaced one, otherwise the exception type name. The code is read from the family the
+    /// exception belongs to, because each family has a member with the value 0 that a lock or sequence
+    /// failure would otherwise report as a key/value code.</summary>
     private static void RecordError(Exception ex) =>
         RecordErrorCategory(ex switch
         {
-            KahunaException ke => $"Kahuna:{ke.KeyValueErrorCode}",
+            KahunaException ke => $"Kahuna:{ke.ErrorDomain}:{ke.ErrorCodeName}",
             _ => ex.GetType().Name
         });
 

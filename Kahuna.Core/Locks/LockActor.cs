@@ -153,12 +153,19 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         }
         finally
         {
-            logger.LogLocksActorTook(                
+            logger.LogLocksActorTook(
                 actorContext.Self.Runner.Name,
                 message.Type,
                 message.Resource,
                 stopwatch.ElapsedMilliseconds
             );
+
+            // Ownership transfer for pooled fire-and-forget messages: the sender kept no reference
+            // and cannot recycle, so this actor is the request's sole owner once handled. Runs after
+            // the exit log above (the last read of message fields); nothing may touch the message
+            // afterwards — the pool can hand it to another thread immediately.
+            if (message.ReturnToPoolOnReceive)
+                LockRequestPool.Return(message);
         }
 
         return LockStaticResponses.ErroredResponse;
@@ -167,29 +174,53 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// <summary>
     /// Looks for a lock on the resource and tries to lock it
     /// Check for the owner and expiration time
+    /// A resident or ephemeral resource completes synchronously; only a persistent resource that
+    /// is not resident pays the async backend load.
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private async Task<LockResponse> TryLock(LockRequest message)
+    private ValueTask<LockResponse> TryLock(LockRequest message)
     {
         if (!locks.TryGetValue(message.Resource, out LockEntry? entry))
         {
-            LockEntry? newEntry = null;
-
-            /// Try to retrieve lock context from persistence
             if (message.Durability == LockDurability.Persistent)
-                newEntry = await backendReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
+                return TryLockLoad(message);
 
-            newEntry ??= new() { FencingToken = -1 };
-            
-            entry = newEntry;
-            
-            locks.Add(message.Resource, newEntry);
+            entry = new() { FencingToken = -1 };
+
+            locks.Add(message.Resource, entry);
         }
-        
+
+        return new(TryLockEntry(message, entry));
+    }
+
+    /// <summary>
+    /// Loads the lock entry from persistence and runs the lock attempt on it.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async ValueTask<LockResponse> TryLockLoad(LockRequest message)
+    {
+        LockEntry? entry = await backendReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
+
+        entry ??= new() { FencingToken = -1 };
+
+        locks.Add(message.Resource, entry);
+
+        return TryLockEntry(message, entry);
+    }
+
+    /// <summary>
+    /// Runs the lock attempt on a resolved entry.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="entry"></param>
+    /// <returns></returns>
+    private LockResponse TryLockEntry(LockRequest message, LockEntry entry)
+    {
         if (entry.ReplicationIntent is not null)
             return LockStaticResponses.WaitingForReplication;
-        
+
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         // Gate the busy check on the state, not just the owner: an unlocked entry loaded from the
@@ -206,28 +237,32 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             if (!isExpired)
                 return LockStaticResponses.BusyResponse;
         }
-        
-        LockProposal proposal = new(
-            message.Type,
-            message.Resource,
-            message.Owner,
-            entry.FencingToken + 1,
-            currentTime + message.ExpiresMs,
-            currentTime,
-            currentTime,
-            LockState.Locked,
-            message.Durability
-        );
 
         if (message.Durability == LockDurability.Persistent)
+        {
+            LockProposal proposal = new(
+                message.Type,
+                message.Resource,
+                message.Owner,
+                entry.FencingToken + 1,
+                currentTime + message.ExpiresMs,
+                currentTime,
+                currentTime,
+                LockState.Locked,
+                message.Durability
+            );
+
             return CreateProposal(message, entry, proposal, currentTime);
-        
-        entry.FencingToken = proposal.FencingToken;
-        entry.Owner = proposal.Owner;
-        entry.Expires = proposal.Expires;
-        entry.LastUsed = proposal.LastUsed;
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
+        }
+
+        // Ephemeral locks mutate the resident entry directly; no proposal object is needed
+        // because nothing is replicated.
+        entry.FencingToken++;
+        entry.Owner = message.Owner;
+        entry.Expires = currentTime + message.ExpiresMs;
+        entry.LastUsed = currentTime;
+        entry.LastModified = currentTime;
+        entry.State = LockState.Locked;
 
         return new(LockResponseType.Locked, entry.FencingToken);
     }
@@ -238,41 +273,73 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private async Task<LockResponse> TryExtendLock(LockRequest message)
+    private ValueTask<LockResponse> TryExtendLock(LockRequest message)
     {
-        LockEntry? entry = await GetLockEntry(message.Resource, message.Durability);
-        if (entry is null || entry.State == LockState.Unlocked)
+        if (locks.TryGetValue(message.Resource, out LockEntry? entry))
+            return new(TryExtendLockEntry(message, entry));
+
+        if (message.Durability == LockDurability.Persistent)
+            return TryExtendLockLoad(message);
+
+        return new(LockStaticResponses.DoesNotExistResponse);
+    }
+
+    /// <summary>
+    /// Loads the lock entry from persistence and runs the extend attempt on it.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async ValueTask<LockResponse> TryExtendLockLoad(LockRequest message)
+    {
+        LockEntry? entry = await LoadLockEntry(message.Resource);
+        if (entry is null)
             return LockStaticResponses.DoesNotExistResponse;
-        
+
+        return TryExtendLockEntry(message, entry);
+    }
+
+    /// <summary>
+    /// Runs the extend attempt on a resolved entry.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="entry"></param>
+    /// <returns></returns>
+    private LockResponse TryExtendLockEntry(LockRequest message, LockEntry entry)
+    {
+        if (entry.State == LockState.Unlocked)
+            return LockStaticResponses.DoesNotExistResponse;
+
         if (entry.ReplicationIntent is not null)
             return LockStaticResponses.WaitingForReplication;
 
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-        
+
         if (entry.Expires - currentTime < TimeSpan.Zero)
             return LockStaticResponses.DoesNotExistResponse;
-        
+
         if (!((ReadOnlySpan<byte>)entry.Owner).SequenceEqual(message.Owner))
             return LockStaticResponses.InvalidOwnerResponse;
 
-        LockProposal proposal = new(
-            message.Type,
-            message.Resource,
-            entry.Owner,
-            entry.FencingToken,
-            currentTime + message.ExpiresMs,
-            currentTime,
-            currentTime,
-            entry.State,
-            message.Durability
-        );
-
         if (message.Durability == LockDurability.Persistent)
+        {
+            LockProposal proposal = new(
+                message.Type,
+                message.Resource,
+                entry.Owner,
+                entry.FencingToken,
+                currentTime + message.ExpiresMs,
+                currentTime,
+                currentTime,
+                entry.State,
+                message.Durability
+            );
+
             return CreateProposal(message, entry, proposal, currentTime);
-        
-        entry.Expires = proposal.Expires;
-        entry.LastUsed = proposal.LastUsed;
-        entry.LastModified = proposal.LastModified;
+        }
+
+        entry.Expires = currentTime + message.ExpiresMs;
+        entry.LastUsed = currentTime;
+        entry.LastModified = currentTime;
 
         return new(LockResponseType.Extended, entry.FencingToken);
     }
@@ -282,39 +349,71 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private async Task<LockResponse> TryUnlock(LockRequest message)
+    private ValueTask<LockResponse> TryUnlock(LockRequest message)
     {
-        LockEntry? entry = await GetLockEntry(message.Resource, message.Durability);
-        if (entry is null || entry.State == LockState.Unlocked)
+        if (locks.TryGetValue(message.Resource, out LockEntry? entry))
+            return new(TryUnlockEntry(message, entry));
+
+        if (message.Durability == LockDurability.Persistent)
+            return TryUnlockLoad(message);
+
+        return new(LockStaticResponses.DoesNotExistResponse);
+    }
+
+    /// <summary>
+    /// Loads the lock entry from persistence and runs the unlock attempt on it.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async ValueTask<LockResponse> TryUnlockLoad(LockRequest message)
+    {
+        LockEntry? entry = await LoadLockEntry(message.Resource);
+        if (entry is null)
             return LockStaticResponses.DoesNotExistResponse;
-        
+
+        return TryUnlockEntry(message, entry);
+    }
+
+    /// <summary>
+    /// Runs the unlock attempt on a resolved entry.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="entry"></param>
+    /// <returns></returns>
+    private LockResponse TryUnlockEntry(LockRequest message, LockEntry entry)
+    {
+        if (entry.State == LockState.Unlocked)
+            return LockStaticResponses.DoesNotExistResponse;
+
         if (entry.ReplicationIntent is not null)
             return LockStaticResponses.WaitingForReplication;
 
         if (!((ReadOnlySpan<byte>)entry.Owner).SequenceEqual(message.Owner))
             return LockStaticResponses.InvalidOwnerResponse;
-        
+
         HLCTimestamp currentTime = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        LockProposal proposal = new(
-            message.Type,
-            message.Resource,
-            null,
-            entry.FencingToken,
-            entry.Expires,
-            currentTime,
-            currentTime,
-            LockState.Unlocked,
-            message.Durability
-        );
-
         if (message.Durability == LockDurability.Persistent)
+        {
+            LockProposal proposal = new(
+                message.Type,
+                message.Resource,
+                null,
+                entry.FencingToken,
+                entry.Expires,
+                currentTime,
+                currentTime,
+                LockState.Unlocked,
+                message.Durability
+            );
+
             return CreateProposal(message, entry, proposal, currentTime);
-        
-        entry.Owner = proposal.Owner;
-        entry.LastUsed = proposal.LastUsed;
-        entry.LastModified = proposal.LastModified;
-        entry.State = proposal.State;
+        }
+
+        entry.Owner = null;
+        entry.LastUsed = currentTime;
+        entry.LastModified = currentTime;
+        entry.State = LockState.Unlocked;
 
         return LockStaticResponses.UnlockedResponse;
     }
@@ -324,13 +423,39 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// </summary>
     /// <param name="message"></param>
     /// <returns></returns>
-    private async Task<LockResponse> GetLock(LockRequest message)
+    private ValueTask<LockResponse> GetLock(LockRequest message)
     {
-        LockEntry? entry = await GetLockEntry(message.Resource, message.Durability);
-        
+        if (locks.TryGetValue(message.Resource, out LockEntry? entry))
+            return new(GetLockEntry(entry));
+
+        if (message.Durability == LockDurability.Persistent)
+            return GetLockLoad(message);
+
+        return new(GetLockEntry(null));
+    }
+
+    /// <summary>
+    /// Loads the lock entry from persistence and reads it.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <returns></returns>
+    private async ValueTask<LockResponse> GetLockLoad(LockRequest message)
+    {
+        LockEntry? entry = await LoadLockEntry(message.Resource);
+
+        return GetLockEntry(entry);
+    }
+
+    /// <summary>
+    /// Reads a resolved entry. A null entry means the lock does not exist.
+    /// </summary>
+    /// <param name="entry"></param>
+    /// <returns></returns>
+    private LockResponse GetLockEntry(LockEntry? entry)
+    {
         if (entry is null || entry.State == LockState.Unlocked)
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockEntry(null, entry?.FencingToken ?? 0, HLCTimestamp.Zero));
-        
+
         if (entry.ReplicationIntent is not null)
             return LockStaticResponses.WaitingForReplication;
 
@@ -338,7 +463,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
         if (entry.Expires - currentTime < TimeSpan.Zero)
             return new(LockResponseType.LockDoesNotExist, new ReadOnlyLockEntry(null, entry.FencingToken, HLCTimestamp.Zero));
-        
+
         entry.LastUsed = currentTime;
 
         ReadOnlyLockEntry readOnlyLockEntry = new(entry.Owner, entry.FencingToken, entry.Expires);
@@ -347,29 +472,19 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     }
 
     /// <summary>
-    /// Returns an existing lock entry from memory or tries to retrieve it from disk
+    /// Retrieves a persistent lock entry from disk and, when found, makes it resident.
     /// </summary>
     /// <param name="resource"></param>
-    /// <param name="durability"></param>
     /// <returns></returns>
-    private async ValueTask<LockEntry?> GetLockEntry(string resource, LockDurability durability)
+    private async Task<LockEntry?> LoadLockEntry(string resource)
     {
-        if (!locks.TryGetValue(resource, out LockEntry? entry))
+        LockEntry? entry = await backendReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource));
+        if (entry is not null)
         {
-            if (durability == LockDurability.Persistent)
-            {
-                entry = await backendReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource));
-                if (entry is not null)
-                {
-                    entry.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-                    locks.Add(resource, entry);
-                    return entry;
-                }                               
-            }
-            
-            return null;    
+            entry.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            locks.Add(resource, entry);
         }
-        
+
         return entry;
     }
 

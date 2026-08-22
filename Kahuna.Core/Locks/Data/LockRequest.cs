@@ -22,7 +22,7 @@ internal sealed class LockRequest : IConsistentHashable
     /// - TryUnlock: Attempts to release a lock.
     /// - Get: Retrieves lock information for a specified resource.
     /// </remarks>
-    public LockRequestType Type { get; }
+    public LockRequestType Type { get; private set; }
 
     /// <summary>
     /// Gets the identifier of the resource that the lock operation is targeting.
@@ -32,7 +32,7 @@ internal sealed class LockRequest : IConsistentHashable
     /// (such as acquire, release, or extend) is being performed. The value is used
     /// to determine which resource the lock request should act upon.
     /// </remarks>
-    public string Resource { get; }
+    public string Resource { get; private set; }
 
     /// <summary>
     /// Gets the identifier of the entity attempting to acquire or manage the lock.
@@ -46,7 +46,7 @@ internal sealed class LockRequest : IConsistentHashable
     /// A null value indicates that no specific owner is associated or defined
     /// for the current lock request.
     /// </remarks>
-    public byte[]? Owner { get; }
+    public byte[]? Owner { get; private set; }
 
     /// <summary>
     /// Gets the duration, in milliseconds, for which a lock should remain valid. This value
@@ -57,7 +57,7 @@ internal sealed class LockRequest : IConsistentHashable
     /// not persist indefinitely in the system. The value is utilized for operations such as
     /// creating or extending locks.
     /// </remarks>
-    public int ExpiresMs { get; }
+    public int ExpiresMs { get; private set; }
 
     /// <summary>
     /// Specifies the durability of the lock being requested, indicating whether the lock is ephemeral or persistent.
@@ -67,36 +67,45 @@ internal sealed class LockRequest : IConsistentHashable
     /// - Ephemeral: The lock exists transiently and is not maintained across failures or restarts.
     /// - Persistent: The lock is stored persistently and is recoverable after a failure or restart.
     /// </remarks>
-    public LockDurability Durability { get; }
+    public LockDurability Durability { get; private set; }
     
     /// <summary>
     /// 
     /// </summary>
-    public int ProposalId { get; }
+    public int ProposalId { get; private set; }
     
     /// <summary>
     /// 
     /// </summary>
-    public int PartitionId { get; }
+    public int PartitionId { get; private set; }
     
     /// <summary>
     ///
     /// </summary>
-    public TaskCompletionSource<LockResponse?>? Promise { get; }
+    public TaskCompletionSource<LockResponse?>? Promise { get; private set; }
 
     /// <summary>
     /// For CompleteProposal requests: the Raft WAL log index the proposal committed at, so the
     /// apply can stamp it on the background write and the partition's application-durability floor
     /// advances once the flush lands. -1 for every other request type.
     /// </summary>
-    public long ProposalLogIndex { get; }
+    public long ProposalLogIndex { get; private set; }
 
     /// <summary>
     /// Committed lock state carried by an <c>InvalidateOrApply</c> message so the owning actor can
     /// bring a resident cache entry up to date. Non-null only when <see cref="Type"/> is
     /// <see cref="LockRequestType.InvalidateOrApply"/>.
     /// </summary>
-    public LockInvalidateOrApplyData? InvalidateOrApplyData { get; }
+    public LockInvalidateOrApplyData? InvalidateOrApplyData { get; private set; }
+
+    /// <summary>
+    /// Ownership-transfer marker for pooled fire-and-forget messages: when true, the receiving
+    /// <see cref="LockActor"/> returns this request to <see cref="LockRequestPool"/> after
+    /// handling it, because the sender kept no reference and cannot recycle it. Ask-style callers
+    /// must leave this false and return the request themselves after the reply arrives — setting
+    /// it on an asked request would return the object twice.
+    /// </summary>
+    public bool ReturnToPoolOnReceive { get; internal set; }
 
     /// <summary>
     /// Constructor
@@ -133,6 +142,55 @@ internal sealed class LockRequest : IConsistentHashable
         Promise = promise;
         ProposalLogIndex = proposalLogIndex;
         InvalidateOrApplyData = invalidateOrApplyData;
+    }
+
+    /// <summary>
+    /// Repopulates a pooled instance with the same fields the constructor takes. The ownership
+    /// marker resets to false; a rent helper that transfers ownership sets it afterwards.
+    /// </summary>
+    public void Reset(
+        LockRequestType type,
+        string resource,
+        byte[]? owner,
+        int expiresMs,
+        LockDurability durability,
+        int proposalId,
+        int partitionId,
+        TaskCompletionSource<LockResponse?>? promise,
+        long proposalLogIndex = -1,
+        LockInvalidateOrApplyData? invalidateOrApplyData = null
+    )
+    {
+        Type = type;
+        Resource = resource;
+        Owner = owner;
+        ExpiresMs = expiresMs;
+        Durability = durability;
+        ProposalId = proposalId;
+        PartitionId = partitionId;
+        Promise = promise;
+        ProposalLogIndex = proposalLogIndex;
+        InvalidateOrApplyData = invalidateOrApplyData;
+        ReturnToPoolOnReceive = false;
+    }
+
+    /// <summary>
+    /// Drops every reference before the instance parks in the pool, so a pooled request cannot
+    /// keep an owner payload, promise, or apply record alive.
+    /// </summary>
+    public void Clear()
+    {
+        Type = default;
+        Resource = string.Empty;
+        Owner = null;
+        ExpiresMs = 0;
+        Durability = default;
+        ProposalId = 0;
+        PartitionId = 0;
+        Promise = null;
+        ProposalLogIndex = -1;
+        InvalidateOrApplyData = null;
+        ReturnToPoolOnReceive = false;
     }
 
     /// <summary>

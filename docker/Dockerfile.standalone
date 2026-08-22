@@ -32,6 +32,10 @@ WORKDIR /app
 EXPOSE 8081
 EXPOSE 8082
 
+# Cleartext HTTP/2 (h2c) for gRPC (see KAHUNA_GRPC_CLEARTEXT_PORT). This listener speaks
+# HTTP/2 without TLS and rejects HTTP/1.1, so REST clients must use the HTTP or HTTPS port.
+EXPOSE 8083
+
 COPY --from=build-env /app .
 COPY certs/development-certificate.pfx /app/certificate.pfx
 
@@ -42,6 +46,7 @@ VOLUME ["/data"]
 ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
 ENV KAHUNA_HTTP_PORT=8081
 ENV KAHUNA_HTTPS_PORT=8082
+ENV KAHUNA_GRPC_CLEARTEXT_PORT=8083
 ENV KAHUNA_DATA_DIR=/data
 ENV KAHUNA_PARTITIONS=3
 

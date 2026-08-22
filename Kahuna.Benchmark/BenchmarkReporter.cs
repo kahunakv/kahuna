@@ -129,8 +129,10 @@ internal static class BenchmarkReporter
         Console.WriteLine();
 
         // Break the "errors" column down by cause so a non-zero count is actionable — a Kahuna
-        // response code (MustRetry, Aborted, …) points at contention/leadership; a transport type
-        // (RpcException, IOException, …) points at the network or a node being unreachable.
+        // response code (MustRetry, Aborted, …) points at leadership or a transient server state;
+        // a transport type (RpcException, IOException, …) points at the network or a node being
+        // unreachable. Lock contention is not here: the server answers Busy, and that counts as a
+        // miss, so a non-empty breakdown always means something went wrong.
         IReadOnlyList<(string Category, long Count)> errorBreakdown = WorkloadGenerator.SnapshotErrorCategories();
         if (errorBreakdown.Count > 0)
         {

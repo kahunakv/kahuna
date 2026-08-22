@@ -40,6 +40,41 @@ public sealed class TestAllocationHygiene
         Assert.Null(request.Promise);
     }
 
+    [Fact]
+    public void LockRequestReturn_ReleasesOwnerAndPromise()
+    {
+        byte[] owner = new byte[1 << 20]; // 1 MiB — the buffer we must not retain in the pool.
+        TaskCompletionSource<LockResponse?> promise = new();
+
+        LockRequest request = LockRequestPool.RentInvalidateOrApply(
+            "lock/1", owner, partitionId: 0, fencingToken: 7,
+            HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, LockState.Locked);
+
+        Assert.Same(owner, request.Owner);
+        Assert.NotNull(request.InvalidateOrApplyData);
+        Assert.True(request.ReturnToPoolOnReceive);
+
+        // Returning the request to the pool must drop every heap reference it holds — the owner
+        // buffer, the apply record, and any promise — otherwise a pooled object pins them
+        // indefinitely between reuses. The ownership marker must also reset so a later Ask-style
+        // rent of the same instance is not recycled twice.
+        LockRequestPool.Return(request);
+
+        Assert.Null(request.Owner);
+        Assert.Null(request.InvalidateOrApplyData);
+        Assert.Null(request.Promise);
+        Assert.False(request.ReturnToPoolOnReceive);
+
+        LockRequest rented = LockRequestPool.Rent(
+            LockRequestType.TryLock, "lock/2", owner, expiresMs: 1000,
+            LockDurability.Persistent, proposalId: 0, partitionId: 0, promise);
+
+        Assert.False(rented.ReturnToPoolOnReceive);
+        Assert.Same(promise, rented.Promise);
+
+        LockRequestPool.Return(rented);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("lock")]
