@@ -126,10 +126,13 @@ internal sealed class CompletionReceiptStore
     {
         if (!receipts.TryGetValue(new ReceiptKey(transactionId, key), out CompletionReceipt receipt))
             return false;
+
         if (receipt.Durability != durability)
             return false;
+
         if (expectedAnchor is not null && !string.Equals(receipt.RecordAnchorKey, expectedAnchor, StringComparison.Ordinal))
             return false;
+
         return true;
     }
 
@@ -230,6 +233,7 @@ internal sealed class CompletionReceiptStore
     public static byte[] SerializeImport(IReadOnlyCollection<CompletionReceiptRecord> records, int destinationPartitionId, bool forget = false)
     {
         GrpcImportCompletionReceiptsRequest message = new() { DestinationPartitionId = destinationPartitionId, Forget = forget };
+
         foreach (CompletionReceiptRecord record in records)
         {
             GrpcCompletionReceiptEntry entry = new()
@@ -240,10 +244,13 @@ internal sealed class CompletionReceiptStore
                 Key                   = record.Key,
                 Durability            = (int)record.Durability,
             };
+
             if (record.RecordAnchorKey is not null)
                 entry.RecordAnchorKey = record.RecordAnchorKey;
+
             message.Receipts.Add(entry);
         }
+
         return message.ToByteArray();
     }
 
@@ -284,12 +291,15 @@ internal sealed class CompletionReceiptStore
                     case 1: // repeated GrpcCompletionReceiptEntry Receipts
                         pending.Add(ParseReceiptEntry(input));
                         break;
+
                     case 2: // int32 DestinationPartitionId — routing already resolved; irrelevant on apply
                         input.ReadInt32();
                         break;
+
                     case 3: // bool Forget — record vs. remove; wire order is not guaranteed, hence the buffer
                         forget = input.ReadBool();
                         break;
+
                     default:
                         input.SkipLastField();
                         break;
@@ -372,6 +382,7 @@ internal sealed class CompletionReceiptStore
 
             if (startKey is not null && string.CompareOrdinal(key, startKey) < 0)
                 continue;
+
             if (endKey is not null && string.CompareOrdinal(key, endKey) >= 0)
                 continue;
 
@@ -410,6 +421,7 @@ internal sealed class CompletionReceiptStore
             return true;
 
         GrpcImportCompletionReceiptsRequest message = new();
+
         foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
         {
             if (keyToPartition(receipt.Key.Key) != partitionId)
@@ -423,6 +435,7 @@ internal sealed class CompletionReceiptStore
                 Key                   = receipt.Key.Key,
                 Durability            = (int)receipt.Value.Durability,
             };
+
             if (receipt.Value.RecordAnchorKey is not null)
                 entry.RecordAnchorKey = receipt.Value.RecordAnchorKey;
 
@@ -434,6 +447,7 @@ internal sealed class CompletionReceiptStore
         try
         {
             byte[] data = message.ToByteArray();
+
             lock (fileLock)
             {
                 string tmp = path + ".tmp";
@@ -442,6 +456,7 @@ internal sealed class CompletionReceiptStore
             }
 
             persistedVersion[partitionId] = observedVersion;
+
             return true;
         }
         catch (Exception ex)
@@ -460,12 +475,14 @@ internal sealed class CompletionReceiptStore
             return;
 
         string[] files;
+
         lock (fileLock)
             files = Directory.GetFiles(snapshotDirectory, $"{snapshotPrefix}_p*.snapshot");
 
         foreach (string path in files)
         {
             byte[] data;
+
             try
             {
                 lock (fileLock)
@@ -477,6 +494,7 @@ internal sealed class CompletionReceiptStore
             }
 
             GrpcImportCompletionReceiptsRequest message;
+
             try
             {
                 message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(data);
