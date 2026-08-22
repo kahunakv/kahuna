@@ -192,10 +192,11 @@ public sealed class TestTransactionOperationRegistry
         ctx.BeginOperation(Op(1), OperationKind.Set, null);
         ctx.CompleteOperation(
             Op(1),
-            new OperationEffect
+            new OperationCompletionPayload
             {
-                ModifiedKey = ("k", KeyValueDurability.Persistent),
-                PointLock = ("k", KeyValueDurability.Persistent)
+                ModifiedKey = "k",
+                AcquiredPointLock = "k",
+                Durability = KeyValueDurability.Persistent
             },
             new CachedOperationResponse(KeyValueResponseType.Set, 3, HLCTimestamp.Zero));
 
@@ -211,9 +212,9 @@ public sealed class TestTransactionOperationRegistry
         ctx.BeginOperation(Op(1), OperationKind.Get, null);
         ctx.CompleteOperation(
             Op(1),
-            new OperationEffect
+            new OperationCompletionPayload
             {
-                ReadObservation = new KeyValueTransactionReadKey { Key = "rk", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 3 }
+                Read = new KeyValueTransactionReadKey { Key = "rk", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 3 }
             },
             new CachedOperationResponse(KeyValueResponseType.Get, 3, HLCTimestamp.Zero));
 
@@ -231,7 +232,7 @@ public sealed class TestTransactionOperationRegistry
         ctx.BeginOperation(Op(1), OperationKind.Get, [1]);
         ctx.CompleteOperation(
             Op(1),
-            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
+            new OperationCompletionPayload { Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
             new CachedOperationResponse(KeyValueResponseType.Get, 5, HLCTimestamp.Zero));
 
         Assert.False(ctx.ReadObservationConflict);
@@ -240,7 +241,7 @@ public sealed class TestTransactionOperationRegistry
         ctx.BeginOperation(Op(2), OperationKind.Get, [2]);
         ctx.CompleteOperation(
             Op(2),
-            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 9 } },
+            new OperationCompletionPayload { Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 9 } },
             new CachedOperationResponse(KeyValueResponseType.Get, 9, HLCTimestamp.Zero));
 
         // The first observation is retained (not overwritten) and the read set is flagged as conflicted.
@@ -257,13 +258,13 @@ public sealed class TestTransactionOperationRegistry
         ctx.BeginOperation(Op(1), OperationKind.Get, [1]);
         ctx.CompleteOperation(
             Op(1),
-            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
+            new OperationCompletionPayload { Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
             new CachedOperationResponse(KeyValueResponseType.Get, 5, HLCTimestamp.Zero));
 
         ctx.BeginOperation(Op(2), OperationKind.Get, [2]);
         ctx.CompleteOperation(
             Op(2),
-            new OperationEffect { ReadObservation = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
+            new OperationCompletionPayload { Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 5 } },
             new CachedOperationResponse(KeyValueResponseType.Get, 5, HLCTimestamp.Zero));
 
         Assert.False(ctx.ReadObservationConflict);
@@ -290,10 +291,10 @@ public sealed class TestTransactionOperationRegistry
     {
         TransactionContext ctx = NewContext();
         ctx.BeginOperation(Op(1), OperationKind.Delete, null);
-        OperationEffect effect = new() { ModifiedKey = ("k", KeyValueDurability.Persistent) };
-        ctx.CompleteOperation(Op(1), effect, new CachedOperationResponse(KeyValueResponseType.Deleted, 1, HLCTimestamp.Zero));
+        OperationCompletionPayload payload = new() { ModifiedKey = "k", Durability = KeyValueDurability.Persistent };
+        ctx.CompleteOperation(Op(1), payload, new CachedOperationResponse(KeyValueResponseType.Deleted, 1, HLCTimestamp.Zero));
         // A replayed completion (already terminal) must be a no-op — the set stays a single entry.
-        ctx.CompleteOperation(Op(1), effect, new CachedOperationResponse(KeyValueResponseType.Deleted, 1, HLCTimestamp.Zero));
+        ctx.CompleteOperation(Op(1), payload, new CachedOperationResponse(KeyValueResponseType.Deleted, 1, HLCTimestamp.Zero));
 
         Assert.Single(ctx.GetWorkingSetSnapshot().ModifiedKeys!);
     }
@@ -304,12 +305,12 @@ public sealed class TestTransactionOperationRegistry
         TransactionContext ctx = NewContext();
 
         ctx.BeginOperation(Op(1), OperationKind.PointLock, null);
-        ctx.CompleteOperation(Op(1), new OperationEffect { PointLock = ("lk", KeyValueDurability.Persistent) },
+        ctx.CompleteOperation(Op(1), new OperationCompletionPayload { AcquiredPointLock = "lk", Durability = KeyValueDurability.Persistent },
             new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
         Assert.Contains(("lk", KeyValueDurability.Persistent), ctx.GetWorkingSetSnapshot().LocksAcquired!);
 
         ctx.BeginOperation(Op(2), OperationKind.PointLock, null);
-        ctx.CompleteOperation(Op(2), new OperationEffect { RemovePointLock = ("lk", KeyValueDurability.Persistent) },
+        ctx.CompleteOperation(Op(2), new OperationCompletionPayload { ReleasedPointLock = "lk", Durability = KeyValueDurability.Persistent },
             new CachedOperationResponse(KeyValueResponseType.Unlocked, 0, HLCTimestamp.Zero));
         Assert.Empty(ctx.GetWorkingSetSnapshot().LocksAcquired!);
     }
@@ -320,12 +321,12 @@ public sealed class TestTransactionOperationRegistry
         TransactionContext ctx = NewContext();
 
         ctx.BeginOperation(Op(1), OperationKind.PrefixLock, null);
-        ctx.CompleteOperation(Op(1), new OperationEffect { PrefixLock = ("users:", KeyValueDurability.Persistent) },
+        ctx.CompleteOperation(Op(1), new OperationCompletionPayload { AcquiredPrefixLock = "users:", Durability = KeyValueDurability.Persistent },
             new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
         Assert.Contains(("users:", KeyValueDurability.Persistent), ctx.GetWorkingSetSnapshot().PrefixLocksAcquired!);
 
         ctx.BeginOperation(Op(2), OperationKind.PrefixLock, null);
-        ctx.CompleteOperation(Op(2), new OperationEffect { RemovePrefixLock = ("users:", KeyValueDurability.Persistent) },
+        ctx.CompleteOperation(Op(2), new OperationCompletionPayload { ReleasedPrefixLock = "users:", Durability = KeyValueDurability.Persistent },
             new CachedOperationResponse(KeyValueResponseType.Unlocked, 0, HLCTimestamp.Zero));
         Assert.Empty(ctx.GetWorkingSetSnapshot().PrefixLocksAcquired!);
     }
@@ -337,7 +338,7 @@ public sealed class TestTransactionOperationRegistry
         RangeLockKey range = new("orders", "a", true, "z", false, KeyValueDurability.Persistent);
 
         ctx.BeginOperation(Op(1), OperationKind.RangeLock, null);
-        ctx.CompleteOperation(Op(1), new OperationEffect { RangeLock = (range, RangeLockMode.Exclusive) },
+        ctx.CompleteOperation(Op(1), new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Exclusive) },
             new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
 
         IReadOnlyDictionary<RangeLockKey, RangeLockMode> held = ctx.GetWorkingSetSnapshot().RangeLocksAcquired!;
@@ -345,7 +346,7 @@ public sealed class TestTransactionOperationRegistry
         Assert.Equal(RangeLockMode.Exclusive, mode);
 
         ctx.BeginOperation(Op(2), OperationKind.RangeLock, null);
-        ctx.CompleteOperation(Op(2), new OperationEffect { RemoveRangeLock = range },
+        ctx.CompleteOperation(Op(2), new OperationCompletionPayload { ReleasedRangeLock = range },
             new CachedOperationResponse(KeyValueResponseType.Unlocked, 0, HLCTimestamp.Zero));
         Assert.Empty(ctx.GetWorkingSetSnapshot().RangeLocksAcquired!);
     }
@@ -358,11 +359,11 @@ public sealed class TestTransactionOperationRegistry
 
         // Shared acquire, then a confirmed shared→exclusive upgrade of the same bounds.
         ctx.BeginOperation(Op(1), OperationKind.RangeLock, null);
-        ctx.CompleteOperation(Op(1), new OperationEffect { RangeLock = (range, RangeLockMode.Shared) },
+        ctx.CompleteOperation(Op(1), new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Shared) },
             new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
 
         ctx.BeginOperation(Op(2), OperationKind.RangeLock, null);
-        ctx.CompleteOperation(Op(2), new OperationEffect { RangeLock = (range, RangeLockMode.Exclusive) },
+        ctx.CompleteOperation(Op(2), new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Exclusive) },
             new CachedOperationResponse(KeyValueResponseType.Locked, 0, HLCTimestamp.Zero));
 
         IReadOnlyDictionary<RangeLockKey, RangeLockMode> held = ctx.GetWorkingSetSnapshot().RangeLocksAcquired!;
@@ -378,7 +379,7 @@ public sealed class TestTransactionOperationRegistry
         ctx.BeginOperation(Op(1), OperationKind.Scan, null);
         ctx.CompleteOperation(
             Op(1),
-            new OperationEffect
+            new OperationCompletionPayload
             {
                 ReadObservations =
                 [

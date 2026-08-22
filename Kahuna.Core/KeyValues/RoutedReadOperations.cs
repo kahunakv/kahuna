@@ -132,19 +132,20 @@ internal sealed class RoutedReadOperations
         // idempotent replay, but records no observation into the read set.
         bool snapshotRead = !readTimestamp.IsNull();
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                Read = snapshotRead
-                    ? null
-                    : new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 },
-                Durability = durability,
-                CachedType = type,
-                CachedRevision = exists ? entry!.Revision : 0,
-                CachedTimestamp = exists ? entry!.LastModified : HLCTimestamp.Zero
-            },
-            cancellationToken);
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.Read = snapshotRead
+            ? null
+            : new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 };
+        payload.Durability = durability;
+        payload.CachedType = type;
+        payload.CachedRevision = exists ? entry!.Revision : 0;
+        payload.CachedTimestamp = exists ? entry!.LastModified : HLCTimestamp.Zero;
+
+        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+
+        // No retry cache is involved on this path, so this frame still holds the sole reference: the
+        // fold retains the read-key object, not the shell, so the shell can be recycled.
+        OperationCompletionPayloadPool.Return(payload);
 
         return (type, entry);
     }
@@ -334,15 +335,16 @@ internal sealed class RoutedReadOperations
             }
         }
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ReadObservations = observations,
-                Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent,
-                CachedType = batchCachedType
-            },
-            cancellationToken);
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReadObservations = observations;
+        payload.Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent;
+        payload.CachedType = batchCachedType;
+
+        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+
+        // No retry cache is involved on this path, so this frame still holds the sole reference: the
+        // fold copied the observations it kept and the shell can be recycled.
+        OperationCompletionPayloadPool.Return(payload);
 
         return result;
     }

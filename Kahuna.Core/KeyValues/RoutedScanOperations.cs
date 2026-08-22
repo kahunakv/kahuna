@@ -237,15 +237,16 @@ internal sealed class RoutedScanOperations
                 });
         }
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ReadObservations = observations,
-                Durability = durability,
-                CachedType = result.Type
-            },
-            cancellationToken);
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReadObservations = observations;
+        payload.Durability = durability;
+        payload.CachedType = result.Type;
+
+        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+
+        // No retry cache is involved on this path, so this frame still holds the sole reference: the
+        // fold copied the observations it kept and the shell can be recycled.
+        OperationCompletionPayloadPool.Return(payload);
 
         return result;
     }
@@ -322,15 +323,16 @@ internal sealed class RoutedScanOperations
                 });
         }
 
-        await LocateAndCompleteOperation(
-            coordinatorKey, transactionId, operationId,
-            new OperationCompletionPayload
-            {
-                ReadObservations = observations,
-                Durability = durability,
-                CachedType = result.Type
-            },
-            cancellationToken);
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReadObservations = observations;
+        payload.Durability = durability;
+        payload.CachedType = result.Type;
+
+        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+
+        // No retry cache is involved on this path, so this frame still holds the sole reference: the
+        // fold copied the observations it kept and the shell can be recycled.
+        OperationCompletionPayloadPool.Return(payload);
 
         return result;
     }

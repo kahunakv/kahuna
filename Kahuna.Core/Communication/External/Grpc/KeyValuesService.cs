@@ -2017,6 +2017,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         (KeyValueResponseType outcome, string? recordAnchorKey) = await keyValues.CompleteOperationInbound(request.CoordinatorKey, transactionId, operationId, payload);
 
+        // This landing point created the shell from the wire and nothing downstream retains it: the
+        // fold copies what it keeps, and a redirect re-serializes before sending. Recycle it here.
+        OperationCompletionPayloadPool.Return(payload);
+
         GrpcCompleteOperationResponse response = new()
         {
             Acknowledged = outcome == KeyValueResponseType.Set
@@ -2030,29 +2034,28 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <summary>
     /// Restores the completion payload from the inter-node request — the inverse of the sender-side
     /// mapping. Every effect-bearing field must be restored here; a dropped field silently narrows the
-    /// coordinator's working set.
+    /// coordinator's working set. The shell is rented; the caller recycles it after the fold.
     /// </summary>
     internal static OperationCompletionPayload FromGrpcCompleteOperationRequest(GrpcCompleteOperationRequest request)
     {
-        return new()
-        {
-            ModifiedKey = request.HasModifiedKey ? request.ModifiedKey : null,
-            AcquiredPointLock = request.HasAcquiredPointLock ? request.AcquiredPointLock : null,
-            ReleasedPointLock = request.HasReleasedPointLock ? request.ReleasedPointLock : null,
-            AcquiredPrefixLock = request.HasAcquiredPrefixLock ? request.AcquiredPrefixLock : null,
-            ReleasedPrefixLock = request.HasReleasedPrefixLock ? request.ReleasedPrefixLock : null,
-            AcquiredRangeLock = request.AcquiredRangeLock is null ? null : (ToRangeLockKey(request.AcquiredRangeLock), (RangeLockMode)request.AcquiredRangeLock.Mode),
-            ReleasedRangeLock = request.ReleasedRangeLock is null ? null : ToRangeLockKey(request.ReleasedRangeLock),
-            Read = request.Read is null ? null : ToReadKey(request.Read),
-            ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList(),
-            ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList(),
-            StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList(),
-            AcquiredPointLocks = request.AcquiredPointLocks.Count == 0 ? null : request.AcquiredPointLocks.Select(l => (l.Key, (KeyValueDurability)l.Durability)).ToList(),
-            Durability = (KeyValueDurability)request.Durability,
-            CachedType = (KeyValueResponseType)request.CachedType,
-            CachedRevision = request.CachedRevision,
-            CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter)
-        };
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ModifiedKey = request.HasModifiedKey ? request.ModifiedKey : null;
+        payload.AcquiredPointLock = request.HasAcquiredPointLock ? request.AcquiredPointLock : null;
+        payload.ReleasedPointLock = request.HasReleasedPointLock ? request.ReleasedPointLock : null;
+        payload.AcquiredPrefixLock = request.HasAcquiredPrefixLock ? request.AcquiredPrefixLock : null;
+        payload.ReleasedPrefixLock = request.HasReleasedPrefixLock ? request.ReleasedPrefixLock : null;
+        payload.AcquiredRangeLock = request.AcquiredRangeLock is null ? null : (ToRangeLockKey(request.AcquiredRangeLock), (RangeLockMode)request.AcquiredRangeLock.Mode);
+        payload.ReleasedRangeLock = request.ReleasedRangeLock is null ? null : ToRangeLockKey(request.ReleasedRangeLock);
+        payload.Read = request.Read is null ? null : ToReadKey(request.Read);
+        payload.ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList();
+        payload.ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList();
+        payload.StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList();
+        payload.AcquiredPointLocks = request.AcquiredPointLocks.Count == 0 ? null : request.AcquiredPointLocks.Select(l => (l.Key, (KeyValueDurability)l.Durability)).ToList();
+        payload.Durability = (KeyValueDurability)request.Durability;
+        payload.CachedType = (KeyValueResponseType)request.CachedType;
+        payload.CachedRevision = request.CachedRevision;
+        payload.CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter);
+        return payload;
     }
 
     /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>

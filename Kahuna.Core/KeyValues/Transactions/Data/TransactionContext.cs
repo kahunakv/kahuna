@@ -304,7 +304,7 @@ internal class TransactionContext
     /// a no-op, so a replayed completion never double-records an effect.
     /// </summary>
     /// <summary>Returns the transaction's record anchor after this effect is folded in (null if none yet).</summary>
-    internal string? CompleteOperation(TransactionOperationId operationId, OperationEffect? effect, object? response)
+    internal string? CompleteOperation(TransactionOperationId operationId, OperationCompletionPayload? payload, object? response)
     {
         lock (registryLock)
         {
@@ -316,7 +316,7 @@ internal class TransactionContext
 
             record.Status = OperationStatus.Completed;
             record.CachedResponse = response;
-            ApplyEffectLocked(effect);
+            ApplyPayloadLocked(payload);
             DecrementPending();
             return RecordAnchorKey;
         }
@@ -360,18 +360,25 @@ internal class TransactionContext
             FoldModifiedKeyLocked(modified);
     }
 
-    /// <summary>Caller must hold <see cref="registryLock"/>. Folds a confirmed effect into the working set.</summary>
-    private void ApplyEffectLocked(OperationEffect? effect)
+    /// <summary>
+    /// Caller must hold <see cref="registryLock"/>. Folds a confirmed completion payload into the working
+    /// set, pairing each key and lock with the payload's shared durability. The payload is read directly —
+    /// there is no intermediate effect object — so a completion allocates nothing on this path.
+    /// </summary>
+    private void ApplyPayloadLocked(OperationCompletionPayload? payload)
     {
-        if (effect is null)
+        if (payload is null)
             return;
 
-        if (effect.ModifiedKey is { } modified)
-            FoldModifiedKeyLocked(modified);
+        KeyValueDurability durability = payload.Durability;
+
+        if (!string.IsNullOrEmpty(payload.ModifiedKey))
+            FoldModifiedKeyLocked((payload.ModifiedKey, durability));
 
         // A batch folds its confirmed keys in canonical request order, so the first persistent one wins the
-        // anchor deterministically regardless of the order per-partition fan-out completed.
-        if (effect.ModifiedKeys is { } modifiedKeys)
+        // anchor deterministically regardless of the order per-partition fan-out completed. Each batch item
+        // carries its own durability, independent of the payload's shared one.
+        if (payload.ModifiedKeys is { } modifiedKeys)
         {
             foreach ((string, KeyValueDurability) batchModified in modifiedKeys)
                 FoldModifiedKeyLocked(batchModified);
@@ -380,51 +387,51 @@ internal class TransactionContext
         // Stage the actor-confirmed committed values for the persistent modified keys, exactly as the script
         // commands' StageMutation does, so an all-persistent registered transaction finalizes through the
         // durable-intent path instead of the manual ticket path.
-        if (effect.StagedMutations is { } stagedMutations)
+        if (payload.StagedMutations is { } stagedMutations)
         {
             foreach (StagedMutationEffect staged in stagedMutations)
                 StageMutation(staged.Key, staged.Value, staged.Revision, staged.ExpiresMs, staged.NoRevision);
         }
 
-        if (effect.PointLock is { } pointLock)
+        if (!string.IsNullOrEmpty(payload.AcquiredPointLock))
         {
             LocksAcquired ??= [];
-            LocksAcquired.Add(pointLock);
+            LocksAcquired.Add((payload.AcquiredPointLock, durability));
         }
 
-        if (effect.AcquiredPointLocks is { } acquiredPointLocks)
+        if (payload.AcquiredPointLocks is { } acquiredPointLocks)
         {
             LocksAcquired ??= [];
             foreach ((string, KeyValueDurability) batchLock in acquiredPointLocks)
                 LocksAcquired.Add(batchLock);
         }
 
-        if (effect.RemovePointLock is { } removedLock)
-            LocksAcquired?.Remove(removedLock);
+        if (!string.IsNullOrEmpty(payload.ReleasedPointLock))
+            LocksAcquired?.Remove((payload.ReleasedPointLock, durability));
 
-        if (effect.PrefixLock is { } prefixLock)
+        if (!string.IsNullOrEmpty(payload.AcquiredPrefixLock))
         {
             PrefixLocksAcquired ??= [];
-            PrefixLocksAcquired.Add(prefixLock);
+            PrefixLocksAcquired.Add((payload.AcquiredPrefixLock, durability));
         }
 
-        if (effect.RemovePrefixLock is { } removedPrefixLock)
-            PrefixLocksAcquired?.Remove(removedPrefixLock);
+        if (!string.IsNullOrEmpty(payload.ReleasedPrefixLock))
+            PrefixLocksAcquired?.Remove((payload.ReleasedPrefixLock, durability));
 
-        if (effect.RangeLock is { } rangeLock)
+        if (payload.AcquiredRangeLock is { } rangeLock)
         {
             RangeLocksAcquired ??= new();
             // Add on first acquire; replace the mode on a confirmed upgrade or renewal of the same bounds.
             RangeLocksAcquired[rangeLock.Range] = rangeLock.Mode;
         }
 
-        if (effect.RemoveRangeLock is { } removedRangeLock)
+        if (payload.ReleasedRangeLock is { } removedRangeLock)
             RangeLocksAcquired?.Remove(removedRangeLock);
 
-        if (effect.ReadObservation is { } read)
+        if (payload.Read is { } read)
             FoldReadObservationLocked(read);
 
-        if (effect.ReadObservations is { } reads)
+        if (payload.ReadObservations is { } reads)
         {
             foreach (KeyValueTransactionReadKey observed in reads)
                 FoldReadObservationLocked(observed);

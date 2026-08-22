@@ -140,24 +140,22 @@ internal sealed class RoutedWriteOperations
 
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
-        // Cache the result and drive the completion; if it is not acknowledged, surface MustRetry so a
-        // same-id retry recovers the confirmed effect without applying the set a second time.
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, response,
-                new OperationCompletionPayload
-                {
-                    ModifiedKey = applied ? key : null,
-                    AcquiredPointLock = applied ? key : null,
-                    // Stage the confirmed value for a persistent write so the coordinator finalizes durably,
-                    // carrying the NoRevision flag so a registered SET NOREV materializes revision-free.
-                    StagedMutations = applied && durability == KeyValueDurability.Persistent
-                        ? [new StagedMutationEffect(key, value, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0)]
-                        : null,
-                    Durability = durability,
-                    CachedType = type,
-                    CachedRevision = revision,
-                    CachedTimestamp = lastModified
-                }))
+        // Drive the completion; if it is not acknowledged, surface MustRetry so a same-id retry
+        // recovers the confirmed effect without applying the set a second time.
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ModifiedKey = applied ? key : null;
+        payload.AcquiredPointLock = applied ? key : null;
+        // Stage the confirmed value for a persistent write so the coordinator finalizes durably,
+        // carrying the NoRevision flag so a registered SET NOREV materializes revision-free.
+        payload.StagedMutations = applied && durability == KeyValueDurability.Persistent
+            ? [new StagedMutationEffect(key, value, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0)]
+            : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+        payload.CachedRevision = revision;
+        payload.CachedTimestamp = lastModified;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
         return response;
@@ -259,23 +257,21 @@ internal sealed class RoutedWriteOperations
         // Cache the batch result and drive the completion off the caller token; if it is not acknowledged,
         // surface MustRetry so a same-id retry recovers the confirmed effect without re-writing.
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, responses,
-                new OperationCompletionPayload
-                {
-                    ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                    StagedMutations = stagedMutations.Count > 0 ? stagedMutations : null,
-                    // A confirmed write folds its implicit point lock, exactly as the single-key path does. An
-                    // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
-                    // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
-                    // recorded these keys, so the HashSet fold is idempotent.
-                    AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                    // A batch that confirmed at least one write completes terminally so its effect folds. A
-                    // batch that confirmed nothing must NOT be cached as a terminal success — that would let a
-                    // same-id retry replay the false success forever instead of re-registering. Mark it
-                    // transient so the completion cancels the registration and a same-id retry re-executes.
-                    CachedType = modifiedKeys.Count > 0 ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null;
+        payload.StagedMutations = stagedMutations.Count > 0 ? stagedMutations : null;
+        // A confirmed write folds its implicit point lock, exactly as the single-key path does. An
+        // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
+        // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
+        // recorded these keys, so the HashSet fold is idempotent.
+        payload.AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null;
+        // A batch that confirmed at least one write completes terminally so its effect folds. A
+        // batch that confirmed nothing must NOT be cached as a terminal success — that would let a
+        // same-id retry replay the false success forever instead of re-registering. Mark it
+        // transient so the completion cancels the registration and a same-id retry re-executes.
+        payload.CachedType = modifiedKeys.Count > 0 ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, responses, payload))
             return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
 
         return responses;
@@ -380,23 +376,21 @@ internal sealed class RoutedWriteOperations
 
         // Cache the batch result and drive the completion off the caller token; if it is not acknowledged,
         // surface MustRetry so a same-id retry recovers the confirmed effect without re-deleting.
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, responses,
-                new OperationCompletionPayload
-                {
-                    ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                    StagedMutations = stagedMutations.Count > 0 ? stagedMutations : null,
-                    // A confirmed delete folds its implicit point lock, exactly as the single-key path does. An
-                    // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
-                    // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
-                    // recorded these keys, so the HashSet fold is idempotent.
-                    AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null,
-                    // A batch that confirmed at least one delete completes terminally so its effect folds. A
-                    // batch that confirmed nothing must NOT be cached as a terminal success — that would let a
-                    // same-id retry replay the false success forever instead of re-registering. Mark it
-                    // transient so the completion cancels the registration and a same-id retry re-executes.
-                    CachedType = modifiedKeys.Count > 0 ? KeyValueResponseType.Deleted : KeyValueResponseType.MustRetry
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ModifiedKeys = modifiedKeys.Count > 0 ? modifiedKeys : null;
+        payload.StagedMutations = stagedMutations.Count > 0 ? stagedMutations : null;
+        // A confirmed delete folds its implicit point lock, exactly as the single-key path does. An
+        // optimistic transaction takes no explicit locks, so this is its only source of the held-lock
+        // set that PrepareMutations requires; for a pessimistic caller the explicit lock already
+        // recorded these keys, so the HashSet fold is idempotent.
+        payload.AcquiredPointLocks = modifiedKeys.Count > 0 ? modifiedKeys : null;
+        // A batch that confirmed at least one delete completes terminally so its effect folds. A
+        // batch that confirmed nothing must NOT be cached as a terminal success — that would let a
+        // same-id retry replay the false success forever instead of re-registering. Mark it
+        // transient so the completion cancels the registration and a same-id retry re-executes.
+        payload.CachedType = modifiedKeys.Count > 0 ? KeyValueResponseType.Deleted : KeyValueResponseType.MustRetry;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, responses, payload))
             return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
 
         return responses;
@@ -500,21 +494,19 @@ internal sealed class RoutedWriteOperations
 
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, response,
-                new OperationCompletionPayload
-                {
-                    ModifiedKey = applied ? key : null,
-                    AcquiredPointLock = applied ? key : null,
-                    // Stage the tombstone (null value) for a persistent delete so the coordinator finalizes durably.
-                    StagedMutations = applied && durability == KeyValueDurability.Persistent
-                        ? [new StagedMutationEffect(key, null, revision, 0, NoRevision: false)]
-                        : null,
-                    Durability = durability,
-                    CachedType = type,
-                    CachedRevision = revision,
-                    CachedTimestamp = lastModified
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ModifiedKey = applied ? key : null;
+        payload.AcquiredPointLock = applied ? key : null;
+        // Stage the tombstone (null value) for a persistent delete so the coordinator finalizes durably.
+        payload.StagedMutations = applied && durability == KeyValueDurability.Persistent
+            ? [new StagedMutationEffect(key, null, revision, 0, NoRevision: false)]
+            : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+        payload.CachedRevision = revision;
+        payload.CachedTimestamp = lastModified;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
         return response;
@@ -590,18 +582,16 @@ internal sealed class RoutedWriteOperations
 
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, response,
-                new OperationCompletionPayload
-                {
-                    ModifiedKey = applied ? key : null,
-                    AcquiredPointLock = applied ? key : null,
-                    StagedMutations = stagedMutations,
-                    Durability = durability,
-                    CachedType = type,
-                    CachedRevision = revision,
-                    CachedTimestamp = lastModified
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ModifiedKey = applied ? key : null;
+        payload.AcquiredPointLock = applied ? key : null;
+        payload.StagedMutations = stagedMutations;
+        payload.Durability = durability;
+        payload.CachedType = type;
+        payload.CachedRevision = revision;
+        payload.CachedTimestamp = lastModified;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
         return response;

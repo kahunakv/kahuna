@@ -123,7 +123,7 @@ public sealed class TestSessionReaping
         TransactionOperationId opId = TransactionOperationId.NewRandom();
         Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.RangeLock, [1]).Outcome);
         RangeLockKey range = new("pfx", "a", true, "z", false, KeyValueDurability.Persistent);
-        ctx.CompleteOperation(opId, new OperationEffect { RangeLock = (range, RangeLockMode.Exclusive) }, response: null);
+        ctx.CompleteOperation(opId, new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Exclusive) }, response: null);
 
         List<(RangeLockKey Range, RangeLockMode Mode)> whileAccepting = ctx.SnapshotRenewableRangeLocks();
         Assert.Single(whileAccepting);
@@ -157,7 +157,7 @@ public sealed class TestSessionReaping
         TransactionOperationId opId = TransactionOperationId.NewRandom();
         Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.RangeLock, [1]).Outcome);
         RangeLockKey range = new("pfx", null, true, null, false, KeyValueDurability.Persistent);
-        ctx.CompleteOperation(opId, new OperationEffect { RangeLock = (range, RangeLockMode.Shared) }, response: null);
+        ctx.CompleteOperation(opId, new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Shared) }, response: null);
         Assert.Single(ctx.SnapshotRenewableRangeLocks());
 
         // The reaper claims the session, but the lock is still held until ReleaseWorkingSet runs.
@@ -188,7 +188,7 @@ public sealed class TestSessionReaping
         Assert.True(ctx.HasPendingOperations);
 
         // Completing the operation drains the pending count.
-        ctx.CompleteOperation(opId, effect: null, response: null);
+        ctx.CompleteOperation(opId, payload: null, response: null);
         Assert.False(ctx.HasPendingOperations);
     }
 

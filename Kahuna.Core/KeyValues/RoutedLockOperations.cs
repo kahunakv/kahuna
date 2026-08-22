@@ -128,14 +128,12 @@ internal sealed class RoutedLockOperations
 
         (KeyValueResponseType, string, KeyValueDurability, HLCTimestamp) response = (type, resultKey, resultDurability, holder);
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, response,
-                new OperationCompletionPayload
-                {
-                    AcquiredPointLock = acquired ? key : null,
-                    Durability = durability,
-                    CachedType = type
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.AcquiredPointLock = acquired ? key : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
 
         return response;
@@ -206,14 +204,12 @@ internal sealed class RoutedLockOperations
 
         bool acquired = type == KeyValueResponseType.Locked;
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, type,
-                new OperationCompletionPayload
-                {
-                    AcquiredPrefixLock = acquired ? prefixKey : null,
-                    Durability = durability,
-                    CachedType = type
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.AcquiredPrefixLock = acquired ? prefixKey : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, type, payload))
             return KeyValueResponseType.MustRetry;
 
         return type;
@@ -282,17 +278,15 @@ internal sealed class RoutedLockOperations
                 acquired.Add((key, durability));
         }
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, responses,
-                new OperationCompletionPayload
-                {
-                    AcquiredPointLocks = acquired.Count > 0 ? acquired : null,
-                    // A batch that acquired at least one lock completes terminally so its held locks fold. A
-                    // batch that acquired nothing must NOT be cached as a terminal success — that would let a
-                    // same-id retry replay the false success forever instead of re-registering. Mark it
-                    // transient so the completion cancels the registration and a same-id retry re-executes.
-                    CachedType = acquired.Count > 0 ? KeyValueResponseType.Locked : KeyValueResponseType.MustRetry
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.AcquiredPointLocks = acquired.Count > 0 ? acquired : null;
+        // A batch that acquired at least one lock completes terminally so its held locks fold. A
+        // batch that acquired nothing must NOT be cached as a terminal success — that would let a
+        // same-id retry replay the false success forever instead of re-registering. Mark it
+        // transient so the completion cancels the registration and a same-id retry re-executes.
+        payload.CachedType = acquired.Count > 0 ? KeyValueResponseType.Locked : KeyValueResponseType.MustRetry;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, responses, payload))
             return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
 
         return responses;
@@ -357,14 +351,12 @@ internal sealed class RoutedLockOperations
 
         (KeyValueResponseType, string) response = (type, resultKey);
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, response,
-                new OperationCompletionPayload
-                {
-                    ReleasedPointLock = released ? key : null,
-                    Durability = durability,
-                    CachedType = type
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReleasedPointLock = released ? key : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
             return (KeyValueResponseType.MustRetry, key);
 
         return response;
@@ -434,14 +426,12 @@ internal sealed class RoutedLockOperations
 
         bool released = type == KeyValueResponseType.Unlocked;
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, type,
-                new OperationCompletionPayload
-                {
-                    ReleasedPrefixLock = released ? prefixKey : null,
-                    Durability = durability,
-                    CachedType = type
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReleasedPrefixLock = released ? prefixKey : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, type, payload))
             return KeyValueResponseType.MustRetry;
 
         return type;
@@ -514,14 +504,12 @@ internal sealed class RoutedLockOperations
 
         (KeyValueResponseType, HLCTimestamp) response = (type, holder);
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, response,
-                new OperationCompletionPayload
-                {
-                    AcquiredRangeLock = acquired ? (range, mode) : null,
-                    Durability = durability,
-                    CachedType = type
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.AcquiredRangeLock = acquired ? (range, mode) : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
         return response;
@@ -618,14 +606,12 @@ internal sealed class RoutedLockOperations
         bool released = type == KeyValueResponseType.Unlocked;
         RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
-        if (!await CompleteRegisteredOperation(
-                coordinatorKey, transactionId, operationId, type,
-                new OperationCompletionPayload
-                {
-                    ReleasedRangeLock = released ? range : null,
-                    Durability = durability,
-                    CachedType = type
-                }))
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReleasedRangeLock = released ? range : null;
+        payload.Durability = durability;
+        payload.CachedType = type;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, type, payload))
             return KeyValueResponseType.MustRetry;
 
         return type;

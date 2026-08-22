@@ -79,39 +79,47 @@ internal sealed class OperationRegistrar
     }
 
     /// <summary>
-    /// Drives the coordinator completion for an operation whose actor just executed, first caching the
-    /// confirmed response and effect on this participant so a lost or cancelled completion is recoverable.
-    /// The completion runs detached from the caller's cancellation token: once the actor has mutated,
-    /// abandoning the completion because the caller went away would strand the effect with the coordinator
-    /// record stuck pending. Returns true when the coordinator acknowledged the fold; false means the
-    /// caller must surface <see cref="KeyValueResponseType.MustRetry"/>, and a same-id retry recovers the
-    /// result through <see cref="TryRecoverRegisteredOperation"/> without reapplying the operation.
+    /// Drives the coordinator completion for an operation whose actor just executed. On acknowledgement
+    /// nothing was shared, so this frame recycles the rented payload shell. When the completion does not
+    /// land, the confirmed response and payload are cached on this participant so a same-id retry
+    /// recovers the result through <see cref="TryRecoverRegisteredOperation"/> without reapplying the
+    /// operation — the cache then owns the payload for good (recovery can hand its reference to
+    /// concurrent retries, so it is never recycled). Takes ownership of <paramref name="payload"/>:
+    /// the caller must not touch it after this call. The completion runs detached from the caller's
+    /// cancellation token: once the actor has mutated, abandoning the completion because the caller
+    /// went away would strand the effect with the coordinator record stuck pending. Returns true when
+    /// the coordinator acknowledged the fold; false means the caller must surface
+    /// <see cref="KeyValueResponseType.MustRetry"/>.
     /// </summary>
     internal async Task<bool> CompleteRegisteredOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId,
         object response, OperationCompletionPayload payload)
     {
-        participantOperationCache.Store(transactionId, operationId, response, payload);
-
         try
         {
             (KeyValueResponseType outcome, _) = await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
 
             if (outcome == KeyValueResponseType.Set)
             {
-                participantOperationCache.Remove(transactionId, operationId);
+                // Acknowledged without ever entering the cache: this frame holds the sole reference,
+                // and the coordinator fold copied everything it kept, so the shell can be recycled.
+                OperationCompletionPayloadPool.Return(payload);
                 return true;
             }
 
             // The routing resolved without an exception but the completion did not reach the coordinator
-            // (e.g. a leadership flip between routing and landing). Retain the cache entry so a same-id
-            // retry re-drives the idempotent completion through TryRecoverRegisteredOperation.
+            // (e.g. a leadership flip between routing and landing). Cache the result so a same-id retry
+            // re-drives the idempotent completion through TryRecoverRegisteredOperation. In the window
+            // before this store, a concurrent same-id retry finds no entry and surfaces MustRetry, which
+            // is safe — a later retry finds the entry.
+            participantOperationCache.Store(transactionId, operationId, response, payload);
             logger.LogWarning("Completion of transaction operation {OperationId} was not acknowledged by coordinator; retaining participant result for retry", operationId);
             return false;
         }
         catch (Exception ex)
         {
-            // RPC loss or transient fault — retain the cache entry for same-id retry recovery.
+            // RPC loss or transient fault — cache the result for same-id retry recovery.
+            participantOperationCache.Store(transactionId, operationId, response, payload);
             logger.LogWarning(ex, "Completion of transaction operation {OperationId} was not acknowledged; retaining participant result for retry", operationId);
             return false;
         }
@@ -131,6 +139,8 @@ internal sealed class OperationRegistrar
         if (!participantOperationCache.TryGet(transactionId, operationId, out object? response, out OperationCompletionPayload? payload))
             return null;
 
+        // The payload reference is cache-owned and may be held by concurrent same-id retries — it
+        // must never be returned to the payload pool, on any path in this method.
         try
         {
             (KeyValueResponseType outcome, _) = await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload!, CancellationToken.None);
@@ -182,20 +192,18 @@ internal sealed class OperationRegistrar
     /// </summary>
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
-        OperationEffect? effect = BuildEffect(payload);
-
         // A transient outcome, or a WaitingForReplication registration that produced no effect, must not
         // be cached as terminal: cancel so a same-id retry re-registers as new and actually applies the
         // mutation. A WaitingForReplication that DID produce an effect keeps the cached-response replay
         // path (do not cancel) — a retry would see the cached response and skip reapplication.
         if (payload.CachedType == KeyValueResponseType.MustRetry ||
-            (payload.CachedType == KeyValueResponseType.WaitingForReplication && effect is null))
+            (payload.CachedType == KeyValueResponseType.WaitingForReplication && !HasEffect(payload)))
         {
             txCoordinator.CancelOperation(transactionId, operationId);
             return null;
         }
 
-        return txCoordinator.CompleteOperation(transactionId, operationId, effect, new CachedOperationResponse(payload.CachedType, payload.CachedRevision, payload.CachedTimestamp));
+        return txCoordinator.CompleteOperation(transactionId, operationId, payload, new CachedOperationResponse(payload.CachedType, payload.CachedRevision, payload.CachedTimestamp));
     }
 
     /// <summary>
@@ -242,39 +250,17 @@ internal sealed class OperationRegistrar
         return (KeyValueResponseType.Set, anchor);
     }
 
-    /// <summary>Maps a completion payload into the coordinator-owned working-set effect, or null when it records nothing.</summary>
-    private static OperationEffect? BuildEffect(OperationCompletionPayload payload)
-    {
-        KeyValueDurability durability = payload.Durability;
-
-        bool hasEffect =
-            !string.IsNullOrEmpty(payload.ModifiedKey) ||
-            (payload.ModifiedKeys is { Count: > 0 }) ||
-            (payload.AcquiredPointLocks is { Count: > 0 }) ||
-            !string.IsNullOrEmpty(payload.AcquiredPointLock) || !string.IsNullOrEmpty(payload.ReleasedPointLock) ||
-            !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
-            payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
-            payload.Read is not null ||
-            (payload.ReadObservations is { Count: > 0 }) ||
-            (payload.StagedMutations is { Count: > 0 });
-
-        if (!hasEffect)
-            return null;
-
-        return new()
-        {
-            ModifiedKey = string.IsNullOrEmpty(payload.ModifiedKey) ? null : (payload.ModifiedKey, durability),
-            ModifiedKeys = payload.ModifiedKeys is { Count: > 0 } ? payload.ModifiedKeys : null,
-            StagedMutations = payload.StagedMutations is { Count: > 0 } ? payload.StagedMutations : null,
-            PointLock = string.IsNullOrEmpty(payload.AcquiredPointLock) ? null : (payload.AcquiredPointLock, durability),
-            AcquiredPointLocks = payload.AcquiredPointLocks is { Count: > 0 } ? payload.AcquiredPointLocks : null,
-            RemovePointLock = string.IsNullOrEmpty(payload.ReleasedPointLock) ? null : (payload.ReleasedPointLock, durability),
-            PrefixLock = string.IsNullOrEmpty(payload.AcquiredPrefixLock) ? null : (payload.AcquiredPrefixLock, durability),
-            RemovePrefixLock = string.IsNullOrEmpty(payload.ReleasedPrefixLock) ? null : (payload.ReleasedPrefixLock, durability),
-            RangeLock = payload.AcquiredRangeLock,
-            RemoveRangeLock = payload.ReleasedRangeLock,
-            ReadObservation = payload.Read,
-            ReadObservations = payload.ReadObservations
-        };
-    }
+    /// <summary>True when the payload records at least one working-set effect: a modified key, an acquired
+    /// or released lock, a read observation, or a staged mutation. The fold itself reads the payload
+    /// directly, so this predicate only drives the no-effect cancel decision above.</summary>
+    private static bool HasEffect(OperationCompletionPayload payload) =>
+        !string.IsNullOrEmpty(payload.ModifiedKey) ||
+        (payload.ModifiedKeys is { Count: > 0 }) ||
+        (payload.AcquiredPointLocks is { Count: > 0 }) ||
+        !string.IsNullOrEmpty(payload.AcquiredPointLock) || !string.IsNullOrEmpty(payload.ReleasedPointLock) ||
+        !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
+        payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
+        payload.Read is not null ||
+        (payload.ReadObservations is { Count: > 0 }) ||
+        (payload.StagedMutations is { Count: > 0 });
 }

@@ -601,10 +601,10 @@ internal sealed class TransactionCoordinator : IDisposable
     /// anchor (null if no persistent write yet). Throws when the session no longer exists — the effect
     /// cannot be folded, so this completion is not acknowledged and the caller must not report success.
     /// </summary>
-    public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationEffect? effect, object? response)
+    public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload? payload, object? response)
     {
         if (sessions.TryGetValue(transactionId, out TransactionContext? context))
-            return context.CompleteOperation(operationId, effect, response);
+            return context.CompleteOperation(operationId, payload, response);
 
         // The session is gone (reaped/aborted, or never existed). Signalling rather than returning a null
         // anchor — which reads as success — keeps a participant that already applied the operation from

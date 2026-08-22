@@ -27,9 +27,34 @@ internal static class OperationDigest
     /// <summary>Strings up to this UTF-8 byte count encode on the stack; longer ones rent from the pool.</summary>
     private const int StackEncodeThreshold = 256;
 
+    /// <summary>
+    /// Reusable per-thread hasher. The XxHash128 state block is ~500 bytes, so a fresh instance per
+    /// digest dominates hot-path allocations. Reuse is safe because every digest builder below is
+    /// synchronous: the instance is acquired, appended to, and drained with no await in between, so
+    /// no other frame on the thread can observe it mid-build.
+    /// </summary>
+    [ThreadStatic]
+    private static XxHash128? threadHash;
+
+    private static XxHash128 AcquireHash()
+    {
+        XxHash128? hash = threadHash;
+        if (hash is null)
+        {
+            hash = new XxHash128();
+            threadHash = hash;
+            return hash;
+        }
+
+        // An exception thrown mid-build leaves appended state behind; reset unconditionally so a
+        // previous failed digest can never leak into this one.
+        hash.Reset();
+        return hash;
+    }
+
     internal static byte[] ForSet(string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.Set);
         AppendString(hash, key);
         AppendBytes(hash, value);
@@ -43,7 +68,7 @@ internal static class OperationDigest
 
     internal static byte[] ForDelete(string key, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.Delete);
         AppendString(hash, key);
         AppendInt(hash, (int)durability);
@@ -57,7 +82,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForDeleteMany(IReadOnlyList<(string Key, KeyValueDurability Durability)> items)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.DeleteMany);
         AppendInt(hash, items.Count);
         foreach ((string key, KeyValueDurability durability) in items)
@@ -76,7 +101,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForSetMany(IReadOnlyList<KahunaSetKeyValueRequestItem> items)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.SetMany);
         AppendInt(hash, items.Count);
         foreach (KahunaSetKeyValueRequestItem item in items)
@@ -94,7 +119,7 @@ internal static class OperationDigest
 
     internal static byte[] ForExtend(string key, int expiresMs, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.Extend);
         AppendString(hash, key);
         AppendInt(hash, expiresMs);
@@ -104,7 +129,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPointLockAcquire(string key, int expiresMs, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.PointLock);
         AppendString(hash, key);
         AppendInt(hash, expiresMs);
@@ -119,7 +144,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForManyPointLockAcquire(IReadOnlyList<(string Key, int ExpiresMs, KeyValueDurability Durability)> items)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.ManyPointLock);
         AppendInt(hash, items.Count);
         foreach ((string key, int expiresMs, KeyValueDurability durability) in items)
@@ -133,7 +158,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPointLockRelease(string key, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.PointLock);
         // A distinct constant separates a release declaration from an acquire of the same key.
         AppendInt(hash, -1);
@@ -144,7 +169,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPrefixLockAcquire(string prefixKey, int expiresMs, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.PrefixLock);
         AppendString(hash, prefixKey);
         AppendInt(hash, expiresMs);
@@ -154,7 +179,7 @@ internal static class OperationDigest
 
     internal static byte[] ForPrefixLockRelease(string prefixKey, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.PrefixLock);
         // A distinct constant separates a release declaration from an acquire of the same prefix.
         AppendInt(hash, -1);
@@ -165,7 +190,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRangeLockAcquire(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, RangeLockMode mode, int expiresMs, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.RangeLock);
         AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
         AppendInt(hash, (int)mode);
@@ -176,7 +201,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRangeLockRelease(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.RangeLock);
         // A distinct constant separates a release declaration from an acquire of the same bounds.
         AppendInt(hash, -1);
@@ -187,7 +212,7 @@ internal static class OperationDigest
 
     internal static byte[] ForScan(string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.Scan);
         AppendString(hash, prefixedKey);
         AppendHlc(hash, readTimestamp);
@@ -197,7 +222,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRangeScan(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.Scan);
         AppendBounds(hash, prefix, startKey, startInclusive, endKey, endInclusive);
         AppendInt(hash, limit);
@@ -214,7 +239,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForManyRead(OperationKind kind, IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, kind);
         AppendInt(hash, keys.Count);
         foreach ((string key, long revision, KeyValueDurability durability) in keys)
@@ -235,7 +260,7 @@ internal static class OperationDigest
 
     internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
     {
-        XxHash128 hash = new();
+        XxHash128 hash = AcquireHash();
         AppendTag(hash, kind);
         AppendString(hash, key);
         AppendLong(hash, revision);
