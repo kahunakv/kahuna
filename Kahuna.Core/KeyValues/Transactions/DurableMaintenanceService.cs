@@ -43,7 +43,8 @@ internal sealed class DurableMaintenanceService
     private readonly LocalLockOperations localLocks;
 
     // Retention GC of durable-2PC metadata (records + participant receipts): the window a terminal record is kept
-    // before it and its receipts are reclaimed, and the per-pass cap that bounds one sweep's work.
+    // before it and its receipts are reclaimed, and the cap that bounds one reclamation batch inside a sweep. A
+    // sweep drains every eligible record; the cap only sizes its batches.
     private readonly TimeSpan durableRecordRetentionTtl;
 
     private readonly int durableRecordGcMaxPerPass;
@@ -189,11 +190,18 @@ internal sealed class DurableMaintenanceService
     /// lease and any leader-change replay. A record is purged only after every one of its participants' receipts
     /// was released durably; a failed release retains the record for the next pass (missing proof ⇒ retain).</para>
     ///
-    /// <para>The pass runs in three stages — select every eligible record, then release <b>all</b> their receipts
+    /// <para>The sweep runs in three stages — select every eligible record, then release <b>all</b> their receipts
     /// with one replicated forget per participant partition, then purge. Batching the release is what lets
-    /// reclamation keep pace with commit inflow: the pass costs one round trip per partition it touches rather
+    /// reclamation keep pace with commit inflow: a batch costs one round trip per partition it touches rather
     /// than one per record it reclaims, so a backlog drains in partition-count replications instead of
     /// thousands.</para>
+    ///
+    /// <para>One sweep drains the <b>whole</b> eligible backlog, processed in batches of at most
+    /// <see cref="KahunaConfiguration.DurableRecordGcMaxPerPass"/> records each. The cap bounds a batch's
+    /// receipt/purge structures and each replicated entry's size — it must not bound the sweep's total: paced at
+    /// cap-per-tick the sweep reclaims at most cap ÷ collection-interval records per second, and any workload
+    /// committing faster than that grows the store without bound while every checkpoint re-serializes the
+    /// growing set.</para>
     /// </summary>
     internal async Task CollectDurableTransactionRecords(CancellationToken cancellationToken)
     {
@@ -214,10 +222,11 @@ internal sealed class DurableMaintenanceService
 
         int cap = durableRecordGcMaxPerPass;
 
-        // Stage 1 — select. The records eligible this pass, each paired with its anchor partition, plus the pass-wide
-        // receipt batch (keyed by the participant partition that must forget each) those partitions forget in stage 2.
-        // A record's own participant partitions are not stored per-record: they are needed only to hold a record back
-        // when a forget fails (rare), and that dependency is reconstructed once in stage 3 from the receipt batch.
+        // Stage 1 — select. The records eligible in the current batch, each paired with its anchor partition, plus
+        // the batch-wide receipt set (keyed by the participant partition that must forget each) those partitions
+        // forget in stage 2. A record's own participant partitions are not stored per-record: they are needed only
+        // to hold a record back when a forget fails (rare), and that dependency is reconstructed once in stage 3
+        // from the receipt batch.
         List<(TransactionRecord Record, int AnchorPartition)> eligible = [];
         Dictionary<int, List<CompletionReceiptRecord>> receiptsByPartition = [];
 
@@ -225,11 +234,14 @@ internal sealed class DurableMaintenanceService
         // records over few partitions, and each miss would otherwise be an await on the request path of the sweep.
         Dictionary<int, bool> anchorLeadership = [];
 
+        // Participant partitions whose receipt forget already failed during this sweep. Later batches treat them
+        // as failed without a new round trip — their dependent records stay retained for the next tick — instead
+        // of re-issuing a doomed replication per batch against a partition that is down or mid-election.
+        HashSet<int> failedForgetPartitions = [];
+
         foreach (TransactionRecord record in transactionRecordStore.Snapshot())
         {
             if (cancellationToken.IsCancellationRequested)
-                break;
-            if (cap > 0 && eligible.Count >= cap)
                 break;
 
             if (!record.IsTerminal || record.DecidedAt == HLCTimestamp.Zero)
@@ -252,12 +264,28 @@ internal sealed class DurableMaintenanceService
 
             AppendCompletionReceiptsForRecord(record, receiptsByPartition);
             eligible.Add((record, anchorPartition));
+
+            if (cap > 0 && eligible.Count >= cap)
+            {
+                await ReclaimBatchAsync(eligible, receiptsByPartition, failedForgetPartitions, cancellationToken).ConfigureAwait(false);
+                eligible.Clear();
+                receiptsByPartition.Clear();
+            }
         }
 
-        if (eligible.Count == 0)
-            return;
+        if (eligible.Count > 0 && !cancellationToken.IsCancellationRequested)
+            await ReclaimBatchAsync(eligible, receiptsByPartition, failedForgetPartitions, cancellationToken).ConfigureAwait(false);
+    }
 
-        // Stage 2 — release. One replicated forget per participant partition, carrying every receipt this pass
+    /// <summary>Stages 2 and 3 of <see cref="CollectDurableTransactionRecords"/> for one selected batch:
+    /// release the batch's completion receipts, then purge the records whose receipts all released durably.</summary>
+    private async Task ReclaimBatchAsync(
+        List<(TransactionRecord Record, int AnchorPartition)> eligible,
+        Dictionary<int, List<CompletionReceiptRecord>> receiptsByPartition,
+        HashSet<int> failedForgetPartitions,
+        CancellationToken cancellationToken)
+    {
+        // Stage 2 — release. One replicated forget per participant partition, carrying every receipt this batch
         // releases on it (chunked, see ReceiptForgetBatchMax). A partition whose forget was not durable is
         // remembered so the records that depend on it stay retained; other partitions' records still purge.
         HashSet<int> unreleasedPartitions = [];
@@ -265,6 +293,12 @@ internal sealed class DurableMaintenanceService
 
         foreach ((int partitionId, List<CompletionReceiptRecord> receipts) in receiptsByPartition)
         {
+            if (failedForgetPartitions.Contains(partitionId))
+            {
+                unreleasedPartitions.Add(partitionId);
+                continue;
+            }
+
             bool partitionReleased = true;
 
             for (int offset = 0; offset < receipts.Count; offset += ReceiptForgetBatchMax)
@@ -279,7 +313,7 @@ internal sealed class DurableMaintenanceService
                     offset, Math.Min(ReceiptForgetBatchMax, receipts.Count - offset));
 
                 // A chunk that fails abandons the rest for this partition. Earlier chunks stay forgotten, which is
-                // safe: forget is idempotent, and every record here is retained and re-attempted on a later pass.
+                // safe: forget is idempotent, and every record here is retained and re-attempted on a later sweep.
                 if (!await ForgetCompletionReceiptsToPartitionLeaderAsync(partitionId, chunk, cancellationToken).ConfigureAwait(false))
                 {
                     partitionReleased = false;
@@ -290,19 +324,22 @@ internal sealed class DurableMaintenanceService
             }
 
             if (!partitionReleased)
+            {
                 unreleasedPartitions.Add(partitionId);
+                failedForgetPartitions.Add(partitionId);
+            }
         }
 
         if (receiptsReleased > 0)
             DurableTransactionMetrics.ReceiptsReleased(receiptsReleased);
 
         // Stage 3 — purge, grouped by anchor partition. A record is purged only once every partition holding one of
-        // its receipts forgot it durably, so a partial failure narrows what this pass reclaims instead of purging a
+        // its receipts forgot it durably, so a partial failure narrows what this batch reclaims instead of purging a
         // record while a proof of it still exists somewhere.
         //
         // The set of transactions blocked by a failed forget is reconstructed here, once, from the receipt batch —
         // rather than storing each record's participant partitions in stage 1 (an allocation per record, on the hot
-        // common path where nothing fails). A receipt carries only its transaction id, but within a single pass a
+        // common path where nothing fails). A receipt carries only its transaction id, but within a single batch a
         // terminal record's transaction id identifies it uniquely, so keying the block set on transaction id is
         // exact. When no forget failed (the common case) the block set is empty and every eligible record purges.
         HashSet<HLCTimestamp> blockedTransactions = [];

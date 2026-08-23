@@ -231,8 +231,9 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan CompletionReceiptRetentionTtl { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// Maximum terminal transaction records the retention GC sweep considers per pass. Caps the size of the
-    /// receipt batch one sweep releases; a value &lt;= 0 considers everything eligible each pass.
+    /// Maximum terminal transaction records the retention GC sweep reclaims in one batch. A sweep drains the
+    /// whole eligible backlog every collection tick; the cap only sizes its batches (in-memory structures and
+    /// replicated-entry size). A value &lt;= 0 processes everything eligible as one batch.
     /// </summary>
     public int DurableRecordGcMaxPerPass { get; set; } = 4_096;
 

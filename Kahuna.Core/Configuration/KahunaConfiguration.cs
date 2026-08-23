@@ -325,13 +325,14 @@ public sealed class KahunaConfiguration
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
     /// <summary>
-    /// Maximum terminal transaction records the retention GC sweep considers in one collection pass, per node.
-    /// Bounds the size of the receipt batch a single sweep releases so a large backlog — e.g. after a restart or a
-    /// burst — is drained across successive passes instead of monopolizing one tick. It caps records <i>selected</i>,
-    /// not records reclaimed: a record whose participant partition failed to forget its receipts is retained and
-    /// reconsidered next pass. Because the sweep issues one replication per participant partition rather than one
+    /// Maximum terminal transaction records the retention GC sweep reclaims in one <i>batch</i>, per node. A sweep
+    /// drains the whole eligible backlog every collection tick, processed in batches of at most this many records;
+    /// the cap bounds each batch's in-memory receipt/purge structures and each replicated entry's size, never the
+    /// sweep's total. (Capping the total was a growth bug: it limited reclamation to cap ÷ collection-interval
+    /// records per second, so any workload committing faster grew the store — and the checkpoint cost proportional
+    /// to it — without bound.) Because a batch issues one replication per participant partition rather than one
     /// per record, this can be raised well above the count of partitions without multiplying round trips.
-    /// A value &lt;= 0 disables the per-pass cap (consider everything eligible each pass).
+    /// A value &lt;= 0 removes the batch bound (the sweep processes everything eligible as one batch).
     /// </summary>
     public int DurableRecordGcMaxPerPass { get; set; } = 4_096;
 

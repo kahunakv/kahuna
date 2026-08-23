@@ -119,27 +119,91 @@ public sealed class TestTransactionRecordGcBatching
     }
 
     [Fact]
-    public async Task Sweep_CapBoundsSelectedRecords_AndSuccessivePassesDrainTheBacklog()
+    public async Task Sweep_DrainsBacklogBeyondCap_InOneSweep_UsingCapSizedBatches()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         await using EmbeddedKahunaNode node = await StartNodeAsync(ct, gcMaxPerPass: 5);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
 
-        await CommitTransactionsAsync(node, TransactionCount, "capped");
+        List<string> keys = await CommitTransactionsAsync(node, TransactionCount, "capped");
         await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count >= TransactionCount);
-        int before = kahuna.DurableTransactionRecordStore.Count;
+
+        HashSet<int> participantPartitions = [];
+        foreach (string key in keys)
+            participantPartitions.Add(kahuna.KeyValues.LocateRange(key).PartitionId);
+        Assert.True(participantPartitions.Count > 1, "test needs the keys to span more than one partition");
+
+        ConcurrentBag<int> forgetCalls = [];
+        kahuna.KeyValues.ReplicateReceiptForgetFault = partitionId =>
+        {
+            forgetCalls.Add(partitionId);
+            return false;
+        };
 
         await Task.Delay(50, ct);
         await kahuna.KeyValues.CollectDurableTransactionRecords(ct);
 
-        // One pass reclaims at most the cap, so the backlog shrinks by five rather than draining outright.
-        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == before - 5);
-        Assert.Equal(before - 5, kahuna.DurableTransactionRecordStore.Count);
+        // A single sweep drains the whole eligible backlog even when it is several times the cap. A sweep
+        // paced at cap-per-tick would reclaim only five here — and on a real workload would fall behind the
+        // commit rate forever, growing the store (and its checkpoint cost) without bound.
+        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == 0);
+        await WaitUntil(() => kahuna.CompletionReceiptStore.Count == 0);
 
-        // Successive passes drain the rest — the cap paces the sweep, it does not strand records.
-        for (int pass = 0; pass < 10 && kahuna.DurableTransactionRecordStore.Count > 0; pass++)
-            await kahuna.KeyValues.CollectDurableTransactionRecords(ct);
+        // The drain ran as cap-sized batches, one forget per partition per batch: every partition holds more
+        // records than one batch can carry, so each spans several batches and the forget count must exceed the
+        // partition count. The ceiling is one forget per partition in each of the ceil(24 / 5) = 5 batches.
+        Assert.True(forgetCalls.Count > participantPartitions.Count,
+            $"expected more forget replications than partitions (several batches); got {forgetCalls.Count} over {participantPartitions.Count} partitions");
+        Assert.True(forgetCalls.Count <= 5 * participantPartitions.Count,
+            $"expected at most one forget per partition per batch; got {forgetCalls.Count}");
+    }
+
+    [Fact]
+    public async Task Sweep_FailedForgetPartition_IsNotRetriedWithinTheSweep_AndOtherRecordsDrain()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, gcMaxPerPass: 5);
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        List<string> keys = await CommitTransactionsAsync(node, TransactionCount, "skipfail");
+        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count >= TransactionCount);
+
+        Dictionary<int, int> recordsByPartition = [];
+        foreach (string key in keys)
+        {
+            int partitionId = kahuna.KeyValues.LocateRange(key).PartitionId;
+            recordsByPartition[partitionId] = recordsByPartition.GetValueOrDefault(partitionId) + 1;
+        }
+
+        Assert.True(recordsByPartition.Count > 1, "test needs the keys to span more than one partition");
+
+        (int faultedPartition, int retainedCount) = recordsByPartition.OrderByDescending(p => p.Value).First();
+
+        ConcurrentBag<int> forgetCalls = [];
+        kahuna.KeyValues.ReplicateReceiptForgetFault = partitionId =>
+        {
+            forgetCalls.Add(partitionId);
+            return partitionId == faultedPartition;
+        };
+
+        await Task.Delay(50, ct);
+        await kahuna.KeyValues.CollectDurableTransactionRecords(ct);
+
+        // The faulted partition's records are retained; everything else drains in the same sweep.
+        await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == retainedCount);
+        foreach (TransactionRecord record in kahuna.DurableTransactionRecordStore.Snapshot())
+            Assert.Equal(faultedPartition, kahuna.KeyValues.LocateRange(record.RecordAnchorKey).PartitionId);
+
+        // The faulted partition's records span several cap-sized batches, but only the first batch paid the
+        // failed round trip — later batches remember the failure and hold their dependent records without
+        // re-asking a partition that is down or mid-election.
+        Assert.Equal(1, forgetCalls.Count(p => p == faultedPartition));
+
+        // Once the partition can forget again, the next sweep drains the remainder.
+        kahuna.KeyValues.ReplicateReceiptForgetFault = null;
+        await kahuna.KeyValues.CollectDurableTransactionRecords(ct);
 
         await WaitUntil(() => kahuna.DurableTransactionRecordStore.Count == 0);
         await WaitUntil(() => kahuna.CompletionReceiptStore.Count == 0);

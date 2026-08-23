@@ -389,18 +389,33 @@ internal sealed class TransactionRecordStore
 
         try
         {
-            TransactionRecordSnapshotMessage message = new();
-            foreach (TransactionRecord record in records.Values)
-            {
-                if (resolveAnchorPartition(record.RecordAnchorKey).PartitionId == partitionId)
-                    message.Records.Add(ToSnapshotEntry(record));
-            }
-
-            byte[] data = ReplicationSerializer.Serialize(message);
+            // Entries stream straight into the temp file through one reused entry message (participant
+            // sub-messages included), producing the same bytes as serializing a whole
+            // TransactionRecordSnapshotMessage: each entry is written length-delimited under the repeated
+            // field's tag. Materializing one protobuf object per retained record plus one byte[] for the
+            // whole set made every checkpoint's allocation proportional to the store size, which dominated
+            // the node's allocation profile whenever the retained set was large.
             lock (fileLock)
             {
                 string tmp = path + ".tmp";
-                File.WriteAllBytes(tmp, data);
+
+                using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
+                using (CodedOutputStream output = new(file))
+                {
+                    TransactionRecordSnapshotEntry entry = new();
+                    List<TransactionParticipantRefMessage> participantPool = [];
+
+                    foreach (TransactionRecord record in records.Values)
+                    {
+                        if (resolveAnchorPartition(record.RecordAnchorKey).PartitionId != partitionId)
+                            continue;
+
+                        FillSnapshotEntry(entry, participantPool, record);
+                        output.WriteTag(TransactionRecordSnapshotMessage.RecordsFieldNumber, WireFormat.WireType.LengthDelimited);
+                        output.WriteMessage(entry);
+                    }
+                }
+
                 File.Move(tmp, path, overwrite: true);
             }
 
@@ -559,29 +574,46 @@ internal sealed class TransactionRecordStore
 
     private static TransactionRecordSnapshotEntry ToSnapshotEntry(TransactionRecord r)
     {
-        TransactionRecordSnapshotEntry entry = new()
-        {
-            TransactionIdNode = r.TransactionId.N, TransactionIdPhysical = r.TransactionId.L, TransactionIdCounter = r.TransactionId.C,
-            Epoch = r.Epoch, CoordinatorKey = r.CoordinatorKey, RecordAnchorKey = r.RecordAnchorKey,
-            CommitTimestampNode = r.CommitTimestamp.N, CommitTimestampPhysical = r.CommitTimestamp.L, CommitTimestampCounter = r.CommitTimestamp.C,
-            DecisionDeadlineNode = r.DecisionDeadline.N, DecisionDeadlinePhysical = r.DecisionDeadline.L, DecisionDeadlineCounter = r.DecisionDeadline.C,
-            ManifestHash = r.ManifestHash, ManifestPresent = r.ManifestPresent,
-            Decision = r.Decision switch
-            {
-                TransactionDecision.Commit => TransactionDecisionMessage.TransactionDecisionCommit,
-                TransactionDecision.Abort => TransactionDecisionMessage.TransactionDecisionAbort,
-                _ => TransactionDecisionMessage.TransactionDecisionUndecided
-            },
-            AbortClass = (int)r.AbortClass,
-            WinningOpIdNode = r.WinningOpId.N, WinningOpIdPhysical = r.WinningOpId.L, WinningOpIdCounter = r.WinningOpId.C,
-            CreatedAtNode = r.CreatedAt.N, CreatedAtPhysical = r.CreatedAt.L, CreatedAtCounter = r.CreatedAt.C,
-            DecidedAtNode = r.DecidedAt.N, DecidedAtPhysical = r.DecidedAt.L, DecidedAtCounter = r.DecidedAt.C
-        };
-
-        foreach (TransactionParticipantRef p in r.Participants)
-            entry.Participants.Add(new TransactionParticipantRefMessage { Key = p.Key, Durability = (int)p.Durability });
-
+        TransactionRecordSnapshotEntry entry = new();
+        FillSnapshotEntry(entry, [], r);
         return entry;
+    }
+
+    // Fills a possibly-reused entry message from a record. Every field is assigned on every call and the
+    // participant list is rebuilt, so no value from a previously filled record can leak into this one.
+    // Participant sub-messages come from the caller's pool (grown on demand), so a caller that serializes
+    // each filled entry immediately can stream an arbitrarily large record set through one entry object.
+    private static void FillSnapshotEntry(
+        TransactionRecordSnapshotEntry entry, List<TransactionParticipantRefMessage> participantPool, TransactionRecord r)
+    {
+        entry.TransactionIdNode = r.TransactionId.N; entry.TransactionIdPhysical = r.TransactionId.L; entry.TransactionIdCounter = r.TransactionId.C;
+        entry.Epoch = r.Epoch; entry.CoordinatorKey = r.CoordinatorKey; entry.RecordAnchorKey = r.RecordAnchorKey;
+        entry.CommitTimestampNode = r.CommitTimestamp.N; entry.CommitTimestampPhysical = r.CommitTimestamp.L; entry.CommitTimestampCounter = r.CommitTimestamp.C;
+        entry.DecisionDeadlineNode = r.DecisionDeadline.N; entry.DecisionDeadlinePhysical = r.DecisionDeadline.L; entry.DecisionDeadlineCounter = r.DecisionDeadline.C;
+        entry.ManifestHash = r.ManifestHash; entry.ManifestPresent = r.ManifestPresent;
+        entry.Decision = r.Decision switch
+        {
+            TransactionDecision.Commit => TransactionDecisionMessage.TransactionDecisionCommit,
+            TransactionDecision.Abort => TransactionDecisionMessage.TransactionDecisionAbort,
+            _ => TransactionDecisionMessage.TransactionDecisionUndecided
+        };
+        entry.AbortClass = (int)r.AbortClass;
+        entry.WinningOpIdNode = r.WinningOpId.N; entry.WinningOpIdPhysical = r.WinningOpId.L; entry.WinningOpIdCounter = r.WinningOpId.C;
+        entry.CreatedAtNode = r.CreatedAt.N; entry.CreatedAtPhysical = r.CreatedAt.L; entry.CreatedAtCounter = r.CreatedAt.C;
+        entry.DecidedAtNode = r.DecidedAt.N; entry.DecidedAtPhysical = r.DecidedAt.L; entry.DecidedAtCounter = r.DecidedAt.C;
+
+        entry.Participants.Clear();
+        int pooled = 0;
+        foreach (TransactionParticipantRef p in r.Participants)
+        {
+            if (pooled >= participantPool.Count)
+                participantPool.Add(new TransactionParticipantRefMessage());
+
+            TransactionParticipantRefMessage m = participantPool[pooled++];
+            m.Key = p.Key;
+            m.Durability = (int)p.Durability;
+            entry.Participants.Add(m);
+        }
     }
 
     private static TransactionRecord FromSnapshotEntry(TransactionRecordSnapshotEntry e)
