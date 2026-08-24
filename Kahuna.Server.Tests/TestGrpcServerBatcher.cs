@@ -44,7 +44,7 @@ public sealed class TestGrpcServerBatcher
         ILogger logger)
         => (Task)BatcherType
             .GetMethod("ReadKeyValueMessages", BindingFlags.NonPublic | BindingFlags.Static)!
-            .Invoke(null, [streamId, streaming, logger])!;
+            .Invoke(null, ["test://batcher-read-loop", streamId, streaming, logger])!;
 
     private static Task InvokeReadLockMessages(
         long streamId,
@@ -52,7 +52,7 @@ public sealed class TestGrpcServerBatcher
         ILogger logger)
         => (Task)BatcherType
             .GetMethod("ReadLockMessages", BindingFlags.NonPublic | BindingFlags.Static)!
-            .Invoke(null, [streamId, streaming, logger])!;
+            .Invoke(null, ["test://batcher-read-loop", streamId, streaming, logger])!;
 
     private static TaskCompletionSource<GrpcServerBatcherResponse> SeedPending(int requestId, long streamId)
     {

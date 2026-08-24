@@ -25,7 +25,15 @@ internal readonly struct GrpcServerBatcherItem
     /// <summary>
     /// Returns the task completion source of the reply
     /// </summary>
-    public TaskCompletionSource<GrpcServerBatcherResponse> Promise { get; }    
+    public TaskCompletionSource<GrpcServerBatcherResponse> Promise { get; }
+
+    /// <summary>
+    /// Monotonic enqueue time (<see cref="Environment.TickCount64"/>). The batcher's reaper fails
+    /// the promise once the item has waited longer than the request deadline — the only backstop
+    /// when the peer's stream goes quiet without dying, because no response and no stream error
+    /// will ever complete the promise on that path.
+    /// </summary>
+    public long EnqueuedAtTicks { get; }
 
     /// <summary>
     /// Constructor
@@ -36,8 +44,8 @@ internal readonly struct GrpcServerBatcherItem
     /// <param name="promise"></param>
     public GrpcServerBatcherItem(
         GrpcServerBatcherItemType type,
-        int requestId, 
-        GrpcServerBatcherRequest request, 
+        int requestId,
+        GrpcServerBatcherRequest request,
         TaskCompletionSource<GrpcServerBatcherResponse> promise
     )
     {
@@ -45,5 +53,6 @@ internal readonly struct GrpcServerBatcherItem
         RequestId = requestId;
         Request = request;
         Promise = promise;
+        EnqueuedAtTicks = Environment.TickCount64;
     }
 }

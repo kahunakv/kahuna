@@ -12,6 +12,18 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 /// A server-side batching utility designed to handle gRPC-based communication requests at scale.
 /// The primary function of this class is to queue various gRPC request types for processing
 /// and to return the appropriate responses.
+///
+/// <para><b>Liveness contract.</b> A promise returned by <c>Enqueue</c> always settles: either a
+/// response arrives on the shared duplex stream, the stream visibly dies
+/// (<see cref="FailPendingRequests"/>), or the reaper fails it after <see cref="RequestDeadline"/>.
+/// The deadline is the only backstop for a stream that goes quiet WITHOUT dying — a SIGSTOPed peer
+/// leaves the TCP session established and the HTTP/2 window stalls with no error, so nothing else
+/// would ever complete the promise (observed as 126k unresolved promises and a permanently silent
+/// data plane in the Caraxes run-J soak). Writes are bounded by <see cref="WriteTimeout"/> for the
+/// same reason: one stuck <c>WriteAsync</c> would otherwise hold the per-stream semaphore forever
+/// and silently wedge every future forwarded operation to that peer. A failed or stalled stream is
+/// evicted from the process-wide registry so the next enqueue rebuilds fresh streams instead of
+/// writing to dead call objects for the rest of the process lifetime.</para>
 /// </summary>
 internal sealed class GrpcServerBatcher
 {
@@ -24,6 +36,26 @@ internal sealed class GrpcServerBatcher
     private static int requestId;
 
     private static long streamingId;
+
+    private static int reaperStarted;
+
+    /// <summary>
+    /// Upper bound on how long an enqueued request may wait for its response before the reaper
+    /// fails it with a retryable <see cref="StatusCode.Unavailable"/>. Mutable only so tests can
+    /// shrink it; production code must treat it as a constant.
+    /// </summary>
+    internal static TimeSpan RequestDeadline = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Upper bound on acquiring the per-stream write semaphore and on a single
+    /// <c>RequestStream.WriteAsync</c>. Exceeding either marks the stream stalled: it is disposed,
+    /// evicted from the registry, and its pending requests are failed retryably. Mutable only so
+    /// tests can shrink it.
+    /// </summary>
+    internal static TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>Sweep cadence of the deadline reaper. Mutable only so tests can shrink it.</summary>
+    internal static TimeSpan ReaperInterval = TimeSpan.FromSeconds(1);
 
     private readonly string url;
 
@@ -518,12 +550,127 @@ internal sealed class GrpcServerBatcher
 
     private Task<GrpcServerBatcherResponse> TryProcessQueue(GrpcServerBatcherItem grpcBatcherItem, TaskCompletionSource<GrpcServerBatcherResponse> promise)
     {
+        EnsureReaperStarted(logger);
+
         inbox.Enqueue(grpcBatcherItem);
 
         if (1 == Interlocked.Exchange(ref processing, 0))
             _ = DeliverMessages();
 
         return promise.Task;
+    }
+
+    /// <summary>
+    /// Starts the process-wide deadline reaper on first use. The reaper is the liveness backstop
+    /// for requests whose stream went quiet without dying: no response and no stream error will
+    /// ever complete them, so an unswept <see cref="requestRefs"/> entry would hang its caller
+    /// forever and leak. One loop serves every batcher instance because the dictionaries are
+    /// process-wide statics.
+    /// </summary>
+    private static void EnsureReaperStarted(ILogger logger)
+    {
+        if (Interlocked.Exchange(ref reaperStarted, 1) == 1)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                try
+                {
+                    await Task.Delay(ReaperInterval).ConfigureAwait(false);
+                    SweepExpiredRequests(Environment.TickCount64, logger);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "GrpcServerBatcher reaper sweep failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Fails every tracked request older than <see cref="RequestDeadline"/> with a retryable
+    /// <see cref="StatusCode.Unavailable"/> and scrubs it from both tracking dictionaries.
+    /// Exposed with an explicit clock input so tests can drive expiry deterministically.
+    /// </summary>
+    internal static void SweepExpiredRequests(long nowTicks, ILogger logger)
+    {
+        double deadlineMs = RequestDeadline.TotalMilliseconds;
+        int expired = 0;
+
+        // Weakly-consistent enumeration is fine: a request completed concurrently loses the
+        // TryRemove race and is skipped; a request enqueued concurrently is younger than the
+        // deadline and is skipped by the age check.
+        foreach (KeyValuePair<int, GrpcServerBatcherItem> entry in requestRefs)
+        {
+            if (nowTicks - entry.Value.EnqueuedAtTicks < deadlineMs)
+                continue;
+
+            if (!requestRefs.TryRemove(entry.Key, out GrpcServerBatcherItem item))
+                continue;
+
+            requestStreamRefs.TryRemove(entry.Key, out _);
+            item.Promise.TrySetException(new RpcException(new(
+                StatusCode.Unavailable, "The remote node did not answer within the inter-node request deadline.")));
+            expired++;
+        }
+
+        if (expired > 0)
+            logger.LogWarning("GrpcServerBatcher reaper expired {Count} request(s) past the {Deadline} deadline — the peer stream is quiet; requests fail retryably instead of hanging.", expired, RequestDeadline);
+    }
+
+    /// <summary>
+    /// Evicts and disposes every shared streaming for <paramref name="streamUrl"/> so the next
+    /// enqueue rebuilds fresh streams. Without the eviction the registry — populated once per URL
+    /// for the process lifetime — would keep handing out dead call objects forever, which was half
+    /// of the permanent-wedge failure mode. Disposal also unblocks any <c>WriteAsync</c> stuck on
+    /// the stalled session and drives the read loops into their failure cleanup. Idempotent and
+    /// safe to race from the write path, both read loops, and sibling streams.
+    /// <para>
+    /// When <paramref name="failingStreamId"/> is given, the eviction only happens if the current
+    /// registry entry still contains that stream: a slow failure surfacing AFTER the URL was
+    /// already evicted and rebuilt must not tear down the healthy replacement (transiently
+    /// harmless — it would be rebuilt again — but a failure storm would churn streams for
+    /// nothing).
+    /// </para>
+    /// </summary>
+    private static void InvalidateStreamingsForUrl(string streamUrl, ILogger logger, string reason, long? failingStreamId = null)
+    {
+        if (!streamings.TryGetValue(streamUrl, out Lazy<List<GrpcServerSharedStreaming>>? current))
+            return;
+
+        if (failingStreamId is not null)
+        {
+            // An entry still being lazily created cannot contain the failing stream (ids are
+            // assigned during creation and the failing stream was in use); leave it alone.
+            if (!current.IsValueCreated)
+                return;
+
+            bool containsFailing = false;
+            foreach (GrpcServerSharedStreaming streaming in current.Value)
+            {
+                if (streaming.Id == failingStreamId.Value)
+                {
+                    containsFailing = true;
+                    break;
+                }
+            }
+
+            if (!containsFailing)
+                return;
+        }
+
+        if (!streamings.TryRemove(new KeyValuePair<string, Lazy<List<GrpcServerSharedStreaming>>>(streamUrl, current)))
+            return;
+
+        logger.LogWarning("GrpcServerBatcher evicting shared streams for {Url}: {Reason}", streamUrl, reason);
+
+        if (!current.IsValueCreated)
+            return;
+
+        foreach (GrpcServerSharedStreaming streaming in current.Value)
+            streaming.Dispose();
     }
 
     /// <summary>
@@ -622,7 +769,43 @@ internal sealed class GrpcServerBatcher
         }
     }
 
-    private static async Task RunLockBatch(GrpcServerSharedStreaming sharedStreaming, GrpcServerBatcherItem request)
+    /// <summary>
+    /// Serializes one write onto the shared stream, bounded by <see cref="WriteTimeout"/> on both
+    /// the semaphore acquisition and the write itself. Either bound firing means the stream is
+    /// stalled (the run-J failure mode: a SIGSTOPed peer's HTTP/2 window fills and the write never
+    /// completes, holding the semaphore forever): the stream is evicted and disposed, its pending
+    /// requests fail retryably, and the thrown <see cref="RpcException"/> makes the caller's batch
+    /// fail the same way instead of wedging.
+    /// </summary>
+    private async Task WriteBoundedAsync<T>(GrpcServerSharedStreaming sharedStreaming, IClientStreamWriter<T> writer, T batchRequest)
+    {
+        if (!await sharedStreaming.Semaphore.WaitAsync(WriteTimeout).ConfigureAwait(false))
+        {
+            RpcException stalled = new(new(StatusCode.Unavailable, "gRPC inter-node stream stalled: the write pipeline is blocked past the write timeout."));
+            InvalidateStreamingsForUrl(url, logger, "write semaphore held past the write timeout — a previous write is stuck on a stalled stream", sharedStreaming.Id);
+            FailPendingRequests(sharedStreaming.Id, stalled);
+            throw stalled;
+        }
+
+        try
+        {
+            await writer.WriteAsync(batchRequest).WaitAsync(WriteTimeout).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            RpcException failure = ex as RpcException ?? new RpcException(new(
+                StatusCode.Unavailable, $"gRPC inter-node stream write failed or timed out: {ex.GetType().Name}."));
+            InvalidateStreamingsForUrl(url, logger, $"write failed or timed out ({ex.GetType().Name})", sharedStreaming.Id);
+            FailPendingRequests(sharedStreaming.Id, failure);
+            throw failure;
+        }
+        finally
+        {
+            sharedStreaming.Semaphore.Release();
+        }
+    }
+
+    private async Task RunLockBatch(GrpcServerSharedStreaming sharedStreaming, GrpcServerBatcherItem request)
     {
         GrpcBatchServerLockRequest batchRequest = new()
         {
@@ -654,19 +837,10 @@ internal sealed class GrpcServerBatcher
         else
             throw new KahunaServerException("Unknown request type");
 
-        try
-        {
-            await sharedStreaming.Semaphore.WaitAsync();
-
-            await sharedStreaming.LockStreaming.RequestStream.WriteAsync(batchRequest);
-        }
-        finally
-        {
-            sharedStreaming.Semaphore.Release();
-        }
+        await WriteBoundedAsync(sharedStreaming, sharedStreaming.LockStreaming.RequestStream, batchRequest).ConfigureAwait(false);
     }
 
-    private static async Task RunKeyValueBatch(GrpcServerSharedStreaming sharedStreaming, GrpcServerBatcherItem request)
+    private async Task RunKeyValueBatch(GrpcServerSharedStreaming sharedStreaming, GrpcServerBatcherItem request)
     {
         GrpcBatchServerKeyValueRequest batchRequest = new()
         {
@@ -923,19 +1097,10 @@ internal sealed class GrpcServerBatcher
         else
             throw new KahunaServerException("Unknown request type");
 
-        try
-        {
-            await sharedStreaming.Semaphore.WaitAsync();
-
-            await sharedStreaming.KeyValueStreaming.RequestStream.WriteAsync(batchRequest);
-        }
-        finally
-        {
-            sharedStreaming.Semaphore.Release();
-        }
+        await WriteBoundedAsync(sharedStreaming, sharedStreaming.KeyValueStreaming.RequestStream, batchRequest).ConfigureAwait(false);
     }
-    
-    private static async Task ReadLockMessages(long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming, ILogger logger)
+
+    private static async Task ReadLockMessages(string streamUrl, long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> streaming, ILogger logger)
     {
         try
         {
@@ -981,21 +1146,24 @@ internal sealed class GrpcServerBatcher
             }
 
             RpcException streamClosed = new(new(StatusCode.Unavailable, "gRPC inter-node lock stream closed."));
+            InvalidateStreamingsForUrl(streamUrl, logger, "lock response stream ended", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, streamClosed);
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
         {
             logger.LogWarning("GrpcServerBatcher lock stream closed: {Status}", ex.Status);
+            InvalidateStreamingsForUrl(streamUrl, logger, "lock stream closed", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadLockMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
+            InvalidateStreamingsForUrl(streamUrl, logger, "lock read loop faulted", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
     }
 
-    private static async Task ReadKeyValueMessages(long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming, ILogger logger)
+    private static async Task ReadKeyValueMessages(string streamUrl, long sharedStreamingId, AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> streaming, ILogger logger)
     {
         try
         {
@@ -1223,16 +1391,19 @@ internal sealed class GrpcServerBatcher
             }
 
             RpcException streamClosed = new(new(StatusCode.Unavailable, "gRPC inter-node key-value stream closed."));
+            InvalidateStreamingsForUrl(streamUrl, logger, "key-value response stream ended", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, streamClosed);
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
         {
             logger.LogWarning("GrpcServerBatcher key-value stream closed: {Status}", ex.Status);
+            InvalidateStreamingsForUrl(streamUrl, logger, "key-value stream closed", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadKeyValueMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
+            InvalidateStreamingsForUrl(streamUrl, logger, "key-value read loop faulted", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
     }
@@ -1270,8 +1441,8 @@ internal sealed class GrpcServerBatcher
 
             long id = Interlocked.Increment(ref streamingId);
 
-            _ = ReadLockMessages(id, locksStreaming, logger);
-            _ = ReadKeyValueMessages(id, keyValueStreaming, logger);
+            _ = ReadLockMessages(url, id, locksStreaming, logger);
+            _ = ReadKeyValueMessages(url, id, keyValueStreaming, logger);
 
             nodeStreamings.Add(new(id, locksStreaming, keyValueStreaming));
         }
