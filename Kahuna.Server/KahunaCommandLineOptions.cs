@@ -388,6 +388,27 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-suggestion-timeout", Required = false, HelpText = "How long the P0 leader waits for a suggested move to be confirmed before declaring it dropped in milliseconds. After timeout the partition is eligible again subject to raft-move-cooldown.", Default = 15000)]
     public int RaftSuggestionTimeout { get; set; } = 15000;
 
+    [Option("raft-enable-slow-node-avoidance", Required = false, HelpText = "Master switch for degraded-node leader avoidance. When true, the balancer classifies nodes whose WAL commit wait stands far above the cluster median as slow, refuses them as transfer targets, and drains the leaderships they already hold. Acts only inside the leader-balancer pass, so it does nothing unless raft-enable-leader-balancer is also true.", Default = false)]
+    public bool RaftEnableSlowNodeAvoidance { get; set; } = false;
+
+    [Option("raft-slow-node-multiplier", Required = false, HelpText = "How far above the cluster median commit wait a node must sit before it is a slow candidate. Must be greater than 1.0.", Default = 3.0)]
+    public double RaftSlowNodeMultiplier { get; set; } = 3.0;
+
+    [Option("raft-slow-node-floor-ms", Required = false, HelpText = "Absolute floor in milliseconds below which a node is never a slow candidate, whatever its ratio to the median.", Default = 10.0)]
+    public double RaftSlowNodeFloorMs { get; set; } = 10.0;
+
+    [Option("raft-slow-node-min-samples", Required = false, HelpText = "Number of WAL group batches a node must have observed before its commit wait is judged at all. Below this the node counts as unknown and is never drained or excluded.", Default = 20L)]
+    public long RaftSlowNodeMinSamples { get; set; } = 20;
+
+    [Option("raft-slow-node-observation-ttl", Required = false, HelpText = "Maximum age of a node's last commit-wait observation before the node counts as unknown, in milliseconds.", Default = 30000)]
+    public int RaftSlowNodeObservationTtl { get; set; } = 30000;
+
+    [Option("raft-slow-node-enter-passes", Required = false, HelpText = "Consecutive balancer passes a node must look slow before it is classified Slow.", Default = 3)]
+    public int RaftSlowNodeEnterPasses { get; set; } = 3;
+
+    [Option("raft-slow-node-exit-passes", Required = false, HelpText = "Consecutive clean passes before a classified slow node is released. Deliberately longer than raft-slow-node-enter-passes to avoid flapping.", Default = 6)]
+    public int RaftSlowNodeExitPasses { get; set; } = 6;
+
     [Option("raft-replication-factor", Required = false, HelpText = "Desired number of voter replicas per partition range. 0 (the default) means full replication: every roster voter hosts every range. When > 0, each range gets a replica set of this size and quorum is computed per range over its voter replicas only. Prefer odd values.", Default = 0)]
     public int RaftReplicationFactor { get; set; }
 

@@ -97,8 +97,8 @@ public sealed class TestGrpcServerBatcherLiveness
             RequestRefs().TryRemove(freshRequest, out _);
             RequestStreamRefs().TryRemove(oldRequest, out _);
             RequestStreamRefs().TryRemove(freshRequest, out _);
-            old.TrySetCanceled();
-            fresh.TrySetCanceled();
+            old.TrySetCanceled(TestContext.Current.CancellationToken);
+            fresh.TrySetCanceled(TestContext.Current.CancellationToken);
         }
     }
 
@@ -127,7 +127,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
         try
         {
-            await streaming.Semaphore.WaitAsync();     // the stuck previous writer
+            await streaming.Semaphore.WaitAsync(TestContext.Current.CancellationToken);     // the stuck previous writer
 
             RpcException failure = await Assert.ThrowsAsync<RpcException>(() =>
                 InvokeWriteBounded(url, streaming, new GrpcBatchServerKeyValueRequest()));
@@ -143,7 +143,7 @@ public sealed class TestGrpcServerBatcherLiveness
             Streamings().TryRemove(url, out _);
             RequestRefs().TryRemove(requestId, out _);
             RequestStreamRefs().TryRemove(requestId, out _);
-            pending.TrySetCanceled();
+            pending.TrySetCanceled(TestContext.Current.CancellationToken);
         }
     }
 
@@ -172,7 +172,7 @@ public sealed class TestGrpcServerBatcherLiveness
             Assert.False(Streamings().ContainsKey(url));
 
             // The semaphore was released on the failure path: the pipeline is not wedged.
-            Assert.True(await streaming.Semaphore.WaitAsync(TimeSpan.FromSeconds(1)));
+            Assert.True(await streaming.Semaphore.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
             streaming.Semaphore.Release();
         }
         finally
