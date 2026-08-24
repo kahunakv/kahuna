@@ -28,6 +28,37 @@ internal sealed class PreparedIntentStore
 {
     private readonly ConcurrentDictionary<string, PreparedIntent> intents = new();
 
+    /// <summary>One key's last committed durable-transaction write, as remembered by the staged-base fence:
+    /// the revision/state the committed head reached when that commit's settlement applied, and the commit
+    /// timestamp used for retention pruning.</summary>
+    private readonly record struct CommittedHead(long Revision, KeyValueState State, HLCTimestamp CommittedAt);
+
+    // The staged-base fence's committed-head memory: for each key, the last durable-transaction commit whose
+    // settlement (or removal) this store applied, within the retention horizon. Fed by commit resolutions on
+    // the same per-key ordered apply path as prepares, so at the moment a prepare applies, any competitor
+    // commit of the same key that settled earlier in the log has already left its head here.
+    //
+    // ADVISORY, per-node, in-memory state: it shapes only the prepare ACKNOWLEDGEMENT returned to the local
+    // producer (see <see cref="ApplyDeltaAckPrepares"/>), never the replicated state-machine transition — so
+    // it needs no cross-replica determinism, no persistence, and no snapshot coupling. Bounded by
+    // size-triggered retention pruning; the staleness gate in the fence makes pruning safe.
+    private readonly ConcurrentDictionary<string, CommittedHead> committedHeads = new();
+
+    // Highest commit timestamp among recorded heads — the fence's notion of "now" for pruning and the
+    // staleness gate, always an HLC from replicated commits, never a local clock. Guarded by applyGate.
+    private HLCTimestamp committedHeadWatermark = HLCTimestamp.Zero;
+
+    /// <summary>Default staged-base fence retention (ms). Must comfortably exceed the longest possible
+    /// transaction lifetime (begin → prepare), because the staleness gate refuses to acknowledge a
+    /// validated-base prepare from a transaction older than this horizon — its base may predate every
+    /// retained head. Ten minutes covers the decision-deadline ceiling and typical reaper horizons.</summary>
+    internal const int DefaultStagedBaseFenceRetentionMs = 600_000;
+
+    // Committed-head entries are pruned only when the map crosses this size, so quiet stores never scan.
+    private const int CommittedHeadPruneTriggerCount = 32_768;
+
+    private int stagedBaseFenceRetentionMs = DefaultStagedBaseFenceRetentionMs;
+
     // Monotonic change stamp for the intent set, bumped whenever an intent is installed, updated, or removed. A
     // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
     // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
@@ -80,6 +111,13 @@ internal sealed class PreparedIntentStore
     /// <summary>Wires the key → data-partition resolver once the locator exists (manager construction).</summary>
     public void AttachPartitionResolver(Func<string, int> resolver) => resolvePartition = resolver;
 
+    /// <summary>Sets the staged-base fence retention horizon. The caller must pass a value comfortably above
+    /// the longest possible transaction lifetime: the staleness gate refuses to acknowledge a validated-base
+    /// prepare from a transaction older than this horizon, so a horizon below real transaction lifetimes turns
+    /// long transactions into spurious aborts. Idempotent; safe to call on a shared store.</summary>
+    public void ConfigureStagedBaseFence(int retentionMs) =>
+        stagedBaseFenceRetentionMs = Math.Max(1, retentionMs);
+
     /// <summary>Applies one transition to the intent at the command's key and reflects the result in the map:
     /// install/update on <see cref="TransactionApplyOutcome.Applied"/> with a record, delete when the applied
     /// record is null (removal), and leave the map unchanged on a no-op or rejection.</summary>
@@ -110,8 +148,141 @@ internal sealed class PreparedIntentStore
                 Interlocked.Increment(ref version);
             }
 
+            // A commit resolution (or the removal of a committed intent — the import/replay orderings where the
+            // resolve applied elsewhere) makes the intent's mutation the key's committed head; remember it for
+            // the staged-base fence. Idempotent replays record the same values. A resolve over an absent intent
+            // (already settled and garbage-collected, decision replaying) has no mutation left to record.
+            if (existing is not null)
+            {
+                bool committedNow = command is ResolveIntentCommand { Commit: true }
+                    && result.Outcome is TransactionApplyOutcome.Applied or TransactionApplyOutcome.IdempotentNoop;
+                bool removedCommitted = command is RemoveIntentCommand
+                    && existing.Resolution == PreparedIntentResolution.Committed;
+
+                if (committedNow || removedCommitted)
+                    RecordCommittedHead(existing);
+            }
+
+            // ── Staged-base fence, evaluated at the prepare's own apply position ──
+            // A freshly installed validated-base prepare is checked against the committed-head memory. The
+            // pre-propose validation cannot see a competitor that commits the same base between its probe and
+            // this prepare landing (the competitor's intent settled and was removed, so single-live-intent sees
+            // nothing) — the interleaving that silently discards the competitor's write (a lost update). Here
+            // that competitor is always visible: either its intent is still live (the state machine already
+            // rejected this prepare), or its settlement applied earlier on this key and left its head above.
+            //
+            // The verdict does NOT change the replicated transition — the intent installs identically on every
+            // node, so replicas and replay never diverge. It only flags the result; the local producer's
+            // acknowledgement path (<see cref="ApplyDeltaAckPrepares"/>) folds the flag into a refused prepare,
+            // which drives the coordinator's standard truthful conflict abort, and the abort's resolution rolls
+            // the installed intent back everywhere.
+            //
+            // Judged on a fresh install AND on the idempotent same-identity re-prepare of a still-pending
+            // intent: the finalizer's prepare-retry loop re-proposes the same delta and reads the no-op as "already
+            // prepared", so a verdict given only on the first apply would be washed away by the first retry.
+            // Heads only move forward, so once a base is stale every re-ask answers stale, and the retry budget
+            // exhausts into the truthful abort. A RESOLVED existing intent is left alone — that is a decision
+            // replay, owned by the record, with no acknowledgement left to protect. A foreign holder is the state
+            // machine's rejection to report.
+            bool freshValidatedInstall = existing is null && result.Outcome == TransactionApplyOutcome.Applied;
+            bool pendingSameIdentityReprepare = existing is { IsPending: true } && result.Outcome == TransactionApplyOutcome.IdempotentNoop;
+
+            if ((freshValidatedInstall || pendingSameIdentityReprepare)
+                && command is PrepareIntentCommand { Intent.HasValidatedBase: true } fencedPrepare)
+            {
+                string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent);
+                if (fenceConflict is not null)
+                {
+                    DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
+
+                    logger?.LogWarning(
+                        "Staged base for {Key} moved before the prepare of transaction {TransactionId} applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
+                        fencedPrepare.Intent.Key, fencedPrepare.Intent.TransactionId, fenceConflict);
+
+                    return result with { StaleBase = true };
+                }
+            }
+
             return result;
         }
+    }
+
+    /// <summary>
+    /// Decides whether a freshly installed validated-base prepare deserves its acknowledgement, against the
+    /// committed-head memory. Returns null to acknowledge, or the conflict reason. Caller holds
+    /// <see cref="applyGate"/>.
+    /// </summary>
+    private string? EvaluateStagedBaseFence(PreparedIntent intent)
+    {
+        // Staleness gate, the partner of retention pruning: a pruned head cannot be distinguished from "no
+        // commit happened", so a prepare from a transaction that BEGAN before the retention horizon (its reads,
+        // and therefore its base, may predate every retained head) must not be acknowledged on absence of
+        // evidence. The transaction id is the begin HLC, so it lower-bounds every read the base came from.
+        // Measured against the head watermark — an HLC from replicated commits — never a local clock.
+        if (committedHeadWatermark != HLCTimestamp.Zero
+            && intent.TransactionId.L + stagedBaseFenceRetentionMs < committedHeadWatermark.L)
+            return $"transaction began before the staged-base fence retention horizon; its validated base for key {intent.Key} cannot be verified";
+
+        if (!committedHeads.TryGetValue(intent.Key, out CommittedHead head))
+            return null;
+
+        // BaseState says whether the validated base was an existing value (the finalize-input builder maps an
+        // observed non-existent base to Undefined). PreparedIntent.UnknownBaseRevision (no base at all) never
+        // reaches this method. A transactional delete recorded as the head keeps the key absent, so it is a
+        // valid base for a validated-absent insert.
+        if (intent.BaseState != KeyValueState.Set)
+        {
+            return head.State == KeyValueState.Set
+                ? $"committed base for key {intent.Key} changed after validation: validated absent, committed head is now revision {head.Revision}"
+                : null;
+        }
+
+        // Only a head that moved PAST the validated base is a conflict. A head at the base is exactly the
+        // commit the read observed; a head behind the base means non-transactional writes advanced the key
+        // after that commit — this memory can attest nothing newer there, and refusing would wedge every later
+        // read-modify-write of the key until the entry ages out.
+        return head.Revision > intent.BaseRevision
+            ? $"committed base for key {intent.Key} changed after validation: validated revision {intent.BaseRevision}, committed head is now revision {head.Revision}"
+            : null;
+    }
+
+    /// <summary>Records a committed intent's mutation as its key's committed head and advances the pruning
+    /// watermark. Monotonic per key: an older revision never overwrites a newer one. Deliberately does not
+    /// touch the snapshot change stamp — the memory is advisory and never persisted. Caller holds
+    /// <see cref="applyGate"/>.</summary>
+    private void RecordCommittedHead(PreparedIntent intent)
+    {
+        if (committedHeads.TryGetValue(intent.Key, out CommittedHead current) && current.Revision >= intent.Revision)
+            return;
+
+        committedHeads[intent.Key] = new(intent.Revision, intent.State, intent.CommitTimestamp);
+
+        if (intent.CommitTimestamp > committedHeadWatermark)
+            committedHeadWatermark = intent.CommitTimestamp;
+
+        if (committedHeads.Count > CommittedHeadPruneTriggerCount)
+            PruneCommittedHeads();
+    }
+
+    /// <summary>Drops committed-head entries older than the retention horizon. Size-triggered rather than
+    /// timer-driven, so quiet stores never scan. Safe because the staleness gate refuses any prepare whose
+    /// transaction is old enough to have depended on a pruned entry. Caller holds <see cref="applyGate"/>.</summary>
+    private void PruneCommittedHeads()
+    {
+        long cutoff = committedHeadWatermark.L - stagedBaseFenceRetentionMs;
+
+        List<string>? expired = null;
+        foreach (KeyValuePair<string, CommittedHead> entry in committedHeads)
+        {
+            if (entry.Value.CommittedAt.L < cutoff)
+                (expired ??= []).Add(entry.Key);
+        }
+
+        if (expired is null)
+            return;
+
+        foreach (string key in expired)
+            committedHeads.TryRemove(key, out _);
     }
 
     /// <summary>The current intent at <paramref name="key"/>, or null. The emptiness pre-check is
@@ -217,8 +388,10 @@ internal sealed class PreparedIntentStore
 
     /// <summary>Applies a delta and reports whether every PREPARE command in it took ownership of its key. Returns
     /// <see langword="false"/> when any prepare is rejected by the state machine — another transaction already
-    /// holds the key, or the same identity re-prepared a divergent mutation — which is NOT an acknowledged
-    /// prepare: the producer must abort rather than commit a mutation whose recoverable intent it never owned.
+    /// holds the key, or the same identity re-prepared a divergent mutation — or when the staged-base fence
+    /// flagged an applied prepare's validated base as moved (<see cref="PreparedIntentApplyResult.StaleBase"/>).
+    /// Neither is an acknowledged prepare: the producer must abort rather than commit a mutation whose
+    /// recoverable intent it never owned, or whose base a competitor already re-committed (a lost update).
     /// Resolve/remove deltas carry no prepares, so they always report true.</summary>
     public bool ApplyDeltaAckPrepares(RaftLog log)
     {
@@ -232,7 +405,7 @@ internal sealed class PreparedIntentStore
             foreach (PreparedIntentCommand command in proposed)
             {
                 PreparedIntentApplyResult result = Apply(command);
-                if (command is PrepareIntentCommand && result.Outcome == TransactionApplyOutcome.Rejected)
+                if (command is PrepareIntentCommand && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
                     allPreparesAccepted = false;
             }
 
@@ -245,7 +418,7 @@ internal sealed class PreparedIntentStore
         {
             PreparedIntentCommand command = ToCommand(message, delta.Header);
             PreparedIntentApplyResult result = Apply(command);
-            if (command is PrepareIntentCommand && result.Outcome == TransactionApplyOutcome.Rejected)
+            if (command is PrepareIntentCommand && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
                 allPreparesAccepted = false;
         }
 

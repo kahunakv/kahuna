@@ -15,17 +15,21 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Covers the post-prepare staged-base fence: the guard against the lost-update window between the
-/// pre-propose staged-base validation and a transaction's prepares landing. A competitor that commits the
-/// same base inside that window — reachable when the writer's in-memory write intent is lost to a lease
-/// lapse, cache eviction, or leader change — was invisible to every earlier guard: the pre-propose probe
-/// ran too early, the prepare's single-live-intent check saw no live foreign intent (the competitor already
-/// settled), and read-set validation skips a read-then-written key. Bank soak run K lost 3 units of
-/// SUM(balance) over ~900k transfers through exactly this interleaving.
+/// Covers the staged-base fences: the guards against the lost-update window between the pre-propose
+/// staged-base validation and a transaction's prepares landing. A competitor that commits the same base
+/// inside that window — reachable when the writer's in-memory write intent is lost to a lease lapse, cache
+/// eviction, or leader change — was invisible to every earlier guard: the pre-propose probe ran too early,
+/// the prepare's single-live-intent check saw no live foreign intent (the competitor already settled), and
+/// read-set validation skips a read-then-written key. A bank soak lost 3 units of SUM(balance) over ~900k
+/// transfers through exactly this interleaving.
 ///
-/// The probe-semantics tests pin the new <see cref="KeyValueConflictChecks.StagedBase"/> answer directly;
-/// the interleaving test reproduces the full window end to end using the finalizer's test hook, because no
-/// external caller can time the competitor into the probe→prepare gap deterministically.
+/// Two mechanisms close the window: the one-phase bundle re-runs the pre-propose staged-base validation
+/// immediately before its propose (its decision shares the prepare's atomic batch, so nothing later can
+/// withhold it), and the 2PC path is fenced at the prepare's own apply position by the intent store's
+/// committed-head compare, which refuses the prepare acknowledgement. The probe-semantics tests pin the
+/// <see cref="KeyValueConflictChecks.StagedBase"/> answer, still served to mixed-version remote peers; the
+/// two interleaving tests reproduce the full window end to end — one per commit path — using the
+/// finalizer's test hook, because no external caller can time the competitor into the gap deterministically.
 /// </summary>
 public sealed class TestStagedBasePostPrepareFence
 {
@@ -264,5 +268,131 @@ public sealed class TestStagedBasePostPrepareFence
         Assert.Equal(KeyValueResponseType.Get, finalType);
         Assert.Equal(baseRevision + 1, finalEntry!.Revision);
         Assert.Equal("101", Encoding.UTF8.GetString(finalEntry.Value!));
+    }
+
+    /// <summary>
+    /// The same lost-update interleaving on the standard 2PC path (a two-partition write set never takes the
+    /// one-phase bundle): the competitor's full durable lifecycle — prepare, materialization, settlement — lands
+    /// inside the probe→prepare window, so its intent is gone and only its committed head remains when the
+    /// victim's prepare applies. The intent store's staged-base fence must refuse that prepare's
+    /// acknowledgement, and the commit must abort. Before the fence, the pre-propose validation was the last
+    /// look and this committed.
+    /// </summary>
+    [Fact]
+    public async Task LostUpdateWindow_TwoPhasePath_CompetitorSettlesInsideWindow_Aborts()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        string runId = Guid.NewGuid().ToString("N")[..8];
+        string contested = $"sbf-twopc-{runId}-a/k";
+
+        // A second written key on a different partition keeps the transaction off the one-phase bundle, so the
+        // finalize runs the standard prepare barrier this test targets. Keys route by their parent bucket, so
+        // the candidates vary the bucket, not the leaf.
+        int contestedPartition = node.Raft.GetPartitionKey(contested);
+        string? companion = null;
+        for (int i = 0; i < 256; i++)
+        {
+            string candidate = $"sbf-twopc-{runId}-b{i}/k";
+            if (node.Raft.GetPartitionKey(candidate) != contestedPartition)
+            {
+                companion = candidate;
+                break;
+            }
+        }
+
+        Assert.NotNull(companion);
+
+        long contestedBase = await Seed(node.Kahuna, contested, "100", ct);
+        long companionBase = await Seed(node.Kahuna, companion!, "500", ct);
+
+        (KeyValueResponseType startType, TransactionHandle victim) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                CoordinatorKey = contested + "/victim",
+                Locking = KeyValueTransactionLocking.Optimistic,
+                AsyncRelease = true,
+                Timeout = 60_000
+            }, ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
+
+        foreach ((string key, long expectedRevision, string newValue) in
+                 new[] { (contested, contestedBase, "99"), (companion!, companionBase, "501") })
+        {
+            (KeyValueResponseType readType, ReadOnlyKeyValueEntry? readEntry) = await node.Kahuna.LocateAndTryGetValue(
+                victim.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+                coordinatorKey: victim.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Get, readType);
+            Assert.Equal(expectedRevision, readEntry!.Revision);
+
+            (KeyValueResponseType writeType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                victim.TransactionId, key, Encoding.UTF8.GetBytes(newValue), null, -1, KeyValueFlags.None, 0,
+                KeyValueDurability.Persistent, ct,
+                coordinatorKey: victim.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, writeType);
+        }
+
+        PreparedIntent competitor = new(
+            TransactionId: new HLCTimestamp(0, victim.TransactionId.L + 1, 0), Epoch: 1, Key: contested,
+            ManifestHash: 0, RecordAnchorKey: contested,
+            CommitTimestamp: new HLCTimestamp(0, victim.TransactionId.L + 2, 0),
+            State: KeyValueState.Set, Value: "101"u8.ToArray(), Bucket: null,
+            Revision: contestedBase + 1, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: contestedBase, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending);
+
+        byte[] competitorRecord = PreparedIntentMaterializer.ToKeyValueRecord(
+            competitor with { Resolution = PreparedIntentResolution.Committed }, new KeyValueMessage());
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        PreparedIntentStore intentStore = manager.DurablePreparedIntentStore;
+
+        DurableTransactionFinalizer finalizer = manager.TransactionCoordinator.DurableFinalizerForTests;
+        finalizer.TestAfterPreValidationHook = async hookCt =>
+        {
+            finalizer.TestAfterPreValidationHook = null;
+
+            // Let the victim's staged in-memory write intent lapse, as a paused coordinator would.
+            await Task.Delay(400, hookCt);
+
+            // The competitor's whole durable lifecycle, in the key's apply order: prepare installs its intent,
+            // the committed value materializes, and settlement resolves and removes the intent — leaving only
+            // the committed head behind, exactly the state the victim's prepare later applies against.
+            PreparedIntentApplyResult prepared = intentStore.Apply(new PrepareIntentCommand(competitor));
+            Assert.Equal(TransactionApplyOutcome.Applied, prepared.Outcome);
+
+            bool applied = await manager.OnReplicationReceived(
+                contestedPartition,
+                new RaftLog { LogType = ReplicationTypes.KeyValues, LogData = competitorRecord });
+            Assert.True(applied, "the competitor's committed value must apply");
+
+            intentStore.Apply(new ResolveIntentCommand(competitor.TransactionId, competitor.Epoch, contested, Commit: true));
+            intentStore.Apply(new RemoveIntentCommand(competitor.TransactionId, competitor.Epoch, contested));
+        };
+
+        try
+        {
+            (KeyValueResponseType commitType, _) = await node.Kahuna.LocateAndCommitTransaction(victim, ct);
+
+            Assert.True(KeyValueResponseType.Aborted == commitType, $"expected Aborted, got {commitType}");
+        }
+        finally
+        {
+            finalizer.TestAfterPreValidationHook = null;
+        }
+
+        // The competitor's write survived on the contested key, and the victim's companion write rolled back.
+        (KeyValueResponseType contestedType, ReadOnlyKeyValueEntry? contestedEntry) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, contested, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, contestedType);
+        Assert.Equal(contestedBase + 1, contestedEntry!.Revision);
+        Assert.Equal("101", Encoding.UTF8.GetString(contestedEntry.Value!));
+
+        (KeyValueResponseType companionType, ReadOnlyKeyValueEntry? companionEntry) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, companion!, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, companionType);
+        Assert.Equal(companionBase, companionEntry!.Revision);
+        Assert.Equal("500", Encoding.UTF8.GetString(companionEntry.Value!));
     }
 }

@@ -74,20 +74,26 @@ public sealed class TestDurableTransactionFinalizer
         }
     }
 
-    private static PreparedIntent Intent(HLCTimestamp txId, long epoch, string key) =>
+    private static PreparedIntent Intent(HLCTimestamp txId, long epoch, string key, long revision = 1, long baseRevision = 0) =>
         new(txId, epoch, key, ManifestHash: 0, RecordAnchorKey: "anchor", CommitTimestamp: Ts(1100),
-            State: KeyValueState.Set, Value: [1], Bucket: null, Revision: 1, Expires: HLCTimestamp.Zero,
-            NoRevision: false, BaseRevision: 0, BaseState: KeyValueState.Set, RecoveryDeadline: Ts(6000),
+            State: KeyValueState.Set, Value: [1], Bucket: null, Revision: revision, Expires: HLCTimestamp.Zero,
+            NoRevision: false, BaseRevision: baseRevision, BaseState: KeyValueState.Set, RecoveryDeadline: Ts(6000),
             Resolution: PreparedIntentResolution.Pending);
 
-    private static DurableFinalizeInput Input(HLCTimestamp txId, long epoch, params (int Partition, string Key)[] participants)
+    private static DurableFinalizeInput Input(HLCTimestamp txId, long epoch, params (int Partition, string Key)[] participants) =>
+        Input(txId, epoch, revision: 1, baseRevision: 0, participants);
+
+    // Overload for a transaction whose writes sit above earlier committed transactions on the same keys:
+    // the staged-base fence compares each prepare's validated base against the key's last committed head,
+    // so a later transaction's fabricated input must carry the base it would really have read.
+    private static DurableFinalizeInput Input(HLCTimestamp txId, long epoch, long revision, long baseRevision, params (int Partition, string Key)[] participants)
     {
         List<TransactionParticipantRef> manifest = participants.Select(p => new TransactionParticipantRef(p.Key, KeyValueDurability.Persistent)).ToList();
         long hash = TransactionManifest.ComputeHash(txId, epoch, participants[0].Key, Ts(1100), manifest);
 
         List<DurablePartitionPrepare> partitions = participants
             .GroupBy(p => p.Partition)
-            .Select(g => new DurablePartitionPrepare(g.Key, 0L, g.Select(p => Intent(txId, epoch, p.Key) with { ManifestHash = hash }).ToList()))
+            .Select(g => new DurablePartitionPrepare(g.Key, 0L, g.Select(p => Intent(txId, epoch, p.Key, revision, baseRevision) with { ManifestHash = hash }).ToList()))
             .ToList();
 
         return new DurableFinalizeInput(txId, epoch, "coord", participants[0].Key, participants[0].Partition,
@@ -552,8 +558,11 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Null(intents.Get("acct/1")); // first transaction's intent is GC'd on commit
 
         // A second, later transaction writes the same key; without GC its prepare would conflict with the first's
-        // lingering intent (one live intent per key) and this key would be stuck.
-        DurableFinalizeOutcome second = await finalizer.FinalizeAsync(Input(Ts(3000), 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
+        // lingering intent (one live intent per key) and this key would be stuck. It read the first commit's
+        // value, so it carries that revision as its validated base — a repeat of the first base would be a
+        // lost update the staged-base fence rightly refuses.
+        DurableFinalizeOutcome second = await finalizer.FinalizeAsync(
+            Input(Ts(3000), 1, revision: 2, baseRevision: 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
         Assert.Equal(DurableFinalizeResult.Committed, second.Result);
         Assert.Null(intents.Get("acct/1"));
         Assert.Equal(0, intents.Count);

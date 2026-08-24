@@ -532,6 +532,13 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
 
+    /// <summary>
+    /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
+    /// head. Must comfortably exceed the longest transaction lifetime the deployment allows. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.StagedBaseFenceRetentionMs"/>.
+    /// </summary>
+    public int StagedBaseFenceRetentionMs { get; set; } = 600_000;
+
     // ── Leader-balancer knobs ────────────────────────────────────────────────
     // The Kommander leader balancer redistributes partition leadership across cluster nodes.
     // A freshly split partition starts with LeaderSinceMs = 0 and becomes a balancer candidate

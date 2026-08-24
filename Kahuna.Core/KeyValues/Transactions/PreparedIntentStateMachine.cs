@@ -9,10 +9,16 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// removal this is <see langword="null"/>, which the store reads as "delete this key's intent". On a no-op or
 /// rejection it is the unchanged current intent (or null when absent).</param>
 /// <param name="RejectReason">Set only when rejected.</param>
+/// <param name="StaleBase">Set by the store's staged-base fence on an APPLIED prepare whose validated base no
+/// longer matches the key's last transactionally committed head: the intent installed (the replicated
+/// transition is identical everywhere), but the local producer's acknowledgement must refuse it so the
+/// coordinator drives a truthful conflict abort instead of committing a lost update. The pure state machine
+/// never sets this — it is a store-level, advisory verdict.</param>
 internal readonly record struct PreparedIntentApplyResult(
     TransactionApplyOutcome Outcome,
     PreparedIntent? Intent,
-    string? RejectReason);
+    string? RejectReason,
+    bool StaleBase = false);
 
 /// <summary>
 /// The pure, deterministic state machine for a single key's durable prepared intent. Enforces exactly one live

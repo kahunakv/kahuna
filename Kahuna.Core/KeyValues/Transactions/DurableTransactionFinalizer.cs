@@ -267,9 +267,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         //
         // This pre-propose pass is the cheap early half only: it cannot see a competitor that commits inside
         // the window between this probe and the prepare landing (its intent settled and garbage-collected, or
-        // settled by the prepare-retry helping pass below). The authoritative half is the post-prepare
-        // staged-base probe inside validateReadSet, which runs while this transaction's own durable intents
-        // freeze every written key. Exactly that window admitted the bank-soak run-K lost update.
+        // settled by the prepare-retry helping pass below) — exactly the window that admitted the bank-soak
+        // lost update. The authoritative half runs at the prepare's own apply position: the intent store's
+        // staged-base fence compares the validated base against the last transactionally committed head of the
+        // key and refuses the prepare acknowledgement on a mismatch, which drives the truthful abort below.
+        // The one-phase bundle cannot rely on that refusal (its decision shares the prepare's atomic batch),
+        // so TryOnePhaseFinalizeAsync re-runs this validation immediately before its propose instead.
         if (validateStagedBases is not null)
         {
             switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
@@ -329,14 +332,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         //
         // Validated-base (read-modify-write) transactions are also routed away from the bundle in multi-process
         // clusters — the caller folds that condition into readSetExtendsBeyondWrites (see the call site in
-        // TransactionCoordinator). The base is only re-checked by the post-prepare staged-base fence inside the
-        // 2PC flow's validateReadSet barrier; the bundle validates strictly pre-propose, so a competitor that
-        // commits the same base between that validation and the bundle's apply — its own intent settled and
-        // gone, so the bundle's pre-flight sees no live foreign intent — would be silently overwritten (a lost
-        // update). In a single-process Raft group the caller keeps the bundle eligible: reaching that window
-        // requires the competitor's whole finalize (including synchronous settlement and intent removal) to
-        // interleave into the sub-millisecond validate→propose gap of this one, after an in-process
-        // write-intent lease lapse — accepted as a residual in exchange for the embedded fast path.
+        // TransactionCoordinator). On the 2PC path a moved base is caught at prepare-apply time by the intent
+        // store's staged-base fence (the acknowledgement is refused and the coordinator aborts truthfully), but
+        // the bundle's decision shares the prepare's atomic batch, so a refused acknowledgement arrives with the
+        // decision already durable — the fence cannot withhold it. The bundle's guard is instead the late
+        // staged-base re-validation inside TryOnePhaseFinalizeAsync, immediately before the propose. In a
+        // single-process Raft group the caller keeps the bundle eligible: a competitor's whole finalize
+        // (including settlement and intent removal) interleaving into the sub-millisecond validate→propose gap
+        // after an in-process write-intent lease lapse is accepted as a residual in exchange for the embedded
+        // fast path; in multi-process a stalled bundle proposal can apply arbitrarily late, so the residual is
+        // unbounded there and the routing above closes it.
         if (replicateOnePhaseBundle is not null &&
             !readSetExtendsBeyondWrites &&
             input.Partitions.Count == 1 &&
@@ -572,6 +577,26 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
         if (!validated)
             return null;
+
+        // Late staged-base re-validation, as close to the propose as the bundle allows. The bundle decides in
+        // the same atomic batch as its prepare, so the prepare-apply staged-base fence cannot withhold its
+        // decision (the acknowledgement arrives with the decision already durable) — the bundle's only guard
+        // against a competitor that committed the same base after FinalizeAsync's entry validation is this
+        // re-check. Re-running it here shrinks the unguarded window to the validate→apply gap of a single
+        // local proposal; a competitor's whole finalize interleaving into that sub-millisecond gap after an
+        // in-process lease lapse is the accepted residual of the embedded fast path. Conflict decides a
+        // record-backed abort (the caller finishes its resolution); Unknown yields a clean retry.
+        if (validateStagedBases is not null)
+        {
+            switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
+            {
+                case StagedBaseValidation.Conflict:
+                    return await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false);
+
+                case StagedBaseValidation.Unknown:
+                    return Retry();
+            }
+        }
 
         // Mint the attempt HLC now: the deadline gate in the record state machine still evaluates it when the
         // bundled decision applies, so a stalled proposal can never commit past the frozen deadline. The decision

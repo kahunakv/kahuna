@@ -605,6 +605,17 @@ public sealed class KahunaConfiguration
     public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
 
     /// <summary>
+    /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed head.
+    /// The fence refuses a validated-base prepare's acknowledgement when the base moved — the lost-update
+    /// guard — and, because pruned memory is indistinguishable from "no commit happened", it also refuses any
+    /// validated-base prepare from a transaction that BEGAN before this horizon. Must therefore comfortably
+    /// exceed the longest transaction lifetime the deployment allows (session timeouts, reaper idle
+    /// horizons); a value below real lifetimes turns long transactions into spurious conflict aborts. Memory
+    /// cost is one small entry per transactionally written key within the horizon.
+    /// </summary>
+    public int StagedBaseFenceRetentionMs { get; set; } = 600_000;
+
+    /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
     /// <para>

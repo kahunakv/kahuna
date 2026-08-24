@@ -51,16 +51,30 @@ internal static class DurableTransactionMetrics
             description: "Transactions aborted because a foreign range lock covered one of their written keys.");
 
     /// <summary>
-    /// Transactions aborted by the post-prepare staged-base fence: a read-then-written key's committed head no
-    /// longer matched the base the write was validated against, because a competitor committed the same base
-    /// between the pre-propose staged-base probe and this transaction's prepare landing. Each occurrence is a
-    /// prevented lost update — before this fence existed, exactly this interleaving silently dropped committed
-    /// writes under a paused coordinator (bank soak run K).
+    /// Transactions aborted because a commit-conflict probe answered "staged base compare failed". The local
+    /// coordinator no longer asks that check (the prepare-apply fence below owns it); a nonzero count means a
+    /// mixed-version remote peer still probes the retired way, or the defensive branch caught an unexpected
+    /// answer. Kept for wire compatibility with peers that still send staged-base probes.
     /// </summary>
     internal static readonly Counter<long> StagedBasePostPrepareAborts =
         Meter.CreateCounter<long>(
             "kahuna.transactions.staged_base_post_prepare_aborts",
             description: "Transactions aborted because a written key's committed base moved between validation and prepare.");
+
+    /// <summary>
+    /// Validated-base prepares whose acknowledgement the intent store's staged-base fence refused: at the
+    /// prepare's own apply position, the key's last transactionally committed head no longer matched the base
+    /// the write was validated against — a competitor committed the same base between the pre-propose
+    /// staged-base validation and this prepare landing. On the 2PC path each refusal becomes a truthful
+    /// conflict abort and is a prevented lost update (before this fence existed, exactly this interleaving
+    /// silently dropped committed writes under a paused coordinator — the bank-soak conservation loss). In a
+    /// one-phase bundle the refusal cannot withhold the bundled decision; the bundle's guard is its own
+    /// pre-propose re-validation, so a bundle-path occurrence only marks the accepted residual window.
+    /// </summary>
+    internal static readonly Counter<long> StagedBasePrepareRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.staged_base_prepare_rejections",
+            description: "Prepare acknowledgements refused because the written key's committed base moved before the prepare applied.");
 
     /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying

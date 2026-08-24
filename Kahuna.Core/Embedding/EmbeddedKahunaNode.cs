@@ -416,6 +416,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RangeSplitSettleWindow = options.RangeSplitSettleWindow,
             RangeMergeMinSize = options.RangeMergeMinSize,
             StagedWriteIntentLeaseMs = options.StagedWriteIntentLeaseMs,
+            StagedBaseFenceRetentionMs = options.StagedBaseFenceRetentionMs,
             SingleProcessRaftGroup = singleProcessRaftGroup
         }, options.WalPath);
     }

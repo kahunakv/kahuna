@@ -161,6 +161,10 @@ internal sealed class KeyValuesManagerBuilder
         transactionRecordStore = externalRecordStore ?? new TransactionRecordStore(configuration.StoragePath, configuration.StorageRevision, logger);
         preparedIntentStore = externalIntentStore ?? new PreparedIntentStore(configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // The staged-base fence's memory horizon comes from configuration; idempotent, so re-applying it to a
+        // shared external store is harmless.
+        preparedIntentStore.ConfigureStagedBaseFence(configuration.StagedBaseFenceRetentionMs);
+
         // A one-phase bundled commit is legal only if its own prepare — earlier in the same atomic batch — took
         // ownership of every written key; the record store validates that against the live intent set at apply
         // time. Both stores apply on the same ordered per-partition path, so the lookup is deterministic at the
