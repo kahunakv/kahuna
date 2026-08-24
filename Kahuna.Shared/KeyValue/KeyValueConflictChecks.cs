@@ -25,5 +25,18 @@ public enum KeyValueConflictChecks
     /// transaction's write set, catching a range lock acquired after the write was staged and therefore
     /// invisible to the write-time fence.
     /// </summary>
-    ForeignRangeLock = 1 << 1
+    ForeignRangeLock = 1 << 1,
+
+    /// <summary>
+    /// The key's committed head no longer matches the base the probe carries
+    /// (<c>KeyValueConflictProbe.BaseRevision</c>). This is the post-prepare staged-base fence for a
+    /// read-modify-write key: the pre-propose staged-base compare-and-set leaves a window between its
+    /// probe and the prepare landing in which a competitor can commit the same base — under a paused
+    /// coordinator whose in-memory write-intent lease lapsed, that admitted a silent lost update. Asked
+    /// after the transaction's own durable prepared intents are live on every written key, the answer is
+    /// stable: single-live-intent excludes any later competing commit until this transaction settles.
+    /// Answered with <see cref="KeyValueResponseType.NotSet"/> (compare failed) rather than Aborted, so
+    /// the caller can attribute the conflict precisely.
+    /// </summary>
+    StagedBase = 1 << 2
 }

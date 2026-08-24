@@ -717,7 +717,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             {
                 Key = probe.Key,
                 Durability = (GrpcKeyValueDurability)probe.Durability,
-                Checks = (uint)probe.Checks
+                Checks = (uint)probe.Checks,
+                BaseRevision = probe.BaseRevision
             });
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);

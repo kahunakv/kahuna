@@ -594,6 +594,17 @@ public sealed class KahunaConfiguration
     public bool SingleProcessRaftGroup { get; set; }
 
     /// <summary>
+    /// Milliseconds a transactional staged write's in-memory write intent stays live before other
+    /// transactions may treat it as abandoned and write past it. This lease is the window guard between a
+    /// transaction staging a write and its durable prepare landing; once it lapses (a paused coordinator,
+    /// a stalled client between statements), a competitor can stage and commit the same key — the
+    /// interleaving the post-prepare staged-base fence exists to abort. Shortening it increases exposure
+    /// to that fence's aborts under slow clients; lengthening it delays writers behind genuinely
+    /// abandoned transactions until the reaper clears them. Was a hardcoded 15 s before it was a setting.
+    /// </summary>
+    public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
+
+    /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
     /// <para>

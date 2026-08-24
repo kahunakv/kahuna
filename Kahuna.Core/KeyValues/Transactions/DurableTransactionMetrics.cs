@@ -51,6 +51,18 @@ internal static class DurableTransactionMetrics
             description: "Transactions aborted because a foreign range lock covered one of their written keys.");
 
     /// <summary>
+    /// Transactions aborted by the post-prepare staged-base fence: a read-then-written key's committed head no
+    /// longer matched the base the write was validated against, because a competitor committed the same base
+    /// between the pre-propose staged-base probe and this transaction's prepare landing. Each occurrence is a
+    /// prevented lost update — before this fence existed, exactly this interleaving silently dropped committed
+    /// writes under a paused coordinator (bank soak run K).
+    /// </summary>
+    internal static readonly Counter<long> StagedBasePostPrepareAborts =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.staged_base_post_prepare_aborts",
+            description: "Transactions aborted because a written key's committed base moved between validation and prepare.");
+
+    /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying
     /// [record init + anchor prepare + commit decision], taken when the participant set collapses to the
     /// locally-led anchor partition, no foreign durable intent holds any written key, and read-set

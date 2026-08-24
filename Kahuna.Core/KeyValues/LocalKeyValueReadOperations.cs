@@ -309,7 +309,7 @@ internal sealed class LocalKeyValueReadOperations
 
         async Task<(KeyValueResponseType, string, KeyValueDurability)> CheckWriteIntent(KeyValueConflictProbe item)
         {
-            KeyValueResponseType type = await TryCheckWriteIntentValue(transactionId, item.Key, item.Durability, item.Checks);
+            KeyValueResponseType type = await TryCheckWriteIntentValue(transactionId, item.Key, item.Durability, item.Checks, item.BaseRevision);
 
             return (type, item.Key, item.Durability);
         }
@@ -317,15 +317,18 @@ internal sealed class LocalKeyValueReadOperations
 
     /// <summary>
     /// Checks the given key for the conflict classes named in <paramref name="checks"/>: a live write intent
-    /// from another transaction (the write-skew guard optimistic transactions apply to their read set) and/or a
-    /// foreign range lock covering the key (the decide-time fence applied to a write set).
-    /// Returns Aborted when a conflict is found; DoesNotExist otherwise.
+    /// from another transaction (the write-skew guard optimistic transactions apply to their read set), a
+    /// foreign range lock covering the key (the decide-time fence applied to a write set), and/or a moved
+    /// staged base (the post-prepare fence for a read-modify-write key, compared against
+    /// <paramref name="baseRevision"/>). Returns Aborted for an intent/range-lock conflict, NotSet for a
+    /// staged-base mismatch; DoesNotExist otherwise.
     /// </summary>
     public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
         HLCTimestamp transactionId,
         string key,
         KeyValueDurability durability,
-        KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent
+        KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent,
+        long baseRevision = -1
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -335,7 +338,10 @@ internal sealed class LocalKeyValueReadOperations
             key,
             null,
             null,
-            -1,
+            // CompareRevision carries the staged-base check's validated base; -1 (also the pool's
+            // idle value) doubles as "the base was a non-existent key", which only the StagedBase
+            // check consults.
+            baseRevision,
             KeyValueFlags.None,
             0,
             HLCTimestamp.Zero,

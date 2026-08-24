@@ -47,6 +47,9 @@ public sealed partial class KahunaManager
     /// <summary>Durable prepared-intent store. Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.PreparedIntentStore DurablePreparedIntentStore => keyValues.DurablePreparedIntentStore;
 
+    /// <summary>The interactive-transaction coordinator, for tests that install finalizer interleaving hooks.</summary>
+    internal Server.KeyValues.Transactions.TransactionCoordinator TransactionCoordinator => keyValues.Coordinator;
+
     /// <summary>Durable transaction-record store (canonical decisions). Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.TransactionRecordStore DurableTransactionRecordStore => keyValues.DurableTransactionRecordStore;
 

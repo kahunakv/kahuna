@@ -302,7 +302,7 @@ internal sealed class TrySetHandler : BaseHandler
         entry.WriteIntent ??= new()
         {
             TransactionId = message.TransactionId,
-            Expires = currentTime + 15000
+            Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs
         };
 
         return new(KeyValueResponseType.Set, mvccEntry.Revision, currentTime);

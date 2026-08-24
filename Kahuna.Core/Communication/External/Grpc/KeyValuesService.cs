@@ -783,7 +783,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         List<KeyValueConflictProbe> keys = new(request.Items.Count);
 
         foreach (GrpcTryCheckManyWriteIntentsRequestItem item in request.Items)
-            keys.Add(new(item.Key, (KeyValueDurability)item.Durability, (KeyValueConflictChecks)item.Checks));
+            keys.Add(new(item.Key, (KeyValueDurability)item.Durability, (KeyValueConflictChecks)item.Checks, item.BaseRevision));
 
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
             await keyValues.TryCheckManyWriteIntentValues(

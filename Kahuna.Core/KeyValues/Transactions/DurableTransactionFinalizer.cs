@@ -232,6 +232,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         this.maxMaterializationBatchBytes = Math.Max(1, maxMaterializationBatchBytes);
     }
 
+    /// <summary>
+    /// Test-only interleaving hook, awaited after the pre-propose staged-base validation passes and before
+    /// anything durable is proposed. Lets a test run a competing commit inside the probe→prepare window — the
+    /// interleaving behind the bank-soak run-K lost update — which no external caller can time
+    /// deterministically. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<CancellationToken, Task>? TestAfterPreValidationHook;
+
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
     /// true means no conflict. Only invoked when every prepare committed.</param>
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
@@ -246,12 +254,22 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     {
         long startTicks = Stopwatch.GetTimestamp();
 
+        // Test-only interleaving point; see TestAfterPreValidationHook. Read once so a concurrent
+        // clear cannot fault the invocation below.
+        Func<CancellationToken, Task>? afterPreValidationHook = TestAfterPreValidationHook;
+
         // ── Staged-base compare-and-set, before anything durable is proposed ──
         // Each frozen intent carries the committed base it was validated against; if that base moved — the
         // in-memory write-intent lease lapsed mid-finalize and another transaction committed the same base
         // first — committing here would silently discard that write (a lost update). The read-set validation
         // cannot cover this: a read-then-written key is validated as a write, and this is that validation.
         // A base that cannot be resolved right now (a foreign undecided intent) decides nothing and retries.
+        //
+        // This pre-propose pass is the cheap early half only: it cannot see a competitor that commits inside
+        // the window between this probe and the prepare landing (its intent settled and garbage-collected, or
+        // settled by the prepare-retry helping pass below). The authoritative half is the post-prepare
+        // staged-base probe inside validateReadSet, which runs while this transaction's own durable intents
+        // freeze every written key. Exactly that window admitted the bank-soak run-K lost update.
         if (validateStagedBases is not null)
         {
             switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
@@ -271,6 +289,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     return Retry();
             }
         }
+
+        // Test-only: runs a competing action inside the window between the pre-propose staged-base
+        // validation above and the prepares landing below — the exact interleaving the post-prepare
+        // staged-base fence exists to catch, which no external caller can time deterministically.
+        if (afterPreValidationHook is not null)
+            await afterPreValidationHook(cancellationToken).ConfigureAwait(false);
 
         // ── Initialize the canonical record (Undecided) on the anchor partition ──
         byte[] initDelta = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
@@ -295,13 +319,24 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // outcome that is retryable-but-ambiguous) falls through to the standard 2PC flow below, unchanged.
         //
         // Ineligible whenever the validated read set reaches beyond the written keys. The bundle's validation
-        // runs before anything durable, and its only apply-time re-checks cover written keys (staged-base
-        // compare-and-set, bundled-prepare gate) — a read-only dependency is re-checked by nothing. A stalled
-        // bundle (a killed leader's WAL tail committing after restart) would then decide with a read validated
-        // long ago, while the in-memory write intents that make this transaction visible to other validators'
-        // conflict probes are already gone — closing no one's write-skew window but its own victim's. The 2PC
-        // flow keeps a durable, probe-visible prepared intent on every written key from prepare until the
-        // decision, so concurrent validators abort instead of committing around it.
+        // runs before anything durable, and its only apply-time re-checks cover written keys (the bundled-prepare
+        // presence gate) — a read-only dependency is re-checked by nothing. A stalled bundle (a killed leader's
+        // WAL tail committing after restart) would then decide with a read validated long ago, while the
+        // in-memory write intents that make this transaction visible to other validators' conflict probes are
+        // already gone — closing no one's write-skew window but its own victim's. The 2PC flow keeps a durable,
+        // probe-visible prepared intent on every written key from prepare until the decision, so concurrent
+        // validators abort instead of committing around it.
+        //
+        // Validated-base (read-modify-write) transactions are also routed away from the bundle in multi-process
+        // clusters — the caller folds that condition into readSetExtendsBeyondWrites (see the call site in
+        // TransactionCoordinator). The base is only re-checked by the post-prepare staged-base fence inside the
+        // 2PC flow's validateReadSet barrier; the bundle validates strictly pre-propose, so a competitor that
+        // commits the same base between that validation and the bundle's apply — its own intent settled and
+        // gone, so the bundle's pre-flight sees no live foreign intent — would be silently overwritten (a lost
+        // update). In a single-process Raft group the caller keeps the bundle eligible: reaching that window
+        // requires the competitor's whole finalize (including synchronous settlement and intent removal) to
+        // interleave into the sub-millisecond validate→propose gap of this one, after an in-process
+        // write-intent lease lapse — accepted as a residual in exchange for the embedded fast path.
         if (replicateOnePhaseBundle is not null &&
             !readSetExtendsBeyondWrites &&
             input.Partitions.Count == 1 &&

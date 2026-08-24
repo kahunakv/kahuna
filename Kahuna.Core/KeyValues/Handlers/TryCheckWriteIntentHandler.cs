@@ -52,10 +52,37 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             && RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, GetBucket(message.Key), message.TransactionId, currentTime))
             return KeyValueStaticResponses.AbortedResponse;
 
-        if ((message.ConflictChecks & KeyValueConflictChecks.WriteIntent) == 0)
+        if ((message.ConflictChecks & (KeyValueConflictChecks.WriteIntent | KeyValueConflictChecks.StagedBase)) == 0)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
+
+        // Staged-base fence for a read-modify-write key, asked by the finalizer AFTER the caller's own durable
+        // prepared intents are live on every written key. The pre-propose staged-base compare-and-set leaves a
+        // window between its probe and the prepare landing; a competitor that commits the same base inside that
+        // window (its intent already settled and garbage-collected, or settled by the prepare-retry helping pass)
+        // is invisible to the prepare's single-live-intent check — the observed bank-soak lost update. Here the
+        // committed head is compared directly: the caller's live intent excludes any later competing commit, so
+        // a matching head cannot move again before the decision. MVCC stagings and intents never touch
+        // entry.Revision (only materialization advances it), so the committed head is exactly what a validated
+        // base was recorded against. Answered with NotSet — "the compare failed" — so the caller can attribute
+        // the abort to a moved base rather than to the range-lock fence.
+        if ((message.ConflictChecks & KeyValueConflictChecks.StagedBase) != 0)
+        {
+            bool existsNow = entry is not null
+                && entry.State == KeyValueState.Set
+                && (entry.Expires == HLCTimestamp.Zero || entry.Expires - currentTime > TimeSpan.Zero);
+
+            // CompareRevision carries the validated base: >= 0 when the base existed at that revision,
+            // -1 when the read-modify-write was validated against "key does not exist".
+            bool baseExisted = message.CompareRevision >= 0;
+
+            if (existsNow != baseExisted || (existsNow && entry!.Revision != message.CompareRevision))
+                return KeyValueStaticResponses.NotSetResponse;
+        }
+
+        if ((message.ConflictChecks & KeyValueConflictChecks.WriteIntent) == 0)
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
 
         // Live in-memory write intent from a different transaction — signal conflict to the caller.
         if (entry?.WriteIntent is not null && entry.WriteIntent.TransactionId != message.TransactionId)

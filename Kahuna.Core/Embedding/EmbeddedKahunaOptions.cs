@@ -525,6 +525,13 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int RangeMergeMinSize { get; set; } = 10;
 
+    /// <summary>
+    /// Milliseconds a transactional staged write's in-memory write intent stays live before other
+    /// transactions may treat it as abandoned and write past it. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.StagedWriteIntentLeaseMs"/>.
+    /// </summary>
+    public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
+
     // ── Leader-balancer knobs ────────────────────────────────────────────────
     // The Kommander leader balancer redistributes partition leadership across cluster nodes.
     // A freshly split partition starts with LeaderSinceMs = 0 and becomes a balancer candidate

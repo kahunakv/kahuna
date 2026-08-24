@@ -1390,6 +1390,9 @@ internal sealed class TransactionCoordinator : IDisposable
 
     private DurableTransactionFinalizer? durableFinalizer;
 
+    /// <summary>Test access to the lazily built finalizer, for installing its interleaving hooks.</summary>
+    internal DurableTransactionFinalizer DurableFinalizerForTests => DurableFinalizer;
+
     // Deferred-settlement background resolutions in flight. Tracked so Dispose can drain them (bounded) before
     // teardown and cancel any straggler; a lost run is finished by recovery regardless, so this is best-effort.
     private readonly CancellationTokenSource deferredResolutionCts = new();
@@ -1667,8 +1670,18 @@ internal sealed class TransactionCoordinator : IDisposable
                 // a committed bundle replays during restore ahead of any later conflicting write), so
                 // read-carrying transactions stay one-phase eligible there. See
                 // <see cref="KahunaConfiguration.SingleProcessRaftGroup"/> for the full argument.
+                //
+                // A validated base (a read-then-written key) disqualifies the bundle for the same shape of
+                // reason: the post-prepare staged-base fence inside CheckCommitConflicts is the only guard
+                // against a competitor that commits the same base between the pre-propose probe and this
+                // transaction's prepare landing (the bank-soak run-K lost update), and the bundle never
+                // reaches that fence — its validation is strictly pre-propose. Multi-process only, matching
+                // the read-set rule: in a single-process group that window requires the competitor's whole
+                // finalize to interleave into this one's validate→propose gap after an in-process lease
+                // lapse, accepted as a residual in exchange for the embedded fast path.
                 readSetExtendsBeyondWrites: !configuration.SingleProcessRaftGroup
-                    && HasReadDependenciesBeyondWrites(context)).ConfigureAwait(false);
+                    && (HasReadDependenciesBeyondWrites(context)
+                        || context.WrittenBaseObservations is { Count: > 0 })).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -1813,11 +1826,13 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>
     /// Whether the transaction's validated read footprint reaches beyond the keys it writes: a point read of a
-    /// key it never modifies, or any prefix/range lock (a scan's footprint). Written keys are re-fenced at
-    /// decision-apply time (staged-base compare-and-set, bundled-prepare gate), but a read-only dependency is
-    /// protected solely by commit-time validation — so the finalize path must not choose a protocol that lets
-    /// the decision apply after that validation can no longer be trusted. Always false when the read set is not
-    /// validated at all, since no read-stability promise exists to protect.
+    /// key it never modifies, or any prefix/range lock (a scan's footprint). Written keys carrying a validated
+    /// base are re-fenced post-prepare (the staged-base probe inside <see cref="CheckCommitConflicts"/>, while
+    /// the transaction's own durable intents freeze those keys), but a read-only dependency is protected solely
+    /// by commit-time validation — so the finalize path must not choose a protocol that lets the decision apply
+    /// after that validation can no longer be trusted. Note there is NO apply-time base re-check: the
+    /// bundled-prepare gate verifies intent presence only, and decision-apply gates only on the frozen deadline.
+    /// Always false when the read set is not validated at all, since no read-stability promise exists to protect.
     /// </summary>
     private static bool HasReadDependenciesBeyondWrites(TransactionContext context)
     {
@@ -2150,10 +2165,20 @@ internal sealed class TransactionCoordinator : IDisposable
             }
         }
 
-        // Write keys ask only about foreign range locks. Deliberately not about write intents: a foreign
-        // in-memory intent on a key this transaction writes is the durable prepare's conflict to resolve —
-        // it retries and helps the blocker settle — and flagging it here would turn that retryable contention
-        // into a hard abort.
+        // Write keys ask about foreign range locks, and — for a read-then-written key — whether the committed
+        // base the write was validated against is still the key's committed head. Deliberately not about write
+        // intents: a foreign in-memory intent on a key this transaction writes is the durable prepare's conflict
+        // to resolve — it retries and helps the blocker settle — and flagging it here would turn that retryable
+        // contention into a hard abort.
+        //
+        // The staged-base ask is the post-prepare half of the staged-base compare-and-set. The pre-propose check
+        // (ValidateStagedBasesAsync) probes before anything durable exists, so a competitor that commits the same
+        // base between that probe and this transaction's prepare landing — reachable when a paused coordinator's
+        // in-memory write-intent lease lapses, and when the prepare-retry helping pass settles the competitor
+        // itself — was invisible to every guard and committed a lost update (bank soak run K, −3 SUM(balance)).
+        // This probe runs inside the finalizer's post-prepare validation: the transaction's own durable intents
+        // are live on every written key, so single-live-intent excludes any later competing commit and a clean
+        // answer here cannot be invalidated before the decision.
         if (context.ModifiedKeys is not null)
         {
             foreach ((string key, KeyValueDurability durability) in context.ModifiedKeys)
@@ -2161,7 +2186,17 @@ internal sealed class TransactionCoordinator : IDisposable
                 if (string.IsNullOrEmpty(key))
                     continue;
 
-                probeKeys.Add(new(key, durability, KeyValueConflictChecks.ForeignRangeLock));
+                KeyValueConflictChecks checks = KeyValueConflictChecks.ForeignRangeLock;
+                long baseRevision = -1;
+
+                if (context.WrittenBaseObservations is not null
+                    && context.WrittenBaseObservations.TryGetValue((key, durability), out KeyValueTransactionReadKey? observed))
+                {
+                    checks |= KeyValueConflictChecks.StagedBase;
+                    baseRevision = observed.Exists ? observed.Revision : -1;
+                }
+
+                probeKeys.Add(new(key, durability, checks, baseRevision));
             }
         }
 
@@ -2178,14 +2213,16 @@ internal sealed class TransactionCoordinator : IDisposable
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
         {
             // Two results for one key can only differ if one of them found a conflict, and a conflict is the
-            // answer that matters: never let a second, cleaner answer overwrite it.
-            if (byKey.TryGetValue((key, durability), out KeyValueResponseType existing) && existing == KeyValueResponseType.Aborted)
+            // answer that matters: never let a second, cleaner answer overwrite it. NotSet is the staged-base
+            // fence's "compare failed" — a conflict answer just like Aborted.
+            if (byKey.TryGetValue((key, durability), out KeyValueResponseType existing)
+                && existing is KeyValueResponseType.Aborted or KeyValueResponseType.NotSet)
                 continue;
 
             byKey[(key, durability)] = type;
         }
 
-        foreach ((string key, KeyValueDurability durability, KeyValueConflictChecks checks) in probeKeys)
+        foreach ((string key, KeyValueDurability durability, KeyValueConflictChecks checks, _) in probeKeys)
         {
             // Which set the key came from, read off the question that was asked about it rather than off its
             // position in the list: only the read set asks about write intents.
@@ -2205,6 +2242,27 @@ internal sealed class TransactionCoordinator : IDisposable
                 };
 
                 logger.LogWriteSkewGuardAborted(context.TransactionId, key);
+
+                return false;
+            }
+
+            // The staged-base fence answered "compare failed": the key's committed head is no longer the base
+            // this transaction's read-modify-write was validated against — a competitor committed the same base
+            // between the pre-propose staged-base probe and this transaction's prepare landing. Committing here
+            // would silently discard that competitor's write (a lost update), so it is a conflict abort.
+            if (type == KeyValueResponseType.NotSet)
+            {
+                DurableTransactionMetrics.StagedBasePostPrepareAborts.Add(1);
+
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.Aborted,
+                    Reason = $"Committed base for written key {key} changed after validation"
+                };
+
+                logger.LogWarning(
+                    "Staged base for {Key} moved between validation and prepare of transaction {TransactionId}; aborting to prevent a lost update",
+                    key, context.TransactionId);
 
                 return false;
             }

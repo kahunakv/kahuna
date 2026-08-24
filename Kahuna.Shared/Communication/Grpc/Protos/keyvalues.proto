@@ -392,9 +392,14 @@ message GrpcTryCheckManyWriteIntentsRequestItem {
   string Key = 1;
   GrpcKeyValueDurability Durability = 2;
   // KeyValueConflictChecks bit set: which conflict classes to answer for this key
-  // (1 = concurrent write intent, 2 = foreign range lock). Selected per key because one probe
-  // carries a transaction's read set and its write set, which ask different questions.
+  // (1 = concurrent write intent, 2 = foreign range lock, 4 = staged base moved). Selected per key
+  // because one probe carries a transaction's read set and its write set, which ask different questions.
   uint32 Checks = 3;
+  // For the staged-base check (4): the committed base the caller's read-modify-write of this key was
+  // validated against — the revision when the base existed, or -1 when the validated base was
+  // "key does not exist". Ignored by every other check. Absent on the wire (0) only when the staged-base
+  // check is not requested, so the -1 sentinel is always explicit when it matters.
+  sint64 BaseRevision = 4;
 }
 
 message GrpcTryCheckManyWriteIntentsResponse {
