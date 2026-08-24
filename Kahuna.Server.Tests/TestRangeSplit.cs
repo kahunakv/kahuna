@@ -36,6 +36,13 @@ public sealed class TestRangeSplit : BaseCluster
     /// <summary>System partition (Kommander's partition 0) leader — CreatePartitionAsync requires this.</summary>
     private const int SystemPartition = 0;
 
+    /// <summary>
+    /// Polls the nodes until one reports leadership of <paramref name="partition"/>. Uses the
+    /// placement-safe <see cref="PartitionLeaderResolver.AmILeaderIfHosted"/> wrapper, never the
+    /// raw <c>AmILeader</c>: several call sites target the partition a split just created, and a
+    /// node that has not yet applied the partition-creation commit throws
+    /// "Invalid partition" from the raw call instead of answering false.
+    /// </summary>
     private static async Task<(IRaft Raft, KahunaManager Kahuna)> LeaderOf(
         int partition, (IRaft, KahunaManager)[] nodes)
     {
@@ -43,7 +50,7 @@ public sealed class TestRangeSplit : BaseCluster
         while (true)
         {
             foreach ((IRaft raft, KahunaManager kahuna) in nodes)
-                if (await raft.AmILeader(partition, ct))
+                if (await raft.AmILeaderIfHosted(partition, ct))
                     return (raft, kahuna);
             await Task.Delay(50, ct);
         }
