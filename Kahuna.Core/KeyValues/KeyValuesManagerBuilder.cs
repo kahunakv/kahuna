@@ -342,6 +342,40 @@ internal sealed class KeyValuesManagerBuilder
 
         restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
         replicator = new(backgroundWriter, routers.Persistent, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
+
+        // Commit-settlement convergence check: when a commit settlement applies here without a local completion
+        // receipt for the settled key, this node never materialized that committed mutation into its visible
+        // state — the routed one-shot commit-apply was dropped or landed on another node. Re-drive the
+        // force-resident apply from the intent still in hand (idempotent; the head guards no-op a spurious
+        // repair). This runs at the same apply position that advances the staged-base fence's committed head,
+        // so the fence can no longer be left comparing against a head the visible entry never reached — the
+        // frozen validated/head refusal wedge, and the silent window where committed transfers stopped
+        // materializing. The receipt lookup is O(1); on a healthy node the materialization always precedes its
+        // settlement in log order and the check costs one dictionary probe per settled intent.
+        CompletionReceiptStore observedReceiptStore = completionReceiptStore;
+        KeyValueReplicator repairReplicator = replicator;
+        KeyValueLocator repairLocator = locator;
+        ILogger<IKahuna> repairLogger = logger;
+        preparedIntentStore.AttachCommittedSettleObserver(intent =>
+        {
+            try
+            {
+                if (observedReceiptStore.Contains(intent.TransactionId, intent.Key, KeyValueDurability.Persistent))
+                    return;
+
+                Transactions.DurableTransactionMetrics.MaterializationRepairs.Add(1);
+                repairLogger.LogWarning(
+                    "Commit settlement for key {Key} of transaction {TransactionId} applied without a local completion receipt; re-driving the committed mutation into the visible entry",
+                    intent.Key, intent.TransactionId);
+
+                repairReplicator.RequestDurableCommitRepair(repairLocator.LocateRange(intent.Key).PartitionId, intent);
+            }
+            catch (Exception ex)
+            {
+                // The repair is best-effort convergence; the settle apply itself must never fail on it.
+                repairLogger.LogError(ex, "Materialization repair failed for key {Key} of transaction {TransactionId}", intent.Key, intent.TransactionId);
+            }
+        });
         replicationDispatcher = new(runtime, restorer, replicator);
         durableReplication = new(runtime, replicator);
         runtime.DurableReplication = durableReplication;

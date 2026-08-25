@@ -22,7 +22,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     {
     }
 
-    public KeyValueResponse? Execute(KeyValueRequest message)
+    public async ValueTask<KeyValueResponse?> Execute(KeyValueRequest message)
     {
         InvalidateOrApplyData data = message.InvalidateOrApplyData!;
 
@@ -31,7 +31,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         // An abort just clears the transaction's staged write intent and MVCC snapshot so the key is not blocked
         // until the intent expires (the analog of ApplyConfirmedRollback).
         if (data.ForceResident)
-            return data.IsRollback ? ApplyDurableRollback(message.Key, data) : ApplyDurableCommit(message.Key, data);
+            return data.IsRollback ? ApplyDurableRollback(message.Key, data) : await ApplyDurableCommit(message.Key, data).ConfigureAwait(false);
 
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
             return null;
@@ -40,9 +40,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or
         // the durable-intent resolution (WriteIntent), which archives the correct superseded revision and
         // adjusts accounting exactly once. Advancing the entry here first would corrupt that archive.
-        // A notification for the transaction that owns the write intent always defers, even if a finite
-        // lease elapsed: the acknowledged force-resident apply owns intent cleanup and archival. An
-        // unrelated expired intent may be cleared before applying the authoritative committed value.
+        // An unrelated expired intent may be cleared before applying the authoritative committed value.
         if (entry.ReplicationIntent is not null || entry.WriteIntent is not null)
         {
             HLCTimestamp now = context.Raft.HybridLogicalClock
@@ -57,8 +55,23 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
 
             if (entry.WriteIntent is not null)
             {
-                if (entry.WriteIntent.TransactionId == data.TransactionId)
+                // A replicated kv record carrying the write intent's own transaction id IS that
+                // transaction's committed materialization: persistent commits materialize only through
+                // the durable-intent path (the manual persistent commit is rejected at the manager
+                // boundary), and only those records carry a transaction id. The routed force-resident
+                // apply reaches exactly one node — the partition leader at resolution time — so on any
+                // other replica still holding this intent (an old leader that lost leadership
+                // mid-transaction), this notification is the only signal that ever clears the intent and
+                // advances the entry. Deferring here froze such an entry forever: reads kept serving the
+                // superseded revision while the staged-base fence's committed-head memory advanced on the
+                // replicated settle, refusing every later read-modify-write of the key. Apply it; when
+                // the force-resident apply also runs on this single-threaded actor, whichever side runs
+                // second degrades to an idempotent no-op through the head guards.
+                if (data.TransactionId != HLCTimestamp.Zero && entry.WriteIntent.TransactionId == data.TransactionId)
+                {
+                    ApplyOwnCommittedMaterialization(message.Key, entry, data, now);
                     return null;
+                }
 
                 if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, now))
                     return null;
@@ -79,14 +92,45 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     }
 
     /// <summary>
-    /// Applies a durable-intent resolution's committed value on the leader: inserts the entry when the key is not
-    /// resident, then runs the shared confirmed-commit apply (clears the committing transaction's write intent and
-    /// MVCC snapshot, archives the superseded revision, applies the value, persists, and records the decision).
+    /// Applies the write-intent-owning transaction's own replicated materialization to a resident entry: clears
+    /// the transaction's MVCC snapshot and write intent, archives the superseded revision, and advances the
+    /// committed head. Persistence, the unflushed-overlay record, and the completion receipt are NOT enqueued
+    /// here — the replicator already performed all three for this same log entry before routing this
+    /// notification. Guarded so an entry that already advanced (the force-resident apply ran first) is left
+    /// untouched apart from the transaction's now-settled staged state.
+    /// </summary>
+    private void ApplyOwnCommittedMaterialization(string key, KeyValueEntry entry, InvalidateOrApplyData data, HLCTimestamp now)
+    {
+        RemoveMvccEntry(entry, data.TransactionId);
+        TrimExpiredMvccEntries(entry, now);
+        entry.WriteIntent = null;
+
+        if (IsStrictlyNewer(entry, data) || HeadMatches(entry, data))
+        {
+            context.RecordCommitted(data.TransactionId);
+            return;
+        }
+
+        ApplyCommittedHead(entry, BuildProposal(key, data), data.TransactionId);
+        context.RecordCommitted(data.TransactionId);
+    }
+
+    /// <summary>
+    /// Applies a durable-intent resolution's committed value on the leader: loads the entry from the backend
+    /// when the key is not resident, then runs the shared confirmed-commit apply (clears the committing
+    /// transaction's write intent and MVCC snapshot, archives the superseded revision, applies the value,
+    /// persists, and records the decision). The backend load on a miss is required for correctness, not just
+    /// warmth: a commit-apply can arrive late — after a whole-partition snapshot install or an un-host purge
+    /// evicted the resident entry — and fabricating an empty stub here would install this (possibly superseded)
+    /// mutation as the visible head, shadowing newer durable rows for every read until the entry heals.
+    /// Loading first lets the strictly-newer guard turn a late re-apply into the no-op it must be.
     /// Idempotent: a re-apply after the intent is already cleared and the revision is at or ahead is a no-op.
     /// </summary>
-    private KeyValueResponse ApplyDurableCommit(string key, InvalidateOrApplyData data)
+    private async ValueTask<KeyValueResponse> ApplyDurableCommit(string key, InvalidateOrApplyData data)
     {
-        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
+        KeyValueEntry? entry = await GetKeyValueEntry(key, KeyValueDurability.Persistent).ConfigureAwait(false);
+
+        if (entry is null)
         {
             entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
             context.InsertStoreEntry(key, entry);

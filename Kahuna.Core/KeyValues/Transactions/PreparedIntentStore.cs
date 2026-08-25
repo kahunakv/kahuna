@@ -111,6 +111,17 @@ internal sealed class PreparedIntentStore
     /// <summary>Wires the key → data-partition resolver once the locator exists (manager construction).</summary>
     public void AttachPartitionResolver(Func<string, int> resolver) => resolvePartition = resolver;
 
+    // Invoked (outside the apply gate) with the committed intent whenever a commit settlement (resolve or
+    // removal of a committed intent) applies on this node — the convergence hook: the same apply position
+    // that advances the fence's committed head lets the wiring verify the mutation actually materialized
+    // here and repair the visible entry when it did not. Must not re-enter this store.
+    private Action<PreparedIntent>? onCommittedSettleApplied;
+
+    /// <summary>Wires the commit-settlement convergence hook (manager construction). The callback runs on the
+    /// apply path outside the gate, once per applied commit resolution/removal, and must not re-enter the
+    /// store.</summary>
+    public void AttachCommittedSettleObserver(Action<PreparedIntent> observer) => onCommittedSettleApplied = observer;
+
     /// <summary>Sets the staged-base fence retention horizon. The caller must pass a value comfortably above
     /// the longest possible transaction lifetime: the staleness gate refuses to acknowledge a validated-base
     /// prepare from a transaction older than this horizon, so a horizon below real transaction lifetimes turns
@@ -125,11 +136,14 @@ internal sealed class PreparedIntentStore
     {
         string key = KeyOf(command);
 
+        PreparedIntent? settledCommit = null;
+        PreparedIntentApplyResult result;
+
         lock (applyGate)
         {
             intents.TryGetValue(key, out PreparedIntent? existing);
 
-            PreparedIntentApplyResult result = PreparedIntentStateMachine.Apply(existing, command);
+            result = PreparedIntentStateMachine.Apply(existing, command);
 
             if (result.Outcome == TransactionApplyOutcome.Applied)
             {
@@ -160,7 +174,10 @@ internal sealed class PreparedIntentStore
                     && existing.Resolution == PreparedIntentResolution.Committed;
 
                 if (committedNow || removedCommitted)
+                {
                     RecordCommittedHead(existing);
+                    settledCommit = existing;
+                }
             }
 
             // ── Staged-base fence, evaluated at the prepare's own apply position ──
@@ -194,16 +211,78 @@ internal sealed class PreparedIntentStore
                 if (fenceConflict is not null)
                 {
                     DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
+                    TrackFenceRefusal(fencedPrepare.Intent);
 
                     logger?.LogWarning(
                         "Staged base for {Key} moved before the prepare of transaction {TransactionId} applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
                         fencedPrepare.Intent.Key, fencedPrepare.Intent.TransactionId, fenceConflict);
 
-                    return result with { StaleBase = true };
+                    result = result with { StaleBase = true };
                 }
+                else
+                    fenceRefusalStreaks.TryRemove(key, out _);
             }
+        }
 
-            return result;
+        // Outside the gate: the repair hook may rent messages and enqueue actor work, none of which may run
+        // under the apply lock. The hook must not re-enter this store.
+        if (settledCommit is not null)
+            onCommittedSettleApplied?.Invoke(settledCommit);
+
+        return result;
+    }
+
+    // ── Fence-wedge watchdog ─────────────────────────────────────────────────────
+    //
+    // A healthy fence refusal is transient: the client re-reads, validates the moved base, and the next
+    // prepare passes. A key refusing over and over with the SAME frozen (validated base, committed head) pair
+    // means this node's visible entry stopped converging with its committed head — the key is wedged and
+    // effectively read-only, which previously ran for tens of minutes with nothing above Warning spam. The
+    // streaks are advisory per-node observability, mutated under the apply gate, and pruned when the key's
+    // fence passes or its head advances.
+
+    private readonly record struct FenceRefusalStreak(long BaseRevision, long HeadRevision, long Count);
+
+    private readonly ConcurrentDictionary<string, FenceRefusalStreak> fenceRefusalStreaks = new();
+
+    // A storm reaches ~2,000-3,000 refusals/min on a wedged hot key; 50 consecutive identical refusals is far
+    // beyond any healthy retry burst (the finalizer retries a prepare at most 8 times) while alarming within
+    // seconds of wedge onset. Re-escalate periodically so a long-lived wedge stays visible in the log.
+    private const int FenceWedgeAlarmThreshold = 50;
+
+    private const int FenceWedgeReAlarmEvery = 10_000;
+
+    // Bounds the tracker: refusal streaks exist only for keys currently refusing, but a pathological workload
+    // could touch many; past the cap new keys are simply not tracked (the metric still counts refusals).
+    private const int FenceRefusalTrackerMaxKeys = 4_096;
+
+    /// <summary>Records one fence refusal for the watchdog and escalates when the same key refuses repeatedly
+    /// at an unchanged (validated base, committed head) pair. Caller holds <see cref="applyGate"/>.</summary>
+    private void TrackFenceRefusal(PreparedIntent intent)
+    {
+        committedHeads.TryGetValue(intent.Key, out CommittedHead head);
+
+        if (!fenceRefusalStreaks.TryGetValue(intent.Key, out FenceRefusalStreak streak)
+            || streak.BaseRevision != intent.BaseRevision
+            || streak.HeadRevision != head.Revision)
+        {
+            if (fenceRefusalStreaks.Count >= FenceRefusalTrackerMaxKeys && !fenceRefusalStreaks.ContainsKey(intent.Key))
+                return;
+
+            fenceRefusalStreaks[intent.Key] = new(intent.BaseRevision, head.Revision, 1);
+            return;
+        }
+
+        long count = streak.Count + 1;
+        fenceRefusalStreaks[intent.Key] = streak with { Count = count };
+
+        if (count == FenceWedgeAlarmThreshold || (count > FenceWedgeAlarmThreshold && count % FenceWedgeReAlarmEvery == 0))
+        {
+            DurableTransactionMetrics.StagedBaseFenceWedgedKeys.Add(1);
+
+            logger?.LogError(
+                "Key {Key} refused {Count} consecutive validated-base prepares at a frozen pair (validated revision {BaseRevision}, committed head {HeadRevision}): the node's visible entry has stopped converging with its committed head and the key is effectively read-only until it reconciles",
+                intent.Key, count, intent.BaseRevision, head.Revision);
         }
     }
 
@@ -256,6 +335,9 @@ internal sealed class PreparedIntentStore
             return;
 
         committedHeads[intent.Key] = new(intent.Revision, intent.State, intent.CommitTimestamp);
+
+        // The head moved: whatever refusal streak the key held was measured against the old pair.
+        fenceRefusalStreaks.TryRemove(intent.Key, out _);
 
         if (intent.CommitTimestamp > committedHeadWatermark)
             committedHeadWatermark = intent.CommitTimestamp;

@@ -77,6 +77,29 @@ internal static class DurableTransactionMetrics
             description: "Prepare acknowledgements refused because the written key's committed base moved before the prepare applied.");
 
     /// <summary>
+    /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
+    /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
+    /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals
+    /// are transient (the client re-reads the moved base and passes), so any occurrence is a convergence
+    /// failure worth an operator's attention even though the refusals themselves lose no data.
+    /// </summary>
+    internal static readonly Counter<long> StagedBaseFenceWedgedKeys =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.staged_base_fence_wedged_keys",
+            description: "Watchdog escalations for keys stuck refusing validated-base prepares at a frozen validated/head pair.");
+
+    /// <summary>
+    /// Commit settlements that applied on this node without a local completion receipt for the settled key —
+    /// proof the committed mutation never materialized into this node's visible state (a dropped or misrouted
+    /// commit-apply) — and were repaired by re-driving the force-resident apply from the intent still in hand.
+    /// Zero on a healthy node: the materialization always precedes its settlement in log order.
+    /// </summary>
+    internal static readonly Counter<long> MaterializationRepairs =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.materialization_repairs",
+            description: "Committed mutations re-applied locally because their settlement applied without a local completion receipt.");
+
+    /// <summary>
     /// Recovery passes that HELD a due prepared intent instead of resolving it, because its canonical record is
     /// absent and the intent is older than the record retention horizon — absence can then mean a committed
     /// record the retention GC reclaimed while this leg's settlement kept failing, and presuming abort would

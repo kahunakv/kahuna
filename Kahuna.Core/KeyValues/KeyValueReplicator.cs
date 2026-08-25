@@ -195,6 +195,34 @@ internal sealed class KeyValueReplicator
     }
 
     /// <summary>
+    /// Fire-and-forget convergence repair for a committed durable intent whose materialization never applied on
+    /// this node: routes the same force-resident commit-apply as <see cref="ApplyDurableCommit"/>, but as a
+    /// send with ownership transfer, because the caller sits on the replicated settle-apply path and must not
+    /// block on the actor. The apply is idempotent (head guards turn a re-apply into a no-op), so a spurious
+    /// repair is harmless; a needed one restores the entry the routed one-shot apply missed.
+    /// </summary>
+    public void RequestDurableCommitRepair(int partitionId, PreparedIntent intent)
+    {
+        persistentRouter.Send(
+            KeyValueRequestPool.RentInvalidateOrApply(
+                intent.Key,
+                intent.Revision,
+                intent.Value,
+                intent.Expires,
+                intent.CommitTimestamp,
+                intent.CommitTimestamp,
+                intent.State,
+                forceResident: true,
+                transactionId: intent.TransactionId,
+                partitionId: partitionId,
+                noRevision: intent.NoRevision,
+                isRollback: false,
+                returnToPoolOnReceive: true
+            )
+        );
+    }
+
+    /// <summary>
     /// Routes a durable-intent ABORT cleanup to the owning persistent actor: clears the transaction's staged write
     /// intent and MVCC snapshot for the key so an aborted transaction does not leave it blocked until the write
     /// intent lease expires (the durable analog of ApplyConfirmedRollback). The returned acknowledgement is

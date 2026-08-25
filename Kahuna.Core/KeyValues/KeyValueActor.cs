@@ -436,7 +436,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
-                KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
+                KeyValueRequestType.InvalidateOrApply => await InvalidateOrApply(message),
                 KeyValueRequestType.FlushAck => FlushAck(message),
                 KeyValueRequestType.EvictPartition => evictPartitionHandler.Execute(message),
                 KeyValueRequestType.Collect => CollectMessage(),
@@ -696,7 +696,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         return resumeReadHandler.Execute(message);
     }
 
-    private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)
+    private ValueTask<KeyValueResponse?> InvalidateOrApply(KeyValueRequest message)
     {
         return invalidateOrApplyHandler.Execute(message);
     }
