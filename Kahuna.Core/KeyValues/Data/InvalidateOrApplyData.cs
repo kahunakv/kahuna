@@ -30,5 +30,14 @@ internal sealed record InvalidateOrApplyData(
     // When true (with ForceResident), this is a durable ABORT cleanup rather than a commit-apply: clear the
     // transaction's staged write intent and MVCC snapshot without applying any value (the durable analog of
     // ApplyConfirmedRollback), so an aborted transaction does not leave the key blocked until the intent expires.
-    bool IsRollback = false
+    bool IsRollback = false,
+    // When true, the sender performed the authoritative backend point read for this key OFF the actor and
+    // <see cref="HydratedEntry"/> carries its result (null = no persisted row exists). A force-resident
+    // commit-apply that finds the key non-resident needs that read — fabricating an empty base would install a
+    // possibly superseded mutation over a newer persisted row — but the actor's message loop must never await
+    // queued backend I/O (a parked loop backs the mailbox up past the batcher deadline and expires whole
+    // request batches). Without hydration the handler answers a non-resident apply MustRetry and the sender
+    // re-asks with the read's result.
+    bool BackendHydrated = false,
+    ReadOnlyKeyValueEntry? HydratedEntry = null
 );

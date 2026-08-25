@@ -45,6 +45,11 @@ internal sealed class KeyValueReplicator
 
     private readonly PartitionDurabilityTracker? durabilityTracker;
 
+    // Performs the authoritative backend point read for a key OFF the owning actor, so the actor's message
+    // loop never awaits queued I/O. Consulted by ApplyDurableCommit when the target actor answers that the
+    // key is not resident; null (bare unit-test construction) keeps the un-hydrated single-ask behavior.
+    private readonly Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueReplicator(
@@ -56,7 +61,8 @@ internal sealed class KeyValueReplicator
         CompletionReceiptStore completionReceiptStore,
         ILogger<IKahuna> logger,
         UnflushedKeyValueWritesIndex? unflushedWrites = null,
-        PartitionDurabilityTracker? durabilityTracker = null)
+        PartitionDurabilityTracker? durabilityTracker = null,
+        Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null)
     {
         this.backgroundWriter         = backgroundWriter;
         this.persistentRouter         = persistentRouter;
@@ -66,6 +72,7 @@ internal sealed class KeyValueReplicator
         this.completionReceiptStore   = completionReceiptStore;
         this.unflushedWrites          = unflushedWrites;
         this.durabilityTracker        = durabilityTracker;
+        this.hydrateFromBackend       = hydrateFromBackend;
         this.logger                   = logger;
     }
 
@@ -161,32 +168,70 @@ internal sealed class KeyValueReplicator
     /// so the actor can clear that transaction's staged write intent and MVCC snapshot and apply the value to the
     /// base entry. The returned acknowledgement means the actor has
     /// completed that work; routing/enqueueing alone is not sufficient to settle the durable intent.
+    ///
+    /// <para>Two-step hydration: the actor's message loop never performs backend I/O, so when the key is not
+    /// resident the first ask answers MustRetry, the persisted row is read HERE — off the actor, on the queued
+    /// read scheduler — and a second ask hands the result in. The resident hot path stays a single ask with no
+    /// read at all. The point read is needed for correctness on the cold path: a commit-apply can land late
+    /// (after a snapshot install or un-host purge evicted the entry), and installing over a fabricated empty
+    /// base would shadow newer persisted rows.</para>
     /// </summary>
     public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)
     {
+        KeyValueResponseType first = await AskDurableCommit(partitionId, intent, hydratedEntry: null, backendHydrated: false).ConfigureAwait(false);
+
+        if (first == KeyValueResponseType.Committed)
+            return true;
+
+        if (first != KeyValueResponseType.MustRetry || hydrateFromBackend is null)
+            return false;
+
+        ReadOnlyKeyValueEntry? persisted;
+        try
+        {
+            KeyValueEntry? row = await hydrateFromBackend(partitionId, intent.Key).ConfigureAwait(false);
+            persisted = row is null
+                ? null
+                : new ReadOnlyKeyValueEntry(row.Value, row.Revision, row.Expires, row.LastUsed, row.LastModified, row.State);
+        }
+        catch
+        {
+            return false;
+        }
+
+        return await AskDurableCommit(partitionId, intent, persisted, backendHydrated: true).ConfigureAwait(false)
+            == KeyValueResponseType.Committed;
+    }
+
+    private async Task<KeyValueResponseType> AskDurableCommit(
+        int partitionId, PreparedIntent intent, ReadOnlyKeyValueEntry? hydratedEntry, bool backendHydrated)
+    {
         KeyValueRequest request = KeyValueRequestPool.RentInvalidateOrApply(
-            intent.Key, 
-            intent.Revision, 
+            intent.Key,
+            intent.Revision,
             intent.Value,
-            intent.Expires, 
-            intent.CommitTimestamp, 
-            intent.CommitTimestamp, 
+            intent.Expires,
+            intent.CommitTimestamp,
+            intent.CommitTimestamp,
             intent.State,
-            forceResident: true, 
-            transactionId: intent.TransactionId, 
-            partitionId: partitionId, 
-            noRevision: intent.NoRevision, 
-            isRollback: false
+            forceResident: true,
+            transactionId: intent.TransactionId,
+            partitionId: partitionId,
+            noRevision: intent.NoRevision,
+            isRollback: false,
+            returnToPoolOnReceive: false,
+            backendHydrated: backendHydrated,
+            hydratedEntry: hydratedEntry
         );
 
         try
         {
             KeyValueResponse? response = await persistentRouter.Ask(request).ConfigureAwait(false);
-            return response?.Type == KeyValueResponseType.Committed;
+            return response?.Type ?? KeyValueResponseType.Errored;
         }
         catch
         {
-            return false;
+            return KeyValueResponseType.Errored;
         }
         finally
         {
@@ -195,31 +240,30 @@ internal sealed class KeyValueReplicator
     }
 
     /// <summary>
-    /// Fire-and-forget convergence repair for a committed durable intent whose materialization never applied on
-    /// this node: routes the same force-resident commit-apply as <see cref="ApplyDurableCommit"/>, but as a
-    /// send with ownership transfer, because the caller sits on the replicated settle-apply path and must not
-    /// block on the actor. The apply is idempotent (head guards turn a re-apply into a no-op), so a spurious
-    /// repair is harmless; a needed one restores the entry the routed one-shot apply missed.
+    /// Detached convergence repair for a committed durable intent whose materialization never applied on this
+    /// node. The caller sits on the replicated settle-apply path and must not block, so the repair runs the
+    /// full <see cref="ApplyDurableCommit"/> flow (including its off-actor hydration read) on a background
+    /// task. The apply is idempotent (head guards turn a re-apply into a no-op), so a spurious repair is
+    /// harmless; an unconfirmed one is logged and left to the recovery sweep, which remains the backstop.
     /// </summary>
-    public void RequestDurableCommitRepair(int partitionId, PreparedIntent intent)
+    public void ScheduleDurableCommitRepair(int partitionId, PreparedIntent intent)
     {
-        persistentRouter.Send(
-            KeyValueRequestPool.RentInvalidateOrApply(
-                intent.Key,
-                intent.Revision,
-                intent.Value,
-                intent.Expires,
-                intent.CommitTimestamp,
-                intent.CommitTimestamp,
-                intent.State,
-                forceResident: true,
-                transactionId: intent.TransactionId,
-                partitionId: partitionId,
-                noRevision: intent.NoRevision,
-                isRollback: false,
-                returnToPoolOnReceive: true
-            )
-        );
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false))
+                    logger.LogWarning(
+                        "Materialization repair for key {Key} of transaction {TransactionId} did not confirm; the recovery sweep remains the backstop",
+                        intent.Key, intent.TransactionId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Materialization repair for key {Key} of transaction {TransactionId} failed; the recovery sweep remains the backstop",
+                    intent.Key, intent.TransactionId);
+            }
+        });
     }
 
     /// <summary>

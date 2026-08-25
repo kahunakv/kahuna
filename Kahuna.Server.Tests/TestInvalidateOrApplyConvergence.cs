@@ -29,7 +29,9 @@ namespace Kahuna.Server.Tests;
 ///   Deferring froze the entry at the superseded revision while the staged-base fence's committed head
 ///   advanced — every later read-modify-write refused forever at a frozen validated/head pair.</item>
 ///   <item>A late force-resident commit-apply on a non-resident key must not install its (possibly
-///   superseded) mutation over a newer durable row — it must load the backend row first and no-op.</item>
+///   superseded) mutation over a newer durable row. The handler itself must do no backend I/O (an in-actor
+///   await parks the mailbox and expires request batches), so it answers MustRetry un-hydrated and applies
+///   against the sender's off-actor point read on the second ask.</item>
 ///   <item>The full wedge sequence must converge: a commit whose materialization never reached the entry
 ///   yields one truthful fence refusal, the settle-observer repair re-drives the mutation, and the next
 ///   validated-base prepare (after the client's re-read) is acknowledged.</item>
@@ -90,11 +92,6 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         RaftManager raft = BuildRaft(raftName);
         BTree<string, KeyValueEntry> store = new(32);
 
-        // A locally-started scheduler: the raft node never joins a cluster in these tests, so its own
-        // read scheduler's workers are never started and a backend read through it would hang forever.
-        Kommander.WAL.IO.FairReadScheduler readScheduler = new(NullLogger<IRaft>.Instance, workerCount: 1);
-        readScheduler.Start();
-
         KeyValueContext context = new(
             actorContext: null!,
             store: store,
@@ -105,7 +102,10 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
             writeAggregator: null!,
             persistenceBackend: backend!,
             raft: raft,
-            backendReadScheduler: readScheduler,
+            // Deliberately null: the handler's contract forbids any backend I/O inside the actor loop, so no
+            // path in these tests may ever reach the read scheduler — a violation fails loudly here instead
+            // of silently re-introducing the mailbox-parking regression.
+            backendReadScheduler: null!,
             keySpaceRegistry: new(),
             rangeMapStore: new(raft, null, null, NullLogger<IKahuna>.Instance),
             configuration: BuildConfig(),
@@ -146,7 +146,8 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     }
 
     private static KeyValueRequest MaterializationOf(
-        string key, HLCTimestamp transactionId, long revision, byte[] value, HLCTimestamp lastModified, bool forceResident)
+        string key, HLCTimestamp transactionId, long revision, byte[] value, HLCTimestamp lastModified, bool forceResident,
+        bool backendHydrated = false, ReadOnlyKeyValueEntry? hydratedEntry = null)
     {
         return KeyValueRequestPool.RentInvalidateOrApply(
             key,
@@ -160,17 +161,20 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
             transactionId: transactionId,
             partitionId: 1,
             noRevision: false,
-            isRollback: false);
+            isRollback: false,
+            returnToPoolOnReceive: false,
+            backendHydrated: backendHydrated,
+            hydratedEntry: hydratedEntry);
     }
 
     [Fact]
-    public async Task OwnTransactionNotification_AppliesCommittedMaterialization()
+    public void OwnTransactionNotification_AppliesCommittedMaterialization()
     {
         Harness h = BuildHarness("inv-own-apply");
         HLCTimestamp tx = Ts(1_000);
         KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/a", tx);
 
-        KeyValueResponse? response = await h.Handler.Execute(
+        KeyValueResponse? response = h.Handler.Execute(
             MaterializationOf("acct/a", tx, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: false));
 
         Assert.Null(response);
@@ -187,13 +191,13 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Assert.Equal("v5"u8.ToArray(), archived.Value);
 
         // A replay of the same notification is an idempotent no-op.
-        await h.Handler.Execute(
+        h.Handler.Execute(
             MaterializationOf("acct/a", tx, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: false));
         Assert.Equal(6, entry.Revision);
         Assert.Equal(1, entry.Revisions!.Count);
 
         // The routed force-resident apply arriving second degrades to an idempotent no-op too.
-        KeyValueResponse? forced = await h.Handler.Execute(
+        KeyValueResponse? forced = h.Handler.Execute(
             MaterializationOf("acct/a", tx, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: true));
         Assert.Equal(KeyValueResponseType.Committed, forced?.Type);
         Assert.Equal(6, entry.Revision);
@@ -201,14 +205,14 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     }
 
     [Fact]
-    public async Task ForeignLiveIntentNotification_StillDefers()
+    public void ForeignLiveIntentNotification_StillDefers()
     {
         Harness h = BuildHarness("inv-foreign-defer");
         HLCTimestamp holder = Ts(1_000);
         HLCTimestamp other = Ts(2_000);
         KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/b", holder);
 
-        KeyValueResponse? response = await h.Handler.Execute(
+        KeyValueResponse? response = h.Handler.Execute(
             MaterializationOf("acct/b", other, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: false));
 
         Assert.Null(response);
@@ -218,32 +222,66 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     }
 
     [Fact]
-    public async Task LateForceResidentApply_DoesNotShadowNewerDurableRow()
+    public void NonResidentUnhydratedApply_AnswersMustRetry_WithoutTouchingTheStore()
     {
-        MemoryPersistenceBackend backend = new();
-        Harness h = BuildHarness("inv-late-apply", backend);
+        Harness h = BuildHarness("inv-unhydrated");
 
-        // The durable truth: the key's committed row is already at revision 7 (a whole-partition install or
-        // a flush landed it), while the actor-resident entry was evicted.
-        HLCTimestamp newest = Ts(7_000);
-        backend.StoreKeyValues([
-            new PersistenceRequestItem(
-                "acct/c", "v7"u8.ToArray(), revision: 7,
-                expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
-                lastUsedNode: newest.N, lastUsedPhysical: newest.L, lastUsedCounter: newest.C,
-                lastModifiedNode: newest.N, lastModifiedPhysical: newest.L, lastModifiedCounter: newest.C,
-                state: (int)KeyValueState.Set)
-        ]);
+        // First step of the two-step hydration protocol: the actor answers MustRetry so the SENDER performs
+        // the backend read off the actor — the handler itself must do no I/O and install nothing.
+        KeyValueResponse? response = h.Handler.Execute(
+            MaterializationOf("acct/u", Ts(1_000), revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: true));
+
+        Assert.Equal(KeyValueResponseType.MustRetry, response?.Type);
+        Assert.False(h.Store.TryGetValue("acct/u", out _));
+    }
+
+    [Fact]
+    public void LateForceResidentApply_DoesNotShadowNewerDurableRow()
+    {
+        Harness h = BuildHarness("inv-late-apply");
+
+        // The durable truth: the key's committed row is already at revision 7 (a whole-partition install or a
+        // flush landed it), while the actor-resident entry was evicted. The sender's off-actor point read
+        // found that row and hands it in as the hydrated base.
+        ReadOnlyKeyValueEntry persisted = new("v7"u8.ToArray(), 7, HLCTimestamp.Zero, Ts(7_000), Ts(7_000), KeyValueState.Set);
 
         // A commit-apply for the SUPERSEDED revision 6 arrives late (a stalled resolution leg finally
-        // landing). It must load the backend row and no-op instead of installing revision 6 as the head.
-        KeyValueResponse? response = await h.Handler.Execute(
-            MaterializationOf("acct/c", Ts(1_000), revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: true));
+        // landing). It must adopt the hydrated row and no-op instead of installing revision 6 as the head.
+        KeyValueResponse? response = h.Handler.Execute(
+            MaterializationOf("acct/c", Ts(1_000), revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: true,
+                backendHydrated: true, hydratedEntry: persisted));
 
         Assert.Equal(KeyValueResponseType.Committed, response?.Type);
         Assert.True(h.Store.TryGetValue("acct/c", out KeyValueEntry? resident));
         Assert.Equal(7, resident!.Revision);
         Assert.Equal("v7"u8.ToArray(), resident.Value);
+    }
+
+    [Fact]
+    public void HydratedApplyOnAFreshKey_InstallsTheCommittedMutation()
+    {
+        using IDisposable lifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+
+        RaftManager writerRaft = BuildRaft("inv-fresh-writer");
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> writer =
+            actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+                "inv-fresh-bg", writerRaft, writerRaft.ReadScheduler, new MemoryPersistenceBackend(),
+                null!, null!, new TransactionRecordStore(), new PreparedIntentStore(),
+                BuildConfig(), NullLogger<IKahuna>.Instance, new FlushNotificationSink(), null!);
+
+        Harness h = BuildHarness("inv-fresh-install", backgroundWriter: writer);
+
+        // The sender's off-actor read found no persisted row: a genuinely fresh key (the seeding shape).
+        // The hydrated apply must install the committed mutation as the visible head.
+        KeyValueResponse? response = h.Handler.Execute(
+            MaterializationOf("acct/new", Ts(1_000), revision: 0, "v0"u8.ToArray(), Ts(1_100), forceResident: true,
+                backendHydrated: true, hydratedEntry: null));
+
+        Assert.Equal(KeyValueResponseType.Committed, response?.Type);
+        Assert.True(h.Store.TryGetValue("acct/new", out KeyValueEntry? resident));
+        Assert.Equal(0, resident!.Revision);
+        Assert.Equal("v0"u8.ToArray(), resident.Value);
+        Assert.Equal(KeyValueState.Set, resident.State);
     }
 
     /// <summary>
@@ -253,7 +291,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     /// converge the entry so the next attempt (validating the re-read, moved base) is acknowledged.
     /// </summary>
     [Fact]
-    public async Task WedgedKey_RefusalThenRepair_Converges()
+    public void WedgedKey_RefusalThenRepair_Converges()
     {
         using IDisposable lifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
 
@@ -307,8 +345,10 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         intents.Apply(new RemoveIntentCommand(staleAttempt.TransactionId, 1, "acct/w"));
 
         // No completion receipt exists for T here, so the repair wiring re-drives the committed mutation.
+        // The entry is resident (it still holds T's staged intent), so the apply is the single-ask sync
+        // fast path — no hydration round trip.
         Assert.False(receipts.Contains(tx, "acct/w", KeyValueDurability.Persistent));
-        KeyValueResponse? repaired = await h.Handler.Execute(
+        KeyValueResponse? repaired = h.Handler.Execute(
             MaterializationOf("acct/w", tx, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: true));
 
         Assert.Equal(KeyValueResponseType.Committed, repaired?.Type);

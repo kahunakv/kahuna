@@ -341,7 +341,13 @@ internal sealed class KeyValuesManagerBuilder
         UnflushedKeyValueWritesIndex? unflushedWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
 
         restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
-        replicator = new(backgroundWriter, routers.Persistent, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
+        replicator = new(backgroundWriter, routers.Persistent, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker,
+            // Off-actor hydration for the durable commit-apply's non-resident cold path: the point read runs
+            // on the queued backend read scheduler HERE (the sender side), never inside the owning actor's
+            // message loop — an in-actor await on this read parks the whole mailbox behind one disk read and,
+            // under replicated-apply fan-out, expires entire request batches past the batcher deadline.
+            hydrateFromBackend: (partitionId, key) =>
+                backendReadScheduler.EnqueueBatchableTask(partitionId, key, KeyValuePointReadExecutor.For(persistenceBackend)));
 
         // Commit-settlement convergence check: when a commit settlement applies here without a local completion
         // receipt for the settled key, this node never materialized that committed mutation into its visible
@@ -368,7 +374,7 @@ internal sealed class KeyValuesManagerBuilder
                     "Commit settlement for key {Key} of transaction {TransactionId} applied without a local completion receipt; re-driving the committed mutation into the visible entry",
                     intent.Key, intent.TransactionId);
 
-                repairReplicator.RequestDurableCommitRepair(repairLocator.LocateRange(intent.Key).PartitionId, intent);
+                repairReplicator.ScheduleDurableCommitRepair(repairLocator.LocateRange(intent.Key).PartitionId, intent);
             }
             catch (Exception ex)
             {

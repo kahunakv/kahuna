@@ -436,7 +436,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.CompleteProposal => CompleteProposal(message),
                 KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
                 KeyValueRequestType.ResumeRead => ResumeRead(message),
-                KeyValueRequestType.InvalidateOrApply => await InvalidateOrApply(message),
+                KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 KeyValueRequestType.FlushAck => FlushAck(message),
                 KeyValueRequestType.EvictPartition => evictPartitionHandler.Execute(message),
                 KeyValueRequestType.Collect => CollectMessage(),
@@ -696,7 +696,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         return resumeReadHandler.Execute(message);
     }
 
-    private ValueTask<KeyValueResponse?> InvalidateOrApply(KeyValueRequest message)
+    // Deliberately synchronous: the handler's contract forbids any await that could queue on backend I/O
+    // inside this actor's message loop (see the invariant on InvalidateOrApplyHandler.Execute).
+    private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)
     {
         return invalidateOrApplyHandler.Execute(message);
     }

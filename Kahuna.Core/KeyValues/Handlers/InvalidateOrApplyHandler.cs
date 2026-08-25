@@ -22,7 +22,12 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     {
     }
 
-    public async ValueTask<KeyValueResponse?> Execute(KeyValueRequest message)
+    // INVARIANT: every path in this handler is synchronous. It runs inside the KeyValueActor's single-threaded
+    // message loop, and an await that queues on the backend read scheduler parks the whole mailbox behind one
+    // disk read — under replicated-apply fan-out (seeding, recovery, split settlement) the backed-up mailbox
+    // blows past the request batcher's deadline and expires entire batches. Any backend read a path needs must
+    // be performed by the SENDER, off the actor, and handed in through InvalidateOrApplyData.BackendHydrated.
+    public KeyValueResponse? Execute(KeyValueRequest message)
     {
         InvalidateOrApplyData data = message.InvalidateOrApplyData!;
 
@@ -31,7 +36,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         // An abort just clears the transaction's staged write intent and MVCC snapshot so the key is not blocked
         // until the intent expires (the analog of ApplyConfirmedRollback).
         if (data.ForceResident)
-            return data.IsRollback ? ApplyDurableRollback(message.Key, data) : await ApplyDurableCommit(message.Key, data).ConfigureAwait(false);
+            return data.IsRollback ? ApplyDurableRollback(message.Key, data) : ApplyDurableCommit(message.Key, data);
 
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
             return null;
@@ -116,23 +121,44 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     }
 
     /// <summary>
-    /// Applies a durable-intent resolution's committed value on the leader: loads the entry from the backend
-    /// when the key is not resident, then runs the shared confirmed-commit apply (clears the committing
-    /// transaction's write intent and MVCC snapshot, archives the superseded revision, applies the value,
-    /// persists, and records the decision). The backend load on a miss is required for correctness, not just
-    /// warmth: a commit-apply can arrive late — after a whole-partition snapshot install or an un-host purge
-    /// evicted the resident entry — and fabricating an empty stub here would install this (possibly superseded)
-    /// mutation as the visible head, shadowing newer durable rows for every read until the entry heals.
-    /// Loading first lets the strictly-newer guard turn a late re-apply into the no-op it must be.
-    /// Idempotent: a re-apply after the intent is already cleared and the revision is at or ahead is a no-op.
+    /// Applies a durable-intent resolution's committed value on the leader, then runs the shared
+    /// confirmed-commit apply (clears the committing transaction's write intent and MVCC snapshot, archives the
+    /// superseded revision, applies the value, persists, and records the decision).
+    ///
+    /// <para>When the key is not resident, the persisted row must be consulted before anything installs —
+    /// a commit-apply can arrive late, after a whole-partition snapshot install or an un-host purge evicted the
+    /// resident entry, and fabricating an empty base would install this (possibly superseded) mutation as the
+    /// visible head, shadowing newer durable rows for every read until the entry heals. That read must NOT run
+    /// here (see the no-I/O invariant on <see cref="Execute"/>): an un-hydrated non-resident apply answers
+    /// MustRetry, the sender performs the point read off the actor, and re-asks with the result carried in
+    /// <see cref="InvalidateOrApplyData.HydratedEntry"/>. The hydrated entry (or the fresh stub when no row is
+    /// persisted) then lets the strictly-newer guard turn a late re-apply into the no-op it must be.
+    /// Idempotent: a re-apply after the intent is already cleared and the revision is at or ahead is a no-op.</para>
     /// </summary>
-    private async ValueTask<KeyValueResponse> ApplyDurableCommit(string key, InvalidateOrApplyData data)
+    private KeyValueResponse ApplyDurableCommit(string key, InvalidateOrApplyData data)
     {
-        KeyValueEntry? entry = await GetKeyValueEntry(key, KeyValueDurability.Persistent).ConfigureAwait(false);
-
-        if (entry is null)
+        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
         {
-            entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
+            if (!data.BackendHydrated)
+                return KeyValueStaticResponses.MustRetryResponse;
+
+            if (data.HydratedEntry is not null)
+            {
+                entry = new()
+                {
+                    Bucket = GetBucket(key),
+                    Value = data.HydratedEntry.Value,
+                    Revision = data.HydratedEntry.Revision,
+                    FlushedRevision = data.HydratedEntry.Revision,
+                    Expires = data.HydratedEntry.Expires,
+                    LastUsed = data.HydratedEntry.LastUsed,
+                    LastModified = data.HydratedEntry.LastModified,
+                    State = data.HydratedEntry.State
+                };
+            }
+            else
+                entry = new() { Bucket = GetBucket(key), State = KeyValueState.Undefined, Revision = -1 };
+
             context.InsertStoreEntry(key, entry);
         }
 
