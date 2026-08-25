@@ -349,16 +349,18 @@ internal sealed class KeyValuesManagerBuilder
             hydrateFromBackend: (partitionId, key) =>
                 backendReadScheduler.EnqueueBatchableTask(partitionId, key, KeyValuePointReadExecutor.For(persistenceBackend)));
 
-        // Commit-settlement convergence check: when a commit settlement applies here without a local completion
-        // receipt for the settled key, this node never materialized that committed mutation into its visible
-        // state — the routed one-shot commit-apply was dropped or landed on another node. Re-drive the
-        // force-resident apply from the intent still in hand (idempotent; the head guards no-op a spurious
-        // repair). This runs at the same apply position that advances the staged-base fence's committed head,
-        // so the fence can no longer be left comparing against a head the visible entry never reached — the
-        // frozen validated/head refusal wedge, and the silent window where committed transfers stopped
-        // materializing. The receipt lookup is O(1); on a healthy node the materialization always precedes its
-        // settlement in log order and the check costs one dictionary probe per settled intent.
-        CompletionReceiptStore observedReceiptStore = completionReceiptStore;
+        // Commit-settlement convergence check: at the same apply position that advances the staged-base
+        // fence's committed head, verify this node's replicator actually processed the commit's kv record —
+        // witnessed by the unflushed overlay, which the replicator writes before anything else and which holds
+        // the head until the flush lands. An absent/older overlay entry means the record's apply never ran
+        // here (a consumer apply skipped at a leadership boundary): the head is about to move past a value the
+        // local durable state does not hold, the exact separation behind the frozen validated/head refusal
+        // wedge and its one-commit durable loss. Re-drive the full commit apply from the intent still in hand
+        // (idempotent; the head guards no-op a spurious repair, e.g. after a false miss when the flush landed
+        // inside the materialize→settle gap). A completion receipt is deliberately NOT the witness: receipts
+        // also arrive through the replicated receipt channel, so one can exist here without the local record
+        // apply ever having run.
+        UnflushedKeyValueWritesIndex? observedOverlay = unflushedWrites;
         KeyValueReplicator repairReplicator = replicator;
         KeyValueLocator repairLocator = locator;
         ILogger<IKahuna> repairLogger = logger;
@@ -366,12 +368,12 @@ internal sealed class KeyValuesManagerBuilder
         {
             try
             {
-                if (observedReceiptStore.Contains(intent.TransactionId, intent.Key, KeyValueDurability.Persistent))
+                if (!KeyValueReplicator.LocalMaterializationMissing(observedOverlay, intent))
                     return;
 
                 Transactions.DurableTransactionMetrics.MaterializationRepairs.Add(1);
                 repairLogger.LogWarning(
-                    "Commit settlement for key {Key} of transaction {TransactionId} applied without a local completion receipt; re-driving the committed mutation into the visible entry",
+                    "Commit settlement for key {Key} of transaction {TransactionId} applied but this node's durable state has no record of its materialization; re-driving the committed mutation",
                     intent.Key, intent.TransactionId);
 
                 repairReplicator.ScheduleDurableCommitRepair(repairLocator.LocateRange(intent.Key).PartitionId, intent);
@@ -390,12 +392,12 @@ internal sealed class KeyValuesManagerBuilder
         // another. The repair re-reads the durable row off the actor and reconciles the entry from it; the
         // streak re-arms the repair until the pair moves. Runs on every replica that applies the refused
         // prepare, so the wedge heals wherever the stale entry lives.
-        preparedIntentStore.AttachFenceWedgeRepairer(key =>
+        preparedIntentStore.AttachFenceWedgeRepairer((key, validatedBase, committedHead) =>
         {
             try
             {
                 Transactions.DurableTransactionMetrics.CoherenceReconciles.Add(1);
-                repairReplicator.ScheduleCoherenceReconcile(repairLocator.LocateRange(key).PartitionId, key);
+                repairReplicator.ScheduleCoherenceReconcile(repairLocator.LocateRange(key).PartitionId, key, committedHead);
             }
             catch (Exception ex)
             {

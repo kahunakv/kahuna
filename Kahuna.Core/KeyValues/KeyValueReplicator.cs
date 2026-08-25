@@ -240,6 +240,23 @@ internal sealed class KeyValueReplicator
     }
 
     /// <summary>
+    /// The settle-time convergence gate: decides whether this node's local durable state is missing a
+    /// commit's materialization at the moment its settlement applies. The unflushed overlay is the witness
+    /// that this node's replicator processed the commit's kv record — the replicator records the head there
+    /// before anything else, and the entry stays until the flush lands — so an overlay entry at or above the
+    /// intent's revision proves the local durable read path already serves the value. An absent or older
+    /// entry means the record's apply never ran here (a skipped consumer apply at a leadership boundary) and
+    /// the settled intent, still carrying the full mutation, must re-drive it. A false miss — the flush
+    /// landed inside the materialize→settle gap and removed the entry — costs one idempotent no-op ask.
+    /// Without an overlay (raw-backend configurations) absence cannot be proven either way, so the repair
+    /// always runs and degrades to the same no-op.
+    /// </summary>
+    internal static bool LocalMaterializationMissing(UnflushedKeyValueWritesIndex? overlay, PreparedIntent intent) =>
+        overlay is null
+        || !overlay.TryGet(intent.Key, out UnflushedKeyValueWrite pending)
+        || pending.Revision < intent.Revision;
+
+    /// <summary>
     /// Detached coherence reconcile for a key whose resident entry stopped converging with this node's own
     /// durable state — detected as a fence-refusal streak at a frozen (validated base, committed head) pair.
     /// Reads the durable row off the actor (backend or unflushed overlay; the value is durable here even when
@@ -248,7 +265,7 @@ internal sealed class KeyValueReplicator
     /// the caller sits on the replicated prepare-apply path and must not block; a missed reconcile re-arms on
     /// the continuing refusal streak.
     /// </summary>
-    public void ScheduleCoherenceReconcile(int partitionId, string key)
+    public void ScheduleCoherenceReconcile(int partitionId, string key, long committedHeadRevision)
     {
         Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
         if (hydrate is null)
@@ -259,6 +276,17 @@ internal sealed class KeyValueReplicator
             try
             {
                 KeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
+
+                // The reconcile can only heal from what this node durably holds. A local row below the
+                // committed head means the head commit's value never reached this node's durable state at
+                // all — the reconcile cannot converge the key from here, and staying silent about that made
+                // a 46-minute wedge diagnosable only by inference. Say it plainly; the settle-time repair
+                // owns re-driving the mutation, and this alarm firing means that repair did not land either.
+                if (row is null || row.Revision < committedHeadRevision)
+                    logger.LogError(
+                        "Coherence reconcile for key {Key} cannot heal: the local durable row is at revision {LocalRevision} but the committed head is {HeadRevision} — this node's durable state is missing the head commit",
+                        key, row?.Revision ?? -1, committedHeadRevision);
+
                 if (row is null)
                     return;
 

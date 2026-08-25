@@ -471,8 +471,9 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Harness h = BuildHarness("inv-runs-kernel");
         PreparedIntentStore intents = new();
 
-        List<string> repairRequests = [];
-        intents.AttachFenceWedgeRepairer(repairRequests.Add);
+        List<(string Key, long ValidatedBase, long CommittedHead)> repairRequests = [];
+        intents.AttachFenceWedgeRepairer((key, validatedBase, committedHead) =>
+            repairRequests.Add((key, validatedBase, committedHead)));
 
         // The healed old leader's state: entry at revision 5 with T0's orphan session lock (never expires,
         // cleanup went to the then-current leader).
@@ -515,7 +516,9 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         }
 
         Assert.Single(repairRequests);
-        Assert.Equal("acct/k", repairRequests[0]);
+        Assert.Equal("acct/k", repairRequests[0].Key);
+        Assert.Equal(5, repairRequests[0].ValidatedBase);
+        Assert.Equal(6, repairRequests[0].CommittedHead);
         Assert.True(attempts <= 6, $"the repair must trigger within a handful of refusals, took {attempts}");
 
         // The repair's reconcile: the node's own durable row has revision 6 (the replicator recorded and
@@ -536,6 +539,38 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         PreparedIntentApplyResult acknowledged = intents.Apply(new PrepareIntentCommand(freshAttempt));
         Assert.Equal(TransactionApplyOutcome.Applied, acknowledged.Outcome);
         Assert.False(acknowledged.StaleBase, "after the reconcile the re-read base must be acknowledged");
+    }
+
+    [Fact]
+    public void LocalMaterializationGate_TrustsOnlyTheOverlayWitness()
+    {
+        PreparedIntent intent = new(
+            TransactionId: Ts(1_000), Epoch: 1, Key: "gate/k",
+            ManifestHash: 0, RecordAnchorKey: "gate/k",
+            CommitTimestamp: Ts(1_100),
+            State: KeyValueState.Set, Value: [1], Bucket: null,
+            Revision: 9, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 8, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending);
+
+        // No overlay configured: absence cannot be proven either way — the repair must run.
+        Assert.True(KeyValueReplicator.LocalMaterializationMissing(null, intent));
+
+        // Overlay has no entry for the key: this node's replicator never processed the commit's record.
+        UnflushedKeyValueWritesIndex overlay = new();
+        Assert.True(KeyValueReplicator.LocalMaterializationMissing(overlay, intent));
+
+        // Overlay holds an OLDER head: the record's apply still never ran here.
+        overlay.Record("gate/k", [0], 8, HLCTimestamp.Zero, Ts(900), Ts(900), KeyValueState.Set, noRevision: false);
+        Assert.True(KeyValueReplicator.LocalMaterializationMissing(overlay, intent));
+
+        // Overlay at the commit's revision: the replicator ran — the local durable read path serves it.
+        overlay.Record("gate/k", [1], 9, HLCTimestamp.Zero, Ts(1_100), Ts(1_100), KeyValueState.Set, noRevision: false);
+        Assert.False(KeyValueReplicator.LocalMaterializationMissing(overlay, intent));
+
+        // Overlay already past the commit (a newer write queued): equally proven.
+        overlay.Record("gate/k", [2], 10, HLCTimestamp.Zero, Ts(1_200), Ts(1_200), KeyValueState.Set, noRevision: false);
+        Assert.False(KeyValueReplicator.LocalMaterializationMissing(overlay, intent));
     }
 
     [Fact]

@@ -122,15 +122,17 @@ internal sealed class PreparedIntentStore
     /// store.</summary>
     public void AttachCommittedSettleObserver(Action<PreparedIntent> observer) => onCommittedSettleApplied = observer;
 
-    // Invoked (outside the apply gate) with the key when a fence-refusal streak at a frozen
-    // (validated base, committed head) pair indicates this node's visible entry stopped converging with its
-    // committed head — the wiring re-drives convergence from the node's own durable state. Must not block and
-    // must not re-enter this store.
-    private Action<string>? onFenceWedgeRepair;
+    // Invoked (outside the apply gate) with the key and the frozen (validated base, committed head) revision
+    // pair when a fence-refusal streak indicates this node's visible entry stopped converging with its
+    // committed head — the wiring re-drives convergence from the node's own durable state, and the head
+    // revision lets it say plainly when even that state is missing the head commit. Must not block and must
+    // not re-enter this store.
+    private Action<string, long, long>? onFenceWedgeRepair;
 
-    /// <summary>Wires the fence-wedge repair hook (manager construction). The callback runs on the apply path
-    /// outside the gate, rate-limited by the refusal streak, and must not block or re-enter the store.</summary>
-    public void AttachFenceWedgeRepairer(Action<string> repairer) => onFenceWedgeRepair = repairer;
+    /// <summary>Wires the fence-wedge repair hook (manager construction): (key, validated base revision,
+    /// committed head revision). The callback runs on the apply path outside the gate, rate-limited by the
+    /// refusal streak, and must not block or re-enter the store.</summary>
+    public void AttachFenceWedgeRepairer(Action<string, long, long> repairer) => onFenceWedgeRepair = repairer;
 
     /// <summary>Sets the staged-base fence retention horizon. The caller must pass a value comfortably above
     /// the longest possible transaction lifetime: the staleness gate refuses to acknowledge a validated-base
@@ -148,6 +150,8 @@ internal sealed class PreparedIntentStore
 
         PreparedIntent? settledCommit = null;
         bool wedgeRepairDue = false;
+        long wedgeBaseRevision = 0;
+        long wedgeHeadRevision = 0;
         PreparedIntentApplyResult result;
 
         lock (applyGate)
@@ -222,7 +226,8 @@ internal sealed class PreparedIntentStore
                 if (fenceConflict is not null)
                 {
                     DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
-                    wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent);
+                    wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent, out wedgeHeadRevision);
+                    wedgeBaseRevision = fencedPrepare.Intent.BaseRevision;
 
                     logger?.LogWarning(
                         "Staged base for {Key} moved before the prepare of transaction {TransactionId} applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
@@ -241,7 +246,7 @@ internal sealed class PreparedIntentStore
             onCommittedSettleApplied?.Invoke(settledCommit);
 
         if (wedgeRepairDue)
-            onFenceWedgeRepair?.Invoke(key);
+            onFenceWedgeRepair?.Invoke(key, wedgeBaseRevision, wedgeHeadRevision);
 
         return result;
     }
@@ -281,11 +286,13 @@ internal sealed class PreparedIntentStore
 
     /// <summary>Records one fence refusal for the watchdog: escalates to the error log when the same key
     /// refuses repeatedly at an unchanged (validated base, committed head) pair, and returns whether the
-    /// convergence repair hook is due for this refusal (rate-limited by the streak). Caller holds
-    /// <see cref="applyGate"/>.</summary>
-    private bool TrackFenceRefusal(PreparedIntent intent)
+    /// convergence repair hook is due for this refusal (rate-limited by the streak).
+    /// <paramref name="headRevision"/> reports the remembered committed head the refusal was judged against.
+    /// Caller holds <see cref="applyGate"/>.</summary>
+    private bool TrackFenceRefusal(PreparedIntent intent, out long headRevision)
     {
         committedHeads.TryGetValue(intent.Key, out CommittedHead head);
+        headRevision = head.Revision;
 
         if (!fenceRefusalStreaks.TryGetValue(intent.Key, out FenceRefusalStreak streak)
             || streak.BaseRevision != intent.BaseRevision

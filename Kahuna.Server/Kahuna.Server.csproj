@@ -19,7 +19,7 @@
   <PackAsTool>true</PackAsTool>
   <ToolCommandName>kahuna-server</ToolCommandName>
   <PackageId>Kahuna.Server</PackageId>
-  <Version>1.3.7</Version>
+  <Version>1.3.8</Version>
   <Authors>Andres Gutierrez</Authors>
   <Company>Kahuna KV</Company>
   <Description>Kahuna server node — distributed key-value store, lock manager and sequencer. Run `kahuna-server` to start a standalone node.</Description>
