@@ -8,6 +8,7 @@ using Kommander.Data;
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
@@ -414,10 +415,38 @@ internal sealed class KeyValueReplicator
         {
             try
             {
+                // Verify before driving, and re-verify as the confirm step of every rung. The settle-time
+                // overlay witness has a large false-miss rate under sustained writes — the background flush
+                // routinely lands inside the materialize→settle gap and removes the overlay entry — and
+                // treating every miss as a real repair turned healthy seeding into thousands of parked,
+                // laddered actor asks per minute (the run-V seed collapse). The off-actor verification read
+                // separates "flushed" from "missing" without touching the actor, so the common false miss
+                // resolves silently; only a verified-missing row warns, counts, and drives. Verification is
+                // also what CONFIRMS a drive: it reads state the drive's apply actually updates (the
+                // confirmed-commit apply records the overlay before enqueueing the flush), so confirmation
+                // never depends on the actor's archival-proof answer, which can be MustRetry forever for an
+                // already-converged entry.
+                bool verifiedMissing = false;
+
                 foreach (TimeSpan delay in CommitRepairBackoff)
                 {
                     if (delay > TimeSpan.Zero)
                         await Task.Delay(delay).ConfigureAwait(false);
+
+                    if (await VerifyLocallyDurableAsync(partitionId, intent).ConfigureAwait(false))
+                    {
+                        DiscardPendingCommitRepair(intent.Key, intent.Revision);
+                        return;
+                    }
+
+                    if (!verifiedMissing)
+                    {
+                        verifiedMissing = true;
+                        DurableTransactionMetrics.MaterializationRepairs.Add(1);
+                        logger.LogWarning(
+                            "Committed mutation for key {Key} of transaction {TransactionId} is missing from this node's durable state; re-driving it",
+                            intent.Key, intent.TransactionId);
+                    }
 
                     bool confirmed;
                     try
@@ -451,6 +480,37 @@ internal sealed class KeyValueReplicator
                 commitRepairsInFlight.TryRemove(intent.Key, out _);
             }
         });
+    }
+
+    /// <summary>
+    /// Off-actor check that the committed mutation is present in this node's durable state: the unflushed
+    /// overlay at or above the intent's revision (queued for flush), or the hydration read — which folds the
+    /// overlay over the flushed backend — at or above it (already flushed). True means nothing durable is
+    /// missing; the resident entry, if it lags, converges through the ordinary notification or the
+    /// streak-triggered reconcile, neither of which needs this repair. An unavailable read (no hydration seam,
+    /// or a backpressured scheduler) proves nothing and reports false, letting the drive proceed — the drive
+    /// itself is idempotent against an already-durable row.
+    /// </summary>
+    private async Task<bool> VerifyLocallyDurableAsync(int partitionId, PreparedIntent intent)
+    {
+        if (unflushedWrites is not null
+            && unflushedWrites.TryGet(intent.Key, out UnflushedKeyValueWrite pending)
+            && pending.Revision >= intent.Revision)
+            return true;
+
+        Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
+        if (hydrate is null)
+            return false;
+
+        try
+        {
+            KeyValueEntry? row = await hydrate(partitionId, intent.Key).ConfigureAwait(false);
+            return row is not null && row.Revision >= intent.Revision;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

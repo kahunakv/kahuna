@@ -376,11 +376,11 @@ internal sealed class KeyValuesManagerBuilder
                     return;
                 }
 
-                Transactions.DurableTransactionMetrics.MaterializationRepairs.Add(1);
-                repairLogger.LogWarning(
-                    "Commit settlement for key {Key} of transaction {TransactionId} applied but this node's durable state has no record of its materialization; re-driving the committed mutation",
-                    intent.Key, intent.TransactionId);
-
+                // The overlay miss alone is only a suspicion: under sustained writes the background flush
+                // routinely lands inside the materialize→settle gap and removes the entry, so most misses
+                // mean "flushed", not "missing". The scheduled task verifies against the flushed backend off
+                // the actor and resolves the common false miss silently; only a verified-missing mutation
+                // warns, counts, and drives the repair.
                 repairReplicator.ScheduleDurableCommitRepair(repairLocator.LocateRange(intent.Key).PartitionId, intent);
             }
             catch (Exception ex)

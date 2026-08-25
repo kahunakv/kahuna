@@ -611,6 +611,64 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Assert.False(replicator.RetryPendingCommitRepair(1, "park/k"));
     }
 
+    private static async Task WaitUntilUnparked(KeyValueReplicator replicator, string key, int timeoutMs = 5_000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (replicator.TryGetPendingCommitRepair(key) is not null)
+        {
+            if (Environment.TickCount64 >= deadline)
+                Assert.Fail($"repair for '{key}' was not released within {timeoutMs} ms");
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledRepair_ResolvesSilently_WhenTheOverlayProvesTheRowDurable()
+    {
+        // The common benign race: the settle-time witness missed, but the overlay (re-checked off the actor
+        // by the repair task) holds the row — flushed-not-missing. The repair must release without driving.
+        UnflushedKeyValueWritesIndex overlay = new();
+        overlay.Record("verify/a", [6], 6, HLCTimestamp.Zero, Ts(6_000), Ts(6_000), KeyValueState.Set, noRevision: false);
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
+            unflushedWrites: overlay);
+
+        replicator.ScheduleDurableCommitRepair(1, new PreparedIntent(
+            TransactionId: Ts(1_000), Epoch: 1, Key: "verify/a",
+            ManifestHash: 0, RecordAnchorKey: "verify/a",
+            CommitTimestamp: Ts(6_000),
+            State: KeyValueState.Set, Value: [6], Bucket: null,
+            Revision: 6, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 5, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending));
+
+        await WaitUntilUnparked(replicator, "verify/a");
+    }
+
+    [Fact]
+    public async Task ScheduledRepair_ResolvesSilently_WhenTheBackendProvesTheRowDurable()
+    {
+        // The overlay entry was removed by a landed flush; the hydration read finds the flushed row at (or
+        // past) the intent's revision. Still flushed-not-missing: release without driving.
+        KeyValueEntry flushedRow = new() { Revision = 7, Value = [7], State = KeyValueState.Set, LastModified = Ts(7_000) };
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
+            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(flushedRow));
+
+        replicator.ScheduleDurableCommitRepair(1, new PreparedIntent(
+            TransactionId: Ts(1_000), Epoch: 1, Key: "verify/b",
+            ManifestHash: 0, RecordAnchorKey: "verify/b",
+            CommitTimestamp: Ts(6_000),
+            State: KeyValueState.Set, Value: [6], Bucket: null,
+            Revision: 6, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 5, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending));
+
+        await WaitUntilUnparked(replicator, "verify/b");
+    }
+
     [Fact]
     public void CommittedSettleObserver_FiresOnCommit_NotOnAbort()
     {

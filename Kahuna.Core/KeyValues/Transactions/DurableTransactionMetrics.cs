@@ -89,15 +89,16 @@ internal static class DurableTransactionMetrics
             description: "Watchdog escalations for keys stuck refusing validated-base prepares at a frozen validated/head pair.");
 
     /// <summary>
-    /// Commit settlements that applied on this node without a local completion receipt for the settled key —
-    /// proof the committed mutation never materialized into this node's visible state (a dropped or misrouted
-    /// commit-apply) — and were repaired by re-driving the force-resident apply from the intent still in hand.
-    /// Zero on a healthy node: the materialization always precedes its settlement in log order.
+    /// Committed mutations VERIFIED missing from this node's durable state at settlement — the settle-time
+    /// overlay witness missed AND the off-actor verification against the flushed backend confirmed the row is
+    /// genuinely absent (not merely flushed-and-removed from the overlay, the common benign race) — and
+    /// re-driven from the settled intent. Zero on a healthy node; each tick is a locally-skipped record apply
+    /// being repaired, the event behind the frozen validated/head wedge.
     /// </summary>
     internal static readonly Counter<long> MaterializationRepairs =
         Meter.CreateCounter<long>(
             "kahuna.transactions.materialization_repairs",
-            description: "Committed mutations re-applied locally because their settlement applied without a local completion receipt.");
+            description: "Committed mutations verified missing from local durable state at settlement and re-driven.");
 
     /// <summary>
     /// Coherence reconciles scheduled by the fence-wedge repair: a refusal streak at a frozen
