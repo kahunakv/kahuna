@@ -100,6 +100,17 @@ internal static class DurableTransactionMetrics
             description: "Committed mutations re-applied locally because their settlement applied without a local completion receipt.");
 
     /// <summary>
+    /// Coherence reconciles scheduled by the fence-wedge repair: a refusal streak at a frozen
+    /// (validated base, committed head) pair re-drove the key's resident entry from this node's own durable
+    /// row. Each one is a dropped coherence notification being repaired; a sustained rate on the same key
+    /// (with the wedged-keys alarm firing) means the reconcile is not converging and needs investigation.
+    /// </summary>
+    internal static readonly Counter<long> CoherenceReconciles =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.coherence_reconciles",
+            description: "Resident-entry reconciles from local durable state, triggered by fence-refusal streaks.");
+
+    /// <summary>
     /// Recovery passes that HELD a due prepared intent instead of resolving it, because its canonical record is
     /// absent and the intent is older than the record retention horizon — absence can then mean a committed
     /// record the retention GC reclaimed while this leg's settlement kept failing, and presuming abort would

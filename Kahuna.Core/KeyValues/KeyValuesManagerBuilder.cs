@@ -382,6 +382,26 @@ internal sealed class KeyValuesManagerBuilder
                 repairLogger.LogError(ex, "Materialization repair failed for key {Key} of transaction {TransactionId}", intent.Key, intent.TransactionId);
             }
         });
+
+        // Fence-wedge self-heal: a refusal streak at a frozen (validated base, committed head) pair means this
+        // node's resident entry stopped converging with its own durable state — the single-shot coherence
+        // notification for the head-advancing commit was dropped (typically by a live orphan write intent left
+        // behind by a superseded leadership at a pause boundary), and once wedged no later commit ever sends
+        // another. The repair re-reads the durable row off the actor and reconciles the entry from it; the
+        // streak re-arms the repair until the pair moves. Runs on every replica that applies the refused
+        // prepare, so the wedge heals wherever the stale entry lives.
+        preparedIntentStore.AttachFenceWedgeRepairer(key =>
+        {
+            try
+            {
+                Transactions.DurableTransactionMetrics.CoherenceReconciles.Add(1);
+                repairReplicator.ScheduleCoherenceReconcile(repairLocator.LocateRange(key).PartitionId, key);
+            }
+            catch (Exception ex)
+            {
+                repairLogger.LogError(ex, "Fence-wedge reconcile scheduling failed for key {Key}", key);
+            }
+        });
         replicationDispatcher = new(runtime, restorer, replicator);
         durableReplication = new(runtime, replicator);
         runtime.DurableReplication = durableReplication;

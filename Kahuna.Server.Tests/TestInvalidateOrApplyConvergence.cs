@@ -368,6 +368,176 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Assert.False(acknowledged.StaleBase, "after convergence the re-read base must be acknowledged");
     }
 
+    private static KeyValueRequest ReconcileOf(string key, ReadOnlyKeyValueEntry? row)
+    {
+        return KeyValueRequestPool.RentInvalidateOrApply(
+            key,
+            row?.Revision ?? 0,
+            row?.Value,
+            expires: row?.Expires ?? HLCTimestamp.Zero,
+            lastUsed: row?.LastModified ?? HLCTimestamp.Zero,
+            lastModified: row?.LastModified ?? HLCTimestamp.Zero,
+            state: row?.State ?? KeyValueState.Undefined,
+            forceResident: false,
+            transactionId: HLCTimestamp.Zero,
+            partitionId: 1,
+            noRevision: false,
+            isRollback: false,
+            returnToPoolOnReceive: false,
+            backendHydrated: true,
+            hydratedEntry: row,
+            reconcile: true);
+    }
+
+    [Fact]
+    public void Reconcile_AdoptsNewerDurableRow_ClearingALiveOrphanIntent()
+    {
+        Harness h = BuildHarness("inv-reconcile-adopt");
+
+        // The run-S kernel state: the entry is frozen one revision behind the node's own durable row, held
+        // there by a LIVE session-owned write intent orphaned by a superseded leadership (its cleanup was
+        // routed to the then-current leader, never here; a zero-duration lease never expires on its own).
+        HLCTimestamp orphan = Ts(500);
+        KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/r", orphan);
+        Assert.NotNull(entry.WriteIntent);
+
+        ReadOnlyKeyValueEntry durableRow = new("v6"u8.ToArray(), 6, HLCTimestamp.Zero, Ts(6_000), Ts(6_000), KeyValueState.Set);
+
+        KeyValueResponse? response = h.Handler.Execute(ReconcileOf("acct/r", durableRow));
+
+        Assert.Null(response);
+        Assert.Equal(6, entry.Revision);
+        Assert.Equal("v6"u8.ToArray(), entry.Value);
+        Assert.Null(entry.WriteIntent);
+        Assert.True(entry.MvccEntries is null || !entry.MvccEntries.ContainsKey(orphan));
+
+        // The superseded revision was archived, so snapshot readers can still resolve it.
+        Assert.NotNull(entry.Revisions);
+        Assert.True(entry.Revisions!.TryGetValue(5, out KeyValueRevisionEntry archived));
+        Assert.Equal("v5"u8.ToArray(), archived.Value);
+    }
+
+    [Fact]
+    public void Reconcile_NoOps_WhenTheEntryIsCurrentOrAhead()
+    {
+        Harness h = BuildHarness("inv-reconcile-noop");
+        HLCTimestamp holder = Ts(500);
+        KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/n", holder);
+
+        // Row equal to the entry: nothing to converge; the live intent must be left alone (its owner may be
+        // an active transaction on this very leader).
+        ReadOnlyKeyValueEntry equalRow = new("v5"u8.ToArray(), 5, HLCTimestamp.Zero, Ts(5_000), Ts(5_000), KeyValueState.Set);
+        h.Handler.Execute(ReconcileOf("acct/n", equalRow));
+        Assert.Equal(5, entry.Revision);
+        Assert.NotNull(entry.WriteIntent);
+
+        // Row behind the entry: same.
+        ReadOnlyKeyValueEntry olderRow = new("v4"u8.ToArray(), 4, HLCTimestamp.Zero, Ts(4_000), Ts(4_000), KeyValueState.Set);
+        h.Handler.Execute(ReconcileOf("acct/n", olderRow));
+        Assert.Equal(5, entry.Revision);
+        Assert.NotNull(entry.WriteIntent);
+
+        // No durable row at all: the entry is the only truth.
+        h.Handler.Execute(ReconcileOf("acct/n", null));
+        Assert.Equal(5, entry.Revision);
+        Assert.NotNull(entry.WriteIntent);
+    }
+
+    [Fact]
+    public void Reconcile_InstallsTheDurableRow_WhenTheKeyIsNotResident()
+    {
+        Harness h = BuildHarness("inv-reconcile-install");
+
+        ReadOnlyKeyValueEntry durableRow = new("v9"u8.ToArray(), 9, HLCTimestamp.Zero, Ts(9_000), Ts(9_000), KeyValueState.Set);
+        h.Handler.Execute(ReconcileOf("acct/m", durableRow));
+
+        Assert.True(h.Store.TryGetValue("acct/m", out KeyValueEntry? resident));
+        Assert.Equal(9, resident!.Revision);
+        Assert.Equal("v9"u8.ToArray(), resident.Value);
+        Assert.Equal(9, resident.FlushedRevision);
+    }
+
+    /// <summary>
+    /// The run-S wedge, end to end: the head-advancing commit's ONE coherence notification arrives while an
+    /// orphan foreign intent is live and is dropped (by design — the defer itself is unchanged); its settle
+    /// advances the fence's committed head; every later read-modify-write validates one behind and is refused.
+    /// The refusal streak must trigger the wedge-repair hook within a handful of refusals — not 157,036 — and
+    /// the reconcile it drives must converge the entry from the node's own durable row so the next attempt
+    /// (validating the re-read, moved base) is acknowledged.
+    /// </summary>
+    [Fact]
+    public void RunSKernel_DroppedNotificationBehindOrphanIntent_HealsViaStreakReconcile()
+    {
+        Harness h = BuildHarness("inv-runs-kernel");
+        PreparedIntentStore intents = new();
+
+        List<string> repairRequests = [];
+        intents.AttachFenceWedgeRepairer(repairRequests.Add);
+
+        // The healed old leader's state: entry at revision 5 with T0's orphan session lock (never expires,
+        // cleanup went to the then-current leader).
+        HLCTimestamp orphan = Ts(500);
+        KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/k", orphan);
+
+        // The onset commit T (revision 6, base 5) elsewhere: its one notification arrives here while the
+        // orphan is live — dropped. Its settle applies — the head reaches 6.
+        HLCTimestamp tx = Ts(1_000);
+        KeyValueResponse? dropped = h.Handler.Execute(
+            MaterializationOf("acct/k", tx, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: false));
+        Assert.Null(dropped);
+        Assert.Equal(5, entry.Revision); // frozen: the notification was deferred behind the orphan intent
+
+        PreparedIntent committed = new(
+            TransactionId: tx, Epoch: 1, Key: "acct/k",
+            ManifestHash: 0, RecordAnchorKey: "acct/k",
+            CommitTimestamp: Ts(6_000),
+            State: KeyValueState.Set, Value: "v6"u8.ToArray(), Bucket: null,
+            Revision: 6, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 5, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending);
+
+        intents.Apply(new PrepareIntentCommand(committed));
+        intents.Apply(new ResolveIntentCommand(tx, 1, "acct/k", Commit: true));
+        intents.Apply(new RemoveIntentCommand(tx, 1, "acct/k"));
+
+        // The storm: each client attempt reads the frozen entry (5), validates base 5, is refused (head 6),
+        // and its abort resolution rolls the installed intent back — then the next attempt repeats. The
+        // repair hook must fire within the streak threshold.
+        int attempts = 0;
+        while (repairRequests.Count == 0 && attempts < 10)
+        {
+            attempts++;
+            PreparedIntent staleAttempt = committed with { TransactionId = Ts(2_000 + attempts), CommitTimestamp = Ts(7_000 + attempts) };
+            PreparedIntentApplyResult refused = intents.Apply(new PrepareIntentCommand(staleAttempt));
+            Assert.True(refused.StaleBase, $"attempt {attempts} validated the frozen base and must be refused");
+            intents.Apply(new ResolveIntentCommand(staleAttempt.TransactionId, 1, "acct/k", Commit: false));
+            intents.Apply(new RemoveIntentCommand(staleAttempt.TransactionId, 1, "acct/k"));
+        }
+
+        Assert.Single(repairRequests);
+        Assert.Equal("acct/k", repairRequests[0]);
+        Assert.True(attempts <= 6, $"the repair must trigger within a handful of refusals, took {attempts}");
+
+        // The repair's reconcile: the node's own durable row has revision 6 (the replicator recorded and
+        // flushed it before the notification was dropped). Adopting it clears the orphan and converges.
+        ReadOnlyKeyValueEntry durableRow = new("v6"u8.ToArray(), 6, HLCTimestamp.Zero, Ts(6_000), Ts(6_000), KeyValueState.Set);
+        h.Handler.Execute(ReconcileOf("acct/k", durableRow));
+
+        Assert.Equal(6, entry.Revision);
+        Assert.Equal("v6"u8.ToArray(), entry.Value);
+        Assert.Null(entry.WriteIntent);
+
+        // The client's next attempt re-reads the converged entry and passes the fence.
+        PreparedIntent freshAttempt = committed with
+        {
+            TransactionId = Ts(9_000), CommitTimestamp = Ts(9_100),
+            Revision = 7, BaseRevision = 6
+        };
+        PreparedIntentApplyResult acknowledged = intents.Apply(new PrepareIntentCommand(freshAttempt));
+        Assert.Equal(TransactionApplyOutcome.Applied, acknowledged.Outcome);
+        Assert.False(acknowledged.StaleBase, "after the reconcile the re-read base must be acknowledged");
+    }
+
     [Fact]
     public void CommittedSettleObserver_FiresOnCommit_NotOnAbort()
     {

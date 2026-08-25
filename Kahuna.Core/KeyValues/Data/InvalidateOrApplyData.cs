@@ -39,5 +39,12 @@ internal sealed record InvalidateOrApplyData(
     // request batches). Without hydration the handler answers a non-resident apply MustRetry and the sender
     // re-asks with the read's result.
     bool BackendHydrated = false,
-    ReadOnlyKeyValueEntry? HydratedEntry = null
+    ReadOnlyKeyValueEntry? HydratedEntry = null,
+    // When true this is a coherence RECONCILE: <see cref="HydratedEntry"/> carries the node's own durable row
+    // (read off the actor), and the entry adopts it when it is strictly newer — clearing a blocking write
+    // intent, whose owner provably cannot commit against a base the durable history already moved past. The
+    // ordinary coherence notification is single-shot: any defer (a live foreign intent at the moment the one
+    // notification passes by) discards the only convergence signal forever, freezing the resident entry behind
+    // the node's own durable state. The reconcile is the retryable convergence that repairs exactly that.
+    bool Reconcile = false
 );

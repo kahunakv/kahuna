@@ -150,7 +150,8 @@ internal static class KeyValueRequestPool
         bool isRollback,
         bool returnToPoolOnReceive = false,
         bool backendHydrated = false,
-        ReadOnlyKeyValueEntry? hydratedEntry = null)
+        ReadOnlyKeyValueEntry? hydratedEntry = null,
+        bool reconcile = false)
     {
         KeyValueRequest request = Rent(
             KeyValueRequestType.InvalidateOrApply,
@@ -172,7 +173,7 @@ internal static class KeyValueRequestPool
         request.InvalidateOrApplyData = new(
             revision, value, expires, lastUsed, lastModified, state,
             forceResident, transactionId, partitionId, noRevision, isRollback,
-            backendHydrated, hydratedEntry);
+            backendHydrated, hydratedEntry, reconcile);
 
         request.ReturnToPoolOnReceive = returnToPoolOnReceive;
 

@@ -240,6 +240,59 @@ internal sealed class KeyValueReplicator
     }
 
     /// <summary>
+    /// Detached coherence reconcile for a key whose resident entry stopped converging with this node's own
+    /// durable state — detected as a fence-refusal streak at a frozen (validated base, committed head) pair.
+    /// Reads the durable row off the actor (backend or unflushed overlay; the value is durable here even when
+    /// the actor dropped its one coherence notification) and hands it to the owning actor as a reconcile
+    /// message, which adopts it when strictly newer and clears the blocking write intent. Fire-and-forget:
+    /// the caller sits on the replicated prepare-apply path and must not block; a missed reconcile re-arms on
+    /// the continuing refusal streak.
+    /// </summary>
+    public void ScheduleCoherenceReconcile(int partitionId, string key)
+    {
+        Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
+        if (hydrate is null)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                KeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
+                if (row is null)
+                    return;
+
+                persistentRouter.Send(
+                    KeyValueRequestPool.RentInvalidateOrApply(
+                        key,
+                        row.Revision,
+                        row.Value,
+                        row.Expires,
+                        row.LastModified,
+                        row.LastModified,
+                        row.State,
+                        forceResident: false,
+                        transactionId: HLCTimestamp.Zero,
+                        partitionId: partitionId,
+                        noRevision: false,
+                        isRollback: false,
+                        returnToPoolOnReceive: true,
+                        backendHydrated: true,
+                        hydratedEntry: new ReadOnlyKeyValueEntry(row.Value, row.Revision, row.Expires, row.LastUsed, row.LastModified, row.State),
+                        reconcile: true
+                    )
+                );
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Coherence reconcile for key {Key} failed; the refusal streak re-arms it",
+                    key);
+            }
+        });
+    }
+
+    /// <summary>
     /// Detached convergence repair for a committed durable intent whose materialization never applied on this
     /// node. The caller sits on the replicated settle-apply path and must not block, so the repair runs the
     /// full <see cref="ApplyDurableCommit"/> flow (including its off-actor hydration read) on a background

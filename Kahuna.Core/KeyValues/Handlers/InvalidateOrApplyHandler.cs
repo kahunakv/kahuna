@@ -31,6 +31,12 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
     {
         InvalidateOrApplyData data = message.InvalidateOrApplyData!;
 
+        // Coherence reconcile: converge the resident entry with the node's own durable row (read off-actor by
+        // the sender), clearing a blocking write intent. The retryable repair for a dropped single-shot
+        // coherence notification; see ApplyCoherenceReconcile.
+        if (data.Reconcile)
+            return ApplyCoherenceReconcile(message.Key, data);
+
         // Durable-intent resolution apply on the leader. A commit clears the committing transaction's write intent
         // and MVCC snapshot, applies the committed value, and persists it (inserting the entry when not resident).
         // An abort just clears the transaction's staged write intent and MVCC snapshot so the key is not blocked
@@ -188,6 +194,91 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null);
 
         return new(KeyValueResponseType.Committed);
+    }
+
+    /// <summary>
+    /// Converges the resident entry with the node's own durable row, carried in
+    /// <see cref="InvalidateOrApplyData.HydratedEntry"/> from the sender's off-actor read. The ordinary
+    /// coherence notification is single-shot: when it arrives while a foreign write intent is live — an orphan
+    /// left by a superseded leadership whose cleanup was routed to the then-current leader — the defer discards
+    /// the only signal that would ever advance the entry, and once the entry is frozen every later write is
+    /// refused by the staged-base fence, so no further notification ever comes. The durable state on this node
+    /// is intact throughout (the replicator recorded the value before the notification was dropped), so
+    /// convergence needs no remote party: adopt the row when it is strictly newer than the entry.
+    ///
+    /// <para>Clearing the blocking write intent is safe exactly when the row is strictly newer: a committed
+    /// revision above the entry proves the durable history moved past whatever base that intent's owner staged
+    /// against, so the owner can never commit here — its prepare would be refused by the fence, and its
+    /// force-resident apply degrades to the idempotent no-op guards. A live replication intent (a direct write
+    /// mid-flight on this very actor) defers instead: that path is actively converging the entry itself.</para>
+    /// </summary>
+    private KeyValueResponse? ApplyCoherenceReconcile(string key, InvalidateOrApplyData data)
+    {
+        // Nothing durable to converge to (no persisted row): the entry, whatever its state, is the only truth.
+        if (data.HydratedEntry is null)
+            return null;
+
+        ReadOnlyKeyValueEntry row = data.HydratedEntry;
+        HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
+        {
+            entry = new()
+            {
+                Bucket = GetBucket(key),
+                Value = row.Value,
+                Revision = row.Revision,
+                FlushedRevision = row.Revision,
+                Expires = row.Expires,
+                LastUsed = now,
+                LastModified = row.LastModified,
+                State = row.State
+            };
+
+            context.InsertStoreEntry(key, entry);
+            return null;
+        }
+
+        if (entry.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - now > TimeSpan.Zero)
+                return null;
+            entry.ReplicationIntent = null;
+        }
+
+        bool rowIsNewer = row.Revision > entry.Revision
+            || (row.Revision == entry.Revision && row.LastModified > entry.LastModified);
+
+        if (!rowIsNewer)
+            return null;
+
+        if (entry.WriteIntent is not null)
+        {
+            RemoveMvccEntry(entry, entry.WriteIntent.TransactionId);
+            entry.WriteIntent = null;
+        }
+
+        TrimExpiredMvccEntries(entry, now);
+
+        // The transaction id of the durable row is unknown here; Zero never matches a real transaction in the
+        // force-resident apply's applied-by-actor guard, so a later re-delivery still resolves correctly.
+        ApplyCommittedHead(entry, new KeyValueProposal(
+            row.State == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet,
+            key,
+            row.Value,
+            row.Revision,
+            false,
+            row.Expires,
+            now,
+            row.LastModified,
+            row.State,
+            KeyValueDurability.Persistent), HLCTimestamp.Zero);
+
+        // The adopted row came from the durable read path (backend or the unflushed overlay, whose flush is
+        // already queued independently), matching the cache-miss load's clean-marking semantics.
+        entry.FlushedRevision = row.Revision;
+
+        return null;
     }
 
     /// <summary>
