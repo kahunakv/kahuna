@@ -72,12 +72,17 @@ internal sealed class KeyValueReplicator
     /// <summary>
     /// Applies the transactional commit metadata carried on a committed persistent mutation as a follower
     /// replicates the log record: records a durable completion receipt (so a re-commit that lands here after
-    /// the write intent / MVCC entry are gone answers <c>Committed</c> instead of <c>MustRetry</c>). A
-    /// non-transactional (single-shot) write carries a zero transaction id, which is harmless to record.
+    /// the write intent / MVCC entry are gone answers <c>Committed</c> instead of <c>MustRetry</c>), then
+    /// raises the Receipts resolve ceiling over this entry so the next durable receipt snapshot certifies
+    /// it. A non-transactional (single-shot) write carries a zero transaction id and derives no receipt,
+    /// so it neither records nor touches the Receipts channel.
     /// </summary>
-    private void RecordCompletionReceipt(KeyValueMessage keyValueMessage)
+    private void RecordCompletionReceipt(int partitionId, long logIndex, KeyValueMessage keyValueMessage)
     {
         HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+
+        if (transactionId == HLCTimestamp.Zero)
+            return;
 
         completionReceiptStore.Record(
             transactionId,
@@ -85,6 +90,29 @@ internal sealed class KeyValueReplicator
             keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
             KeyValueDurability.Persistent
         );
+
+        // Record precedes MarkApplied so a snapshot capture that samples the raised ceiling always
+        // finds the receipt already in the store.
+        durabilityTracker?.MarkApplied(partitionId, logIndex, DurabilityChannel.Receipts);
+    }
+
+    /// <summary>
+    /// Registers a committed key-value entry with the durability tracker before its effects are
+    /// enqueued. A transactional entry (non-zero transaction id) registers on Flush AND Receipts:
+    /// its apply produces two durable artifacts — the flushed row and the derived completion
+    /// receipt — and the floor passing the index with only the row durable would lose the receipt
+    /// on a floor-narrowed restart replay (a post-restart re-commit would answer MustRetry instead
+    /// of Committed). A single-shot entry derives no receipt and registers on Flush alone.
+    /// </summary>
+    private void RegisterPendingApply(int partitionId, long logIndex, KeyValueMessage keyValueMessage)
+    {
+        if (durabilityTracker is null)
+            return;
+
+        if (keyValueMessage.TransactionIdNode != 0 || keyValueMessage.TransactionIdPhysical != 0 || keyValueMessage.TransactionIdCounter != 0)
+            durabilityTracker.RegisterPending(partitionId, logIndex, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+        else
+            durabilityTracker.RegisterPending(partitionId, logIndex, DurabilityChannel.Flush);
     }
 
     /// <summary>
@@ -235,10 +263,11 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
                     // Register before enqueueing: the partition's durability floor must not pass
-                    // this entry until its flush lands. Applies arrive in log-id order (leaders
-                    // deliver their own committed proposals through this path too), so the
-                    // registration always precedes any watermark advance over this index.
-                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+                    // this entry until every durable artifact of its apply lands (see
+                    // RegisterPendingApply). Applies arrive in log-id order (leaders deliver their
+                    // own committed proposals through this path too), so the registration always
+                    // precedes any watermark advance over this index.
+                    RegisterPendingApply(partitionId, log.Id, keyValueMessage);
 
                     // Record before enqueueing so a read that misses the actor cache observes this
                     // committed write even before the background flush lands it in the backend.
@@ -280,7 +309,7 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.NoRevision
                     );
 
-                    RecordCompletionReceipt(keyValueMessage);
+                    RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
 
                     // Record the committed write into the local histogram.
                     // Running on every node (leader + followers) so the P0/meta leader — which
@@ -304,7 +333,7 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
-                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+                    RegisterPendingApply(partitionId, log.Id, keyValueMessage);
 
                     unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Deleted, keyValueMessage.NoRevision);
@@ -336,7 +365,7 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.NoRevision
                     );
 
-                    RecordCompletionReceipt(keyValueMessage);
+                    RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
                         writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
@@ -354,7 +383,7 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
-                    durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+                    RegisterPendingApply(partitionId, log.Id, keyValueMessage);
 
                     unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
@@ -386,7 +415,7 @@ internal sealed class KeyValueReplicator
                         keyValueMessage.NoRevision
                     );
 
-                    RecordCompletionReceipt(keyValueMessage);
+                    RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
 
                     if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
                         writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);

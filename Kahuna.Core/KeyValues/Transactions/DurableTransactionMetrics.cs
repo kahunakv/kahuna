@@ -77,6 +77,20 @@ internal static class DurableTransactionMetrics
             description: "Prepare acknowledgements refused because the written key's committed base moved before the prepare applied.");
 
     /// <summary>
+    /// Recovery passes that HELD a due prepared intent instead of resolving it, because its canonical record is
+    /// absent and the intent is older than the record retention horizon — absence can then mean a committed
+    /// record the retention GC reclaimed while this leg's settlement kept failing, and presuming abort would
+    /// discard the only durable copy of a committed value. A sustained nonzero rate means an intent is wedged:
+    /// it cannot resolve without its record, and it blocks writers to its key (single live intent per key).
+    /// Surface it to an operator; the safe manual resolutions are re-materializing the value or an explicit,
+    /// audited discard.
+    /// </summary>
+    internal static readonly Counter<long> RecordlessIntentHolds =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.recordless_intent_holds",
+            description: "Due prepared intents held by recovery because their record is absent past the retention horizon.");
+
+    /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying
     /// [record init + anchor prepare + commit decision], taken when the participant set collapses to the
     /// locally-led anchor partition, no foreign durable intent holds any written key, and read-set

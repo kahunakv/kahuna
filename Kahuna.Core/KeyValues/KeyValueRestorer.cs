@@ -73,10 +73,21 @@ internal sealed class KeyValueRestorer
             HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
             HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
+            // A replayed transactional entry re-derives a completion receipt below, so it must
+            // register on Flush AND Receipts — the floor may not pass it until the flushed row and
+            // a receipt snapshot covering the rebuilt receipt are both durable. A single-shot entry
+            // (zero transaction id) derives no receipt and registers on Flush alone.
+            bool derivesReceipt = keyValueMessage.TransactionIdNode != 0
+                || keyValueMessage.TransactionIdPhysical != 0
+                || keyValueMessage.TransactionIdCounter != 0;
+
             // Register before enqueueing: the partition's durability floor must not pass this
-            // replayed entry until its flush lands. Replay runs in log-id order, so the
+            // replayed entry until its durable artifacts land. Replay runs in log-id order, so the
             // registration always precedes any watermark advance over this index.
-            durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
+            if (derivesReceipt)
+                durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+            else
+                durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
 
             // Record before enqueueing so reads observe the replayed committed write even before the
             // background flush lands it in the backend.
@@ -98,13 +109,20 @@ internal sealed class KeyValueRestorer
             ));
 
             // Rebuild the completion receipt from the replayed committed record so a re-commit after a
-            // cold restart / leader change resolves Committed rather than MustRetry.
-            HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
-            completionReceiptStore.Record(
-                transactionId,
-                keyValueMessage.Key,
-                keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
-                KeyValueDurability.Persistent);
+            // cold restart / leader change resolves Committed rather than MustRetry. Then raise the
+            // Receipts resolve ceiling over this entry — Record precedes MarkApplied so a snapshot
+            // capture that samples the raised ceiling always finds the receipt already in the store.
+            if (derivesReceipt)
+            {
+                HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+                completionReceiptStore.Record(
+                    transactionId,
+                    keyValueMessage.Key,
+                    keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
+                    KeyValueDurability.Persistent);
+
+                durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.Receipts);
+            }
 
             return true;
         }

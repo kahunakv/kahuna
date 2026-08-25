@@ -44,15 +44,22 @@ internal enum DurabilityChannel : byte
 /// artifact lands: individually when the background flush batch carrying it succeeds
 /// (<see cref="DurabilityChannel.Flush"/>), or collectively up to the highest applied index when
 /// the owning store's partition snapshot persists (the snapshot channels). Entries whose apply is
-/// synchronously durable register and resolve in one step (<see cref="RegisterDurable"/>).
+/// synchronously durable register and resolve in one step (<see cref="RegisterDurable"/>). An
+/// entry whose apply produces more than one durable artifact registers on every channel that owns
+/// one — a transactional key-value entry needs its flushed row AND the receipt snapshot that
+/// covers its derived completion receipt — and stays pending until each channel resolves it.
 /// </para>
 /// </summary>
 internal sealed class PartitionDurabilityTracker
 {
     private sealed class PartitionState
     {
-        /// <summary>Unresolved delivered indexes, mapped to their resolution channel.</summary>
-        public readonly SortedDictionary<long, DurabilityChannel> Pending = [];
+        /// <summary>Unresolved delivered indexes, mapped to a bitmask of the channels that must
+        /// each resolve before the index counts as durable (bit i = channel i). Most entries carry
+        /// one bit; a transactional key-value entry carries Flush + Receipts, because its apply
+        /// produces two durable artifacts — the flushed row and the derived completion receipt —
+        /// and the floor must not pass the index until both have landed.</summary>
+        public readonly SortedDictionary<long, byte> Pending = [];
 
         /// <summary>Highest index ever registered (pending or durable).</summary>
         public long HighestRegistered = -1;
@@ -70,12 +77,28 @@ internal sealed class PartitionDurabilityTracker
 
     private readonly ConcurrentDictionary<int, PartitionState> partitions = new();
 
+    private static byte Mask(DurabilityChannel channel) => (byte)(1 << (int)channel);
+
+    private static readonly byte FlushMask = Mask(DurabilityChannel.Flush);
+
     /// <summary>
     /// Registers a delivered entry as pending on its resolution channel. Idempotent by index: an
     /// index at or below the highest registration is left as is (redelivery of an entry already
     /// tracked or already certified durable).
     /// </summary>
-    public void RegisterPending(int partitionId, long logIndex, DurabilityChannel channel)
+    public void RegisterPending(int partitionId, long logIndex, DurabilityChannel channel) =>
+        RegisterPendingMask(partitionId, logIndex, Mask(channel));
+
+    /// <summary>
+    /// Registers a delivered entry that must resolve on <b>two</b> channels before the floor may
+    /// pass it — a transactional key-value entry, whose apply persists through the background
+    /// flush AND derives a completion receipt that is durable only when the receipt store's
+    /// partition snapshot lands. Resolving one channel keeps the index pending on the other.
+    /// </summary>
+    public void RegisterPending(int partitionId, long logIndex, DurabilityChannel first, DurabilityChannel second) =>
+        RegisterPendingMask(partitionId, logIndex, (byte)(Mask(first) | Mask(second)));
+
+    private void RegisterPendingMask(int partitionId, long logIndex, byte channels)
     {
         if (logIndex < 0)
             return;
@@ -94,7 +117,7 @@ internal sealed class PartitionDurabilityTracker
                 if (state.HighestRegistered >= logIndex)
                     return;
 
-                state.Pending[logIndex] = channel;
+                state.Pending[logIndex] = channels;
                 state.HighestRegistered = logIndex;
                 return;
             }
@@ -166,6 +189,8 @@ internal sealed class PartitionDurabilityTracker
     }
 
     /// <summary>Resolves one flush-channel index: its durable artifact (the flushed row) landed.
+    /// Clears only the Flush requirement — an index also registered on a snapshot channel (a
+    /// transactional key-value entry awaiting its receipt snapshot) stays pending on that channel.
     /// Never creates tracking state — a flush ack that lands after the partition was forgotten
     /// (this node stopped hosting it) must not resurrect an empty entry.</summary>
     public void Resolve(int partitionId, long logIndex)
@@ -174,7 +199,17 @@ internal sealed class PartitionDurabilityTracker
             return;
 
         lock (state)
-            state.Pending.Remove(logIndex);
+        {
+            if (!state.Pending.TryGetValue(logIndex, out byte channels))
+                return;
+
+            channels &= unchecked((byte)~FlushMask);
+
+            if (channels == 0)
+                state.Pending.Remove(logIndex);
+            else
+                state.Pending[logIndex] = channels;
+        }
     }
 
     /// <summary>
@@ -190,22 +225,36 @@ internal sealed class PartitionDurabilityTracker
         if (!partitions.TryGetValue(partitionId, out PartitionState? state))
             return;
 
+        byte channelMask = Mask(channel);
+
         lock (state)
         {
             List<long>? resolved = null;
+            List<(long Index, byte Remaining)>? narrowed = null;
 
-            foreach (KeyValuePair<long, DurabilityChannel> kv in state.Pending)
+            foreach (KeyValuePair<long, byte> kv in state.Pending)
             {
                 if (kv.Key > upToLogIndex)
                     break;
 
-                if (kv.Value == channel)
+                if ((kv.Value & channelMask) == 0)
+                    continue;
+
+                byte remaining = (byte)(kv.Value & ~channelMask);
+
+                if (remaining == 0)
                     (resolved ??= []).Add(kv.Key);
+                else
+                    (narrowed ??= []).Add((kv.Key, remaining));
             }
 
             if (resolved is not null)
                 foreach (long index in resolved)
                     state.Pending.Remove(index);
+
+            if (narrowed is not null)
+                foreach ((long index, byte remaining) in narrowed)
+                    state.Pending[index] = remaining;
         }
     }
 
@@ -220,8 +269,8 @@ internal sealed class PartitionDurabilityTracker
 
         lock (state)
         {
-            foreach (KeyValuePair<long, DurabilityChannel> kv in state.Pending)
-                if (kv.Value != DurabilityChannel.Flush)
+            foreach (KeyValuePair<long, byte> kv in state.Pending)
+                if ((kv.Value & ~FlushMask) != 0)
                     return true;
 
             return false;
@@ -239,7 +288,7 @@ internal sealed class PartitionDurabilityTracker
 
         lock (state)
         {
-            foreach (KeyValuePair<long, DurabilityChannel> kv in state.Pending)
+            foreach (KeyValuePair<long, byte> kv in state.Pending)
                 return kv.Key - 1;
 
             return state.HighestRegistered;

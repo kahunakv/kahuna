@@ -236,4 +236,72 @@ public sealed class TestDurableTransactionRecovery
         Assert.Equal(0, resolved);
         Assert.Equal(PreparedIntentResolution.Pending, store.Get("acct/1")!.Resolution);
     }
+
+    // -----------------------------------------------------------------------
+    // Committed-leg survival across record retention
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// A committed transaction's unmaterialized leg must survive the loss of its canonical record. The
+    /// interleaving is reachable through retention GC: leg A materializes and settles at commit time; leg B's
+    /// deferred resolution fails transiently (a frozen peer), leaving a PENDING intent whose materialization
+    /// never ran; the retention window elapses and the anchor leader purges the terminal record — its
+    /// completion-receipt release stage cannot block on leg B, because receipts are recorded at
+    /// materialization and leg B never materialized, and its local-settlement guard cannot see an intent held
+    /// on a partition this node does not replicate. Recovery then finds a due pending intent with NO record.
+    ///
+    /// Absence of a record after retention is NOT evidence of an abort: the transaction committed, the client
+    /// was told Committed, and this intent is the only durable copy of the committed value. Driving the
+    /// presumed-abort protocol here creates an abort tombstone over a committed transaction's history and
+    /// discards the value forever — observed downstream as a transfer with one leg missing (a durable
+    /// SUM(balance) deficit in the bank soak). The sweep must leave such an intent alone (or materialize it),
+    /// never resolve it to abort.
+    /// </summary>
+    [Fact]
+    public async Task CommittedButUnmaterializedLeg_RecordPurgedByRetention_IsNeverResolvedToAbort()
+    {
+        HLCTimestamp txId = Ts(1000);
+        const string legKey = "acct/credit-leg";
+
+        PreparedIntentStore store = StoreWith(PendingIntent(legKey, recoveryDeadline: Ts(5000)));
+
+        // The real record store, driven through the same transitions production applies: the transaction
+        // initializes, COMMITS, and later its terminal record is purged by the retention GC's own command.
+        TransactionRecordStore records = new();
+        records.Apply(new InitializeTransactionCommand(
+            txId, 1, "coord", Anchor, CommitTimestamp: Ts(1100), DecisionDeadline: Ts(9000),
+            ManifestHash, [], OpId: Ts(1200), CreatedAt: Ts(1000)));
+        records.Apply(new CommitTransactionCommand(txId, 1, ManifestHash, OpId: Ts(1200), AttemptHlc: Ts(1500)));
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+
+        records.Apply(new PurgeTransactionCommand(txId, 1));
+        Assert.Null(records.Get(txId, 1)); // retention reclaimed the committed record
+
+        Seam seam = new();
+        seam.Store = store;
+
+        // Lookup and abort-drive mirror the production wiring: the lookup reads the (now purged) record store,
+        // and the drive applies the presumed-abort through the record state machine — which can mint a
+        // tombstone from absence — then reads back the winner.
+        DurableTransactionRecovery recovery = new(
+            store,
+            seam.Replicate,
+            (transactionId, epoch, _, _) => Task.FromResult(records.Get(transactionId, epoch)),
+            (abort, _, _) =>
+            {
+                records.Apply(abort);
+                return Task.FromResult(records.Get(abort.TransactionId, abort.Epoch));
+            });
+
+        await recovery.SweepAsync(PartitionId, now: Ts(1_000_000), CancellationToken.None);
+
+        // The committed value must still exist somewhere durable: either the sweep materialized it (a
+        // key/value record was replicated), or the intent is still held for a later, better-informed pass.
+        // If neither is true, the committed leg was silently discarded — a durable lost write.
+        bool materialized = seam.Calls.Any(c => c.Type == ReplicationTypes.KeyValues);
+        bool intentStillHeld = store.Get(legKey) is { Resolution: not PreparedIntentResolution.Aborted };
+
+        Assert.True(materialized || intentStillHeld,
+            "a committed transaction's unmaterialized leg was resolved to abort after its record aged out of retention — the committed value is lost");
+    }
 }

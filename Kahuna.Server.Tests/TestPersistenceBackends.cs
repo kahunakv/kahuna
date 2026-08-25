@@ -532,6 +532,44 @@ public class TestPersistenceBackends
         return dir;
     }
 
+    /// <summary>
+    /// The persisted durability floor is monotonic (parity with the SQLite backend's MAX()
+    /// upsert): after a restart the background writer's advanced-only filter resets, so its first
+    /// write can carry a floor below the persisted one — the backend must keep the higher value.
+    /// The floor must also survive a close/reopen and read back per partition.
+    /// </summary>
+    [Fact]
+    public void TestRocksDbDurabilityFloorIsMonotonicAndDurable()
+    {
+        string path = RocksDbTempPath();
+
+        using (RocksDbPersistenceBackend backend = new(path, "v1"))
+        {
+            Assert.Equal(-1, backend.GetDurabilityFloor(2));
+
+            Assert.True(backend.StoreDurabilityFloors([(2, 42), (3, 7)]));
+            Assert.Equal(42, backend.GetDurabilityFloor(2));
+            Assert.Equal(7, backend.GetDurabilityFloor(3));
+
+            // A lower floor never regresses the persisted value; a higher one advances it.
+            Assert.True(backend.StoreDurabilityFloors([(2, 10)]));
+            Assert.Equal(42, backend.GetDurabilityFloor(2));
+
+            Assert.True(backend.StoreDurabilityFloors([(2, 50)]));
+            Assert.Equal(50, backend.GetDurabilityFloor(2));
+        }
+
+        using (RocksDbPersistenceBackend reopened = new(path, "v1"))
+        {
+            Assert.Equal(50, reopened.GetDurabilityFloor(2));
+            Assert.Equal(7, reopened.GetDurabilityFloor(3));
+
+            Assert.True(reopened.RemoveDurabilityFloor(2));
+            Assert.Equal(-1, reopened.GetDurabilityFloor(2));
+            Assert.Equal(7, reopened.GetDurabilityFloor(3));
+        }
+    }
+
     [Fact]
     public void TestRocksDbGetByRangeReturnsAllInPrefix()
     {

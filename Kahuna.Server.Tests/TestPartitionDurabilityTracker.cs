@@ -155,4 +155,82 @@ public sealed class TestPartitionDurabilityTracker
 
         Assert.Equal(10, tracker.GetWatermark(1));
     }
+
+    // ── Two-channel entries (transactional key-values: flushed row + derived receipt) ─────
+
+    /// <summary>
+    /// A transactional key-value entry registers on Flush AND Receipts. The flush ack alone must
+    /// not let the floor pass it — its derived completion receipt is durable only when a receipt
+    /// snapshot covers it. Both orders of resolution finish the entry.
+    /// </summary>
+    [Fact]
+    public void TwoChannelEntry_FlushAloneDoesNotAdvanceWatermark()
+    {
+        PartitionDurabilityTracker tracker = new();
+
+        tracker.RegisterPending(1, 10, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+        tracker.MarkApplied(1, 10, DurabilityChannel.Receipts);
+
+        tracker.Resolve(1, 10);
+
+        // The flushed row landed, but the receipt snapshot has not: still pending.
+        Assert.Equal(9, tracker.GetWatermark(1));
+        Assert.True(tracker.HasPendingSnapshotWork(1));
+
+        tracker.ResolveUpTo(1, DurabilityChannel.Receipts, 10);
+
+        Assert.Equal(10, tracker.GetWatermark(1));
+        Assert.False(tracker.HasPendingSnapshotWork(1));
+    }
+
+    [Fact]
+    public void TwoChannelEntry_ReceiptSnapshotAloneDoesNotAdvanceWatermark()
+    {
+        PartitionDurabilityTracker tracker = new();
+
+        tracker.RegisterPending(1, 10, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+        tracker.MarkApplied(1, 10, DurabilityChannel.Receipts);
+
+        tracker.ResolveUpTo(1, DurabilityChannel.Receipts, 10);
+
+        // The receipt snapshot landed, but the row flush has not: still pending, and the
+        // remaining requirement is the flush, so no snapshot work is outstanding.
+        Assert.Equal(9, tracker.GetWatermark(1));
+        Assert.False(tracker.HasPendingSnapshotWork(1));
+
+        tracker.Resolve(1, 10);
+
+        Assert.Equal(10, tracker.GetWatermark(1));
+    }
+
+    /// <summary>
+    /// A receipt snapshot ceiling below a two-channel entry must leave its Receipts requirement
+    /// pending, and a flush resolve of a neighboring single-channel entry must not disturb it.
+    /// </summary>
+    [Fact]
+    public void TwoChannelEntry_AboveSnapshotCeiling_StaysPendingOnReceipts()
+    {
+        PartitionDurabilityTracker tracker = new();
+
+        tracker.RegisterPending(1, 10, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+        tracker.MarkApplied(1, 10, DurabilityChannel.Receipts);
+        tracker.RegisterPending(1, 11, DurabilityChannel.Flush);
+        tracker.RegisterPending(1, 12, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+        tracker.MarkApplied(1, 12, DurabilityChannel.Receipts);
+
+        tracker.Resolve(1, 10);
+        tracker.Resolve(1, 11);
+        tracker.Resolve(1, 12);
+
+        // Snapshot captured with a ceiling of 10: entry 12's receipt is not covered.
+        tracker.ResolveUpTo(1, DurabilityChannel.Receipts, 10);
+
+        Assert.Equal(11, tracker.GetWatermark(1));
+        Assert.True(tracker.HasPendingSnapshotWork(1));
+
+        tracker.ResolveUpTo(1, DurabilityChannel.Receipts, 12);
+
+        Assert.Equal(12, tracker.GetWatermark(1));
+        Assert.False(tracker.HasPendingSnapshotWork(1));
+    }
 }

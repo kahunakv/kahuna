@@ -216,6 +216,14 @@ internal sealed class DurableMaintenanceService
 
         // Transactions whose local prepared intents have not settled yet: their settlement is still in flight, so
         // do not GC their record even if the (generous) retention window has nominally elapsed.
+        //
+        // This guard is NODE-LOCAL: an unsettled leg on a partition this node does not replicate is invisible
+        // here, and a completion receipt cannot stand in for it (receipts are recorded at materialization, and
+        // an unmaterialized committed leg has none). A record purged past such a leg strands it without its
+        // authority — which is why the recovery sweep refuses to presume abort for a recordless intent older
+        // than the retention horizon and holds it instead (see DurableTransactionRecovery). A cluster-wide
+        // settlement acknowledgment on the record would let the purge wait for proof instead; until then the
+        // hold is the backstop.
         HashSet<(HLCTimestamp, long)> settlementPending = [];
         foreach (PreparedIntent intent in preparedIntentStore.Snapshot())
             settlementPending.Add((intent.TransactionId, intent.Epoch));
@@ -509,7 +517,12 @@ internal sealed class DurableMaintenanceService
         // Apply the recovered committed value to the leader's own KV state. Materialization replication converges
         // followers and makes the value durable, but the leader materializes into its in-memory MVCC through this
         // dedicated apply path — without it a recovered commit is invisible on the recovering leader until restart.
-        (partitionId, intent) => ApplyDurableCommit(partitionId, intent, CancellationToken.None));
+        (partitionId, intent) => ApplyDurableCommit(partitionId, intent, CancellationToken.None),
+        // The record retention horizon bounds when record absence can still be read as "never initialized":
+        // past it, the absent record may be a reclaimed commit and the sweep holds the intent instead of
+        // presuming abort — the guard against discarding a committed leg whose settlement kept failing.
+        runtime.Configuration.TransactionOutcomeRetentionTtl,
+        logger);
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {

@@ -3,6 +3,7 @@ using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kommander.Data;
 using Kommander.Time;
+using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
@@ -15,6 +16,16 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// presumed-abort at the anchor and then resolves the intent to whatever the canonical record actually became
 /// (a concurrent in-flight commit can still win the race). It never guesses an outcome and never resolves an
 /// intent whose record is undecided but still within its deadline.
+///
+/// <para>Record absence is treated as an orphan only while the intent is younger than the record retention
+/// horizon. Past that age the absent record may equally be a COMMITTED record the retention GC reclaimed while
+/// this leg's settlement was still failing (the GC's settlement guard sees only intents this node holds, and a
+/// completion receipt exists only once a leg materializes — an unmaterialized committed leg blocks neither), so
+/// presuming abort would mint a tombstone over a committed transaction's history and discard the only durable
+/// copy of its value: a silent lost write, observed downstream as a transfer with one leg missing. Such an
+/// intent is held (and surfaced through <see cref="DurableTransactionMetrics.RecordlessIntentHolds"/>) instead
+/// of resolved; a failed-init orphan cannot ordinarily reach that age, because the sweep aborts it within its
+/// decision deadline — far inside the retention window.</para>
 /// </summary>
 internal sealed class DurableTransactionRecovery
 {
@@ -35,18 +46,31 @@ internal sealed class DurableTransactionRecovery
 
     private readonly DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally;
 
+    // The record retention horizon (ms). An absent record for an intent older than this is ambiguous — orphan
+    // or reclaimed-after-commit — and must not be presumed aborted. Matches the retention GC's TTL.
+    private readonly long recordRetentionMs;
+
+    private readonly ILogger<IKahuna>? logger;
+
     public DurableTransactionRecovery(
         PreparedIntentStore intentStore,
         DurableTransactionFinalizer.ReplicateDelegate replicate,
         LookupRecordDelegate lookupRecord,
         DriveAbortDelegate driveAbort,
-        DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally = null)
+        DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally = null,
+        TimeSpan? recordRetentionTtl = null,
+        ILogger<IKahuna>? logger = null)
     {
         this.intentStore = intentStore;
         this.replicate = replicate;
         this.lookupRecord = lookupRecord;
         this.driveAbort = driveAbort;
         this.applyCommitLocally = applyCommitLocally;
+        this.logger = logger;
+
+        // Default mirrors KahunaConfiguration.TransactionOutcomeRetentionTtl; a non-positive TTL means age-based
+        // record GC is disabled, so absence can never mean reclaimed-after-commit and no hold is needed.
+        recordRetentionMs = (long)(recordRetentionTtl ?? TimeSpan.FromMinutes(5)).TotalMilliseconds;
     }
 
     /// <summary>Resolves every eligible unresolved intent on <paramref name="partitionId"/> and returns how many
@@ -235,6 +259,24 @@ internal sealed class DurableTransactionRecovery
             case TransactionDecision.Undecided when now <= record.DecisionDeadline:
                 // The coordinator may still be finalizing; do not presume-abort inside the window.
                 return null;
+        }
+
+        // No record at all, and the intent is old enough that the retention GC could already have reclaimed a
+        // TERMINAL record for this transaction: absence no longer distinguishes "never initialized" from
+        // "committed, then aged out while this leg's settlement kept failing". Presuming abort on the latter
+        // discards the only durable copy of a committed value (a silent lost write), so the intent is held for
+        // a later pass — and surfaced loudly, because it can no longer resolve without the record. A genuine
+        // failed-init orphan cannot ordinarily reach this age: the sweep aborts it within its decision
+        // deadline, far inside the retention window.
+        if (record is null && recordRetentionMs > 0 && now.L - intent.CommitTimestamp.L > recordRetentionMs)
+        {
+            DurableTransactionMetrics.RecordlessIntentHolds.Add(1);
+
+            logger?.LogError(
+                "Prepared intent for key {Key} of transaction {TransactionId} has no canonical record and is older than the record retention horizon; holding it instead of presuming abort — the record may have been a reclaimed commit",
+                intent.Key, intent.TransactionId);
+
+            return null;
         }
 
         // Undecided past its deadline, or no record at all (orphan prepare): drive a presumed abort and take the
