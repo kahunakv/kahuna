@@ -369,7 +369,12 @@ internal sealed class KeyValuesManagerBuilder
             try
             {
                 if (!KeyValueReplicator.LocalMaterializationMissing(observedOverlay, intent))
+                {
+                    // A locally-proven settle supersedes any older parked repair for the key, which would
+                    // otherwise retain its value bytes for the process lifetime.
+                    repairReplicator.DiscardPendingCommitRepair(intent.Key, intent.Revision);
                     return;
+                }
 
                 Transactions.DurableTransactionMetrics.MaterializationRepairs.Add(1);
                 repairLogger.LogWarning(
@@ -397,7 +402,15 @@ internal sealed class KeyValuesManagerBuilder
             try
             {
                 Transactions.DurableTransactionMetrics.CoherenceReconciles.Add(1);
-                repairReplicator.ScheduleCoherenceReconcile(repairLocator.LocateRange(key).PartitionId, key, committedHead);
+                int wedgedPartition = repairLocator.LocateRange(key).PartitionId;
+
+                // A parked commit repair carries the head commit's full mutation — the Raft-delivered copy
+                // captured at settle time, and the only thing that can heal a node whose local durable state
+                // is missing the head commit. Re-drive it first; the local-hydration reconcile below covers
+                // the other wedge shape (resident entry frozen behind current local durable state) and
+                // no-ops when the re-drive already converged the key.
+                repairReplicator.RetryPendingCommitRepair(wedgedPartition, key);
+                repairReplicator.ScheduleCoherenceReconcile(wedgedPartition, key, committedHead);
             }
             catch (Exception ex)
             {

@@ -574,6 +574,44 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     }
 
     [Fact]
+    public void PendingCommitRepairRegistry_StaysArmedUntilConfirmed()
+    {
+        // Registry semantics only: the drive itself fails immediately against the null router and must leave
+        // the parked mutation armed — the property run U lacked (a one-shot repair lost in the pause window
+        // left the key read-only to run end).
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance);
+
+        PreparedIntent MakeParked(long revision) => new(
+            TransactionId: Ts(1_000 + revision), Epoch: 1, Key: "park/k",
+            ManifestHash: 0, RecordAnchorKey: "park/k",
+            CommitTimestamp: Ts(2_000 + revision),
+            State: KeyValueState.Set, Value: [(byte)revision], Bucket: null,
+            Revision: revision, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: revision - 1, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending);
+
+        // Parked before the drive, so even an instantly-failing drive leaves the mutation armed.
+        replicator.ScheduleDurableCommitRepair(1, MakeParked(6));
+        Assert.Equal(6, replicator.TryGetPendingCommitRepair("park/k")?.Revision);
+
+        // An older arrival never downgrades the parked mutation; a newer one supersedes it.
+        replicator.ScheduleDurableCommitRepair(1, MakeParked(5));
+        Assert.Equal(6, replicator.TryGetPendingCommitRepair("park/k")?.Revision);
+        replicator.ScheduleDurableCommitRepair(1, MakeParked(7));
+        Assert.Equal(7, replicator.TryGetPendingCommitRepair("park/k")?.Revision);
+
+        // A proven settle at a lower revision discards nothing; at or above, it releases the parked bytes.
+        replicator.DiscardPendingCommitRepair("park/k", upToRevision: 6);
+        Assert.Equal(7, replicator.TryGetPendingCommitRepair("park/k")?.Revision);
+        replicator.DiscardPendingCommitRepair("park/k", upToRevision: 7);
+        Assert.Null(replicator.TryGetPendingCommitRepair("park/k"));
+
+        // With nothing armed, the streak hook's re-drive reports so and falls through to the reconcile.
+        Assert.False(replicator.RetryPendingCommitRepair(1, "park/k"));
+    }
+
+    [Fact]
     public void CommittedSettleObserver_FiresOnCommit_NotOnAbort()
     {
         PreparedIntentStore intents = new();

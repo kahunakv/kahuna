@@ -1,4 +1,5 @@
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Nixie;
 
@@ -325,24 +326,129 @@ internal sealed class KeyValueReplicator
     /// node. The caller sits on the replicated settle-apply path and must not block, so the repair runs the
     /// full <see cref="ApplyDurableCommit"/> flow (including its off-actor hydration read) on a background
     /// task. The apply is idempotent (head guards turn a re-apply into a no-op), so a spurious repair is
-    /// harmless; an unconfirmed one is logged and left to the recovery sweep, which remains the backstop.
+    /// harmless.
+    ///
+    /// <para>The repair is armed-until-confirmed, never one-shot: the intent — the Raft-delivered copy of the
+    /// committed mutation, and the only copy this node holds once the settle removed it from the intent store
+    /// (the recovery sweep only sees LIVE intents, so no sweep ever backstops a settled one) — is PARKED
+    /// before the first drive. The drive itself retries on a short backoff ladder to ride out the disturbed
+    /// window that typically caused the miss (a peer pause backing up the read scheduler, actor churn); if it
+    /// still cannot confirm, the parked mutation stays armed and the fence's refusal-streak hook re-drives it
+    /// (<see cref="RetryPendingCommitRepair"/>) for as long as the key keeps refusing. Without this, a repair
+    /// lost in the same pause window that caused the skip left the key read-only to run end.</para>
     /// </summary>
     public void ScheduleDurableCommitRepair(int partitionId, PreparedIntent intent)
     {
+        ParkCommitRepair(intent);
+        DriveCommitRepairDetached(partitionId, intent);
+    }
+
+    /// <summary>
+    /// Re-drives a parked commit repair for <paramref name="key"/>, if one is armed — invoked by the fence's
+    /// refusal-streak hook, so a repair that failed its initial drives keeps being retried for as long as the
+    /// wedge it would heal keeps refusing writes. Returns whether a parked mutation existed.
+    /// </summary>
+    public bool RetryPendingCommitRepair(int partitionId, string key)
+    {
+        if (!pendingCommitRepairs.TryGetValue(key, out PreparedIntent? parked))
+            return false;
+
+        DriveCommitRepairDetached(partitionId, parked);
+        return true;
+    }
+
+    /// <summary>
+    /// Drops any parked commit repair for <paramref name="key"/> at or below <paramref name="upToRevision"/>:
+    /// a later settle whose materialization is locally proven (the overlay witness passed) supersedes an older
+    /// parked mutation, which could otherwise retain its value bytes for the process lifetime.
+    /// </summary>
+    public void DiscardPendingCommitRepair(string key, long upToRevision)
+    {
+        if (pendingCommitRepairs.TryGetValue(key, out PreparedIntent? parked) && parked.Revision <= upToRevision)
+            pendingCommitRepairs.TryRemove(new KeyValuePair<string, PreparedIntent>(key, parked));
+    }
+
+    /// <summary>Test observability: the parked repair for <paramref name="key"/>, or null.</summary>
+    internal PreparedIntent? TryGetPendingCommitRepair(string key) =>
+        pendingCommitRepairs.TryGetValue(key, out PreparedIntent? parked) ? parked : null;
+
+    // The armed repairs: one per key, keeping the newest revision. Entries are added only when the settle-time
+    // witness detected a locally missing materialization (rare), removed on a confirmed drive or a superseding
+    // proven settle, and capped as a memory backstop — at the cap, new arrivals are still driven, just not
+    // parked (the refusal streak then has nothing to re-drive, which the drive-failure log records).
+    private readonly ConcurrentDictionary<string, PreparedIntent> pendingCommitRepairs = new(StringComparer.Ordinal);
+
+    private const int MaxPendingCommitRepairs = 4_096;
+
+    // Collapses concurrent drives per key: the streak hook re-fires every few seconds while a drive ladder can
+    // still be mid-backoff; stacking identical idempotent drives is harmless but pointless.
+    private readonly ConcurrentDictionary<string, byte> commitRepairsInFlight = new(StringComparer.Ordinal);
+
+    // Backoff ladder for one drive: rides out the short disturbed window (a peer pause, a backed-up read
+    // scheduler) that typically caused both the original miss and a failed first attempt.
+    private static readonly TimeSpan[] CommitRepairBackoff =
+        [TimeSpan.Zero, TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(15)];
+
+    private void ParkCommitRepair(PreparedIntent intent)
+    {
+        if (pendingCommitRepairs.Count >= MaxPendingCommitRepairs && !pendingCommitRepairs.ContainsKey(intent.Key))
+        {
+            logger.LogWarning(
+                "Pending commit-repair registry is full; the repair for key {Key} of transaction {TransactionId} runs un-parked and cannot be re-driven if it fails",
+                intent.Key, intent.TransactionId);
+            return;
+        }
+
+        pendingCommitRepairs.AddOrUpdate(
+            intent.Key,
+            intent,
+            (_, existing) => existing.Revision > intent.Revision ? existing : intent);
+    }
+
+    private void DriveCommitRepairDetached(int partitionId, PreparedIntent intent)
+    {
+        if (!commitRepairsInFlight.TryAdd(intent.Key, 0))
+            return;
+
         _ = Task.Run(async () =>
         {
             try
             {
-                if (!await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false))
-                    logger.LogWarning(
-                        "Materialization repair for key {Key} of transaction {TransactionId} did not confirm; the recovery sweep remains the backstop",
-                        intent.Key, intent.TransactionId);
+                foreach (TimeSpan delay in CommitRepairBackoff)
+                {
+                    if (delay > TimeSpan.Zero)
+                        await Task.Delay(delay).ConfigureAwait(false);
+
+                    bool confirmed;
+                    try
+                    {
+                        confirmed = await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        confirmed = false;
+                    }
+
+                    if (confirmed)
+                    {
+                        DiscardPendingCommitRepair(intent.Key, intent.Revision);
+                        return;
+                    }
+                }
+
+                logger.LogWarning(
+                    "Materialization repair for key {Key} of transaction {TransactionId} did not confirm after retries; the mutation stays armed and the refusal streak re-drives it",
+                    intent.Key, intent.TransactionId);
             }
             catch (Exception ex)
             {
                 logger.LogWarning(ex,
-                    "Materialization repair for key {Key} of transaction {TransactionId} failed; the recovery sweep remains the backstop",
+                    "Materialization repair for key {Key} of transaction {TransactionId} failed; the mutation stays armed and the refusal streak re-drives it",
                     intent.Key, intent.TransactionId);
+            }
+            finally
+            {
+                commitRepairsInFlight.TryRemove(intent.Key, out _);
             }
         });
     }
