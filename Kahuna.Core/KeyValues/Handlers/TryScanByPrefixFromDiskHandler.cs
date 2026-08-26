@@ -38,10 +38,12 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         HLCTimestamp readTimestamp = message.ReadTimestamp;
 
-        // Stage 2 dispatch: detach the full prefix scan (plus optional per-key snapshot
-        // revision walk) off the actor mailbox.
-        // Non-snapshot requests coalesce: multiple callers for the same prefix share one disk
-        // read. Snapshot requests are not coalesced because their result depends on readTimestamp.
+        // Stage 2 dispatch: detach the full prefix scan (plus the snapshot as-of projection)
+        // off the actor mailbox.
+        // Both shapes coalesce: multiple callers for the same prefix (and, for snapshot scans,
+        // the same read timestamp) share one disk read. Snapshot coalescing matters under retry
+        // storms — a caller that timed out and retries the same snapshot must attach to the
+        // in-flight read instead of enqueueing another full-cost scan behind it.
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext =
             context.ActorContext;
 
@@ -53,12 +55,19 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         // (prefix, -3, includeTombstones) = non-snapshot prefix-from-disk scan. The tombstone flag is
         // part of the coalescing key so a tombstone-carrying scan never shares a continuation (and its
         // filtered result) with a plain scan for the same prefix.
-        // Snapshot scans are not registered in PendingReads (no coalescing).
+        // Snapshot scans coalesce in their own map, keyed additionally by the read timestamp,
+        // because their result depends on it.
         bool isNonSnapshot = readTimestamp.IsNull();
         (string, long, bool)? scanKey = isNonSnapshot ? (message.Key, -3L, message.IncludeTombstones) : null;
+        (string, HLCTimestamp, bool)? snapshotScanKey = isNonSnapshot ? null : (message.Key, readTimestamp, message.IncludeTombstones);
 
-        if (scanKey.HasValue &&
-            context.PendingReads.TryGetValue(scanKey.Value, out ReadContinuation? inflight))
+        ReadContinuation? inflight = null;
+        if (scanKey.HasValue)
+            context.PendingReads.TryGetValue(scanKey.Value, out inflight);
+        else if (snapshotScanKey.HasValue)
+            context.PendingSnapshotPrefixScans.TryGetValue(snapshotScanKey.Value, out inflight);
+
+        if (inflight is not null)
         {
             if (!inflight.AddWaiter(promise))
                 return KeyValueStaticResponses.MustRetryResponse;
@@ -66,12 +75,12 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
-        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise, scanKey, message.IncludeTombstones);
+        PrefixFromDiskScanContinuation cont = new(message.Key, readTimestamp, currentTime, promise, scanKey, snapshotScanKey, message.IncludeTombstones);
         ArmReadDeadline(cont, currentTime);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;
-
-        bool includeTombstones = message.IncludeTombstones;
+        else if (snapshotScanKey.HasValue)
+            context.PendingSnapshotPrefixScans[snapshotScanKey.Value] = cont;
 
         // Copy into a local before capturing: the deadline can resolve the continuation (and
         // complete the caller, which returns the pooled request) before the scheduler runs the
@@ -88,38 +97,35 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
                 ResolvePartition(message.Key),
                 () =>
                 {
-                    List<(string, ReadOnlyKeyValueEntry)> scanned =
-                        context.PersistenceBackend.GetKeyValueByPrefix(prefixKey);
+                    // The scheduler can run this long after the deadline sweep expired the
+                    // continuation and resolved its waiters with MustRetry. Skip the disk work
+                    // then: the result would be dropped by the stage-3 late-completion guard, and
+                    // an abandoned full-prefix scan still costs a full read of the range.
+                    if (cont.Cancelled)
+                    {
+                        KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+                        return new List<(string, ReadOnlyKeyValueEntry)>();
+                    }
 
                     if (readTimestamp.IsNull())
-                        return scanned;
+                        return context.PersistenceBackend.GetKeyValueByPrefix(prefixKey);
 
-                    // Snapshot scan: the prefix scan returns each key's latest committed revision.
-                    // When that revision is newer than the snapshot, walk the persisted revision
-                    // history backwards to the most recent revision at-or-before the snapshot,
-                    // mirroring the in-memory scan path. A key with no retained revision
-                    // at-or-before the snapshot is dropped (it did not exist at that time).
-                    List<(string, ReadOnlyKeyValueEntry)> projected = new(scanned.Count);
+                    // Snapshot scan: resolve every key's as-of image in one backend pass. The
+                    // backend keeps polling the cancellation flag so an expired scan stops
+                    // mid-range instead of running to completion. A key with no committed version
+                    // at-or-before the snapshot is dropped (it did not exist at that time);
+                    // deleted and expired as-of entries are kept — stage 3 applies the tombstone
+                    // and expiry policy for both scan shapes.
+                    List<(string, ReadOnlyKeyValueEntry, ReadOnlyKeyValueEntry?)> asOf =
+                        context.PersistenceBackend.GetKeyValueByPrefixAtOrBefore(
+                            prefixKey, readTimestamp, () => cont.Cancelled);
 
-                    foreach ((string key, ReadOnlyKeyValueEntry entry) in scanned)
+                    List<(string, ReadOnlyKeyValueEntry)> projected = new(asOf.Count);
+
+                    foreach ((string key, _, ReadOnlyKeyValueEntry? snapshot) in asOf)
                     {
-                        if (entry.LastModified.CompareTo(readTimestamp) <= 0)
-                        {
-                            projected.Add((key, entry));
-                            continue;
-                        }
-
-                        KeyValueEntry? snapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
-                            key, entry.Revision - 1, readTimestamp);
-                        if (snapshot is null || snapshot.State is KeyValueState.Undefined)
-                            continue;
-                        if (snapshot.State is KeyValueState.Deleted && !includeTombstones)
-                            continue;
-                        if (snapshot.State is not KeyValueState.Deleted &&
-                            snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires.CompareTo(currentTime) < 0)
-                            continue;
-                        projected.Add((key, new(snapshot.Value, snapshot.Revision,
-                            snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
+                        if (snapshot is not null)
+                            projected.Add((key, snapshot));
                     }
 
                     return projected;
@@ -127,8 +133,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         }
         catch (Exception ex)
         {
-            if (scanKey.HasValue)
-                context.PendingReads.Remove(scanKey.Value);
+            cont.RemovePendingKey(context);
             context.Logger.LogWarning(
                 "KeyValueActor/PrefixFromDiskScan: read scheduler rejected enqueue for prefix {Prefix}: {Ex}",
                 message.Key, ex.Message);

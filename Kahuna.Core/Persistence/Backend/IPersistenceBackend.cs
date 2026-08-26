@@ -88,6 +88,59 @@ internal interface IPersistenceBackend
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
 
+    /// <summary>
+    /// Snapshot prefix scan: returns, per key under <paramref name="prefixKeyName"/>, the current
+    /// head row and the key's as-of image at <paramref name="readTimestamp"/> in one backend
+    /// operation. <c>Snapshot</c> is the current head when the head's <c>LastModified</c> is
+    /// at-or-before the timestamp; otherwise it is the highest retained revision with
+    /// <c>revision &lt; head revision</c> and <c>LastModified ≤ readTimestamp</c>. <c>Snapshot</c>
+    /// is <c>null</c> when the key had no committed version at the timestamp. Deleted and expired
+    /// as-of entries are returned with their state — callers apply tombstone and expiry policy.
+    /// <para>
+    /// The default implementation composes <see cref="GetKeyValueByPrefix"/> with one
+    /// <see cref="GetKeyValueRevisionAtOrBefore"/> call per stale key. Backends that interleave
+    /// revision history with head rows in one physical range (RocksDB) override it with a single
+    /// sequential pass: the per-key composition re-reads that range once per stale key, which
+    /// multiplies disk reads by the revision-chain depth.
+    /// </para>
+    /// <para>
+    /// <paramref name="shouldAbort"/> is polled during the scan; once it returns <c>true</c> the
+    /// backend may stop early and return an incomplete result. Callers pass it only for reads whose
+    /// result is discarded after cancellation (an expired read continuation).
+    /// </para>
+    /// </summary>
+    public List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> GetKeyValueByPrefixAtOrBefore(
+        string prefixKeyName, HLCTimestamp readTimestamp, Func<bool>? shouldAbort = null)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> scanned = GetKeyValueByPrefix(prefixKeyName);
+
+        List<(string, ReadOnlyKeyValueEntry, ReadOnlyKeyValueEntry?)> result = new(scanned.Count);
+
+        foreach ((string key, ReadOnlyKeyValueEntry entry) in scanned)
+        {
+            if (shouldAbort is not null && shouldAbort())
+                break;
+
+            if (entry.LastModified.CompareTo(readTimestamp) <= 0)
+            {
+                result.Add((key, entry, entry));
+                continue;
+            }
+
+            KeyValueEntry? snapshot = GetKeyValueRevisionAtOrBefore(key, entry.Revision - 1, readTimestamp);
+            if (snapshot is null || snapshot.State is KeyValueState.Undefined)
+            {
+                result.Add((key, entry, null));
+                continue;
+            }
+
+            result.Add((key, entry, new(snapshot.Value, snapshot.Revision,
+                snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
+        }
+
+        return result;
+    }
+
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);
 
     /// <summary>

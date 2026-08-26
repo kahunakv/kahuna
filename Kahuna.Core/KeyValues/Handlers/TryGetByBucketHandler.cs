@@ -192,8 +192,29 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             // the partition the same way.
             readTask = context.BackendReadScheduler.EnqueueTask(
                 ResolvePartition(message.Key),
-                () => ProjectBucketPage(context.PersistenceBackend.GetKeyValueByPrefix(bucketKey),
-                    isSnapshotScan, capturedReadTs, currentTime, context.PersistenceBackend));
+                () =>
+                {
+                    // The scheduler can run this long after the deadline sweep expired the
+                    // continuation; skip the disk work then — the stage-3 late-completion guard
+                    // drops the result anyway.
+                    if (cont.Cancelled)
+                    {
+                        KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+                        return (new List<(string, ReadOnlyKeyValueEntry)>(),
+                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null);
+                    }
+
+                    if (!isSnapshotScan)
+                        return (context.PersistenceBackend.GetKeyValueByPrefix(bucketKey),
+                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null);
+
+                    // Snapshot scan: one backend pass resolves the raw head page and every key's
+                    // as-of image together, instead of one revision-history read per stale key.
+                    return ProjectBucketPage(
+                        context.PersistenceBackend.GetKeyValueByPrefixAtOrBefore(
+                            bucketKey, capturedReadTs, () => cont.Cancelled),
+                        capturedReadTs, currentTime);
+                });
         }
         catch (Exception ex)
         {
@@ -220,51 +241,47 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     }
 
     /// <summary>
-    /// Builds the raw disk-prefix page and, for snapshot scans, resolves per-key snapshot
-    /// projections in the same scheduler task. Must run on the off-actor scheduler thread —
-    /// <c>GetKeyValueRevisionAtOrBefore</c> does I/O and must not block the actor mailbox.
+    /// Splits a snapshot-scan backend page into the raw head rows and the per-key snapshot
+    /// projections. Runs on the off-actor scheduler thread as part of the stage-2 task.
     ///
-    /// For each disk row:
+    /// For each key of the as-of page:
     /// <list type="bullet">
-    ///   <item>If <c>LastModified ≤ readTimestamp</c>, the row is already the at-or-before
-    ///   version — stored in the projections dict as-is so <c>EvaluateEntry</c> can serve it
+    ///   <item>When the head row is already at-or-before the snapshot, its as-of image is the
+    ///   head itself — stored in the projections dict as-is so <c>EvaluateEntry</c> can serve it
     ///   if the in-memory archive has been trimmed beyond the snapshot.</item>
-    ///   <item>If <c>LastModified > readTimestamp</c>, look up the highest revision
-    ///   at-or-before the snapshot via <c>GetKeyValueRevisionAtOrBefore</c>; drop the key
-    ///   from projections if null, Deleted, Undefined, or expired.</item>
+    ///   <item>Otherwise the as-of image is a historical revision; drop the key from projections
+    ///   if there is none, or it is Deleted, Undefined, or expired.</item>
     /// </list>
     /// </summary>
     internal static (List<(string, ReadOnlyKeyValueEntry)> Raw, Dictionary<string, ReadOnlyKeyValueEntry>? Projections)
         ProjectBucketPage(
-            List<(string, ReadOnlyKeyValueEntry)> raw,
-            bool isSnapshotScan,
+            List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> asOfPage,
             HLCTimestamp readTimestamp,
-            HLCTimestamp currentTime,
-            IPersistenceBackend backend)
+            HLCTimestamp currentTime)
     {
-        if (!isSnapshotScan)
-            return (raw, null);
+        List<(string, ReadOnlyKeyValueEntry)> raw = new(asOfPage.Count);
+        Dictionary<string, ReadOnlyKeyValueEntry> projections = new(asOfPage.Count);
 
-        Dictionary<string, ReadOnlyKeyValueEntry> projections = new(raw.Count);
-        foreach ((string k, ReadOnlyKeyValueEntry e) in raw)
+        foreach ((string k, ReadOnlyKeyValueEntry current, ReadOnlyKeyValueEntry? snap) in asOfPage)
         {
-            if (e.LastModified.CompareTo(readTimestamp) <= 0)
+            raw.Add((k, current));
+
+            if (current.LastModified.CompareTo(readTimestamp) <= 0)
             {
-                // Row is already at-or-before the snapshot; store it directly so the fallback
+                // Head is already at-or-before the snapshot; store it directly so the fallback
                 // can serve it when a resident entry supersedes it and the archive is trimmed.
-                projections[k] = e;
+                projections[k] = current;
                 continue;
             }
 
-            // Current disk row was written after the snapshot; resolve the at-or-before revision.
-            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, e.Revision - 1, readTimestamp);
+            // Head was written after the snapshot; the as-of image is a historical revision.
             if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined)
                 continue;
             if (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0)
                 continue;
-            projections[k] = new ReadOnlyKeyValueEntry(
-                snap.Value, snap.Revision, snap.Expires, snap.LastUsed, snap.LastModified, snap.State);
+            projections[k] = snap;
         }
+
         return (raw, projections);
     }
 

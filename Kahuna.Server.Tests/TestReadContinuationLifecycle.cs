@@ -116,6 +116,37 @@ public sealed class TestReadContinuationLifecycle : RaftTrackingTest
     }
 
     [Fact]
+    public async Task SnapshotPrefixScanContinuation_DeadlineExpires_SweptAndResolvedMustRetry()
+    {
+        KahunaConfiguration config = CreateConfiguration();
+        (TryCollectHandler collect, KeyValueContext context, RaftManager raft) = CreateCollectHandler(config);
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        HLCTimestamp readTs = new(0, 100, 0);
+        (string, HLCTimestamp, bool) snapshotScanKey = ("snap/", readTs, false);
+
+        TaskCompletionSource<KeyValueResponse?> primary = new();
+        TaskCompletionSource<KeyValueResponse?> waiter = new();
+
+        PrefixFromDiskScanContinuation cont = new(
+            "snap/", readTs, now, primary, scanKey: null, snapshotScanKey: snapshotScanKey);
+        Assert.True(cont.AddWaiter(waiter));
+        // Deadline already in the past → the next collect sweep must expire it.
+        cont.Deadline = new HLCTimestamp(now.N, TimeSpan.FromSeconds(1).Ticks, now.C);
+        context.PendingSnapshotPrefixScans[snapshotScanKey] = cont;
+
+        collect.Execute();
+
+        // Expiry cancels the continuation — the flag the scheduled backend work polls to skip
+        // or stop the now-pointless disk scan — removes the coalescing registration, and
+        // resolves every waiter with a retryable result.
+        Assert.True(cont.Cancelled);
+        Assert.False(context.PendingSnapshotPrefixScans.ContainsKey(snapshotScanKey));
+        Assert.Equal(KeyValueResponseType.MustRetry, (await primary.Task)!.Type);
+        Assert.Equal(KeyValueResponseType.MustRetry, (await waiter.Task)!.Type);
+    }
+
+    [Fact]
     public void ReadContinuation_WaiterCap_IsEnforced()
     {
         TaskCompletionSource<KeyValueResponse?> primary = new();

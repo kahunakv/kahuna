@@ -176,6 +176,82 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return MergeScan(items, unflushedWrites.Collect(prefixKeyName), KeyValueScanLimits.MaxPrefixScanResults);
     }
 
+    public List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> GetKeyValueByPrefixAtOrBefore(
+        string prefixKeyName, HLCTimestamp readTimestamp, Func<bool>? shouldAbort = null)
+    {
+        List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> items =
+            inner.GetKeyValueByPrefixAtOrBefore(prefixKeyName, readTimestamp, shouldAbort);
+
+        if (unflushedWrites.IsEmpty)
+            return items;
+
+        List<KeyValuePair<string, UnflushedKeyValueWrite>> queuedItems = unflushedWrites.Collect(prefixKeyName);
+        if (queuedItems.Count == 0)
+            return items;
+
+        Dictionary<string, (ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> merged =
+            new(items.Count + queuedItems.Count, StringComparer.Ordinal);
+
+        foreach ((string key, ReadOnlyKeyValueEntry current, ReadOnlyKeyValueEntry? snapshot) in items)
+            merged[key] = (current, snapshot);
+
+        foreach ((string key, UnflushedKeyValueWrite queued) in queuedItems)
+        {
+            ReadOnlyKeyValueEntry queuedEntry = new(
+                queued.Value, queued.Revision, queued.Expires, queued.LastUsed, queued.LastModified, queued.State);
+
+            if (!merged.TryGetValue(key, out (ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot) existing))
+            {
+                // Key absent from the inner backend: the queued head is the only committed
+                // version, and it is the as-of image exactly when it is at-or-before the snapshot.
+                merged[key] = (queuedEntry,
+                    queued.LastModified.CompareTo(readTimestamp) <= 0 ? queuedEntry : null);
+                continue;
+            }
+
+            // Head merge is newest-wins by (revision, commit HLC), matching MergeScan.
+            ReadOnlyKeyValueEntry current = existing.Current.Revision > queued.Revision
+                || (existing.Current.Revision == queued.Revision && existing.Current.LastModified > queued.LastModified)
+                ? existing.Current
+                : queuedEntry;
+
+            ReadOnlyKeyValueEntry? snapshot;
+            if (current.LastModified.CompareTo(readTimestamp) <= 0)
+            {
+                // The merged head is itself at-or-before the snapshot, so it is the as-of image.
+                snapshot = current;
+            }
+            else
+            {
+                // Head is newer than the snapshot: the queued head can improve the inner as-of
+                // pick only when it qualifies as retained history — it retains a revision row
+                // (not a no-revision write), sits at-or-before the snapshot, below the merged
+                // head's revision, and above the inner backend's pick.
+                snapshot = existing.Snapshot;
+                if (!queued.NoRevision
+                    && queued.LastModified.CompareTo(readTimestamp) <= 0
+                    && queued.Revision < current.Revision
+                    && (snapshot is null || queued.Revision > snapshot.Revision))
+                    snapshot = queuedEntry;
+            }
+
+            merged[key] = (current, snapshot);
+        }
+
+        List<(string, ReadOnlyKeyValueEntry, ReadOnlyKeyValueEntry?)> result = new(
+            Math.Min(merged.Count, KeyValueScanLimits.MaxPrefixScanResults));
+
+        foreach (string key in merged.Keys.OrderBy(static k => k, StringComparer.Ordinal))
+        {
+            if (result.Count >= KeyValueScanLimits.MaxPrefixScanResults)
+                break;
+            (ReadOnlyKeyValueEntry current, ReadOnlyKeyValueEntry? snapshot) = merged[key];
+            result.Add((key, current, snapshot));
+        }
+
+        return result;
+    }
+
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
     {
         List<(string, ReadOnlyKeyValueEntry)> items = inner.GetKeyValueByRange(prefix, startKey, limit);

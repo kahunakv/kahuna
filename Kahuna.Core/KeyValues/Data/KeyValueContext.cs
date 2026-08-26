@@ -139,6 +139,19 @@ internal sealed class KeyValueContext
     /// </summary>
     internal Dictionary<(string Key, long Revision, bool IsExists), Handlers.ReadContinuation> PendingReads { get; } = new();
 
+    /// <summary>
+    /// Per-actor map of in-flight snapshot prefix-from-disk scans, keyed by
+    /// <c>(prefix, readTimestamp, includeTombstones)</c>. Snapshot scans cannot share
+    /// <see cref="PendingReads"/> because their result depends on the read timestamp, so they
+    /// coalesce here: a caller that retries the same snapshot after a timeout attaches to the
+    /// in-flight read instead of enqueueing another full-prefix scan behind it. Registration
+    /// here also puts these continuations in reach of the deadline sweep, which expires them and
+    /// lets the scheduled backend work skip itself once cancelled.
+    /// Stage 1 registers; stage 3 (or the sweep) removes before resolving all waiters.
+    /// Mutated only on the actor thread — no synchronisation required.
+    /// </summary>
+    internal Dictionary<(string Prefix, HLCTimestamp ReadTimestamp, bool IncludeTombstones), Handlers.ReadContinuation> PendingSnapshotPrefixScans { get; } = new();
+
     public KahunaConfiguration Configuration  { get; }
 
     public ILogger<IKahuna> Logger  { get; }

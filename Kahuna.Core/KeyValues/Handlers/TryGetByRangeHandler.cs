@@ -193,10 +193,22 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         {
             readTask = context.BackendReadScheduler.EnqueueTask(
                 scanPartition,
-                () => ProjectSnapshotPage(
-                    context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, diskPageSize),
-                    limit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
-                    context.PersistenceBackend));
+                () =>
+                {
+                    // The scheduler can run this long after the deadline sweep expired the
+                    // continuation; skip the disk work then — the stage-3 late-completion guard
+                    // drops the result anyway.
+                    if (cont.Cancelled)
+                    {
+                        KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+                        return new RangeDiskPage([], false, null);
+                    }
+
+                    return ProjectSnapshotPage(
+                        context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, diskPageSize),
+                        limit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
+                        context.PersistenceBackend, () => cont.Cancelled);
+                });
         }
         catch (Exception ex)
         {
@@ -248,7 +260,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         bool isSnapshotRead,
         HLCTimestamp snapshotTs,
         HLCTimestamp currentTime,
-        IPersistenceBackend backend)
+        IPersistenceBackend backend,
+        Func<bool>? shouldAbort = null)
     {
         // Derive raw pagination facts before any projection filtering.
         bool rawHasMore = rawPage.Count > limit;
@@ -268,6 +281,11 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
         for (int i = 0; i < usableCount; i++)
         {
+            // Stop projecting once the continuation is expired: each stale key costs a
+            // revision-history read, and the result of an expired page is dropped at stage 3.
+            if (shouldAbort is not null && shouldAbort())
+                break;
+
             (string k, ReadOnlyKeyValueEntry e) = rawPage[i];
 
             if (e.LastModified.CompareTo(snapshotTs) <= 0)

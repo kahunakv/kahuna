@@ -44,12 +44,18 @@ internal abstract class ReadContinuation
     /// </summary>
     internal HLCTimestamp Deadline { get; set; }
 
+    // Written on the actor thread by the deadline sweep; also read from scheduler threads, where
+    // stage-2 work polls it to skip or stop a backend read whose waiters are already gone.
+    // Volatile so those off-thread polls observe the expiry without a synchronising message.
+    private volatile bool cancelled;
+
     /// <summary>
     /// Set once when the continuation is expired by the deadline sweep. Acts as a one-shot
     /// generation guard: a late stage-3 completion carrying this same continuation is dropped rather
     /// than double-resolving already-retried waiters or re-registering a removed in-flight entry.
+    /// Stage-2 backend work may also poll it to abandon a read whose waiters are already resolved.
     /// </summary>
-    internal bool Cancelled { get; private set; }
+    internal bool Cancelled => cancelled;
 
     /// <summary>Maximum waiters (primary + coalesced) this continuation admits.</summary>
     internal int MaxWaiters { get; init; } = DefaultMaxWaiters;
@@ -147,10 +153,10 @@ internal abstract class ReadContinuation
     /// </summary>
     internal void Expire(KeyValueContext context, KeyValueResponse? response)
     {
-        if (Cancelled)
+        if (cancelled)
             return;
 
-        Cancelled = true;
+        cancelled = true;
         RemovePendingKey(context);
         Resolve(response);
     }

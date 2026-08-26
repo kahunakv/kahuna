@@ -7,18 +7,20 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// <summary>
 /// Stage-3 continuation for a prefix-from-disk scan (ScanByPrefixFromDisk).
 ///
-/// Stage 2 runs the full GetKeyValueByPrefix query (plus per-key GetKeyValueRevisionAtOrBefore
-/// for snapshot reads) off-actor. Stage 3 (Execute) applies the deleted/expired filter against
-/// the raw disk page returned in ScanDiskResult, then resolves all waiters.
+/// Stage 2 runs the full GetKeyValueByPrefix query (or, for snapshot reads, the single-pass
+/// GetKeyValueByPrefixAtOrBefore projection) off-actor. Stage 3 (Execute) applies the
+/// deleted/expired filter against the raw disk page returned in ScanDiskResult, then resolves
+/// all waiters.
 ///
 /// Non-snapshot requests for the same prefix coalesce onto one disk read. Snapshot requests
-/// (readTimestamp set) are never coalesced because their result depends on the read timestamp.
+/// coalesce in their own map, keyed additionally by the read timestamp their result depends on.
 /// </summary>
 internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
 {
     private readonly HLCTimestamp readTimestamp;
     private readonly HLCTimestamp currentTime;
     private readonly (string, long, bool)? scanKey;
+    private readonly (string, HLCTimestamp, bool)? snapshotScanKey;
     private readonly bool includeTombstones;
 
     internal PrefixFromDiskScanContinuation(
@@ -27,21 +29,25 @@ internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
         HLCTimestamp currentTime,
         KeyValueReplyRef promise,
         (string, long, bool)? scanKey,
+        (string, HLCTimestamp, bool)? snapshotScanKey = null,
         bool includeTombstones = false) : base(promise)
     {
         this.readTimestamp = readTimestamp;
         this.currentTime = currentTime;
         this.scanKey = scanKey;
+        this.snapshotScanKey = snapshotScanKey;
         this.includeTombstones = includeTombstones;
     }
 
     internal override void RemovePendingKey(KeyValueContext context)
     {
-        // Only remove from PendingReads if this continuation was registered there.
-        // Snapshot continuations must not evict a concurrent non-snapshot scan's entry
-        // that happens to share the same prefix.
+        // Only remove the registration this continuation installed. A snapshot continuation
+        // must not evict a concurrent non-snapshot scan's entry that happens to share the same
+        // prefix, and vice versa.
         if (scanKey.HasValue)
             context.PendingReads.Remove(scanKey.Value);
+        if (snapshotScanKey.HasValue)
+            context.PendingSnapshotPrefixScans.Remove(snapshotScanKey.Value);
     }
 
     internal override void Execute(KeyValueContext context)

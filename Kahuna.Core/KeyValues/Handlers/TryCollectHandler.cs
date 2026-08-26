@@ -392,11 +392,17 @@ internal sealed class TryCollectHandler : BaseHandler
     /// </summary>
     private void SweepExpiredReads(HLCTimestamp currentTime)
     {
-        if (context.PendingReads.Count == 0)
+        if (context.PendingReads.Count == 0 && context.PendingSnapshotPrefixScans.Count == 0)
             return;
 
         List<ReadContinuation>? expired = null;
         foreach (KeyValuePair<(string, long, bool), ReadContinuation> kv in context.PendingReads)
+        {
+            if (kv.Value.IsExpired(currentTime))
+                (expired ??= []).Add(kv.Value);
+        }
+
+        foreach (KeyValuePair<(string, HLCTimestamp, bool), ReadContinuation> kv in context.PendingSnapshotPrefixScans)
         {
             if (kv.Value.IsExpired(currentTime))
                 (expired ??= []).Add(kv.Value);

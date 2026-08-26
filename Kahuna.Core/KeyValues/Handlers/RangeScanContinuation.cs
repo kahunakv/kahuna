@@ -336,11 +336,23 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 int capturedLimit = limit;
                 nextTask = context.BackendReadScheduler.EnqueueTask(
                     partitionId,
-                    () => TryGetByRangeHandler.ProjectSnapshotPage(
-                        context.PersistenceBackend.GetKeyValueByRange(
-                            prefix, capturedCursor, TryGetByRangeHandler.SaturatingPageSize(capturedLimit)),
-                        capturedLimit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
-                        context.PersistenceBackend));
+                    () =>
+                    {
+                        // The scheduler can run this long after the deadline sweep expired this
+                        // continuation; skip the disk work then — the stage-3 late-completion
+                        // guard drops the result anyway.
+                        if (Cancelled)
+                        {
+                            KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+                            return new RangeDiskPage([], false, null);
+                        }
+
+                        return TryGetByRangeHandler.ProjectSnapshotPage(
+                            context.PersistenceBackend.GetKeyValueByRange(
+                                prefix, capturedCursor, TryGetByRangeHandler.SaturatingPageSize(capturedLimit)),
+                            capturedLimit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
+                            context.PersistenceBackend, () => Cancelled);
+                    });
             }
             catch (Exception ex)
             {

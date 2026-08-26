@@ -319,6 +319,102 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
+    // ── Snapshot coalescing: identical snapshot scans share one as-of disk read ───────────
+
+    [Fact]
+    public async Task ConcurrentIdenticalSnapshotScans_ExactlyOneDiskRead_AllReceiveResults()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("pfx-snap-coalesce");
+
+        scheduler.Start();
+        try
+        {
+            ManualResetEventSlim gate = new(false);
+            ManualResetEventSlim entered = new(false);
+            CountingAsOfPrefixBackend backend = new(gate, entered, [
+                ("app/x", Encoding.UTF8.GetBytes("xval"), 1L, KeyValueState.Set),
+            ]);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "pfx-snap-coalesce-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            HLCTimestamp readTs = new(0, 100, 0);
+
+            const int n = 5;
+            Task<KeyValueResponse?>[] asks = Enumerable.Range(0, n)
+                .Select(_ =>
+                {
+                    KeyValueRequest scan = MakePrefixScan("app/");
+                    scan.ReadTimestamp = readTs;
+                    return actorRef.Ask(scan, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                })
+                .ToArray();
+
+            // Wait until the first as-of read has entered the backend, then drain the actor
+            // mailbox with a sentinel ephemeral TryGet — by the time it returns, all N snapshot
+            // scans have been processed and coalesced onto the single continuation.
+            entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            KeyValueResponse? sentinel = await actorRef.Ask(
+                MakeEphemeralGet("sentinel"), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            gate.Set();
+
+            KeyValueResponse?[] results = await Task.WhenAll(asks);
+
+            // Exactly one as-of backend call despite N concurrent identical snapshot requests.
+            Assert.Equal(1, backend.AsOfReadCount);
+
+            foreach (KeyValueResponse? r in results)
+            {
+                Assert.NotNull(r);
+                Assert.Equal(KeyValueResponseType.Get, r!.Type);
+                Assert.Single(r.Items!);
+            }
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    // ── Snapshot scans with different read timestamps must not share a result ─────────────
+
+    [Fact]
+    public async Task SnapshotScansWithDifferentTimestamps_DoNotCoalesce()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("pfx-snap-distinct");
+
+        scheduler.Start();
+        try
+        {
+            CountingAsOfPrefixBackend backend = new(gate: null, entered: null, [
+                ("app/x", Encoding.UTF8.GetBytes("xval"), 1L, KeyValueState.Set),
+            ]);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "pfx-snap-distinct-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueRequest first = MakePrefixScan("app/");
+            first.ReadTimestamp = new HLCTimestamp(0, 100, 0);
+            KeyValueResponse? firstResp = await actorRef.Ask(first, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Get, firstResp!.Type);
+
+            KeyValueRequest second = MakePrefixScan("app/");
+            second.ReadTimestamp = new HLCTimestamp(0, 200, 0);
+            KeyValueResponse? secondResp = await actorRef.Ask(second, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Get, secondResp!.Type);
+
+            // Each distinct read timestamp pays its own as-of read.
+            Assert.Equal(2, backend.AsOfReadCount);
+        }
+        finally { scheduler.Stop(); }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     private static KeyValueRequest MakeEphemeralGet(string key)
@@ -459,6 +555,59 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
         public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
         public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => throw new InvalidOperationException("simulated disk fault");
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+        public void Dispose() => inner.Dispose();
+    }
+
+    /// <summary>
+    /// Counts snapshot (as-of) prefix reads and optionally blocks the first one on a gate, so
+    /// tests can assert how many backend as-of scans a set of snapshot requests actually paid.
+    /// </summary>
+    private sealed class CountingAsOfPrefixBackend : IPersistenceBackend, IDisposable
+    {
+        private readonly MemoryPersistenceBackend inner = new();
+        private readonly ManualResetEventSlim? gate;
+        private readonly ManualResetEventSlim? entered;
+        private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> diskEntries;
+        private int asOfReadCount;
+
+        internal int AsOfReadCount => asOfReadCount;
+
+        internal CountingAsOfPrefixBackend(
+            ManualResetEventSlim? gate,
+            ManualResetEventSlim? entered,
+            IEnumerable<(string Key, byte[]? Value, long Revision, KeyValueState State)> entries)
+        {
+            this.gate = gate;
+            this.entered = entered;
+            diskEntries = entries.Select(e => (e.Key, new ReadOnlyKeyValueEntry(
+                e.Value, e.Revision,
+                HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, e.State))).ToList();
+        }
+
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) =>
+            diskEntries.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
+
+        public List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> GetKeyValueByPrefixAtOrBefore(
+            string prefixKeyName, HLCTimestamp readTimestamp, Func<bool>? shouldAbort = null)
+        {
+            Interlocked.Increment(ref asOfReadCount);
+            entered?.Set();
+            gate?.Wait();
+            return diskEntries
+                .Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal))
+                .Select(e => (e.Key, e.Entry, (ReadOnlyKeyValueEntry?)e.Entry))
+                .ToList();
+        }
+
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
