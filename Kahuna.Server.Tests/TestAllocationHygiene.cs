@@ -27,7 +27,7 @@ public sealed class TestAllocationHygiene
             KeyValueRequestType.TrySet, HLCTimestamp.Zero, HLCTimestamp.Zero,
             key: "acc/1", value: [1, 2, 3], compareValue: compareBuffer, compareRevision: 0,
             KeyValueFlags.None, expiresMs: 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            proposalId: 0, partitionId: 0, promise: null);
+            proposalId: 0, partitionId: 0, promise: default);
 
         Assert.Same(compareBuffer, request.CompareValue);
 
@@ -37,7 +37,7 @@ public sealed class TestAllocationHygiene
 
         Assert.Null(request.Value);
         Assert.Null(request.CompareValue);
-        Assert.Null(request.Promise);
+        Assert.True(request.Promise.IsDefault);
     }
 
     [Fact]
@@ -87,7 +87,7 @@ public sealed class TestAllocationHygiene
     {
         LockRequest request = new(
             LockRequestType.TryLock, resource, owner: null, expiresMs: 1000,
-            LockDurability.Ephemeral, proposalId: 0, partitionId: 0, promise: null);
+            LockDurability.Ephemeral, proposalId: 0, partitionId: 0, promise: default);
 
         int expected = (int)XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(resource));
 

@@ -23,7 +23,7 @@ internal sealed partial class KeyValuesManager
 
     /// <summary>
 
-    public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
+    public ValueTask<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,

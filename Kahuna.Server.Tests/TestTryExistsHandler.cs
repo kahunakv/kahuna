@@ -373,7 +373,7 @@ public sealed class TestTryExistsHandler : RaftTrackingTest
             durability,
             0,
             0,
-            null
+            default
         );
     }
 
@@ -396,7 +396,7 @@ public sealed class TestTryExistsHandler : RaftTrackingTest
             durability,
             0,
             0,
-            null
+            default
         );
     }
 

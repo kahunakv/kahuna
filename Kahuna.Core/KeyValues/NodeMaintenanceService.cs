@@ -126,7 +126,7 @@ internal sealed class NodeMaintenanceService
             KeyValueDurability.Persistent,
             0,
             partitionId,
-            null);
+            default);
 
         List<Task<KeyValueResponse?>> tasks = new(ephemeralInstances.Count + persistentInstances.Count);
 

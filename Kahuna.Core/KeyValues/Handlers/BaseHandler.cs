@@ -207,7 +207,7 @@ internal abstract class BaseHandler
             fenceGeneration,
             serialized,
             actorContext.Self,
-            actorContext.Reply.Value.Promise!,
+            KeyValueReplyRef.From(actorContext.Reply.Value),
             0 // placeholder: the aggregator stamps EnqueueTicks from its own TimeProvider at admission.
         );
 

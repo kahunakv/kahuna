@@ -61,9 +61,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="request">The request containing the key-value data to be set.</param>
     /// <param name="context">The server call context providing information about the call.</param>
     /// <returns>A task representing the asynchronous operation, with a response indicating the result of the set operation.</returns>
-    public override async Task<GrpcTrySetKeyValueResponse> TrySetKeyValue(GrpcTrySetKeyValueRequest request, ServerCallContext context)
+    public override Task<GrpcTrySetKeyValueResponse> TrySetKeyValue(GrpcTrySetKeyValueRequest request, ServerCallContext context)
     {
-        return await TrySetKeyValueInternal(request, context);
+        return TrySetKeyValueInternal(request, context).AsTask();
     }
 
     /// <summary>
@@ -72,7 +72,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="request">The request containing the key, value, comparison value, flags, expiration time, durability level, and transaction details.</param>
     /// <param name="context">The server call context associated with the operation, including cancellation tokens and call metadata.</param>
     /// <returns>A response indicating the result of the operation, including the response type, revision number, last modified timestamp, and elapsed time in milliseconds.</returns>
-    private async Task<GrpcTrySetKeyValueResponse> TrySetKeyValueCore(GrpcTrySetKeyValueRequest request, ServerCallContext context)
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<GrpcTrySetKeyValueResponse> TrySetKeyValueCore(GrpcTrySetKeyValueRequest request, ServerCallContext context)
     {
         if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
             return new()
@@ -2551,7 +2552,33 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         }
     }
 
-    internal Task<GrpcTrySetKeyValueResponse> TrySetKeyValueInternal(GrpcTrySetKeyValueRequest request, ServerCallContext context)
+    // ValueTask twin of the guard above for hot handlers converted to pooled async frames: same
+    // classification and refusal contract, but the state machine is recycled instead of allocated
+    // per request. The returned ValueTask must be awaited exactly once.
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<TResponse> Guard<TRequest, TResponse>(
+        TRequest request,
+        ServerCallContext context,
+        Func<KeyValuesService, TRequest, ServerCallContext, ValueTask<TResponse>> handler,
+        Func<TRequest, TResponse> refusal,
+        [CallerMemberName] string handlerName = ""
+    )
+    {
+        try
+        {
+            return await handler(this, request, context);
+        }
+        catch (Exception ex) when (RetryableFailureClassifier.IsRetryable(ex))
+        {
+            logger.LogWarning(
+                "Mapping retryable {ExceptionType} on {Handler} to MustRetry: {Message}",
+                ex.GetType().Name, handlerName, ex.Message);
+
+            return refusal(request);
+        }
+    }
+
+    internal ValueTask<GrpcTrySetKeyValueResponse> TrySetKeyValueInternal(GrpcTrySetKeyValueRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.TrySetKeyValueCore(r, c), static _ => KeyValueMustRetry.TrySetKeyValue());
 
     internal Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValueInternal(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)

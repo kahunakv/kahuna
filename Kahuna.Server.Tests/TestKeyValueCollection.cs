@@ -298,7 +298,7 @@ public sealed class TestKeyValueCollection : RaftTrackingTest
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             KeyValueDurability.Ephemeral,
-            0, 0, null
+            0, 0, default
         ));
 
         Assert.Equal(KeyValueResponseType.RolledBack, response.Type);
@@ -361,7 +361,7 @@ public sealed class TestKeyValueCollection : RaftTrackingTest
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             KeyValueDurability.Ephemeral,
-            0, 0, null
+            0, 0, default
         ));
 
         Assert.Equal(KeyValueResponseType.Unlocked, response.Type);

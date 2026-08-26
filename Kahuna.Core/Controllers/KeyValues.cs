@@ -17,8 +17,10 @@ public sealed partial class KahunaManager
 
     /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
+    /// The interior chain runs on pooled ValueTask frames; this seam materializes the
+    /// one Task its external callers expect.
     /// </summary>
-    public async Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
+    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,
@@ -33,7 +35,7 @@ public sealed partial class KahunaManager
         TransactionOperationId operationId = default
     )
     {
-        return await keyValues.LocateAndTrySetKeyValue(
+        return keyValues.LocateAndTrySetKeyValue(
             transactionId,
             key,
             value,
@@ -46,7 +48,7 @@ public sealed partial class KahunaManager
             routedGeneration,
             coordinatorKey,
             operationId
-        );
+        ).AsTask();
     }
 
     public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
@@ -366,7 +368,7 @@ public sealed partial class KahunaManager
             expiresMs,
             durability,
             routedGeneration
-        );
+        ).AsTask();
     }
 
     /// <summary>

@@ -21,14 +21,36 @@ internal sealed class KeyValueClientBatcher
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Per-stream in-flight accounting: the read loop holds one entry for itself, every dispatched
+    /// handler enters before it starts, and the last exit completes the drain. Handlers report their
+    /// completion here directly (instead of being awaited by a per-request observer) so a dispatched
+    /// request costs a single async frame.
+    /// </summary>
+    private sealed class StreamDrain
+    {
+        private int inFlight = 1;
+
+        private readonly TaskCompletionSource completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Completed => completed.Task;
+
+        public void Enter() => Interlocked.Increment(ref inFlight);
+
+        public void Exit()
+        {
+            if (Interlocked.Decrement(ref inFlight) == 0)
+                completed.TrySetResult();
+        }
+    }
+
     public async Task BatchClientKeyValueRequests(
         IAsyncStreamReader<GrpcBatchClientKeyValueRequest> requestStream,
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
         ServerCallContext context
     )
     {
-        int inFlight = 1;
-        TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        StreamDrain drain = new();
 
         // Handlers complete concurrently, but the HTTP/2 stream admits one writer. Funneling the
         // responses through a single-reader channel (instead of a per-response semaphore hand-off)
@@ -41,161 +63,74 @@ internal sealed class KeyValueClientBatcher
 
         Task writerTask = WriteResponsesToStream(responses.Reader, responseStream, context);
 
-        void Track(GrpcBatchClientKeyValueRequest request, Task task)
-        {
-            Interlocked.Increment(ref inFlight);
-            _ = Observe(request, task);
-        }
-
-        // A handler that throws must still answer its own RequestId: the SDK matches responses by id,
-        // so an unanswered request hangs until its deadline while every other request on the shared
-        // stream keeps flowing. Refusing just that one request with MustRetry leaves the stream and
-        // its neighbours untouched, and gives the SDK's retry loop something it can classify.
-        async Task Observe(GrpcBatchClientKeyValueRequest request, Task task)
-        {
-            try
-            {
-                await task;
-            }
-            catch (Exception ex) when (ex is IOException or OperationCanceledException)
-            {
-                // The stream is already gone or the client left; there is nobody left to answer.
-                logger.LogCommunicationIoException(ex);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Batch key-value client handler faulted");
-
-                writer.TryWrite(BatchRefusalResponses.ForClientKeyValue(request));
-            }
-            finally
-            {
-                if (Interlocked.Decrement(ref inFlight) == 0)
-                    drain.TrySetResult();
-            }
-        }
-
         try
         {
             await foreach (GrpcBatchClientKeyValueRequest request in requestStream.ReadAllAsync())
             {
+                drain.Enter();
+
                 switch (request.Type)
                 {
                     case GrpcClientBatchType.TrySetKeyValue:
-                    {
-                        GrpcTrySetKeyValueRequest? setKeyRequest = request.TrySetKeyValue;
-
-                        Track(request, TrySetKeyValueDelayed(request.RequestId, setKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TrySetKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TrySetManyKeyValue:
-                    {
-                        GrpcTrySetManyKeyValueRequest? setKeyRequest = request.TrySetManyKeyValue;
-
-                        Track(request, TrySetManyKeyValueDelayed(request.RequestId, setKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TrySetManyKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryDeleteManyKeyValue:
-                    {
-                        GrpcTryDeleteManyKeyValueRequest? deleteManyKeyRequest = request.TryDeleteManyKeyValue;
-
-                        Track(request, TryDeleteManyKeyValueDelayed(request.RequestId, deleteManyKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TryDeleteManyKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryGetKeyValue:
-                    {
-                        GrpcTryGetKeyValueRequest? getKeyRequest = request.TryGetKeyValue;
-
-                        Track(request, TryGetKeyValueDelayed(request.RequestId, getKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TryGetKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryDeleteKeyValue:
-                    {
-                        GrpcTryDeleteKeyValueRequest? deleteKeyRequest = request.TryDeleteKeyValue;
-
-                        Track(request, TryDeleteKeyValueDelayed(request.RequestId, deleteKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TryDeleteKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryExtendKeyValue:
-                    {
-                        GrpcTryExtendKeyValueRequest? extendKeyRequest = request.TryExtendKeyValue;
-
-                        Track(request, TryExtendKeyValueDelayed(request.RequestId, extendKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TryExtendKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryExistsKeyValue:
-                    {
-                        GrpcTryExistsKeyValueRequest? extendKeyRequest = request.TryExistsKeyValue;
-
-                        Track(request, TryExistsKeyValueDelayed(request.RequestId, extendKeyRequest, writer, context));
-                    }
-                    break;
+                        _ = TryExistsKeyValueDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryExecuteTransactionScript:
-                    {
-                        GrpcTryExecuteTransactionScriptRequest? tryExecuteTransactionScriptRequest = request.TryExecuteTransactionScript;
-
-                        Track(request, TryExecuteTransactionScriptDelayed(request.RequestId, tryExecuteTransactionScriptRequest, writer, context));
-                    }
-                    break;
+                        _ = TryExecuteTransactionScriptDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryAcquireExclusiveLock:
-                    {
-                        GrpcTryAcquireExclusiveLockRequest? tryAcquireExclusiveLockRequest = request.TryAcquireExclusiveLock;
-
-                        Track(request, TryAcquireExclusiveLockDelayed(request.RequestId, tryAcquireExclusiveLockRequest, writer, context));
-                    }
-                    break;
+                        _ = TryAcquireExclusiveLockDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryGetByBucket:
-                    {
-                        GrpcGetByBucketRequest? GetByBucketRequest = request.GetByBucket;
-
-                        Track(request, TryGetByBucketDelayed(request.RequestId, GetByBucketRequest, writer, context));
-                    }
-                    break;
+                        _ = TryGetByBucketDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryScanByPrefix:
-                    {
-                        GrpcScanAllByPrefixRequest? scanByPrefixRequest = request.ScanByPrefix;
-
-                        Track(request, TryScanAllByPrefixDelayed(request.RequestId, scanByPrefixRequest, writer, context));
-                    }
-                    break;
+                        _ = TryScanAllByPrefixDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryStartTransaction:
-                    {
-                        GrpcStartTransactionRequest? startTransactionRequest = request.StartTransaction;
-
-                        Track(request, TryStartTransactionDelayed(request.RequestId, startTransactionRequest, writer, context));
-                    }
-                    break;
+                        _ = TryStartTransactionDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryCommitTransaction:
-                    {
-                        GrpcCommitTransactionRequest? commitTransactionRequest = request.CommitTransaction;
-
-                        Track(request, TryCommitTransactionDelayed(request.RequestId, commitTransactionRequest, writer, context));
-                    }
-                    break;
+                        _ = TryCommitTransactionDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TryRollbackTransaction:
-                    {
-                        GrpcRollbackTransactionRequest? rollbackTransactionRequest = request.RollbackTransaction;
-
-                        Track(request, TryRollbackTransactionDelayed(request.RequestId, rollbackTransactionRequest, writer, context));
-                    }
-                    break;
+                        _ = TryRollbackTransactionDelayed(request, writer, context, drain);
+                        break;
 
                     case GrpcClientBatchType.TypeNone:
                     default:
                         logger.LogError("Unknown batch client request type: {Type}", request.Type);
+                        drain.Exit();
                         break;
                 }
             }
@@ -206,14 +141,38 @@ internal sealed class KeyValueClientBatcher
         }
         finally
         {
-            if (Interlocked.Decrement(ref inFlight) == 0) drain.TrySetResult();
-            await drain.Task;
+            drain.Exit();
+            await drain.Completed;
 
             // Every handler has answered; close the channel so the drain loop flushes the tail
             // and exits, then wait for it so no write races the call teardown.
             writer.TryComplete();
             await writerTask;
         }
+    }
+
+    /// <summary>
+    /// A handler that throws must still answer its own RequestId: the SDK matches responses by id,
+    /// so an unanswered request hangs until its deadline while every other request on the shared
+    /// stream keeps flowing. Refusing just that one request with MustRetry leaves the stream and
+    /// its neighbours untouched, and gives the SDK's retry loop something it can classify.
+    /// </summary>
+    private void ObserveFault(
+        GrpcBatchClientKeyValueRequest request,
+        ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
+        Exception ex
+    )
+    {
+        if (ex is IOException or OperationCanceledException)
+        {
+            // The stream is already gone or the client left; there is nobody left to answer.
+            logger.LogCommunicationIoException(ex);
+            return;
+        }
+
+        logger.LogError(ex, "Batch key-value client handler faulted");
+
+        responses.TryWrite(BatchRefusalResponses.ForClientKeyValue(request));
     }
 
     /// <summary>
@@ -258,276 +217,402 @@ internal sealed class KeyValueClientBatcher
     }
 
     private async Task TrySetKeyValueDelayed(
-        int requestId,
-        GrpcTrySetKeyValueRequest setKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTrySetKeyValueResponse trySetResponse = await service.TrySetKeyValueInternal(setKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TrySetKeyValue,
-            RequestId = requestId,
-            TrySetKeyValue = trySetResponse
-        };
+            GrpcTrySetKeyValueResponse trySetResponse = await service.TrySetKeyValueInternal(request.TrySetKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TrySetKeyValue,
+                RequestId = request.RequestId,
+                TrySetKeyValue = trySetResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TrySetManyKeyValueDelayed(
-        int requestId,
-        GrpcTrySetManyKeyValueRequest setKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        // Client-facing entry: a transactional batch without registration identity can never commit, so
-        // reject it here exactly as the unary endpoint does (the inter-node batcher stays unguarded —
-        // its already-routed fan-out legitimately carries transactional items without identity).
-        GrpcTrySetManyKeyValueResponse trySetResponse =
-            KeyValuesService.RejectUnregisteredTransactionalSetMany(setKeyRequest)
-            ?? await service.TrySetManyKeyValueInternal(setKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TrySetManyKeyValue,
-            RequestId = requestId,
-            TrySetManyKeyValue = trySetResponse
-        };
+            // Client-facing entry: a transactional batch without registration identity can never commit, so
+            // reject it here exactly as the unary endpoint does (the inter-node batcher stays unguarded —
+            // its already-routed fan-out legitimately carries transactional items without identity).
+            GrpcTrySetManyKeyValueResponse trySetResponse =
+                KeyValuesService.RejectUnregisteredTransactionalSetMany(request.TrySetManyKeyValue)
+                ?? await service.TrySetManyKeyValueInternal(request.TrySetManyKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TrySetManyKeyValue,
+                RequestId = request.RequestId,
+                TrySetManyKeyValue = trySetResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryDeleteManyKeyValueDelayed(
-        int requestId,
-        GrpcTryDeleteManyKeyValueRequest deleteManyKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        // Client-facing entry: reject an unregistered transactional batch exactly as the unary endpoint does.
-        GrpcTryDeleteManyKeyValueResponse tryDeleteManyResponse =
-            KeyValuesService.RejectUnregisteredTransactionalDeleteMany(deleteManyKeyRequest)
-            ?? await service.TryDeleteManyKeyValueInternal(deleteManyKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryDeleteManyKeyValue,
-            RequestId = requestId,
-            TryDeleteManyKeyValue = tryDeleteManyResponse
-        };
+            // Client-facing entry: reject an unregistered transactional batch exactly as the unary endpoint does.
+            GrpcTryDeleteManyKeyValueResponse tryDeleteManyResponse =
+                KeyValuesService.RejectUnregisteredTransactionalDeleteMany(request.TryDeleteManyKeyValue)
+                ?? await service.TryDeleteManyKeyValueInternal(request.TryDeleteManyKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryDeleteManyKeyValue,
+                RequestId = request.RequestId,
+                TryDeleteManyKeyValue = tryDeleteManyResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryGetKeyValueDelayed(
-        int requestId,
-        GrpcTryGetKeyValueRequest getKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTryGetKeyValueResponse tryGetResponse = await service.TryGetKeyValueInternal(getKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryGetKeyValue,
-            RequestId = requestId,
-            TryGetKeyValue = tryGetResponse
-        };
+            GrpcTryGetKeyValueResponse tryGetResponse = await service.TryGetKeyValueInternal(request.TryGetKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryGetKeyValue,
+                RequestId = request.RequestId,
+                TryGetKeyValue = tryGetResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryDeleteKeyValueDelayed(
-        int requestId,
-        GrpcTryDeleteKeyValueRequest deleteKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTryDeleteKeyValueResponse tryDeleteResponse = await service.TryDeleteKeyValueInternal(deleteKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryDeleteKeyValue,
-            RequestId = requestId,
-            TryDeleteKeyValue = tryDeleteResponse
-        };
+            GrpcTryDeleteKeyValueResponse tryDeleteResponse = await service.TryDeleteKeyValueInternal(request.TryDeleteKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryDeleteKeyValue,
+                RequestId = request.RequestId,
+                TryDeleteKeyValue = tryDeleteResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryExtendKeyValueDelayed(
-        int requestId,
-        GrpcTryExtendKeyValueRequest extendKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTryExtendKeyValueResponse tryExtendResponse = await service.TryExtendKeyValueInternal(extendKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryExtendKeyValue,
-            RequestId = requestId,
-            TryExtendKeyValue = tryExtendResponse
-        };
+            GrpcTryExtendKeyValueResponse tryExtendResponse = await service.TryExtendKeyValueInternal(request.TryExtendKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryExtendKeyValue,
+                RequestId = request.RequestId,
+                TryExtendKeyValue = tryExtendResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryExistsKeyValueDelayed(
-        int requestId,
-        GrpcTryExistsKeyValueRequest existKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTryExistsKeyValueResponse tryExistsResponse = await service.TryExistsKeyValueInternal(existKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryExistsKeyValue,
-            RequestId = requestId,
-            TryExistsKeyValue = tryExistsResponse
-        };
+            GrpcTryExistsKeyValueResponse tryExistsResponse = await service.TryExistsKeyValueInternal(request.TryExistsKeyValue, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryExistsKeyValue,
+                RequestId = request.RequestId,
+                TryExistsKeyValue = tryExistsResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryAcquireExclusiveLockDelayed(
-        int requestId,
-        GrpcTryAcquireExclusiveLockRequest existKeyRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLockResponse = await service.TryAcquireExclusiveLockInternal(existKeyRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryAcquireExclusiveLock,
-            RequestId = requestId,
-            TryAcquireExclusiveLock = tryAcquireExclusiveLockResponse
-        };
+            GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLockResponse = await service.TryAcquireExclusiveLockInternal(request.TryAcquireExclusiveLock, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryAcquireExclusiveLock,
+                RequestId = request.RequestId,
+                TryAcquireExclusiveLock = tryAcquireExclusiveLockResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryExecuteTransactionScriptDelayed(
-        int requestId,
-        GrpcTryExecuteTransactionScriptRequest tryExecuteTransactionRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScriptResponse = await service.TryExecuteTransactionScriptInternal(tryExecuteTransactionRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryExecuteTransactionScript,
-            RequestId = requestId,
-            TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
-        };
+            GrpcTryExecuteTransactionScriptResponse tryExecuteTransactionScriptResponse = await service.TryExecuteTransactionScriptInternal(request.TryExecuteTransactionScript, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryExecuteTransactionScript,
+                RequestId = request.RequestId,
+                TryExecuteTransactionScript = tryExecuteTransactionScriptResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryGetByBucketDelayed(
-        int requestId,
-        GrpcGetByBucketRequest GetByBucketRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcGetByBucketResponse GetByBucketResponse = await service.GetByBucketInternal(GetByBucketRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryGetByBucket,
-            RequestId = requestId,
-            GetByBucket = GetByBucketResponse
-        };
+            GrpcGetByBucketResponse getByBucketResponse = await service.GetByBucketInternal(request.GetByBucket, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryGetByBucket,
+                RequestId = request.RequestId,
+                GetByBucket = getByBucketResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryScanAllByPrefixDelayed(
-        int requestId,
-        GrpcScanAllByPrefixRequest scanAllByPrefixRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcScanAllByPrefixResponse scanAllByPrefixResponse = await service.ScanAllByPrefixInternal(scanAllByPrefixRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryScanByPrefix,
-            RequestId = requestId,
-            ScanByPrefix = scanAllByPrefixResponse
-        };
+            GrpcScanAllByPrefixResponse scanAllByPrefixResponse = await service.ScanAllByPrefixInternal(request.ScanByPrefix, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryScanByPrefix,
+                RequestId = request.RequestId,
+                ScanByPrefix = scanAllByPrefixResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryStartTransactionDelayed(
-        int requestId,
-        GrpcStartTransactionRequest startTransactionRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcStartTransactionResponse startTransactionResponse = await service.StartTransactionInternal(startTransactionRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryStartTransaction,
-            RequestId = requestId,
-            StartTransaction = startTransactionResponse
-        };
+            GrpcStartTransactionResponse startTransactionResponse = await service.StartTransactionInternal(request.StartTransaction, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryStartTransaction,
+                RequestId = request.RequestId,
+                StartTransaction = startTransactionResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryCommitTransactionDelayed(
-        int requestId,
-        GrpcCommitTransactionRequest commitTransactionRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcCommitTransactionResponse commitTransactionResponse = await service.CommitTransactionInternal(commitTransactionRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryCommitTransaction,
-            RequestId = requestId,
-            CommitTransaction = commitTransactionResponse
-        };
+            GrpcCommitTransactionResponse commitTransactionResponse = await service.CommitTransactionInternal(request.CommitTransaction, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryCommitTransaction,
+                RequestId = request.RequestId,
+                CommitTransaction = commitTransactionResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 
     private async Task TryRollbackTransactionDelayed(
-        int requestId,
-        GrpcRollbackTransactionRequest rollbackTransactionRequest,
+        GrpcBatchClientKeyValueRequest request,
         ChannelWriter<GrpcBatchClientKeyValueResponse> responses,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamDrain drain
     )
     {
-        GrpcRollbackTransactionResponse rollbackTransactionResponse = await service.RollbackTransactionInternal(rollbackTransactionRequest, context);
-
-        GrpcBatchClientKeyValueResponse response = new()
+        try
         {
-            Type = GrpcClientBatchType.TryRollbackTransaction,
-            RequestId = requestId,
-            RollbackTransaction = rollbackTransactionResponse
-        };
+            GrpcRollbackTransactionResponse rollbackTransactionResponse = await service.RollbackTransactionInternal(request.RollbackTransaction, context);
 
-        responses.TryWrite(response);
+            responses.TryWrite(new GrpcBatchClientKeyValueResponse
+            {
+                Type = GrpcClientBatchType.TryRollbackTransaction,
+                RequestId = request.RequestId,
+                RollbackTransaction = rollbackTransactionResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            ObserveFault(request, responses, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
     }
 }

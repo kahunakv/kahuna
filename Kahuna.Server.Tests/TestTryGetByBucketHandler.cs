@@ -441,7 +441,7 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
             null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Ephemeral, 0, 0, null);
+            KeyValueDurability.Ephemeral, 0, 0, default);
     }
 
     // ── Back-pressure on the scan enqueue surfaces as MustRetry and leaks no in-flight entry ─
@@ -496,7 +496,7 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
             null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            durability, 0, 0, null);
+            durability, 0, 0, default);
     }
 
     private static KeyValueRequest MakeSnapshotBucketScan(string prefix, HLCTimestamp readTimestamp)
@@ -509,7 +509,7 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
             null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null)
+            KeyValueDurability.Persistent, 0, 0, default)
         { ReadTimestamp = readTimestamp };
     }
 
@@ -523,7 +523,7 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
             null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null);
+            KeyValueDurability.Persistent, 0, 0, default);
     }
 
     private static KeyValueRequest MakeSet(string key, byte[] value, long revision)
@@ -542,7 +542,7 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
             KeyValueDurability.Ephemeral,
             0,
             0,
-            null
+            default
         );
     }
 

@@ -285,9 +285,9 @@ public sealed class TestBackendIoScheduler : RaftTrackingTest
 
     private static KeyValueRequest MakeGet(string key) => new(
         KeyValueRequestType.TryGet, HLCTimestamp.Zero, HLCTimestamp.Zero, key, null, null, -1,
-        KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 1, null);
+        KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 1, default);
 
     private static KeyValueRequest MakeSet(string key, string value) => new(
         KeyValueRequestType.TrySet, HLCTimestamp.Zero, HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes(value), null, -1,
-        KeyValueFlags.Set, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 1, null);
+        KeyValueFlags.Set, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, 1, default);
 }

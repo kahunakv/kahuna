@@ -161,7 +161,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
+        KeyValueReplyRef promise = KeyValueReplyRef.From(actorContext.Reply.Value);
 
         string diskCursor = message.StartKey ?? prefix;
 

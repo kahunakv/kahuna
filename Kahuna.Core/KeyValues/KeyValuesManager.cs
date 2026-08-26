@@ -146,11 +146,11 @@ internal sealed partial class KeyValuesManager : IDisposable
         operationRegistrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
     /// <summary>Registers a transaction-scoped operation on its coordinator before it is applied.</summary>
-    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
+    public ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         operationRegistrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
     /// <summary>Records a transaction-scoped operation's confirmed effect on its coordinator.</summary>
-    public Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
+    public ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
         operationRegistrar.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
 
     /// <summary>Coordinator-side registration of an operation.</summary>
@@ -198,7 +198,7 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// Sends a request to a bounded key-value actor router, mapping inbox-full backpressure to a
     /// retryable <c>MustRetry</c> response.
     /// </summary>
-    private static Task<KeyValueResponse?> AskKeyValueActor(
+    private static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 

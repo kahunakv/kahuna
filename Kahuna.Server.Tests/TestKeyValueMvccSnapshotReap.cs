@@ -62,7 +62,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? entry = context.Store.Get("snap/key");
         Assert.NotNull(entry);
@@ -97,7 +97,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? entry = context.Store.Get("snap/key");
         Assert.NotNull(entry);
@@ -138,7 +138,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? entry = context.Store.Get("snap/key");
         Assert.NotNull(entry);
@@ -174,7 +174,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? entry = context.Store.Get("snap/key");
         Assert.NotNull(entry);
@@ -213,7 +213,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? entry = context.Store.Get("snap/key");
         Assert.NotNull(entry);
@@ -345,7 +345,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? entry = context.Store.Get("snap/key");
         Assert.NotNull(entry);
@@ -417,7 +417,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "snap/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         KeyValueEntry? after = context.Store.Get("snap/key");
         Assert.NotNull(after);
@@ -476,7 +476,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "mod/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         // The write-intent MVCC entry was removed by the handler's own Remove() call, not by our trim.
         // Trim must not have doubled-removed or corrupted anything.
@@ -515,7 +515,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "null/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         Assert.Null(entry.MvccEntries);
         Assert.Equal(baselineBytes, entry.CachedBytes);
@@ -569,7 +569,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "trim/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         Assert.Null(seedEntry.MvccEntries);
         Assert.Equal(preInsertBytes, seedEntry.CachedBytes);
@@ -609,7 +609,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             writerTx, HLCTimestamp.Zero, "partial/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         // Dead reader removed, live reader kept.
         Assert.NotNull(entry.MvccEntries);
@@ -662,7 +662,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             committerTx, HLCTimestamp.Zero, "commit/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         Assert.Equal(KeyValueResponseType.Committed, response.Type);
         Assert.Null(entry.MvccEntries);
@@ -713,7 +713,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
             rollbackTx, HLCTimestamp.Zero, "rollback/key",
             null, null, -1, KeyValueFlags.None, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         Assert.Equal(KeyValueResponseType.RolledBack, response.Type);
         Assert.Null(entry.MvccEntries);

@@ -120,7 +120,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <summary>
     ///
     /// </summary>
-    public TaskCompletionSource<KeyValueResponse?>? Promise { get; private set; }
+    public KeyValueReplyRef Promise { get; private set; }
 
     /// <summary>
     /// Stage-3 continuation for a resumable backend read (ResumeRead messages only).
@@ -163,7 +163,7 @@ public sealed class KeyValueRequest : IConsistentHashable
             KeyValueDurability.Persistent,
             0,
             0,
-            null
+            default
         )
     {
     }
@@ -195,7 +195,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         KeyValueDurability durability,
         int proposalId, 
         int partitionId,
-        TaskCompletionSource<KeyValueResponse?>? promise
+        KeyValueReplyRef promise
     )
     {
         Type = type;
@@ -228,7 +228,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         KeyValueDurability durability,
         int proposalId, 
         int partitionId,
-        TaskCompletionSource<KeyValueResponse?>? promise
+        KeyValueReplyRef promise
     )
     {
         Type = type;
@@ -252,7 +252,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         Key = string.Empty;
         Value = null;
         CompareValue = null;
-        Promise = null;
+        Promise = default;
         StartKey = null;
         EndKey = null;
         StartInclusive = false;

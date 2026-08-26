@@ -16,7 +16,7 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/ReleaseProposal: Key not found for key/value {Key}", message.Key);
             
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -25,7 +25,7 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/ReleaseProposal: Couldn't find an active write intent on key/value {Key}", message.Key);
             
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -34,7 +34,7 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/ReleaseProposal: Current write intent on key/value {Key} doesn't match passed id {Current} {Passed}", message.Key, entry.ReplicationIntent.ProposalId, message.ProposalId);
             
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -43,7 +43,7 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/ReleaseProposal: Proposal on key/value {Key} doesn't exist {ProposalId}", message.Key, message.ProposalId);
 
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }        
@@ -60,7 +60,7 @@ internal sealed class ReleaseProposalHandler : BaseHandler
             ? new KeyValueResponse(KeyValueResponseType.MustRetry, 0)
             : KeyValueStaticResponses.ErroredResponse;
 
-        if (message.Promise is null)
+        if (message.Promise.IsDefault)
             return KeyValueStaticResponses.LockedResponse;
 
         message.Promise.TrySetResult(response);

@@ -252,7 +252,7 @@ public sealed class TestPredicateLockLifecycle : RaftTrackingTest
         KeyValueRequestType type, HLCTimestamp transactionId, string key, int expiresMs,
         KeyValueDurability durability = KeyValueDurability.Ephemeral)
         => new(type, transactionId, HLCTimestamp.Zero, key, null, null, -1, KeyValueFlags.None,
-            expiresMs, HLCTimestamp.Zero, durability, 0, 0, null);
+            expiresMs, HLCTimestamp.Zero, durability, 0, 0, default);
 
     private static KeyValueRequest BuildRangeRequest(
         HLCTimestamp transactionId, string key, string startKey, string endKey, int expiresMs)

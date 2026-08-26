@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 using Nixie;
 using Nixie.Routers;
 
@@ -51,7 +53,7 @@ internal sealed class LocalKeyValueOperations
     private Task<TransactionRecord?> LookupDurableRecordRouted(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         runtime.DurableReplication.LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken);
 
-    private static Task<KeyValueResponse?> AskKeyValueActor(
+    private static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
@@ -67,7 +69,8 @@ internal sealed class LocalKeyValueOperations
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    public async ValueTask<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,
@@ -93,7 +96,7 @@ internal sealed class LocalKeyValueOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         request.RoutedGeneration = routedGeneration;
@@ -176,7 +179,7 @@ internal sealed class LocalKeyValueOperations
                 item.Durability,
                 0,
                 0,
-                null
+                default
             );
 
             request.RoutedGeneration = item.RoutedGeneration;
@@ -242,7 +245,7 @@ internal sealed class LocalKeyValueOperations
                 item.Durability,
                 0,
                 0,
-                null
+                default
             );
 
             try
@@ -329,7 +332,7 @@ internal sealed class LocalKeyValueOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         try
@@ -405,7 +408,7 @@ internal sealed class LocalKeyValueOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         try

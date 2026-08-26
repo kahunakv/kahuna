@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 using Kommander;
 using Kommander.Time;
 
@@ -49,11 +51,11 @@ internal sealed class RoutedWriteOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
-    private Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(
+    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
-    private Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(
+    private ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
         registrar.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
 
@@ -70,7 +72,7 @@ internal sealed class RoutedWriteOperations
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
+    public ValueTask<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
         HLCTimestamp transactionId,
         string key,
         byte[]? value,
@@ -86,13 +88,13 @@ internal sealed class RoutedWriteOperations
     )
     {
         if (ReservedKeys.IsReserved(key))
-            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
+            return ValueTask.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
         if (routing is RegistrationRouting.Malformed)
-            return Task.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
+            return ValueTask.FromResult((KeyValueResponseType.InvalidInput, 0L, HLCTimestamp.Zero));
 
         byte[] digest = OperationDigest.ForSet(key, value, compareValue, compareRevision, flags, expiresMs, durability);
 
@@ -105,7 +107,8 @@ internal sealed class RoutedWriteOperations
     /// new, then records the confirmed effect and caches the response. A retry carrying the same
     /// operation id replays the cached response instead of applying the write twice.
     /// </summary>
-    private async Task<(KeyValueResponseType, long, HLCTimestamp)> RegisterAndTrySetKeyValue(
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<(KeyValueResponseType, long, HLCTimestamp)> RegisterAndTrySetKeyValue(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs,
         KeyValueDurability durability, byte[] digest, long routedGeneration, CancellationToken cancellationToken)
@@ -410,7 +413,7 @@ internal sealed class RoutedWriteOperations
     )
     {
         return locator.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero, key, value, null, compareRevision, flags, 0, KeyValueDurability.Persistent, cancellationToken);
+            HLCTimestamp.Zero, key, value, null, compareRevision, flags, 0, KeyValueDurability.Persistent, cancellationToken).AsTask();
     }
 
     internal Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> SystemGetKeyValue(string key, CancellationToken cancellationToken)

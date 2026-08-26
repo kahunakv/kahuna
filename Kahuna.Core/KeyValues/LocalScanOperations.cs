@@ -63,7 +63,7 @@ internal sealed class LocalScanOperations
         CancellationToken cancellationToken) =>
         localKeyValues.TryRouteForeignScanDecisions(windowIntents, scanTransactionId, cancellationToken);
 
-    private static Task<KeyValueResponse?> AskKeyValueActor(
+    private static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
@@ -103,7 +103,7 @@ internal sealed class LocalScanOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         request.ReadTimestamp = readTimestamp;
@@ -175,7 +175,7 @@ internal sealed class LocalScanOperations
             KeyValueDurability.Persistent,
             0,
             0,
-            null
+            default
         );
 
         request.ReadTimestamp = readTimestamp;
@@ -215,7 +215,7 @@ internal sealed class LocalScanOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         request.ReadTimestamp = readTimestamp;
@@ -305,7 +305,7 @@ internal sealed class LocalScanOperations
             limit,
             readTimestamp,
             durability,
-            null
+            default
         );
 
         bool attemptedRoutedResolve = false;

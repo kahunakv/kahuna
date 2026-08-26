@@ -331,7 +331,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
             null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Ephemeral, 0, 0, null);
+            KeyValueDurability.Ephemeral, 0, 0, default);
     }
 
     private static KeyValueRequest MakePrefixScan(string prefix)
@@ -344,7 +344,7 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
             null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null);
+            KeyValueDurability.Persistent, 0, 0, default);
     }
 
     private (RaftManager Raft, FairReadScheduler Scheduler, KahunaConfiguration Config, ILogger<IKahuna> Logger)

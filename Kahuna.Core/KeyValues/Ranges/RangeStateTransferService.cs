@@ -94,7 +94,7 @@ internal sealed class RangeStateTransferService
     private Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) =>
         manager.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
 
-    private static Task<KeyValueResponse?> AskKeyValueActor(
+    private static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
@@ -118,7 +118,7 @@ internal sealed class RangeStateTransferService
             HLCTimestamp.Zero,
             keySpace,
             null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null);
+            KeyValueDurability.Persistent, 0, 0, default);
 
         try
         {
@@ -154,7 +154,7 @@ internal sealed class RangeStateTransferService
             HLCTimestamp.Zero,
             keySpace,
             null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null);
+            KeyValueDurability.Persistent, 0, 0, default);
 
         request.RangeLockImportList = locks;
 

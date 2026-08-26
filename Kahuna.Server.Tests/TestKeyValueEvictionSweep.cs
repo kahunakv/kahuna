@@ -426,7 +426,7 @@ public sealed class TestKeyValueEvictionSweep : RaftTrackingTest
             Encoding.UTF8.GetBytes("v0"),
             null, -1, KeyValueFlags.Set, 0,
             HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-            0, 0, null));
+            0, 0, default));
 
         // Write the key 20 times — 5× more than RevisionRetention.
         for (int i = 1; i <= 20; i++)
@@ -437,7 +437,7 @@ public sealed class TestKeyValueEvictionSweep : RaftTrackingTest
                 Encoding.UTF8.GetBytes($"v{i}"),
                 null, -1, KeyValueFlags.Set, 0,
                 HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-                0, 0, null));
+                0, 0, default));
 
             KeyValueEntry? entry = context.Store.Get("hot/key");
             Assert.NotNull(entry);
@@ -511,7 +511,7 @@ public sealed class TestKeyValueEvictionSweep : RaftTrackingTest
                 txId, HLCTimestamp.Zero, "hot/tx/key",
                 null, null, -1, KeyValueFlags.None, 0,
                 HLCTimestamp.Zero, KeyValueDurability.Ephemeral,
-                0, 0, null));
+                0, 0, default));
 
             KeyValueEntry? after = context.Store.Get("hot/tx/key");
             Assert.NotNull(after);

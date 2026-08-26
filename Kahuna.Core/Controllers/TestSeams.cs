@@ -86,7 +86,7 @@ public sealed partial class KahunaManager
     internal Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValueRanged(
         HLCTimestamp transactionId, string key, byte[]? value, long routedGeneration) =>
         keyValues.TrySetKeyValue(transactionId, key, value, null, -1, KeyValueFlags.Set, 0,
-            KeyValueDurability.Persistent, routedGeneration);
+            KeyValueDurability.Persistent, routedGeneration).AsTask();
 
     /// <summary>
     /// Test seam: forces a split of the descriptor covering <paramref name="splitKey"/> at that

@@ -154,7 +154,7 @@ public class TestSnapshotPointReadFromDiskHistory : RaftTrackingTest
             key, null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null);
+            KeyValueDurability.Persistent, 0, 0, default);
         req.ReadTimestamp = readTimestamp;
         return req;
     }
@@ -166,7 +166,7 @@ public class TestSnapshotPointReadFromDiskHistory : RaftTrackingTest
             key, null, null, -1,
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, 0, 0, null);
+            KeyValueDurability.Persistent, 0, 0, default);
         req.ReadTimestamp = readTimestamp;
         return req;
     }

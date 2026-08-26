@@ -25,7 +25,7 @@ internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
         string prefix,
         HLCTimestamp readTimestamp,
         HLCTimestamp currentTime,
-        TaskCompletionSource<KeyValueResponse?> promise,
+        KeyValueReplyRef promise,
         (string, long, bool)? scanKey,
         bool includeTombstones = false) : base(promise)
     {

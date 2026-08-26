@@ -52,7 +52,7 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
 
     public IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> KeyValueActor { get; }
 
-    public TaskCompletionSource<KeyValueResponse?> Promise { get; }
+    public KeyValueReplyRef Promise { get; }
 
     /// <summary>Millisecond tick when the aggregator admitted this write, stamped from the aggregator's
     /// <see cref="System.TimeProvider"/> so queue-age math and its wake timers share one clock. Set by the
@@ -67,7 +67,7 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
         long fenceGeneration,
         byte[] serializedMessage,
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> keyValueActor,
-        TaskCompletionSource<KeyValueResponse?> promise,
+        KeyValueReplyRef promise,
         long enqueueTicks,
         string? logType = null
     )

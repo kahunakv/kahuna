@@ -141,7 +141,7 @@ public sealed class TestTryPrepareMutationsHandler : RaftTrackingTest
             durability,
             0,
             0,
-            null
+            default
         ) { RecordAnchorKey = recordAnchorKey };
     }
 

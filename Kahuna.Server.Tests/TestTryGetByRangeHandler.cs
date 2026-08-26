@@ -339,7 +339,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
                 KeyValueFlags.None, 0,
                 HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
-                0, 1, null);
+                0, 1, default);
             txScan.Limit = 10;
             txScan.StartInclusive = true;
 
@@ -398,7 +398,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
                 KeyValueFlags.None, 0,
                 HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
-                0, wrongPartition, null);
+                0, wrongPartition, default);
             scan.Limit = 2;               // limit 2 over 5 keys → 3 disk pages (first + continuation)
             scan.StartInclusive = true;
 
@@ -471,7 +471,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
-            0, 1, null);
+            0, 1, default);
         req.Limit = limit;
         req.StartInclusive = true;
         return req;
@@ -487,7 +487,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             KeyValueDurability.Ephemeral,
-            0, 0, null);
+            0, 0, default);
 
     // ── Raft / config factory ─────────────────────────────────────────────────────────────
 
@@ -738,7 +738,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
-            0, 1, null);
+            0, 1, default);
         req.Limit = limit;
         req.StartInclusive = true;
         req.ReadTimestamp = snapshotTs;
@@ -757,7 +757,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             KeyValueDurability.Ephemeral,
-            0, 0, null);
+            0, 0, default);
 
     /// <summary>
     /// A stale resident entry that missed its coherence notification must not shadow a newer

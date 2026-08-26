@@ -57,7 +57,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         List<(string, ReadOnlyKeyValueEntry)> inMemoryItems,
         HashSet<string> seenKeys,
         HLCTimestamp currentTime,
-        TaskCompletionSource<KeyValueResponse?> promise,
+        KeyValueReplyRef promise,
         (string, long, bool)? scanKey,
         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null) : base(promise)
     {

@@ -31,7 +31,7 @@ internal sealed class PointReadContinuation : ReadContinuation
     internal PointReadContinuation(
         string key,
         KeyValueResponseType responseType,
-        TaskCompletionSource<KeyValueResponse?> promise) : base(promise)
+        KeyValueReplyRef promise) : base(promise)
     {
         this.key = key;
         this.responseType = responseType;

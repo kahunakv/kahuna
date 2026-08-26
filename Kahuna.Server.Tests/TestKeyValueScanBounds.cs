@@ -193,7 +193,7 @@ public sealed class TestKeyValueScanBounds : RaftTrackingTest
     {
         KeyValueRequest request = new(
             KeyValueRequestType.ScanByPrefix, HLCTimestamp.Zero, HLCTimestamp.Zero, key,
-            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, null);
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
         request.Limit = limit;
         return request;
     }
@@ -202,7 +202,7 @@ public sealed class TestKeyValueScanBounds : RaftTrackingTest
     {
         KeyValueRequest request = new(
             KeyValueRequestType.GetByRange, HLCTimestamp.Zero, HLCTimestamp.Zero, key,
-            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, null);
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
         request.Limit = limit;
         request.StartKey = startKey;
         request.StartInclusive = false;

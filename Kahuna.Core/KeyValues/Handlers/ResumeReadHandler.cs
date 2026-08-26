@@ -24,7 +24,7 @@ internal sealed class ResumeReadHandler : BaseHandler
             context.Logger.LogWarning(
                 "KeyValueActor/ResumeRead: received message with null continuation for key {Key}",
                 message.Key);
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
             return KeyValueStaticResponses.ErroredResponse;
         }
 

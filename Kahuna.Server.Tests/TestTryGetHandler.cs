@@ -827,7 +827,7 @@ public sealed class TestTryGetHandler : RaftTrackingTest
             durability,
             0,
             0,
-            null
+            default
         );
     }
 
@@ -1008,7 +1008,7 @@ public sealed class TestTryGetHandler : RaftTrackingTest
             durability,
             0,
             0,
-            null
+            default
         ) { ReadTimestamp = readTimestamp };
     }
 

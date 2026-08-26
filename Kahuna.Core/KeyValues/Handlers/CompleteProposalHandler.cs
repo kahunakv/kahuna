@@ -22,7 +22,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/CompleteProposal: Key/Value not found for resource {Key}", message.Key);
             
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -31,7 +31,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/CompleteProposal: Couldn't find an active write intent on key/value {Key}", message.Key);
             
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -40,7 +40,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/CompleteProposal: Current write intent on key/value {Key} doesn't match passed id {Current} {Passed}", message.Key, entry.ReplicationIntent.ProposalId, message.ProposalId);
             
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -49,7 +49,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
         {
             context.Logger.LogWarning("KeyValueActor/CompleteProposal: Proposal on key/value {Key} doesn't exist {ProposalId}", message.Key, message.ProposalId);
 
-            message.Promise?.TrySetResult(KeyValueStaticResponses.ErroredResponse);
+            message.Promise.TrySetResult(KeyValueStaticResponses.ErroredResponse);
 
             return KeyValueStaticResponses.DoesNotExistResponse;
         }
@@ -103,7 +103,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
                 throw new NotImplementedException();
         }
 
-        message.Promise?.TrySetResult(response);
+        message.Promise.TrySetResult(response);
 
         return response;
     }

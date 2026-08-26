@@ -54,7 +54,7 @@ internal sealed class LocalMutationTicketOperations
 
     private KeyValueActorRing persistentKeyValuesRouter => runtime.Routers.Persistent;
 
-    private static Task<KeyValueResponse?> AskKeyValueActor(
+    private static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
@@ -87,7 +87,7 @@ internal sealed class LocalMutationTicketOperations
                 key.durability,
                 0,
                 0,
-                null
+                default
             );
 
             try
@@ -147,7 +147,7 @@ internal sealed class LocalMutationTicketOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         request.RoutedGeneration = routedGeneration;
@@ -237,7 +237,7 @@ internal sealed class LocalMutationTicketOperations
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryPrepareMutations,
             transactionId, commitId, key.key,
-            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, key.durability, 0, 0, null);
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, key.durability, 0, 0, default);
 
         request.RecordAnchorKey = recordAnchorKey;
 
@@ -297,7 +297,7 @@ internal sealed class LocalMutationTicketOperations
             durability,
             0,
             0,
-            null
+            default
         );
         
         try
@@ -376,7 +376,7 @@ internal sealed class LocalMutationTicketOperations
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryCommitMutations, transactionId, HLCTimestamp.Zero, key.key,
-            null, null, -1, KeyValueFlags.None, 0, key.proposalTicketId, key.durability, 0, 0, null);
+            null, null, -1, KeyValueFlags.None, 0, key.proposalTicketId, key.durability, 0, 0, default);
 
         try
         {
@@ -441,7 +441,7 @@ internal sealed class LocalMutationTicketOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         KeyValueResponse? response;
@@ -501,7 +501,7 @@ internal sealed class LocalMutationTicketOperations
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryRollbackMutations, transactionId, HLCTimestamp.Zero, key.key,
-            null, null, -1, KeyValueFlags.None, 0, key.proposalTicketId, key.durability, 0, 0, null);
+            null, null, -1, KeyValueFlags.None, 0, key.proposalTicketId, key.durability, 0, 0, default);
 
         try
         {

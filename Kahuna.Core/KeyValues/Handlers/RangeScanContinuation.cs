@@ -110,7 +110,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         int memBatch,
         bool memMaybeMore,
         string diskCursor,
-        TaskCompletionSource<KeyValueResponse?> promise,
+        KeyValueReplyRef promise,
         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null) : base(promise)
     {
         this.prefix = prefix;

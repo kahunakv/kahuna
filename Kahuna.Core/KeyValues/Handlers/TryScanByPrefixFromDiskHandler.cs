@@ -48,7 +48,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
         if (!actorContext.Reply.HasValue)
             return KeyValueStaticResponses.ErroredResponse;
 
-        TaskCompletionSource<KeyValueResponse?> promise = actorContext.Reply.Value.Promise!;
+        KeyValueReplyRef promise = KeyValueReplyRef.From(actorContext.Reply.Value);
 
         // (prefix, -3, includeTombstones) = non-snapshot prefix-from-disk scan. The tombstone flag is
         // part of the coalescing key so a tombstone-carrying scan never shares a continuation (and its

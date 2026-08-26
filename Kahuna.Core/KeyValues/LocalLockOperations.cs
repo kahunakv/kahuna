@@ -59,7 +59,7 @@ internal sealed class LocalLockOperations
     private Task<bool> TryRouteForeignDecision(KeyValueRequest request, string key, HLCTimestamp transactionId, KeyValueDurability durability, bool alreadyAttempted) =>
         localKeyValues.TryRouteForeignDecision(request, key, transactionId, durability, alreadyAttempted);
 
-    private static Task<KeyValueResponse?> AskKeyValueActor(
+    private static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
@@ -88,7 +88,7 @@ internal sealed class LocalLockOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         try
@@ -185,7 +185,7 @@ internal sealed class LocalLockOperations
             durability,
             0,
             0,
-            null
+            default
         );
         
         try
@@ -254,7 +254,7 @@ internal sealed class LocalLockOperations
                 key.durability,
                 0,
                 0,
-                null
+                default
             );
 
             try
@@ -301,7 +301,7 @@ internal sealed class LocalLockOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         try
@@ -360,7 +360,7 @@ internal sealed class LocalLockOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         try
@@ -429,7 +429,7 @@ internal sealed class LocalLockOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         request.StartKey       = startKey;
@@ -493,7 +493,7 @@ internal sealed class LocalLockOperations
             durability,
             0,
             0,
-            null
+            default
         );
 
         request.StartKey       = startKey;

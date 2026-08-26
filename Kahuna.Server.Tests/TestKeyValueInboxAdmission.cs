@@ -76,7 +76,7 @@ public sealed class TestKeyValueInboxAdmission : RaftTrackingTest
             // A read completion (ResumeRead carrying a continuation) is a control message — it must be
             // admitted ahead of the ordinary backlog and resolve its waiter rather than being stranded.
             TaskCompletionSource<KeyValueResponse?> readPromise = new();
-            PointReadContinuation cont = new("absent/key", KeyValueResponseType.Get, readPromise);
+            PointReadContinuation cont = new("absent/key", KeyValueResponseType.Get, new KeyValueReplyRef(readPromise, default));
             _ = actor.Ask(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont }, TestContext.Current.CancellationToken)!;
 
             Task completed = await Task.WhenAny(readPromise.Task, Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
@@ -137,7 +137,7 @@ public sealed class TestKeyValueInboxAdmission : RaftTrackingTest
 
     private static KeyValueRequest MakeExists(string key) => new(
         KeyValueRequestType.TryExists, HLCTimestamp.Zero, HLCTimestamp.Zero, key,
-        null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, null);
+        null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
 
     private (ActorSystem, RaftManager, IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>) SpawnBoundedActor(int maxInboxSize)
     {

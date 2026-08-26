@@ -106,25 +106,20 @@ internal sealed class KeyValueActorRouters
             or KeyValueRequestType.GetSafeTimestamp;
 
     /// <summary>
-    /// Cached completed task for the inbox-full rejection path, so backpressure allocates nothing.
-    /// </summary>
-    private static readonly Task<KeyValueResponse?> MustRetryTask =
-        Task.FromResult<KeyValueResponse?>(KeyValueStaticResponses.MustRetryResponse);
-
-    /// <summary>
     /// Sends a request to a bounded key-value actor ring, mapping inbox-full backpressure (a hot
     /// actor saturated with ordinary requests) to a retryable <c>MustRetry</c> response. Control
     /// messages are exempt from the bound and never reach this path. A rejected message was never
-    /// enqueued, so retrying is unconditionally safe.
+    /// enqueued, so retrying is unconditionally safe. The returned ValueTask must be awaited
+    /// exactly once; on the admitted path it is backed by a pooled reply promise.
     /// </summary>
-    internal static Task<KeyValueResponse?> AskKeyValueActor(
+    internal static ValueTask<KeyValueResponse?> AskKeyValueActor(
         KeyValueActorRing router,
         KeyValueRequest request)
     {
-        if (router.TryAsk(request, out Task<KeyValueResponse?>? reply))
+        if (router.TryAsk(request, out ValueTask<KeyValueResponse?> reply))
             return reply;
 
-        return MustRetryTask;
+        return new(KeyValueStaticResponses.MustRetryResponse);
     }
 
     private KeyValueActorRing GetEphemeralRouter(

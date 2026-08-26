@@ -30,12 +30,13 @@ internal sealed class KeyValueActorRing
         instances[(request.GetHash() & int.MaxValue) % instances.Length];
 
     /// <summary>
-    /// Admission-checked ask against the key's actor. Returns <c>false</c> when the actor's bounded
-    /// inbox rejected the message (never enqueued, safe to retry) without allocating a promise or an
-    /// exception.
+    /// Admission-checked ask against the key's actor on the pooled reply path. Returns <c>false</c>
+    /// when the actor's bounded inbox rejected the message (never enqueued, safe to retry) without
+    /// allocating a promise or an exception. The returned ValueTask must be awaited exactly once;
+    /// consuming it recycles the pooled reply promise.
     /// </summary>
-    internal bool TryAsk(KeyValueRequest request, [NotNullWhen(true)] out Task<KeyValueResponse?>? reply) =>
-        Route(request).TryAsk(request, out reply);
+    internal bool TryAsk(KeyValueRequest request, out ValueTask<KeyValueResponse?> reply) =>
+        Route(request).TryAskPooled(request, out reply);
 
     /// <summary>
     /// Asks the key's actor and returns its reply task. A bounded-inbox rejection surfaces as an

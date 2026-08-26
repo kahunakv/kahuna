@@ -40,7 +40,7 @@ internal static class KeyValueRequestPool
         KeyValueDurability durability,
         int proposalId, 
         int partitionId,
-        TaskCompletionSource<KeyValueResponse?>? promise
+        KeyValueReplyRef promise
     )
     {
         if (pooledRequests.TryDequeue(out KeyValueRequest? request))
@@ -98,7 +98,7 @@ internal static class KeyValueRequestPool
         int limit,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        TaskCompletionSource<KeyValueResponse?>? promise)
+        KeyValueReplyRef promise)
     {
         KeyValueRequest request = Rent(
             KeyValueRequestType.GetByRange,
@@ -167,7 +167,7 @@ internal static class KeyValueRequestPool
             KeyValueDurability.Persistent,
             0,
             0,
-            null
+            default
         );
 
         request.InvalidateOrApplyData = new(
@@ -191,7 +191,7 @@ internal static class KeyValueRequestPool
         KeyValueDurability durability,
         int proposalId,
         int partitionId,
-        TaskCompletionSource<KeyValueResponse?> promise)
+        KeyValueReplyRef promise)
     {
         KeyValueRequest request = Rent(
             KeyValueRequestType.CompleteProposal,
@@ -227,7 +227,7 @@ internal static class KeyValueRequestPool
         KeyValueDurability durability,
         int proposalId,
         int partitionId,
-        TaskCompletionSource<KeyValueResponse?> promise)
+        KeyValueReplyRef promise)
     {
         KeyValueRequest request = Rent(
             KeyValueRequestType.ReleaseProposal,
@@ -275,7 +275,7 @@ internal static class KeyValueRequestPool
             KeyValueDurability.Persistent,
             0,
             0,
-            null);
+            default);
 
         request.ReturnToPoolOnReceive = true;
 

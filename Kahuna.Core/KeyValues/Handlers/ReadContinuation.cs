@@ -34,7 +34,7 @@ internal abstract class ReadContinuation
 
     // Primary promise plus any coalesced waiters. Mutated only on the actor thread (stage 1
     // adds waiters, stage 3 broadcasts). No synchronisation needed.
-    private readonly List<TaskCompletionSource<KeyValueResponse?>> waiters;
+    private readonly List<KeyValueReplyRef> waiters;
 
     /// <summary>
     /// Actor-enforced deadline for this in-flight read. <see cref="HLCTimestamp.Zero"/> means no
@@ -55,7 +55,7 @@ internal abstract class ReadContinuation
     internal int MaxWaiters { get; init; } = DefaultMaxWaiters;
 
     /// <summary>The primary caller's completion source (the one that initiated the read).</summary>
-    internal TaskCompletionSource<KeyValueResponse?> Promise => waiters[0];
+    internal KeyValueReplyRef Promise => waiters[0];
 
     /// <summary>Current waiter count (primary + coalesced). Actor-thread only.</summary>
     internal int WaiterCount => waiters.Count;
@@ -87,7 +87,7 @@ internal abstract class ReadContinuation
     /// <summary>Marks this continuation as faulted. Call only from the stage-2 callback.</summary>
     internal void SetFaulted() => Faulted = true;
 
-    protected ReadContinuation(TaskCompletionSource<KeyValueResponse?> promise)
+    protected ReadContinuation(KeyValueReplyRef promise)
     {
         waiters = new(1) { promise };
     }
@@ -100,7 +100,7 @@ internal abstract class ReadContinuation
     /// Returns false when the continuation is already expired or the waiter cap is reached; the
     /// caller must then NOT attach and should be given a retryable result instead of parked.
     /// </summary>
-    internal bool AddWaiter(TaskCompletionSource<KeyValueResponse?> promise)
+    internal bool AddWaiter(KeyValueReplyRef promise)
     {
         if (Cancelled || waiters.Count >= MaxWaiters)
             return false;
@@ -115,7 +115,7 @@ internal abstract class ReadContinuation
     /// </summary>
     internal void Resolve(KeyValueResponse? response)
     {
-        foreach (TaskCompletionSource<KeyValueResponse?> w in waiters)
+        foreach (KeyValueReplyRef w in waiters)
             w.TrySetResult(response);
     }
 

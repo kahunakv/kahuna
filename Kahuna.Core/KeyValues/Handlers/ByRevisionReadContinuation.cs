@@ -28,7 +28,7 @@ internal sealed class ByRevisionReadContinuation : ReadContinuation
         string key,
         long revision,
         KeyValueResponseType responseType,
-        TaskCompletionSource<KeyValueResponse?> promise) : base(promise)
+        KeyValueReplyRef promise) : base(promise)
     {
         this.key = key;
         this.revision = revision;
