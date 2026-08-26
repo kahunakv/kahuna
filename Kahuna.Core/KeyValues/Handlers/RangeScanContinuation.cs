@@ -219,11 +219,70 @@ internal sealed class RangeScanContinuation : ReadContinuation
             }
             else
             {
-                // Same key: memory wins — it has the fresher value plus MVCC / RYOW state.
+                // Same key in both sources. The resident entry is usually the fresher committed base
+                // and carries the MVCC / RYOW state, but a stale resident that missed its coherence
+                // notification can shadow a newer durable row indefinitely — so the collision is
+                // decided by (revision, commit HLC), not unconditionally by residency.
                 keyToProcess = memKey!;
-                entry = memItems[memIdx].Entry;
+                KeyValueEntry memEntry = memItems[memIdx].Entry;
+                ReadOnlyKeyValueEntry diskEntry = diskPage[diskIdx].Item2;
                 memIdx++;
                 diskIdx++;
+
+                // In snapshot mode the disk page is as-of projected, so this comparison is only a
+                // staleness signal there, never a serving decision.
+                bool diskIsNewer = diskEntry.Revision > memEntry.Revision
+                    || (diskEntry.Revision == memEntry.Revision && diskEntry.LastModified > memEntry.LastModified);
+
+                if (diskIsNewer && !isSnapshotRead)
+                {
+                    // Converge the resident entry off this scan through the coherence-reconcile apply,
+                    // which adopts the durable row only when strictly newer and owns the intent/fence
+                    // handling. The scan itself never waits on it and never installs into the store.
+                    context.ActorContext.Self.Send(
+                        KeyValueRequestPool.RentInvalidateOrApply(
+                            keyToProcess,
+                            diskEntry.Revision,
+                            diskEntry.Value,
+                            diskEntry.Expires,
+                            diskEntry.LastModified,
+                            diskEntry.LastModified,
+                            diskEntry.State,
+                            forceResident: false,
+                            transactionId: HLCTimestamp.Zero,
+                            partitionId: partitionId,
+                            noRevision: false,
+                            isRollback: false,
+                            returnToPoolOnReceive: true,
+                            backendHydrated: true,
+                            hydratedEntry: new ReadOnlyKeyValueEntry(
+                                diskEntry.Value, diskEntry.Revision, diskEntry.Expires,
+                                diskEntry.LastUsed, diskEntry.LastModified, diskEntry.State),
+                            reconcile: true
+                        )
+                    );
+                }
+
+                if (diskIsNewer && !isSnapshotRead && transactionId == HLCTimestamp.Zero)
+                {
+                    // Plain current read: serve the newer committed durable row as a transient entry
+                    // (populateCache:false semantics, like the disk-only branch). Transactional and
+                    // snapshot reads keep the resident base — its MVCC / RYOW / intent state must not
+                    // be bypassed — and converge through the reconcile sent above.
+                    entry = new KeyValueEntry
+                    {
+                        Bucket = GetBucket(keyToProcess),
+                        Value = diskEntry.Value,
+                        Revision = diskEntry.Revision,
+                        FlushedRevision = diskEntry.Revision,
+                        Expires = diskEntry.Expires,
+                        LastUsed = diskEntry.LastUsed,
+                        LastModified = diskEntry.LastModified,
+                        State = diskEntry.State
+                    };
+                }
+                else
+                    entry = memEntry;
             }
 
             // Exclusive-start enforcement: the BTree honours this natively; apply it to

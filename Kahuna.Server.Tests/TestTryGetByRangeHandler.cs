@@ -263,7 +263,14 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
 
             // Write the in-memory version of kv/x via ephemeral TrySet (no Raft proposal).
             // Ephemeral and persistent keys share the same BTree, so the stage-1 snapshot
-            // picks it up and the merge serves the memory value over the disk value.
+            // picks it up. Three sets advance the resident entry to revision 2 — past the disk
+            // row's revision 1 — so the revision-aware collision serves the memory value.
+            await actorRef.Ask(
+                MakeSet("kv/x", Encoding.UTF8.GetBytes("mem-val-0")),
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await actorRef.Ask(
+                MakeSet("kv/x", Encoding.UTF8.GetBytes("mem-val-1")),
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             await actorRef.Ask(
                 MakeSet("kv/x", Encoding.UTF8.GetBytes("mem-val")),
                 TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -736,6 +743,173 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         req.StartInclusive = true;
         req.ReadTimestamp = snapshotTs;
         return req;
+    }
+
+    // ── Same-key memory/disk collisions: decided by (revision, commit HLC), not residency ──
+
+    private static KeyValueRequest MakeGet(string key) =>
+        new(
+            KeyValueRequestType.TryGet,
+            HLCTimestamp.Zero, HLCTimestamp.Zero,
+            key,
+            null,
+            null, -1,
+            KeyValueFlags.None, 0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Ephemeral,
+            0, 0, null);
+
+    /// <summary>
+    /// A stale resident entry that missed its coherence notification must not shadow a newer
+    /// durable row: the plain current-read scan serves the newer disk row, and the collision
+    /// schedules a coherence reconcile that converges the resident entry off the scan.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_SameKeyCollision_NewerDiskRowWinsAndHealsTheResident()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-collision-disk-newer");
+
+        scheduler.Start();
+        try
+        {
+            // Disk holds doc/x at revision 5; the resident entry is behind it.
+            RangeBackend backend = new(new Dictionary<string, (byte[]? Value, long Revision)>
+            {
+                ["doc/x"] = (Encoding.UTF8.GetBytes("disk-v5"), 5L)
+            });
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-collision-disk-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            await actorRef.Ask(
+                MakeSet("doc/x", Encoding.UTF8.GetBytes("mem-stale")),
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.NotNull(resp.RangeResult);
+            Assert.Single(resp.RangeResult!.Items);
+            Assert.Equal("doc/x", resp.RangeResult.Items[0].Item1);
+            Assert.Equal(5, resp.RangeResult.Items[0].Item2.Revision);
+            Assert.Equal("disk-v5", Encoding.UTF8.GetString(resp.RangeResult.Items[0].Item2.Value!));
+
+            // The collision also scheduled a reconcile: the resident entry converges to the
+            // durable row without any further scan touching disk.
+            long deadline = Environment.TickCount64 + 5_000;
+            while (true)
+            {
+                KeyValueResponse? read = await actorRef.Ask(
+                    MakeGet("doc/x"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+                if (read?.Entry?.Revision == 5)
+                {
+                    Assert.Equal("disk-v5", Encoding.UTF8.GetString(read.Entry.Value!));
+                    break;
+                }
+
+                Assert.True(Environment.TickCount64 < deadline, "the resident entry did not converge to the newer durable row");
+                await Task.Delay(20, TestContext.Current.CancellationToken);
+            }
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    [Fact]
+    public async Task PersistentRangeScan_SameKeyCollision_NewerResidentStillWins()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-collision-mem-newer");
+
+        scheduler.Start();
+        try
+        {
+            // Disk holds doc/y at revision 0; the resident entry advances past it with fresh sets.
+            RangeBackend backend = new(new Dictionary<string, (byte[]? Value, long Revision)>
+            {
+                ["doc/y"] = (Encoding.UTF8.GetBytes("disk-old"), 0L)
+            });
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-collision-mem-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            await actorRef.Ask(
+                MakeSet("doc/y", Encoding.UTF8.GetBytes("mem-1")),
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await actorRef.Ask(
+                MakeSet("doc/y", Encoding.UTF8.GetBytes("mem-2")),
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.NotNull(resp.RangeResult);
+            Assert.Single(resp.RangeResult!.Items);
+            Assert.Equal("mem-2", Encoding.UTF8.GetString(resp.RangeResult.Items[0].Item2.Value!));
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// Snapshot scans keep their as-of projection rules: a newer disk row on a same-key collision
+    /// neither replaces the served value nor schedules a heal from the snapshot path — the
+    /// current-read branch owns convergence.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotRangeScan_SameKeyCollision_KeepsAsOfServingAndDoesNotHeal()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-collision-snapshot");
+
+        scheduler.Start();
+        try
+        {
+            RangeBackend backend = new(new Dictionary<string, (byte[]? Value, long Revision)>
+            {
+                ["doc/z"] = (Encoding.UTF8.GetBytes("disk-v5"), 5L)
+            });
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-collision-snap-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueResponse? written = await actorRef.Ask(
+                MakeSet("doc/z", Encoding.UTF8.GetBytes("mem-as-of")),
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.NotNull(written);
+
+            HLCTimestamp snapshotTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs),
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.NotNull(resp.RangeResult);
+            Assert.Single(resp.RangeResult!.Items);
+            Assert.Equal("mem-as-of", Encoding.UTF8.GetString(resp.RangeResult.Items[0].Item2.Value!));
+
+            // No heal may originate from the snapshot path: the resident entry stays as written.
+            await Task.Delay(200, TestContext.Current.CancellationToken);
+            KeyValueResponse? read = await actorRef.Ask(
+                MakeGet("doc/z"), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal("mem-as-of", Encoding.UTF8.GetString(read!.Entry!.Value!));
+        }
+        finally { scheduler.Stop(); }
     }
 
     /// <summary>

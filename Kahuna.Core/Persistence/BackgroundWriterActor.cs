@@ -171,6 +171,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private List<(int PartitionId, long LogIndex)>? reusableKeyValueIndexes;
 
     /// <summary>
+    /// Mutation identities already drained into the key/value batch being assembled, so the routine
+    /// duplicate of the same committed mutation — queued once by the owning actor and once by the
+    /// Raft consumer — is collapsed to one physical write before any backend I/O. WAL indexes travel
+    /// beside the items, so a collapsed duplicate still advances the durability floor when the
+    /// surviving write lands; its flush acknowledgement would be byte-identical to the survivor's.
+    /// Cleared per assembled batch; duplicates split across batches are suppressed by the backend's
+    /// monotonic current-head guard instead.
+    /// </summary>
+    private readonly HashSet<(string Key, long Revision, int LmNode, long LmPhysical, uint LmCounter, int State, bool NoRevision)> drainedKeyValueIdentities = new();
+
+    /// <summary>
     /// Per-partition floors already persisted to the backend, so a flush cycle only writes floors
     /// that actually advanced.
     /// </summary>
@@ -936,6 +947,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                 DateTime timestamp = DateTime.UtcNow;
 
+                drainedKeyValueIdentities.Clear();
+
                 while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
                 {
                     // Stamped only when the partition is not already awaiting a checkpoint: the stamp
@@ -944,22 +957,40 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     if (keyValueRequest.PartitionId >= 0)
                         partitionDirtySince.TryAdd(keyValueRequest.PartitionId, timestamp);
 
-                    items.Add(new(
+                    // Collapse the leader-plus-consumer duplicate of one committed mutation to a
+                    // single physical write. The WAL index below is still recorded for a collapsed
+                    // duplicate: its durability is certified by the surviving identical write.
+                    bool firstOccurrence = drainedKeyValueIdentities.Add((
                         keyValueRequest.Key,
-                        keyValueRequest.Value,
                         keyValueRequest.Revision,
-                        keyValueRequest.Expires.N,
-                        keyValueRequest.Expires.L,
-                        keyValueRequest.Expires.C,
-                        keyValueRequest.LastUsed.N,
-                        keyValueRequest.LastUsed.L,
-                        keyValueRequest.LastUsed.C,
                         keyValueRequest.LastModified.N,
                         keyValueRequest.LastModified.L,
                         keyValueRequest.LastModified.C,
                         keyValueRequest.State,
-                        keyValueRequest.NoRevision
-                    ));
+                        keyValueRequest.NoRevision));
+
+                    if (firstOccurrence)
+                    {
+                        items.Add(new(
+                            keyValueRequest.Key,
+                            keyValueRequest.Value,
+                            keyValueRequest.Revision,
+                            keyValueRequest.Expires.N,
+                            keyValueRequest.Expires.L,
+                            keyValueRequest.Expires.C,
+                            keyValueRequest.LastUsed.N,
+                            keyValueRequest.LastUsed.L,
+                            keyValueRequest.LastUsed.C,
+                            keyValueRequest.LastModified.N,
+                            keyValueRequest.LastModified.L,
+                            keyValueRequest.LastModified.C,
+                            keyValueRequest.State,
+                            keyValueRequest.NoRevision
+                        ));
+
+                        if (keyValueRequest.Value is not null)
+                            size += keyValueRequest.Value.Length;
+                    }
 
                     // Carry the WAL index so the durability floor advances when this batch lands;
                     // travels beside the items so the retry path keeps the linkage.
@@ -974,14 +1005,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         batchIndexes.Add((keyValueRequest.PartitionId, keyValueRequest.LogIndex));
                     }
 
-                    if (keyValueRequest.Value is not null)
-                        size += keyValueRequest.Value.Length;
-
                     // The request has been copied into the item struct and is no longer referenced
                     // (the retry path keeps the items, not the requests), so recycle it.
                     BackgroundWriteRequestPool.Return(keyValueRequest);
 
-                    if (++counter >= MaxBatchSize || size >= MaxPacketSize)
+                    if (firstOccurrence && (++counter >= MaxBatchSize || size >= MaxPacketSize))
                         break;
                 }
             }

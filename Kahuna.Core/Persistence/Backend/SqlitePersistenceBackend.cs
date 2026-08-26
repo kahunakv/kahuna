@@ -622,39 +622,59 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         try
         {
+            // The current row only ever advances by (revision, commit HLC in physical→counter→node
+            // order): the same committed mutation is queued independently by the owning actor and the
+            // Raft consumer, so a delayed older duplicate can land after a newer head — in the same
+            // batch or a later one — and must never regress what a read serves as current. In the
+            // DO UPDATE predicate, unqualified column names refer to the existing row.
             const string insertKeys = """
               INSERT INTO keys (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state)
               VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state)
               ON CONFLICT(key) DO UPDATE SET
               revision=@revision,
-              value=@value, 
+              value=@value,
               expiresNode=@expiresNode,
-              expiresPhysical=@expiresPhysical, 
+              expiresPhysical=@expiresPhysical,
               expiresCounter=@expiresCounter,
               lastUsedNode=@lastUsedNode,
-              lastUsedPhysical=@lastUsedPhysical, 
+              lastUsedPhysical=@lastUsedPhysical,
               lastUsedCounter=@lastUsedCounter,
               lastModifiedNode=@lastModifiedNode,
-              lastModifiedPhysical=@lastModifiedPhysical, 
-              lastModifiedCounter=@lastModifiedCounter, 
-              state=@state;
+              lastModifiedPhysical=@lastModifiedPhysical,
+              lastModifiedCounter=@lastModifiedCounter,
+              state=@state
+              WHERE @revision > keys.revision
+                 OR (@revision = keys.revision
+                     AND (@lastModifiedPhysical > keys.lastModifiedPhysical
+                          OR (@lastModifiedPhysical = keys.lastModifiedPhysical
+                              AND (@lastModifiedCounter > keys.lastModifiedCounter
+                                   OR (@lastModifiedCounter = keys.lastModifiedCounter
+                                       AND @lastModifiedNode > keys.lastModifiedNode)))));
               """;
-                    
+
+            // A retained-history row is keyed by (key, revision); delete and extend records
+            // legitimately reuse a revision number with a newer commit HLC, so the row only ever
+            // advances by commit HLC — a delayed older same-revision duplicate must not regress it.
             const string insertKeyRevisions = """
-              INSERT INTO keys_revisions (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state) 
-              VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state) 
-              ON CONFLICT(key, revision) DO UPDATE SET 
-              value=@value, 
+              INSERT INTO keys_revisions (key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state)
+              VALUES (@key, @revision, @value, @expiresNode, @expiresPhysical, @expiresCounter, @lastUsedNode, @lastUsedPhysical, @lastUsedCounter, @lastModifiedNode, @lastModifiedPhysical, @lastModifiedCounter, @state)
+              ON CONFLICT(key, revision) DO UPDATE SET
+              value=@value,
               expiresNode=@expiresNode,
-              expiresPhysical=@expiresPhysical, 
+              expiresPhysical=@expiresPhysical,
               expiresCounter=@expiresCounter,
-              lastUsedNode=@lastUsedNode,    
-              lastUsedPhysical=@lastUsedPhysical, 
+              lastUsedNode=@lastUsedNode,
+              lastUsedPhysical=@lastUsedPhysical,
               lastUsedCounter=@lastUsedCounter,
               lastModifiedNode=@lastModifiedNode,
-              lastModifiedPhysical=@lastModifiedPhysical, 
-              lastModifiedCounter=@lastModifiedCounter, 
-              state=@state;
+              lastModifiedPhysical=@lastModifiedPhysical,
+              lastModifiedCounter=@lastModifiedCounter,
+              state=@state
+              WHERE @lastModifiedPhysical > keys_revisions.lastModifiedPhysical
+                 OR (@lastModifiedPhysical = keys_revisions.lastModifiedPhysical
+                     AND (@lastModifiedCounter > keys_revisions.lastModifiedCounter
+                          OR (@lastModifiedCounter = keys_revisions.lastModifiedCounter
+                              AND @lastModifiedNode > keys_revisions.lastModifiedNode)));
               """;
 
             Dictionary<int, List<PersistenceRequestItem>> plan = new();

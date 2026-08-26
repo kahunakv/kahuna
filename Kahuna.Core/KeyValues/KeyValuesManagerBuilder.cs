@@ -347,7 +347,12 @@ internal sealed class KeyValuesManagerBuilder
             // message loop — an in-actor await on this read parks the whole mailbox behind one disk read and,
             // under replicated-apply fan-out, expires entire request batches past the batcher deadline.
             hydrateFromBackend: (partitionId, key) =>
-                backendReadScheduler.EnqueueBatchableTask(partitionId, key, KeyValuePointReadExecutor.For(persistenceBackend)));
+                backendReadScheduler.EnqueueBatchableTask(partitionId, key, KeyValuePointReadExecutor.For(persistenceBackend)),
+            // Exact-revision hydration for the coherence reconcile's below-head recovery: reads the
+            // committed head's retained history row on the same queued scheduler, off the actor. Rare
+            // (only after a below-head durable read on a refusal streak), so no batching executor.
+            hydrateRevisionFromBackend: (partitionId, key, revision) =>
+                backendReadScheduler.EnqueueTask(partitionId, () => persistenceBackend.GetKeyValueRevision(key, revision)));
 
         // Commit-settlement convergence check: at the same apply position that advances the staged-base
         // fence's committed head, verify this node's replicator actually processed the commit's kv record —

@@ -112,6 +112,17 @@ internal static class DurableTransactionMetrics
             description: "Resident-entry reconciles from local durable state, triggered by fence-refusal streaks.");
 
     /// <summary>
+    /// Committed heads recovered from local retained revision history because the durable current row
+    /// was below the committed head when a coherence reconcile read it. Zero on a healthy node; each
+    /// tick is a durable current-head regression (or a lost head flush) being healed by re-promoting
+    /// the exact head revision through the persistence path.
+    /// </summary>
+    internal static readonly Counter<long> CoherenceHeadRecoveries =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.coherence_head_recoveries",
+            description: "Committed heads re-promoted from local revision history after a below-head durable read.");
+
+    /// <summary>
     /// Recovery passes that HELD a due prepared intent instead of resolving it, because its canonical record is
     /// absent and the intent is older than the record retention horizon — absence can then mean a committed
     /// record the retention GC reclaimed while this leg's settlement kept failing, and presuming abort would

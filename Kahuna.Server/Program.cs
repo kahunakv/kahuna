@@ -514,6 +514,12 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         DecommissionDrainTimeout = TimeSpan.FromMilliseconds(opts.RaftDecommissionDrainTimeout),
         ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
         Zone = opts.RaftZone,
-        EnableLoadReports = opts.RaftEnableLoadReports
+        EnableLoadReports = opts.RaftEnableLoadReports,
+        MaxOutboundQueueBytesPerPeer = opts.RaftMaxOutboundQueueBytesPerPeer,
+        MaxBackfillBytesPerRound = opts.RaftMaxBackfillBytesPerRound,
+        SnapshotRescueMaxConsecutiveCycles = opts.RaftSnapshotRescueMaxConsecutiveCycles,
+        SnapshotRescueProbeInterval = TimeSpan.FromMilliseconds(opts.RaftSnapshotRescueProbeInterval),
+        SnapshotExportRetryCacheMaxBytes = opts.RaftSnapshotExportRetryCacheMaxBytes,
+        CompactionLiveReplicaLagBudget = opts.RaftCompactionLiveReplicaLagBudget
     };
 }

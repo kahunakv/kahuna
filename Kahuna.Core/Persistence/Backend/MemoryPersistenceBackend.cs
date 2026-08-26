@@ -120,14 +120,26 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         {
             foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
             {
+                HLCTimestamp itemModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
+
                 if (keyValues.TryGetValue(item.Key, out KeyValueEntry? existing))
                 {
-                    existing.Value = item.Value;
-                    existing.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
-                    existing.Revision = item.Revision;
-                    existing.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
-                    existing.LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
-                    existing.State = (KeyValueState)item.State;
+                    // The current row only ever advances by (revision, commit HLC): the same committed
+                    // mutation is queued independently by the owning actor and the Raft consumer, so a
+                    // delayed older duplicate can land after a newer head — in the same batch or a later
+                    // one — and must never regress what a read serves as current.
+                    bool advances = item.Revision > existing.Revision
+                        || (item.Revision == existing.Revision && itemModified > existing.LastModified);
+
+                    if (advances)
+                    {
+                        existing.Value = item.Value;
+                        existing.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
+                        existing.Revision = item.Revision;
+                        existing.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
+                        existing.LastModified = itemModified;
+                        existing.State = (KeyValueState)item.State;
+                    }
                 }
                 else
                 {
@@ -137,7 +149,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                         Revision = item.Revision,
                         Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
                         LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                        LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                        LastModified = itemModified,
                         State = (KeyValueState)item.State
                     });
                 }
@@ -160,9 +172,17 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 // entry, which is mutated in place on every later write (that aliasing would make all
                 // revisions report the latest values, breaking historical/snapshot reads).
                 // Skipped for no-revision writes; only keyValues (the current-value store) is updated.
+                // Delete and extend records legitimately reuse a revision number with a newer commit
+                // HLC, so the row only ever advances by commit HLC — a delayed older same-revision
+                // duplicate must not regress it.
                 if (!item.NoRevision)
                 {
                     ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
+
+                    if (revisions.TryGetValue(item.Revision, out KeyValueEntry? existingRevision)
+                        && !(itemModified > existingRevision.LastModified))
+                        continue;
+
                     revisions[item.Revision] = new()
                     {
                         Value = item.Value,

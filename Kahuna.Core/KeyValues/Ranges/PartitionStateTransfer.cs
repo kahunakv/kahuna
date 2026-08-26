@@ -293,9 +293,10 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             // Flush the background writer before purging, exactly like the un-host purge: a write
             // queued by a pre-snapshot apply and still unflushed would otherwise land after the
-            // install and overwrite a freshly installed row (backend stores are blind upserts keyed
-            // by key/resource), regressing the partition to pre-snapshot state — for locks, that
-            // resurrects an already-superseded fencing-token high-water mark.
+            // install. Lock rows are blind upserts, so a late write resurrects an already-superseded
+            // fencing-token high-water mark. Key-value current rows advance monotonically, but the
+            // purge removes the rows the guard would compare against, so a late write would still
+            // re-insert pre-snapshot state over an installed gap.
             await drainPersistence().ConfigureAwait(false);
 
             await PurgePartitionBackendRowsAsync(partitionId, ct).ConfigureAwait(false);

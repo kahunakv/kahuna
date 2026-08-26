@@ -110,7 +110,13 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.DecommissionDrainTimeout)] = nameof(KahunaCommandLineOptions.RaftDecommissionDrainTimeout),
         [nameof(RaftConfiguration.ReplicaCountDeadband)] = nameof(KahunaCommandLineOptions.RaftReplicaCountDeadband),
         [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone),
-        [nameof(RaftConfiguration.EnableLoadReports)] = nameof(KahunaCommandLineOptions.RaftEnableLoadReports)
+        [nameof(RaftConfiguration.EnableLoadReports)] = nameof(KahunaCommandLineOptions.RaftEnableLoadReports),
+        [nameof(RaftConfiguration.MaxOutboundQueueBytesPerPeer)] = nameof(KahunaCommandLineOptions.RaftMaxOutboundQueueBytesPerPeer),
+        [nameof(RaftConfiguration.MaxBackfillBytesPerRound)] = nameof(KahunaCommandLineOptions.RaftMaxBackfillBytesPerRound),
+        [nameof(RaftConfiguration.SnapshotRescueMaxConsecutiveCycles)] = nameof(KahunaCommandLineOptions.RaftSnapshotRescueMaxConsecutiveCycles),
+        [nameof(RaftConfiguration.SnapshotRescueProbeInterval)] = nameof(KahunaCommandLineOptions.RaftSnapshotRescueProbeInterval),
+        [nameof(RaftConfiguration.SnapshotExportRetryCacheMaxBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotExportRetryCacheMaxBytes),
+        [nameof(RaftConfiguration.CompactionLiveReplicaLagBudget)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagBudget)
     };
 
     /// <summary>

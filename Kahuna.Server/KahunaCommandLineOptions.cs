@@ -448,6 +448,24 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
     public string RaftTransportSecurity { get; set; } = "";
 
+    [Option("raft-max-outbound-queue-bytes-per-peer", Required = false, HelpText = "Cap on buffered outbound bytes queued per peer; a follower that stops draining has its excess AppendLogs entries dropped rather than accumulated without bound (dropped entries are re-shipped by heartbeat/backfill retry). 0 disables the cap.", Default = 64L * 1024 * 1024)]
+    public long RaftMaxOutboundQueueBytesPerPeer { get; set; } = 64L * 1024 * 1024;
+
+    [Option("raft-max-backfill-bytes-per-round", Required = false, HelpText = "Byte cap on a single backfill round in addition to raft-max-backfill-entries-per-round, so a large-payload workload cannot materialize an oversized batch on the heartbeat path. Also keeps a batch under the gRPC receiver's default 4 MB message cap.", Default = 4 * 1024 * 1024)]
+    public int RaftMaxBackfillBytesPerRound { get; set; } = 4 * 1024 * 1024;
+
+    [Option("raft-snapshot-rescue-max-consecutive-cycles", Required = false, HelpText = "Consecutive snapshot rescue cycles that return a still-below-floor follower before the rescue convergence breaker trips for that follower. Values <= 0 disable the breaker (unbounded retries).", Default = 3)]
+    public int RaftSnapshotRescueMaxConsecutiveCycles { get; set; } = 3;
+
+    [Option("raft-snapshot-rescue-probe-interval", Required = false, HelpText = "While the rescue convergence breaker is tripped for a follower, one rescue attempt is still allowed per this interval in milliseconds, so a follower whose environment recovers is eventually re-seeded. Values <= 0 disable probing.", Default = 300000)]
+    public int RaftSnapshotRescueProbeInterval { get; set; } = 300000;
+
+    [Option("raft-snapshot-export-retry-cache-max-bytes", Required = false, HelpText = "Upper bound in bytes on the leader-side retry cache for one produced snapshot export; an export at or under this size is cached and re-sent on retry instead of re-exported from scratch. Values <= 0 disable the cache.", Default = 64L * 1024 * 1024)]
+    public long RaftSnapshotExportRetryCacheMaxBytes { get; set; } = 64L * 1024 * 1024;
+
+    [Option("raft-compaction-live-replica-lag-budget", Required = false, HelpText = "Entry-count budget within which a follower still converging after a snapshot rescue is held off the WAL compaction floor, so ordinary compaction cannot re-create the below-floor condition the rescue just repaired. Values <= 0 disable the hold.", Default = 100_000L)]
+    public long RaftCompactionLiveReplicaLagBudget { get; set; } = 100_000L;
+
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;
 

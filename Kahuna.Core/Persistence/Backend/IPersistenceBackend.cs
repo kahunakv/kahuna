@@ -15,6 +15,18 @@ internal interface IPersistenceBackend
 {
     public bool StoreLocks(List<PersistenceRequestItem> items);
 
+    /// <summary>
+    /// Persists a batch of committed key-value records. <b>Monotonic current-head contract:</b> the
+    /// durable current row per key is advanced by (revision, commit HLC) only — an older record adds
+    /// its retained-history row but never replaces a newer current head, regardless of arrival order
+    /// within or across batches. On a <c>true</c> return, every key touched by the batch therefore
+    /// has a durable current head at or above the newest record for that key in the batch. Overlay
+    /// cleanup, flush acknowledgements, and durability-floor advancement all rely on this guarantee:
+    /// the same committed mutation reaches this store from more than one producer (the owning actor
+    /// and the Raft consumer), and a delayed older duplicate regressing the current row once caused
+    /// committed data to become invisible to scans. Retained-history rows keyed by (key, revision)
+    /// advance by commit HLC only, because delete/extend records legitimately reuse a revision.
+    /// </summary>
     public bool StoreKeyValues(List<PersistenceRequestItem> items);
 
     /// <summary>

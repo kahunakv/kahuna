@@ -52,6 +52,13 @@ internal sealed class KeyValueReplicator
     // key is not resident; null (bare unit-test construction) keeps the un-hydrated single-ask behavior.
     private readonly Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend;
 
+    // Reads one exact retained revision for a key OFF the owning actor, on the same queued read
+    // scheduler. Consulted by the coherence reconcile when the durable current row is below the
+    // committed head: the head revision's history row normally still exists even when the current
+    // marker regressed, so the head can be recovered locally and re-promoted. Null (bare unit-test
+    // construction) keeps the log-only below-head behavior.
+    private readonly Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueReplicator(
@@ -64,18 +71,20 @@ internal sealed class KeyValueReplicator
         ILogger<IKahuna> logger,
         UnflushedKeyValueWritesIndex? unflushedWrites = null,
         PartitionDurabilityTracker? durabilityTracker = null,
-        Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null)
+        Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null,
+        Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null)
     {
-        this.backgroundWriter         = backgroundWriter;
-        this.persistentRouter         = persistentRouter;
-        this.raft                     = raft;
-        this.writeFrequencyRegistry   = writeFrequencyRegistry;
-        this.keySpaceRegistry         = keySpaceRegistry;
-        this.completionReceiptStore   = completionReceiptStore;
-        this.unflushedWrites          = unflushedWrites;
-        this.durabilityTracker        = durabilityTracker;
-        this.hydrateFromBackend       = hydrateFromBackend;
-        this.logger                   = logger;
+        this.backgroundWriter           = backgroundWriter;
+        this.persistentRouter           = persistentRouter;
+        this.raft                       = raft;
+        this.writeFrequencyRegistry     = writeFrequencyRegistry;
+        this.keySpaceRegistry           = keySpaceRegistry;
+        this.completionReceiptStore     = completionReceiptStore;
+        this.unflushedWrites            = unflushedWrites;
+        this.durabilityTracker          = durabilityTracker;
+        this.hydrateFromBackend         = hydrateFromBackend;
+        this.hydrateRevisionFromBackend = hydrateRevisionFromBackend;
+        this.logger                     = logger;
     }
 
     /// <summary>
@@ -263,7 +272,10 @@ internal sealed class KeyValueReplicator
     /// durable state — detected as a fence-refusal streak at a frozen (validated base, committed head) pair.
     /// Reads the durable row off the actor (backend or unflushed overlay; the value is durable here even when
     /// the actor dropped its one coherence notification) and hands it to the owning actor as a reconcile
-    /// message, which adopts it when strictly newer and clears the blocking write intent. Fire-and-forget:
+    /// message, which adopts it when strictly newer and clears the blocking write intent. When the durable
+    /// row reads below the committed head, the head is first recovered from local retained revision history
+    /// and re-promoted through the persistence path (see
+    /// <see cref="RecoverCommittedHeadFromHistoryAsync"/>). Fire-and-forget:
     /// the caller sits on the replicated prepare-apply path and must not block; a missed reconcile re-arms on
     /// the continuing refusal streak.
     /// </summary>
@@ -279,15 +291,13 @@ internal sealed class KeyValueReplicator
             {
                 KeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
 
-                // The reconcile can only heal from what this node durably holds. A local row below the
-                // committed head means the head commit's value never reached this node's durable state at
-                // all — the reconcile cannot converge the key from here, and staying silent about that made
-                // a 46-minute wedge diagnosable only by inference. Say it plainly; the settle-time repair
-                // owns re-driving the mutation, and this alarm firing means that repair did not land either.
+                // A local current row below the committed head means the durable current marker
+                // regressed, or the head commit's flush was lost after its overlay entry was removed.
+                // The head revision's history row normally still exists in both cases, so recover the
+                // exact head from local retained history and re-promote it through the (monotonic)
+                // persistence path instead of only alarming.
                 if (row is null || row.Revision < committedHeadRevision)
-                    logger.LogError(
-                        "Coherence reconcile for key {Key} cannot heal: the local durable row is at revision {LocalRevision} but the committed head is {HeadRevision} — this node's durable state is missing the head commit",
-                        key, row?.Revision ?? -1, committedHeadRevision);
+                    row = await RecoverCommittedHeadFromHistoryAsync(partitionId, key, committedHeadRevision, row).ConfigureAwait(false);
 
                 if (row is null)
                     return;
@@ -321,6 +331,86 @@ internal sealed class KeyValueReplicator
             }
         });
     }
+
+    // Collapses concurrent below-head recoveries per key: the refusal streak re-fires while a
+    // recovery's queued reads and background flush can still be in flight; stacking identical
+    // idempotent re-promotions is harmless but pointless.
+    private readonly ConcurrentDictionary<string, byte> coherenceRecoveriesInFlight = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Recovers a committed head whose durable current row reads below it: the exact head revision is
+    /// looked up in local retained history (off the actor, on the queued read scheduler) and, when
+    /// present, re-promoted — recorded in the unflushed overlay so reads serve it immediately, then
+    /// queued to the background writer so the monotonic store advances the durable current row.
+    /// Returns the recovered head for the caller's resident-entry reconcile, the original row when
+    /// history is absent (the alarm path — healing then needs the parked settle repair or an
+    /// authoritative remote copy), or the original row when another recovery for the key is already
+    /// in flight.
+    /// </summary>
+    private async Task<KeyValueEntry?> RecoverCommittedHeadFromHistoryAsync(
+        int partitionId, string key, long committedHeadRevision, KeyValueEntry? currentRow)
+    {
+        Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevision = hydrateRevisionFromBackend;
+
+        if (hydrateRevision is null)
+        {
+            LogCannotHeal(key, committedHeadRevision, currentRow);
+            return currentRow;
+        }
+
+        if (!coherenceRecoveriesInFlight.TryAdd(key, 0))
+            return currentRow;
+
+        try
+        {
+            KeyValueEntry? recovered = await hydrateRevision(partitionId, key, committedHeadRevision).ConfigureAwait(false);
+
+            if (recovered is null)
+            {
+                LogCannotHeal(key, committedHeadRevision, currentRow);
+                return currentRow;
+            }
+
+            DurableTransactionMetrics.CoherenceHeadRecoveries.Add(1);
+            logger.LogWarning(
+                "Durable current row for key {Key} is at revision {LocalRevision} but the committed head is {HeadRevision}; re-promoting the head from local revision history",
+                key, currentRow?.Revision ?? -1, committedHeadRevision);
+
+            // Record before enqueueing, exactly like the commit-apply producers: reads observe the
+            // recovered head from the overlay before the flush lands it in the backend.
+            unflushedWrites?.Record(key, recovered.Value, recovered.Revision,
+                recovered.Expires, recovered.LastUsed, recovered.LastModified, recovered.State, noRevision: false);
+
+            backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+                BackgroundWriteType.QueueStoreKeyValue,
+                partitionId,
+                key,
+                recovered.Value,
+                recovered.Revision,
+                recovered.Expires,
+                recovered.LastUsed,
+                recovered.LastModified,
+                (int)recovered.State,
+                noRevision: false
+            ));
+
+            return recovered;
+        }
+        finally
+        {
+            coherenceRecoveriesInFlight.TryRemove(key, out _);
+        }
+    }
+
+    /// <summary>
+    /// A below-head durable read with no local history to heal from. Staying silent about this once
+    /// made a 46-minute wedge diagnosable only by inference — say it plainly; the settle-time repair
+    /// owns re-driving the full mutation, and this alarm firing means that repair did not land either.
+    /// </summary>
+    private void LogCannotHeal(string key, long committedHeadRevision, KeyValueEntry? currentRow) =>
+        logger.LogError(
+            "Coherence reconcile for key {Key} cannot heal: the local durable row is at revision {LocalRevision} but the committed head is {HeadRevision} and no retained history for the head exists on this node",
+            key, currentRow?.Revision ?? -1, committedHeadRevision);
 
     /// <summary>
     /// Detached convergence repair for a committed durable intent whose materialization never applied on this
