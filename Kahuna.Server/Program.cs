@@ -462,6 +462,8 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         BackfillThreshold = opts.RaftBackfillThreshold,
         MaxBackfillEntriesPerRound = opts.RaftMaxBackfillEntriesPerRound,
         FollowerSaturationBackoff = TimeSpan.FromMilliseconds(opts.RaftFollowerSaturationBackoff),
+        BackfillNoProgressPauseCap = TimeSpan.FromMilliseconds(opts.RaftBackfillNoProgressPauseCap),
+        BackfillNoProgressAnchorFallbackShips = opts.RaftBackfillNoProgressAnchorFallbackShips,
         LearnerPromotionLag = opts.RaftLearnerPromotionLag,
         LearnerPromotionStableWindow = TimeSpan.FromMilliseconds(opts.RaftLearnerPromotionStableWindow),
         GossipInterval = TimeSpan.FromMilliseconds(opts.RaftGossipInterval),
