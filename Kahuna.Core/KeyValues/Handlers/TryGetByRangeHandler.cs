@@ -104,11 +104,30 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             bool kvHasMore = items.Count > limit || resumeAfterKey is not null;
             string? kvCeilingKey = resumeAfterKey ?? (items.Count > 0 ? items[^1].Item1 : null);
 
-            // Bound the intent window exactly to the KV rows this page drew from: start-exclusive on a continuation
-            // cursor, end-inclusive per the request, clamped to resumeAfterKey when the walk stopped early so an
-            // intent past the truncation point is deferred to the next page rather than injected here.
-            string? intentEnd = resumeAfterKey ?? memEnd;
-            bool intentEndIncl = resumeAfterKey is not null || memEndIncl;
+            // Bound the intent window exactly to the KV rows this page drew from: clamped to the truncation point
+            // (the inspection-budget cursor, or the limit+1 sentinel key) whenever the walk stopped early, so an
+            // intent past it is deferred to the next page rather than injected here. Without the sentinel clamp an
+            // undecided intent ordinally far past the page — one that cannot affect any returned row — makes the
+            // whole page retry, which starves bounded probes of busy ranges. Only a walk that exhausted the range
+            // keeps the request's own end bound, so intent-only committed keys past the last base row still inject.
+            string? intentEnd;
+            bool intentEndIncl;
+
+            if (resumeAfterKey is not null)
+            {
+                intentEnd = resumeAfterKey;
+                intentEndIncl = true;
+            }
+            else if (items.Count > limit)
+            {
+                intentEnd = items[^1].Item1;
+                intentEndIncl = true;
+            }
+            else
+            {
+                intentEnd = memEnd;
+                intentEndIncl = memEndIncl;
+            }
 
             IReadOnlyList<PreparedIntent> ranged =
                 intentStore.SnapshotScanWindow(memStart, memStartIncl, intentEnd, intentEndIncl);

@@ -289,7 +289,8 @@ public sealed class TestRangeSplitUnderPlacement : BaseCluster
         leader.KeyValues.ImportCompletionReceipts([receipt]);
 
         // A non-leader must refuse to answer from its own (possibly lagging, here empty) stores.
-        (bool localOk, _, _, _) = await nonHosting.KeyValues.GetRangeTransactionStateLocal(partitionId, null, null, ct);
+        (bool localOk, _, _, _, _, _) = await nonHosting.KeyValues.GetRangeTransactionStateLocal(
+            partitionId, null, null, KeyValueRangeStateKinds.All, null, 0, ct);
         Assert.False(localOk);
 
         // The leader-routed gather from the non-hosting node reads the authoritative stores.

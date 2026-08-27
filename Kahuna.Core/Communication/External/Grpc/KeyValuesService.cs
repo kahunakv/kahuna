@@ -2373,19 +2373,27 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     internal async Task<GrpcGetRangeTransactionStateResponse> GetRangeTransactionStateInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
     {
-        (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents) =
+        (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents, bool hasMore, string? nextCursor) =
             await keyValues.GetRangeTransactionStateLocal(
                 request.PartitionId,
                 request.HasStartKey ? request.StartKey : null,
                 request.HasEndKey ? request.EndKey : null,
+                // Kinds 0 (an old peer's request) means all three — the pre-paging behaviour.
+                (KeyValueRangeStateKinds)request.Kinds,
+                request.HasCursor ? request.Cursor : null,
+                request.MaxItems,
                 context.CancellationToken);
 
         GrpcGetRangeTransactionStateResponse response = new()
         {
             Success = ok,
             TransactionRecords = records.Length > 0 ? UnsafeByteOperations.UnsafeWrap(records) : ByteString.Empty,
-            PreparedIntents = intents.Length > 0 ? UnsafeByteOperations.UnsafeWrap(intents) : ByteString.Empty
+            PreparedIntents = intents.Length > 0 ? UnsafeByteOperations.UnsafeWrap(intents) : ByteString.Empty,
+            HasMore = hasMore
         };
+
+        if (nextCursor is not null)
+            response.NextCursor = nextCursor;
 
         foreach (CompletionReceiptRecord receipt in receipts)
         {

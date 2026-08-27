@@ -279,6 +279,7 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     RangeSplitThreshold = opts.RangeSplitThreshold,
     RangeSplitMinRangeSize = opts.RangeSplitMinRangeSize,
     RangeSplitSettleWindow = TimeSpan.FromSeconds(opts.RangeSplitSettleWindowSeconds),
+    RangeMoveSettleTimeout = TimeSpan.FromSeconds(opts.RangeMoveSettleTimeoutSeconds),
     RangeMergeMinSize = opts.RangeMergeMinSize,
     CollectionInterval = TimeSpan.FromSeconds(opts.RangeCollectionIntervalSeconds),
     RangeSplitLoadThreshold = opts.RangeSplitLoadThreshold,

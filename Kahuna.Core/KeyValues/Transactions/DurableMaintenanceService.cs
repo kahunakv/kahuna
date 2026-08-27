@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using Nixie;
 using Nixie.Routers;
 
@@ -100,9 +102,11 @@ internal sealed class DurableMaintenanceService
     private Task<bool> ForgetCompletionReceiptsToPartitionLeaderAsync(int partitionId, IReadOnlyList<CompletionReceiptRecord> receipts, CancellationToken cancellationToken) =>
         rangeStateTransfer.ForgetCompletionReceiptsToPartitionLeaderAsync(partitionId, receipts, cancellationToken);
 
-    private Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
+    // The settle barrier consumes only the intents, so the gather skips receipts and records: they
+    // add nothing to the settle decision and only inflate the response toward the transport's limit.
+    private Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeIntentsFromPartitionLeaderAsync(
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
-        rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken);
+        rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, KeyValueRangeStateKinds.Intents, cancellationToken);
 
     private Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
@@ -465,42 +469,94 @@ internal sealed class DurableMaintenanceService
         return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
     }
 
+    // The drain below must leave the caller's 30-second quiesce window enough room for the catch-up
+    // copy, the state handoff and the cutover that follow it, whatever the operator configured.
+    private const long MovingIntentDrainMaxMs = 15_000;
+
+    // Delay between drain passes. Undecided intents belong to in-flight coordinators whose decisions
+    // land within tens to hundreds of milliseconds; polling faster only re-gathers an unchanged set.
+    private const int MovingIntentDrainDelayMs = 100;
+
     /// <summary>
     /// The pre-cutover settlement barrier of a range split/merge: gathers the moving range's prepared intents
     /// from the source partition's leader (the authoritative store) and settles every decided one through the
     /// recovery path, so the data copy that follows carries materialized rows instead of values that exist only
-    /// as intents. Returns true when the moving range holds no unsettled durable intent; false — the caller must
-    /// refuse this move attempt and retry later — when an intent is still undecided inside its window, a settle
-    /// could not complete, or the gather could not reach the source leader. Without this barrier a cutover races
-    /// deferred settlement: the copied rows predate the commit and the child range serves the prior revision.
+    /// as intents. Without this barrier a cutover races deferred settlement: the copied rows predate the commit
+    /// and the child range serves the prior revision.
+    ///
+    /// <para>The barrier drains rather than gates. The caller holds the quiesce, so no new prepare can enter
+    /// the moving range and the intent set can only shrink: each pass settles every decided intent, and an
+    /// intent still undecided inside its window belongs to an in-flight coordinator whose decision lands
+    /// shortly — so the loop waits briefly and re-gathers instead of refusing outright. A refusal on first
+    /// contact would starve the move: a range under sustained writes always carries a few just-prepared
+    /// intents, so a barrier that never waits refuses every attempt and the split lands only after the load
+    /// stops. The wait is bounded by <see cref="KahunaConfiguration.RangeMoveSettleTimeout"/> (clamped so the
+    /// quiesce window keeps room for the copy and cutover that follow).</para>
+    ///
+    /// <para>Returns true when a gather confirms the moving range holds no durable intent at all; false — the
+    /// caller must refuse this move attempt retryably — when an intent is still unsettled at the deadline, the
+    /// gather could not reach the source leader, or a gather or settle failed.</para>
     /// </summary>
     internal async Task<bool> SettleMovingRangeIntentsAsync(
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
     {
-        const int maxPasses = 3;
+        double budgetMs = Math.Min(configuration.RangeMoveSettleTimeout.TotalMilliseconds, MovingIntentDrainMaxMs);
+        long startTick = Stopwatch.GetTimestamp();
 
-        for (int pass = 0; pass < maxPasses; pass++)
+        while (true)
         {
-            (bool ok, _, _, IReadOnlyList<PreparedIntent> intents) =
-                await GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+            bool ok;
+            IReadOnlyList<PreparedIntent> intents;
+            int unsettled;
 
-            if (!ok)
+            try
+            {
+                (ok, _, _, intents) =
+                    await GetRangeIntentsFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+                if (!ok)
+                    return false;
+
+                if (intents.Count == 0)
+                    return true;
+
+                DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+                HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+                unsettled = await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // A transport failure (an oversized gather response, a dropped call) refuses this attempt
+                // retryably; it must not propagate and take down the caller's whole trigger pass.
+                logger.LogWarning(ex,
+                    "Settle barrier: gather/settle failed for partition {Partition} [{Start},{End}); refusing this move attempt",
+                    sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf");
                 return false;
+            }
 
-            if (intents.Count == 0)
-                return true;
+            // The deadline bounds the whole loop, not only the undecided case: a pass whose settles all
+            // landed still needs its confirming re-gather to come back empty, and if that confirmation
+            // keeps lagging past the deadline the attempt refuses rather than spinning inside the quiesce.
+            double elapsedMs = (Stopwatch.GetTimestamp() - startTick) * 1000.0 / Stopwatch.Frequency;
 
-            DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
-            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
-            if (await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false) > 0)
+            if (elapsedMs >= budgetMs)
+            {
+                logger.LogWarning(
+                    "Settle barrier: partition {Partition} [{Start},{End}) still gathered {Gathered} durable intents ({Unsettled} unsettled) after {Elapsed:F0} ms; refusing this move attempt",
+                    sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf", intents.Count, unsettled, elapsedMs);
                 return false;
+            }
 
-            // Loop to re-gather: the settles above replicated through the source partition, so the next
-            // gather confirms they landed (and catches an intent that raced in before the caller's fence).
+            // Unsettled intents are undecided coordinators: give their decisions real time to land before
+            // the re-gather. A fully settled pass re-gathers after the same short delay, which lets the
+            // settle deltas' ordered apply land so the confirming gather reads them back as absent.
+            await Task.Delay(MovingIntentDrainDelayMs, cancellationToken).ConfigureAwait(false);
         }
-
-        return false;
     }
 
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(

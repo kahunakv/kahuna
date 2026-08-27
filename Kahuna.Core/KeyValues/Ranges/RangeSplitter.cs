@@ -227,7 +227,14 @@ internal sealed class RangeSplitter
             KeyValueDurability.Persistent,
             ct);
 
-        if (lockResult is not (KeyValueResponseType.Locked or KeyValueResponseType.AlreadyLocked))
+        // Only Locked will do. AlreadyLocked names a foreign holder — a re-entrant acquire under the
+        // same transaction id answers Locked — so treating it as success would run the split without
+        // holding the lock that orders the window against in-flight writes: a write admitted on the
+        // source leader between the meta commit and that leader's apply of the quiesce entry would be
+        // proposed against an open range, commit after the catch-up export, and become unreachable
+        // once the moving half routes to the child. The refusal is retryable; the foreign lock's TTL
+        // bounds the deferral, and the trigger's next cadence re-attempts.
+        if (lockResult != KeyValueResponseType.Locked)
         {
             logger.LogError(
                 "RangeSplitter: failed to acquire quiesce lock — {Result}", lockResult);

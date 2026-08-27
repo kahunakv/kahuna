@@ -539,6 +539,19 @@ public sealed class KahunaConfiguration
     public TimeSpan RangeSplitSettleWindow { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// Upper bound on how long a range split or merge holds its quiesce while it drains the moving
+    /// range's unsettled durable intents before the cutover. The quiesce blocks new prepares, so the
+    /// intent set can only shrink: decided intents settle immediately, and undecided ones belong to
+    /// in-flight coordinators whose decisions land within this wait. Without the wait a range under
+    /// sustained writes always carries a few just-prepared intents and every move attempt is refused.
+    /// Writes into the moving range stay refused (retryably) for at most this long per attempt.
+    /// Zero or negative disables the wait: one settle pass runs and an unsettled intent refuses the
+    /// attempt. Values above half the 30-second quiesce window are clamped to 15 seconds, so the
+    /// copy and cutover that follow always run inside the window the drain consumed part of.
+    /// </summary>
+    public TimeSpan RangeMoveSettleTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// Maximum number of keys a KeyRange descriptor may contain before it is no longer
     /// considered an under-min merge candidate. When two adjacent descriptors both have fewer
     /// than this value the auto-merge trigger coalesces them. 0 disables auto-merge.

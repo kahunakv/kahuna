@@ -390,8 +390,16 @@ internal sealed class RangeScanContinuation : ReadContinuation
             bool kvHasMore = accumulated.Count > limit;
             string? kvCeilingKey = accumulated.Count > 0 ? accumulated[^1].Item1 : null;
 
+            // Clamp the intent window to the sentinel key when the page truncated there: an intent past the
+            // ceiling cannot affect any returned row and belongs to the next page — without the clamp an
+            // undecided intent ordinally far past the page makes the whole page retry, which starves bounded
+            // probes of busy ranges. A page that exhausted the range keeps the request's own end bound, so
+            // intent-only committed keys past the last base row still inject.
+            string? intentEnd = kvHasMore ? kvCeilingKey : memEnd;
+            bool intentEndIncl = kvHasMore || memEndInclusive;
+
             IReadOnlyList<PreparedIntent> ranged =
-                intentStore.SnapshotScanWindow(startKey ?? prefix, startInclusive || startKey is null, memEnd, memEndInclusive);
+                intentStore.SnapshotScanWindow(startKey ?? prefix, startInclusive || startKey is null, intentEnd, intentEndIncl);
             if (ranged.Count > 0)
             {
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(

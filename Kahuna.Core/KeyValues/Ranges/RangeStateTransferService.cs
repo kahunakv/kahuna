@@ -525,29 +525,131 @@ internal sealed class RangeStateTransferService
         return await submission.Committed.ConfigureAwait(false);
     }
 
+    // Items per gather page. The number of receipts/records/intents in a busy range has no ceiling,
+    // so an unpaged response can exceed the transport's message limit (gRPC defaults to 4 MB) and
+    // fail the whole gather with ResourceExhausted; paging bounds each response instead. Sized so a
+    // page of intents — the heaviest kind, each carrying a full value — stays far under the limit
+    // for ordinary value sizes.
+    private const int TransactionStatePageSize = 512;
+
     /// <summary>
-    /// Answers the transaction state a moving key range carries — completion receipts, and the
-    /// serialized canonical transaction records and prepared intents whose key/anchor falls in
-    /// <c>[startKey, endKey)</c> — but only when this node holds confirmed leadership of the source
-    /// partition: a follower's stores can lag the newest prepared intent, and a handoff missing an
-    /// intent would strand its transaction after cutover. A false answer means "not the leader,
-    /// route elsewhere", never "no state".
+    /// Answers one page of the transaction state a moving key range carries — completion receipts,
+    /// and the serialized canonical transaction records and prepared intents whose key/anchor falls
+    /// in <c>[startKey, endKey)</c> — but only when this node holds confirmed leadership of the
+    /// source partition: a follower's stores can lag the newest prepared intent, and a handoff
+    /// missing an intent would strand its transaction after cutover. A false answer means "not the
+    /// leader, route elsewhere", never "no state".
+    ///
+    /// <para><paramref name="kinds"/> selects which kinds the answer carries. A positive
+    /// <paramref name="maxItems"/> pages the answer and requires exactly one kind (a shared cursor
+    /// cannot page heterogeneous kinds): the page resumes strictly after <paramref name="cursor"/>,
+    /// cuts at a key boundary so items that share one range key never straddle pages, and reports
+    /// the resume key in <c>NextCursor</c> when more remain. <paramref name="maxItems"/> of zero
+    /// answers everything in one response — the pre-paging behaviour.</para>
     /// </summary>
-    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(
-        int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(
+        int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         if (!await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
-            return (false, [], [], []);
+            return (false, [], [], [], false, null);
 
-        List<CompletionReceiptRecord> receipts = [.. completionReceiptStore.SnapshotRange(startKey, endKey)];
-        IReadOnlyList<TransactionRecord> records = transactionRecordStore.SnapshotRange(startKey, endKey);
-        IReadOnlyList<PreparedIntent> intents = preparedIntentStore.SnapshotRange(startKey, endKey);
+        if (kinds == 0)
+            kinds = KeyValueRangeStateKinds.All;
+
+        // Paging needs one unambiguous key domain for the cursor; a multi-kind page has none.
+        bool paged = maxItems > 0 && kinds is KeyValueRangeStateKinds.Receipts or KeyValueRangeStateKinds.Records or KeyValueRangeStateKinds.Intents;
+
+        List<CompletionReceiptRecord> receipts = [];
+        IReadOnlyList<TransactionRecord> records = [];
+        IReadOnlyList<PreparedIntent> intents = [];
+        bool hasMore = false;
+        string? nextCursor = null;
+
+        if (kinds.HasFlag(KeyValueRangeStateKinds.Receipts))
+        {
+            IReadOnlyCollection<CompletionReceiptRecord> matched = completionReceiptStore.SnapshotRange(startKey, endKey);
+            if (paged)
+                (receipts, hasMore, nextCursor) = PageByKey(matched, static r => r.Key, cursor, maxItems);
+            else
+                receipts = [.. matched];
+        }
+
+        if (kinds.HasFlag(KeyValueRangeStateKinds.Records))
+        {
+            IReadOnlyList<TransactionRecord> matched = transactionRecordStore.SnapshotRange(startKey, endKey);
+            if (paged)
+                (records, hasMore, nextCursor) = PageByKey(matched, static r => r.RecordAnchorKey, cursor, maxItems);
+            else
+                records = matched;
+        }
+
+        if (kinds.HasFlag(KeyValueRangeStateKinds.Intents))
+        {
+            IReadOnlyList<PreparedIntent> matched = preparedIntentStore.SnapshotRange(startKey, endKey);
+            if (paged)
+                (intents, hasMore, nextCursor) = PageByKey(matched, static i => i.Key, cursor, maxItems);
+            else
+                intents = matched;
+        }
 
         return (
             true,
             receipts,
             records.Count > 0 ? TransactionRecordStore.SerializeRecords(records) : [],
-            intents.Count > 0 ? PreparedIntentStore.SerializeIntents(intents) : []);
+            intents.Count > 0 ? PreparedIntentStore.SerializeIntents(intents) : [],
+            hasMore,
+            nextCursor);
+    }
+
+    /// <summary>
+    /// Cuts one page out of an unordered range snapshot: items strictly after <paramref name="cursor"/>
+    /// by their range key (ordinal), sorted, cut at a key boundary at or past <paramref name="maxItems"/>.
+    /// Whole key-groups only — the resume is strictly-after by key, so an item of a split key would
+    /// otherwise be skipped by the next page. A page therefore always carries at least one full key,
+    /// even when that key alone exceeds the cap.
+    /// </summary>
+    private static (List<T> Page, bool HasMore, string? NextCursor) PageByKey<T>(
+        IEnumerable<T> matched, Func<T, string> keyOf, string? cursor, int maxItems)
+    {
+        List<T> eligible = [];
+
+        foreach (T item in matched)
+        {
+            if (cursor is not null && string.CompareOrdinal(keyOf(item), cursor) <= 0)
+                continue;
+
+            eligible.Add(item);
+        }
+
+        eligible.Sort((a, b) => string.CompareOrdinal(keyOf(a), keyOf(b)));
+
+        List<T> page = new(Math.Min(eligible.Count, maxItems));
+
+        int index = 0;
+        while (index < eligible.Count)
+        {
+            // Take the whole run of items sharing this key.
+            string key = keyOf(eligible[index]);
+            int groupEnd = index;
+            while (groupEnd < eligible.Count && string.CompareOrdinal(keyOf(eligible[groupEnd]), key) == 0)
+                groupEnd++;
+
+            if (page.Count > 0 && page.Count + (groupEnd - index) > maxItems)
+                break;
+
+            for (int i = index; i < groupEnd; i++)
+                page.Add(eligible[i]);
+
+            index = groupEnd;
+
+            if (page.Count >= maxItems)
+                break;
+        }
+
+        bool hasMore = index < eligible.Count;
+        string? nextCursor = hasMore && page.Count > 0 ? keyOf(page[^1]) : null;
+
+        return (page, hasMore, nextCursor);
     }
 
     /// <summary>
@@ -555,40 +657,88 @@ internal sealed class RangeStateTransferService
     /// over IPC when the leader is remote. Used by split/merge when the source range has a
     /// committed replica set, so the gather reads the authoritative stores rather than this node's
     /// possibly-empty local projection. Bounded retries across leader changes.
+    ///
+    /// <para>Each kind is paged separately with a per-kind key cursor, so no single response can
+    /// exceed the transport's message limit however many items the range holds. Cross-page
+    /// consistency matches the callers' needs: the settle barrier re-gathers until a clean pass, and
+    /// the pre-cutover handoff runs under the quiesce after the barrier confirmed the range clean,
+    /// so an item that appears mid-gather is one the presumed-abort recovery already covers.</para>
     /// </summary>
+    internal Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
+        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
+        GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, KeyValueRangeStateKinds.All, cancellationToken);
+
+    /// <inheritdoc cref="GetRangeTransactionStateFromPartitionLeaderAsync(int, string?, string?, CancellationToken)"/>
     internal async Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
-        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+        int sourcePartitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, CancellationToken cancellationToken)
+    {
+        List<CompletionReceiptRecord> receipts = [];
+        List<TransactionRecord> records = [];
+        List<PreparedIntent> intents = [];
+
+        foreach (KeyValueRangeStateKinds kind in (KeyValueRangeStateKinds[])
+                 [KeyValueRangeStateKinds.Receipts, KeyValueRangeStateKinds.Records, KeyValueRangeStateKinds.Intents])
+        {
+            if (!kinds.HasFlag(kind))
+                continue;
+
+            string? cursor = null;
+
+            while (true)
+            {
+                (bool ok, List<CompletionReceiptRecord> pageReceipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                    await GetRangeTransactionStatePageAsync(sourcePartitionId, startKey, endKey, kind, cursor, cancellationToken).ConfigureAwait(false);
+
+                if (!ok)
+                    return (false, [], [], []);
+
+                receipts.AddRange(pageReceipts);
+                if (recordBytes.Length > 0)
+                    records.AddRange(TransactionRecordStore.DeserializeRecords(recordBytes));
+                if (intentBytes.Length > 0)
+                    intents.AddRange(PreparedIntentStore.DeserializeIntents(intentBytes));
+
+                // An old peer answers the whole set unpaged (HasMore false) — the loop ends after one page.
+                if (!hasMore || nextCursor is null)
+                    break;
+
+                cursor = nextCursor;
+            }
+        }
+
+        return (true, receipts, records, intents);
+    }
+
+    /// <summary>
+    /// Fetches one page of one kind from the source partition's confirmed leader, local or remote,
+    /// with bounded retries across leader changes. A page from a new leader after a mid-gather
+    /// leader change is exact for every item that existed throughout: the stores replicate through
+    /// the partition, and the cursor addresses items by range key, not by store position.
+    /// </summary>
+    private async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStatePageAsync(
+        int sourcePartitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kind, string? cursor, CancellationToken cancellationToken)
     {
         for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
         {
-            (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes) =
-                await GetRangeTransactionStateLocal(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+            (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                await GetRangeTransactionStateLocal(sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
 
             if (!ok)
             {
                 string? leader = await raft.TryResolveLeader(sourcePartitionId, cancellationToken).ConfigureAwait(false);
 
                 if (leader is not null && leader != raft.GetLocalEndpoint())
-                    (ok, receipts, recordBytes, intentBytes) = await interNodeCommunication.GetRangeTransactionState(
-                        leader, sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+                    (ok, receipts, recordBytes, intentBytes, hasMore, nextCursor) = await interNodeCommunication.GetRangeTransactionState(
+                        leader, sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
             }
 
             if (ok)
-            {
-                IReadOnlyList<TransactionRecord> records = recordBytes.Length > 0
-                    ? TransactionRecordStore.DeserializeRecords(recordBytes)
-                    : [];
-                IReadOnlyList<PreparedIntent> intents = intentBytes.Length > 0
-                    ? PreparedIntentStore.DeserializeIntents(intentBytes)
-                    : [];
-
-                return (true, receipts, records, intents);
-            }
+                return (true, receipts, recordBytes, intentBytes, hasMore, nextCursor);
 
             await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
         }
 
-        return (false, [], [], []);
+        return (false, [], [], [], false, null);
     }
 
     /// <summary>

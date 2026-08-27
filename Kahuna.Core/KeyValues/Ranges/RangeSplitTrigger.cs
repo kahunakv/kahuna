@@ -190,26 +190,41 @@ internal sealed class RangeSplitTrigger : IDisposable
             {
                 ct.ThrowIfCancellationRequested();
 
-                // Skip descriptors that just split (settle window): a still-hot child must not
-                // re-split while its predecessor's leadership transfer is in flight.
-                if (IsInSettleWindow(descriptor.PartitionId))
+                try
                 {
-                    RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
-                    continue;
+                    // Skip descriptors that just split (settle window): a still-hot child must not
+                    // re-split while its predecessor's leadership transfer is in flight.
+                    if (IsInSettleWindow(descriptor.PartitionId))
+                    {
+                        RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+                        continue;
+                    }
+
+                    // Skip if the indivisibility guard refused this descriptor recently — avoids
+                    // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
+                    if (IsInIndivisibleCooldown(descriptor.PartitionId))
+                        continue;
+
+                    // Count branch: split when sampled key count >= threshold.
+                    string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, ct);
+                    if (splitKey is null)
+                        continue;
+
+                    if (await ExecuteSplitAsync(descriptor, splitKey, ct))
+                        splitsDone++;
                 }
-
-                // Skip if the indivisibility guard refused this descriptor recently — avoids
-                // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
-                if (IsInIndivisibleCooldown(descriptor.PartitionId))
-                    continue;
-
-                // Count branch: split when sampled key count >= threshold.
-                string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, ct);
-                if (splitKey is null)
-                    continue;
-
-                if (await ExecuteSplitAsync(descriptor, splitKey, ct))
-                    splitsDone++;
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // One descriptor's failure (a dropped or oversized gather, a leadership change
+                    // mid-split) must not end the pass: every other range still gets evaluated.
+                    logger.LogError(ex,
+                        "RangeSplitTrigger: split evaluation failed for {Space} P{Partition}; continuing with the remaining ranges",
+                        descriptor.KeySpace, descriptor.PartitionId);
+                }
             }
         }
 
@@ -299,19 +314,34 @@ internal sealed class RangeSplitTrigger : IDisposable
                 continue;
             }
 
-            // Load branch uses 2*minRangeSize as the effective threshold — a small-but-hot range
-            // can split even if it is far below the count threshold.
-            string? splitKey = await TryComputeSplitKeyAsync(descriptor, 2 * minRangeSize, ct);
-
-            // Whether the split is indivisible, too small, or succeeds, reset the debounce so
-            // the load branch doesn't retry on every poll interval.
+            // Whether the attempt is indivisible, too small, fails, or succeeds, reset the debounce
+            // so the load branch re-arms a full window instead of retrying on every poll interval.
             hotSince.TryRemove(partitionId, out _);
 
-            if (splitKey is null)
-                continue; // indivisible or too small — TryComputeSplitKeyAsync already logged
+            try
+            {
+                // Load branch uses 2*minRangeSize as the effective threshold — a small-but-hot range
+                // can split even if it is far below the count threshold.
+                string? splitKey = await TryComputeSplitKeyAsync(descriptor, 2 * minRangeSize, ct);
 
-            if (await ExecuteSplitAsync(descriptor, splitKey, ct))
-                splitsDone++;
+                if (splitKey is null)
+                    continue; // indivisible or too small — TryComputeSplitKeyAsync already logged
+
+                if (await ExecuteSplitAsync(descriptor, splitKey, ct))
+                    splitsDone++;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // One descriptor's failure must not end the poll: every other hot range still gets
+                // evaluated, and the debounce reset above rate-limits the retry to one per window.
+                logger.LogError(ex,
+                    "RangeSplitTrigger: load split evaluation failed for {Space} P{Partition}; continuing with the remaining ranges",
+                    descriptor.KeySpace, partitionId);
+            }
         }
 
         return splitsDone;

@@ -331,4 +331,238 @@ public sealed class TestSplitUnsettledDurableIntent : BaseCluster
         string? postSplit = await FindVisibilityFailureAsync(kahunas, rafts, value, ct);
         Assert.True(postSplit is null, $"Committed value lost by the split after deciding: {postSplit}");
     }
+
+    /// <summary>Freezes an undecided intent on <see cref="MovedKey"/>: a pending prepared intent with no
+    /// canonical record, inside its decision window, so nothing may presume its outcome.</summary>
+    private async Task<HLCTimestamp> FreezeUndecidedIntent(
+        KahunaManager driver, KahunaManager[] kahunas, IRaft[] rafts,
+        int sourcePartition, string anchorKey, byte[] value, CancellationToken ct)
+    {
+        HLCTimestamp txId = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp commitTs = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+
+        PreparedIntent intent = new(
+            TransactionId: txId, Epoch: 1, Key: MovedKey, ManifestHash: 42, RecordAnchorKey: anchorKey,
+            CommitTimestamp: commitTs, State: KeyValueState.Set, Value: value, Bucket: Space,
+            Revision: 1, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 0, BaseState: KeyValueState.Set,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0),
+            Resolution: PreparedIntentResolution.Pending);
+
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(
+            sourcePartition, Array.Empty<TransactionRecord>(), new List<PreparedIntent> { intent }, ct));
+
+        await WaitUntilAsync(
+            () => kahunas.Any(m => m.DurablePreparedIntentStore.Get(MovedKey) is { } i && i.TransactionId == txId),
+            timeoutMs: 30_000);
+
+        return txId;
+    }
+
+    /// <summary>Writes the terminal Commit record for <paramref name="txId"/> through the real state
+    /// machine onto the anchor key's partition, so the intent's decision resolves cluster-wide.</summary>
+    private static async Task DecideCommit(
+        KahunaManager driver, HLCTimestamp txId, HLCTimestamp commitTs, string anchorKey, CancellationToken ct)
+    {
+        TransactionRecordStore scratch = new();
+        scratch.Apply(new InitializeTransactionCommand(
+            txId, 1, "xn-coord", anchorKey, commitTs,
+            new HLCTimestamp(0, long.MaxValue, 0), 42,
+            [new TransactionParticipantRef(MovedKey, KeyValueDurability.Persistent)],
+            HLCTimestamp.Zero, commitTs));
+        scratch.Apply(new CommitTransactionCommand(txId, 1, 42, commitTs, commitTs));
+
+        int anchorPartition = driver.KeyValues.LocateDurablePartition(anchorKey).PartitionId;
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(
+            anchorPartition, new List<TransactionRecord>(scratch.Snapshot()), Array.Empty<PreparedIntent>(), ct));
+    }
+
+    /// <summary>
+    /// A bounded scan page must not refuse for an undecided intent that lies ordinally past every
+    /// row the page returns: the intent cannot affect those rows, and it belongs to the page that
+    /// reaches it. Without the clamp, a limit-1 probe of a busy range refuses whenever any
+    /// undecided intent exists anywhere in the range — which starves the split's non-empty probe
+    /// on exactly the hot ranges a split exists to relieve. A page that does reach the intent must
+    /// still refuse.
+    /// </summary>
+    [Fact]
+    public async Task Scan_UndecidedIntentBeyondPage_DoesNotRefuseTheBoundedPage()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, int sourcePartition) =
+            await Setup(replicationFactor: 0, ct);
+
+        await FreezeUndecidedIntent(
+            driver, kahunas, rafts, sourcePartition, "xn-tx/anchor-beyond", V("undecided"), ct);
+
+        // Page of one from the space start: rows a0 (returned) and a1 (sentinel). The undecided
+        // intent on z0 lies past both and must not refuse the page.
+        KeyValueGetByRangeResult bounded = await driver.LocateAndGetByRange(
+            HLCTimestamp.Zero, Space, null, true, null, false, 1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+        Assert.Equal(KeyValueResponseType.Get, bounded.Type);
+        Assert.Single(bounded.Items);
+        Assert.Equal(Space + "/a0", bounded.Items[0].Item1);
+
+        // A page that reaches the intent's key still refuses: undecided is undecided.
+        KeyValueGetByRangeResult reaching = await driver.LocateAndGetByRange(
+            HLCTimestamp.Zero, Space, null, true, null, false, 10,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, reaching.Type);
+    }
+
+    /// <summary>
+    /// The full starvation shape, end to end, in the placed configuration the incident ran under:
+    /// an undecided intent sits in the moving half while a single split attempt runs. The probe
+    /// passes (clean keys head the half, and the intent lies past the probed page), the copy's
+    /// paged reads retry across the undecided window, the settle barrier drains, the transaction
+    /// decides while the attempt is in flight, and that one attempt lands — no refusal, no retry
+    /// cadence.
+    /// </summary>
+    [Fact]
+    public async Task Split_IntentDecidedMidAttempt_SingleAttemptSucceeds()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, int sourcePartition) =
+            await Setup(replicationFactor: 1, ct);
+
+        // Clean keys at the head of the moving half so the non-empty probe's bounded page (row plus
+        // sentinel) never reaches the undecided intent parked on z0.
+        foreach (string probeKey in new[] { Space + "/n0", Space + "/n1" })
+        {
+            (KeyValueResponseType seedType, _, _) = await RetryOnMustRetryAsync(
+                () => driver.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, probeKey, V(probeKey), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Set, seedType);
+        }
+
+        const string anchorKey = "xn-tx/anchor-midattempt";
+        byte[] value = V("decided-mid-attempt");
+
+        HLCTimestamp txId = await FreezeUndecidedIntent(
+            driver, kahunas, rafts, sourcePartition, anchorKey, value, ct);
+
+        HLCTimestamp intentCommitTs = kahunas
+            .Select(m => m.DurablePreparedIntentStore.Get(MovedKey))
+            .First(i => i is not null)!.CommitTimestamp;
+
+        (_, driver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
+        KahunaManager decider = driver;
+
+        // One attempt, started with the intent undecided; the decision lands while it runs.
+        Task<SplitOutcome> splitTask = driver.ForceSplitAtKeyAsync(Space, SplitKey, null, ct);
+
+        await Task.Delay(1_200, ct);
+
+        await DecideCommit(decider, txId, intentCommitTs, anchorKey, ct);
+
+        SplitOutcome outcome = await splitTask;
+        Assert.True(outcome.IsSuccess,
+            $"A single attempt must ride out a decision that lands mid-drain; got {outcome.Status}");
+
+        // The committed value is served from the child range after the cutover.
+        string? postSplit = await FindVisibilityFailureAsync(kahunas, rafts, value, ct);
+        Assert.True(postSplit is null, $"Committed value lost by the split: {postSplit}");
+    }
+
+    /// <summary>
+    /// A range under sustained writes always carries a few just-prepared intents whose coordinators
+    /// are still deciding. The settle barrier must wait for those decisions and then proceed, not
+    /// refuse on first contact — a barrier that never waits refuses every attempt on a hot range
+    /// and the split lands only after the load stops. This freezes an undecided intent in the
+    /// moving half, starts the barrier, decides the transaction while the barrier is waiting, and
+    /// requires that same barrier call to settle the intent and answer clean — after which a split
+    /// of the range succeeds.
+    /// </summary>
+    [Fact]
+    public async Task SettleBarrier_IntentDecidedDuringWait_DrainsAndSplitSucceeds()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, int sourcePartition) =
+            await Setup(replicationFactor: 0, ct);
+
+        HLCTimestamp txId = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp commitTs = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+
+        const string anchorKey = "xn-tx/anchor-deciding";
+        byte[] value = V("decided-while-draining");
+
+        PreparedIntent intent = new(
+            TransactionId: txId, Epoch: 1, Key: MovedKey, ManifestHash: 42, RecordAnchorKey: anchorKey,
+            CommitTimestamp: commitTs, State: KeyValueState.Set, Value: value, Bucket: Space,
+            Revision: 1, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 0, BaseState: KeyValueState.Set,
+            // Far-future recovery deadline: the barrier may only proceed through the real decision,
+            // never by presuming an abort.
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0),
+            Resolution: PreparedIntentResolution.Pending);
+
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(
+            sourcePartition, Array.Empty<TransactionRecord>(), new List<PreparedIntent> { intent }, ct));
+
+        await WaitUntilAsync(
+            () => kahunas.Any(m => m.DurablePreparedIntentStore.Get(MovedKey) is { } i && i.TransactionId == txId),
+            timeoutMs: 30_000);
+
+        // Start the barrier exactly as the splitter does, with the intent still undecided.
+        Task<bool> barrier = driver.KeyValues.SettleMovingRangeIntentsAsync(sourcePartition, SplitKey, null, ct);
+
+        await Task.Delay(1_500, ct);
+        Assert.False(barrier.IsCompleted,
+            "The barrier must wait for an undecided intent's coordinator, not answer on first contact");
+
+        // Decide the transaction (Commit) while the barrier is waiting.
+        TransactionRecordStore scratch = new();
+        scratch.Apply(new InitializeTransactionCommand(
+            txId, 1, "xn-coord", anchorKey, commitTs,
+            new HLCTimestamp(0, long.MaxValue, 0), 42,
+            [new TransactionParticipantRef(MovedKey, KeyValueDurability.Persistent)],
+            HLCTimestamp.Zero, commitTs));
+        scratch.Apply(new CommitTransactionCommand(txId, 1, 42, commitTs, commitTs));
+
+        int anchorPartition = driver.KeyValues.LocateDurablePartition(anchorKey).PartitionId;
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(
+            anchorPartition, new List<TransactionRecord>(scratch.Snapshot()), Array.Empty<PreparedIntent>(), ct));
+
+        Assert.True(await barrier,
+            "The barrier must settle the decided intent during its wait and report the range clean");
+
+        // The barrier settles by materializing: the committed value is a real row and no intent lingers.
+        foreach (KahunaManager manager in kahunas)
+        {
+            KahunaManager observer = manager;
+            await WaitUntilAsync(() => observer.DurablePreparedIntentStore.Get(MovedKey) is null, timeoutMs: 15_000);
+        }
+
+        string? preSplit = await FindVisibilityFailureAsync(kahunas, rafts, value, ct);
+        Assert.True(preSplit is null, $"Committed value not served after the barrier settled it: {preSplit}");
+
+        // With the range drained, the split itself lands.
+        SplitOutcome outcome = SplitOutcome.PartitionCreationFailed;
+
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            (_, driver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
+
+            outcome = await driver.ForceSplitAtKeyAsync(Space, SplitKey, null, ct);
+
+            if (outcome.IsSuccess || outcome.Status is SplitStatus.NoRange or SplitStatus.InvalidSplitKey
+                or SplitStatus.BelowMinRangeSize)
+                break;
+
+            await Task.Delay(200, ct);
+        }
+
+        Assert.True(outcome.IsSuccess, $"Split failed after the barrier drained the range: {outcome.Status}");
+
+        string? postSplit = await FindVisibilityFailureAsync(kahunas, rafts, value, ct);
+        Assert.True(postSplit is null, $"Committed value lost by the split: {postSplit}");
+    }
 }

@@ -111,11 +111,14 @@ public interface IKahuna
     /// The page bytes are a serialized range-snapshot page frame. Returns whether the page committed.</summary>
     public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken);
 
-    /// <summary>Answers the transaction state a moving key range carries — completion receipts plus the
-    /// serialized canonical transaction records and prepared intents in <c>[startKey, endKey)</c> — routed
-    /// here because this node leads the source partition. Ok is false when leadership could not be
-    /// confirmed (the caller re-routes), never "no state".</summary>
-    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken);
+    /// <summary>Answers one page of the transaction state a moving key range carries — completion receipts
+    /// plus the serialized canonical transaction records and prepared intents in <c>[startKey, endKey)</c> —
+    /// routed here because this node leads the source partition. Ok is false when leadership could not be
+    /// confirmed (the caller re-routes), never "no state". <paramref name="kinds"/> selects which kinds the
+    /// answer carries; a positive <paramref name="maxItems"/> pages it (single kind only, resume strictly
+    /// after <paramref name="cursor"/>), because a busy range's item count has no ceiling and an unpaged
+    /// answer can exceed the transport's message limit.</summary>
+    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent);
 
