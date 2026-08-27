@@ -313,6 +313,12 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-follower-saturation-backoff", Required = false, HelpText = "How long a leader stops sending backfill batches to a peer after that peer reports its WAL queue saturated, in milliseconds", Default = 1000)]
     public int RaftFollowerSaturationBackoff { get; set; } = 1000;
 
+    [Option("raft-backfill-no-progress-pause-cap", Required = false, HelpText = "Cap on the exponential pause between backfill batches to a follower whose reported commit frontier is not advancing, in milliseconds", Default = 30000)]
+    public int RaftBackfillNoProgressPauseCap { get; set; } = 30000;
+
+    [Option("raft-backfill-no-progress-anchor-fallback-ships", Required = false, HelpText = "Consecutive fruitless backfill ships after which the leader re-anchors the next batch at the follower's reported commit frontier instead of nextIndex. Values <= 0 disable the fallback", Default = 2)]
+    public int RaftBackfillNoProgressAnchorFallbackShips { get; set; } = 2;
+
     [Option("raft-learner-promotion-lag", Required = false, HelpText = "Maximum entries a learner may trail the leader and still be eligible for promotion", Default = 10)]
     public int RaftLearnerPromotionLag { get; set; } = 10;
 
