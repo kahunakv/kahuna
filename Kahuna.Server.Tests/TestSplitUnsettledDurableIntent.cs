@@ -333,13 +333,16 @@ public sealed class TestSplitUnsettledDurableIntent : BaseCluster
     }
 
     /// <summary>Freezes an undecided intent on <see cref="MovedKey"/>: a pending prepared intent with no
-    /// canonical record, inside its decision window, so nothing may presume its outcome.</summary>
+    /// canonical record, inside its decision window, so nothing may presume its outcome.
+    /// <paramref name="commitTimestamp"/> overrides the intent's timestamp — an aged value simulates a
+    /// coordinator that has been undecided for that long already.</summary>
     private async Task<HLCTimestamp> FreezeUndecidedIntent(
         KahunaManager driver, KahunaManager[] kahunas, IRaft[] rafts,
-        int sourcePartition, string anchorKey, byte[] value, CancellationToken ct)
+        int sourcePartition, string anchorKey, byte[] value, CancellationToken ct,
+        HLCTimestamp? commitTimestamp = null)
     {
         HLCTimestamp txId = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
-        HLCTimestamp commitTs = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp commitTs = commitTimestamp ?? rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
 
         PreparedIntent intent = new(
             TransactionId: txId, Epoch: 1, Key: MovedKey, ManifestHash: 42, RecordAnchorKey: anchorKey,
@@ -412,6 +415,64 @@ public sealed class TestSplitUnsettledDurableIntent : BaseCluster
             HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
 
         Assert.Equal(KeyValueResponseType.MustRetry, reaching.Type);
+    }
+
+    /// <summary>
+    /// An undecided intent whose coordinator has already out-waited a full drain budget predicts a
+    /// quiesced drain that stalls to its deadline. The attempt must refuse at the zero-impact
+    /// admission gate — before the bulk copy and before the quiesce — not after paying for both:
+    /// under sustained load, refused attempts that copy the range and hold the quiesce for the full
+    /// drain window are what halve client throughput.
+    /// </summary>
+    [Fact]
+    public async Task Split_StaleUndecidedIntent_RefusesBeforeCopyAndQuiesce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, int sourcePartition) =
+            await Setup(replicationFactor: 0, ct);
+
+        // Clean keys at the head of the moving half so the probe passes and the refusal below can
+        // only come from the admission gate.
+        foreach (string probeKey in new[] { Space + "/n0", Space + "/n1" })
+        {
+            (KeyValueResponseType seedType, _, _) = await RetryOnMustRetryAsync(
+                () => driver.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, probeKey, V(probeKey), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Set, seedType);
+        }
+
+        // An undecided intent aged one minute — far past the 10-second drain budget.
+        HLCTimestamp now = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp staleCommitTs = new(now.N, now.L - 60_000, now.C);
+
+        await FreezeUndecidedIntent(
+            driver, kahunas, rafts, sourcePartition, "xn-tx/anchor-stale", V("stale-undecided"), ct,
+            commitTimestamp: staleCommitTs);
+
+        (_, driver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
+
+        System.Diagnostics.Stopwatch attemptClock = System.Diagnostics.Stopwatch.StartNew();
+        SplitOutcome outcome = await driver.ForceSplitAtKeyAsync(Space, SplitKey, null, ct);
+        attemptClock.Stop();
+
+        // The gate refuses with the barrier's retryable status. Before the gate existed this
+        // interleaving paid the bulk copy first and failed it instead (TransferFailed).
+        Assert.Equal(SplitStatus.UnsettledMovingIntents, outcome.Status);
+
+        // And it refuses without holding anything: no copy, no quiesce, no drain wait.
+        Assert.True(attemptClock.Elapsed < TimeSpan.FromSeconds(5),
+            $"The gate must refuse before the copy and quiesce; the attempt took {attemptClock.Elapsed}");
+
+        // The range was never quiesced, so a write into the moving half lands immediately.
+        (KeyValueResponseType writeType, _, _) = await RetryOnMustRetryAsync(
+            () => driver.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, Space + "/z1", V("still-writable"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct),
+            r => r.Item1);
+        Assert.Equal(KeyValueResponseType.Set, writeType);
     }
 
     /// <summary>

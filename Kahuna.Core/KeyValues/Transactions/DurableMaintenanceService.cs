@@ -559,6 +559,84 @@ internal sealed class DurableMaintenanceService
         }
     }
 
+    /// <summary>
+    /// The zero-impact admission gate a split runs before it invests in an attempt: one settle pass
+    /// over the moving range's intents with no quiesce held, followed by an age check on whatever
+    /// could not settle. Returns true when the quiesced drain that follows is expected to finish
+    /// quickly; false — the caller should refuse the attempt retryably and back off — when it is not.
+    ///
+    /// <para>Why it exists: everything after this point costs the cluster real work — a bulk copy of
+    /// the whole moving half, and then a quiesce whose exclusive range lock stamps write intents on
+    /// every resident key and refuses the range's writes for up to the full drain budget. An attempt
+    /// that ends refused at the in-quiesce barrier pays all of that for nothing, and under sustained
+    /// load those refused attempts — not the completed splits — are what halves client throughput.
+    /// This gate moves the common refusal to a point where it disturbs nothing.</para>
+    ///
+    /// <para>The verdict is a heuristic on intent age, not a zero-intent requirement — requiring zero
+    /// without a quiesce would re-create the starvation this machinery exists to avoid, because new
+    /// prepares are still flowing. Decided intents settle here (useful work in any outcome). A
+    /// survivor is an undecided coordinator: a young one (inside the drain budget) is expected to
+    /// decide within the quiesced drain, an old one has already out-waited a full budget without a
+    /// decision and would very likely stall the quiesced drain to its deadline too.</para>
+    /// </summary>
+    internal async Task<bool> PreSettleMovingRangeIntentsAsync(
+        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        double budgetMs = Math.Min(configuration.RangeMoveSettleTimeout.TotalMilliseconds, MovingIntentDrainMaxMs);
+
+        try
+        {
+            (bool ok, _, _, IReadOnlyList<PreparedIntent> intents) =
+                await GetRangeIntentsFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+            if (!ok)
+                return false;
+
+            if (intents.Count == 0)
+                return true;
+
+            DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            if (await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false) == 0)
+                return true;
+
+            // Survivors of the settle pass are undecided coordinators (or settles that must retry).
+            // Re-gather so the aged set reflects what actually remains, then judge by age.
+            (ok, _, _, intents) =
+                await GetRangeIntentsFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+            if (!ok)
+                return false;
+
+            now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            long oldestAgeMs = 0;
+            foreach (PreparedIntent intent in intents)
+                oldestAgeMs = Math.Max(oldestAgeMs, now.L - intent.CommitTimestamp.L);
+
+            if (oldestAgeMs <= budgetMs)
+                return true;
+
+            logger.LogInformation(
+                "Pre-settle gate: partition {Partition} [{Start},{End}) holds {Count} unsettled durable intents, oldest {OldestMs} ms; refusing before the quiesce",
+                sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf", intents.Count, oldestAgeMs);
+
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Pre-settle gate: gather/settle failed for partition {Partition} [{Start},{End}); refusing this move attempt",
+                sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf");
+            return false;
+        }
+    }
+
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(
         preparedIntentStore,
         // The scheduler seam is the single ordered apply owner: recovery's settle/materialize deltas apply in Raft

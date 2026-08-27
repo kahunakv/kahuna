@@ -88,6 +88,25 @@ internal sealed class RangeSplitTrigger : IDisposable
 
     private readonly TimeSpan indivisibleCooldown;
 
+    // Per-descriptor backoff after a move was refused because the moving range still held unsettled
+    // durable intents. Unlike the indivisibility guard, which refuses a range whose shape cannot be
+    // improved, this refusal says "not right now": the range is being written and its coordinators
+    // have not all decided. Without a backoff the checker re-attempts on the very next pass, and each
+    // attempt takes the quiesce and refuses writes into the moving half for the whole drain window —
+    // so a range that is busy enough to be worth splitting pays that cost every pass while making no
+    // progress. The delay doubles per consecutive refusal so a range that stays busy is retried
+    // rarely, and it is cleared the moment a split succeeds.
+    private readonly ConcurrentDictionary<int, DrainRefusal> drainRefusedAt = new();
+
+    /// <summary>When a descriptor's drain was last refused, and how many times in a row.</summary>
+    private readonly record struct DrainRefusal(long Tick, int Consecutive);
+
+    /// <summary>Delay after the first drain refusal; doubles per consecutive refusal.</summary>
+    private readonly TimeSpan drainRefusalBackoff;
+
+    /// <summary>Ceiling for the doubled delay.</summary>
+    private readonly TimeSpan drainRefusalBackoffMax;
+
     // Serializes the allocate + create-partition + split-async region across every split entry
     // point. RangeSplitCheckerActor (count, ~60s), RangeSplitLoadCheckerActor (load, ~5s) and the
     // manual admin split all reach it, the first two as separate Nixie actors with separate
@@ -129,6 +148,11 @@ internal sealed class RangeSplitTrigger : IDisposable
         this.loadWindow             = configuration.RangeSplitLoadWindow;
         this.loadImbalanceMax       = configuration.RangeSplitLoadImbalanceMax;
         this.indivisibleCooldown    = configuration.RangeSplitIndivisibleCooldown;
+        // One checker pass is the natural unit: the first refusal costs the range its next pass, and
+        // the ceiling matches the indivisibility cooldown so no cooldown here outlives that one.
+        // Both are derived, so a drain refusal needs no configuration of its own.
+        this.drainRefusalBackoff    = configuration.CollectionInterval;
+        this.drainRefusalBackoffMax = configuration.RangeSplitIndivisibleCooldown;
         this.settleWindow           = configuration.RangeSplitSettleWindow;
         this.logger                 = logger;
     }
@@ -152,6 +176,7 @@ internal sealed class RangeSplitTrigger : IDisposable
             hotSince.Clear();
             settledAt.Clear();
             indivisibleAt.Clear();
+            drainRefusedAt.Clear();
             return 0;
         }
 
@@ -203,6 +228,12 @@ internal sealed class RangeSplitTrigger : IDisposable
                     // Skip if the indivisibility guard refused this descriptor recently — avoids
                     // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
                     if (IsInIndivisibleCooldown(descriptor.PartitionId))
+                        continue;
+
+                    // Skip if the moving half could not be drained recently. The range is simply
+                    // busy, so re-attempting now would re-quiesce it and refuse its writes again for
+                    // nothing.
+                    if (IsInDrainRefusalBackoff(descriptor.PartitionId))
                         continue;
 
                     // Count branch: split when sampled key count >= threshold.
@@ -274,6 +305,12 @@ internal sealed class RangeSplitTrigger : IDisposable
                 RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
                 continue;
             }
+
+            // Same backoff the count branch honours: a range whose drain was just refused is busy,
+            // and the load branch polls far more often, so without this it would carry the whole
+            // re-attempt cost on its own.
+            if (IsInDrainRefusalBackoff(partitionId))
+                continue;
 
             if (!EvaluateLoadPredicate(partitionId, out double ops, out int depth, out double commitWait))
             {
@@ -382,7 +419,15 @@ internal sealed class RangeSplitTrigger : IDisposable
             ct);
 
         if (!outcome.IsSuccess)
+        {
+            // A refused drain is the one failure that is expected to repeat: the range is being
+            // written and its coordinators have not all decided. Back off before re-attempting, so
+            // the next pass does not re-quiesce it and refuse its writes again for nothing.
+            if (outcome.Status == SplitStatus.UnsettledMovingIntents)
+                RecordDrainRefusal(descriptor);
+
             return false;
+        }
 
         int newId = outcome.NewPartitionId;
 
@@ -405,6 +450,7 @@ internal sealed class RangeSplitTrigger : IDisposable
         // (which inherits the parent partition ID) — the split changed the situation.
         hotSince.TryRemove(descriptor.PartitionId, out _);
         indivisibleAt.TryRemove(descriptor.PartitionId, out _);
+        drainRefusedAt.TryRemove(descriptor.PartitionId, out _);
 
         RangeSplitMetrics.Splits.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
 
@@ -586,6 +632,14 @@ internal sealed class RangeSplitTrigger : IDisposable
             if (!activeIds.Contains(id))
                 hotSince.TryRemove(id, out _);
         }
+
+        foreach (int id in drainRefusedAt.Keys)
+        {
+            if (!activeIds.Contains(id) ||
+                (drainRefusedAt.TryGetValue(id, out DrainRefusal refusal) &&
+                 (now - refusal.Tick) * 1000.0 / Stopwatch.Frequency >= DrainBackoffMsFor(refusal.Consecutive)))
+                drainRefusedAt.TryRemove(id, out _);
+        }
     }
 
     /// <summary>
@@ -599,6 +653,56 @@ internal sealed class RangeSplitTrigger : IDisposable
 
         double elapsedMs = (Stopwatch.GetTimestamp() - refusedTick) * 1000.0 / Stopwatch.Frequency;
         return elapsedMs < indivisibleCooldown.TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// Records that a move of <paramref name="descriptor"/> was refused because its moving half still
+    /// held unsettled durable intents, and lengthens the backoff for a range that keeps refusing.
+    /// </summary>
+    private void RecordDrainRefusal(RangeDescriptor descriptor)
+    {
+        DrainRefusal refusal = drainRefusedAt.AddOrUpdate(
+            descriptor.PartitionId,
+            _ => new DrainRefusal(Stopwatch.GetTimestamp(), 1),
+            (_, previous) => new DrainRefusal(Stopwatch.GetTimestamp(), previous.Consecutive + 1));
+
+        RangeSplitMetrics.DrainRefusals.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+
+        double backoffMs = DrainBackoffMsFor(refusal.Consecutive);
+        logger.LogRangeSplitTriggerDrainRefused(
+            descriptor.KeySpace, descriptor.PartitionId, refusal.Consecutive, backoffMs);
+    }
+
+    /// <summary>
+    /// The backoff after <paramref name="consecutive"/> refusals in a row: the base delay doubled
+    /// once per extra refusal, capped. The shift is bounded before it is applied — a range that has
+    /// refused thirty times would otherwise overflow the multiplier rather than saturate it.
+    /// </summary>
+    private double DrainBackoffMsFor(int consecutive) => ComputeDrainBackoffMs(
+        drainRefusalBackoff.TotalMilliseconds, drainRefusalBackoffMax.TotalMilliseconds, consecutive);
+
+    /// <summary>
+    /// The doubling itself, separated from the trigger's state so it can be checked directly.
+    /// <paramref name="consecutive"/> counts refusals in a row and is 1 for the first one.
+    /// </summary>
+    internal static double ComputeDrainBackoffMs(double baseMs, double maxMs, int consecutive)
+    {
+        double ceiling = Math.Max(baseMs, maxMs);
+        int doublings = Math.Clamp(consecutive - 1, 0, 20);
+        return Math.Min(baseMs * (1L << doublings), ceiling);
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> while a descriptor whose drain was refused is still inside its backoff,
+    /// meaning neither branch should attempt it again yet.
+    /// </summary>
+    private bool IsInDrainRefusalBackoff(int partitionId)
+    {
+        if (!drainRefusedAt.TryGetValue(partitionId, out DrainRefusal refusal))
+            return false;
+
+        double elapsedMs = (Stopwatch.GetTimestamp() - refusal.Tick) * 1000.0 / Stopwatch.Frequency;
+        return elapsedMs < DrainBackoffMsFor(refusal.Consecutive);
     }
 
     /// <summary>

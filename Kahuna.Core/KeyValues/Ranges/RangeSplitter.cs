@@ -186,6 +186,24 @@ internal sealed class RangeSplitter
             return SplitOutcome.BelowMinRangeSize;
         }
 
+        // ── 3b. Zero-impact admission gate: settle what can settle, judge the rest ──────────
+        // Everything past this point costs the cluster real work — the bulk copy replicates the
+        // whole moving half, and the quiesce that follows stamps write intents on every resident
+        // key and refuses the range's writes for up to the full drain budget. An attempt that the
+        // in-quiesce barrier would refuse pays all of that for nothing, and under sustained load
+        // those refused attempts are what depress client throughput. The gate settles the decided
+        // backlog with nothing held, and refuses here — before any of that cost — when an undecided
+        // intent has already out-waited a full drain budget, because its coordinator would very
+        // likely stall the quiesced drain to its deadline too. The refusal is the same retryable
+        // outcome as the barrier's, so the trigger's drain backoff paces the re-attempt.
+        if (!await manager.PreSettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, descriptor.EndKey, ct))
+        {
+            logger.LogWarning(
+                "RangeSplitter: moving range [{Key},{End}) is unlikely to drain; refusing this split attempt before the copy and quiesce",
+                splitKey, descriptor.EndKey ?? "+inf");
+            return SplitOutcome.UnsettledMovingIntents;
+        }
+
         // ── 4. (Partition already created by caller) ─────────────────────────────
 
         // ── 5. Bulk copy [K,E) at snapshotTs → P' ───────────────────────────────
