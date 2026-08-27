@@ -54,6 +54,26 @@ public sealed class TestRangeSplitDrainBackoff
     }
 
     [Fact]
+    public void AStreakContinuesWhileTheRefusalsKeepComing()
+    {
+        // The entry outlives its own delay on purpose: the count is what makes the delay grow, so
+        // discarding it at expiry would pin the backoff at the second step and the range would be
+        // re-attempted every other pass for as long as it stays busy.
+        Assert.Equal(2, RangeSplitTrigger.NextConsecutive(1, elapsedSinceLastMs: MaxMs, maxBackoffMs: MaxMs));
+        Assert.Equal(5, RangeSplitTrigger.NextConsecutive(4, elapsedSinceLastMs: 2 * MaxMs, maxBackoffMs: MaxMs));
+    }
+
+    [Fact]
+    public void AStreakStartsOverAfterALongQuietGap()
+    {
+        // Past twice the ceiling the range has drained, or nobody has asked, for long enough that the
+        // old episode says nothing about now. Carrying the count forward would make one refusal cost
+        // the full delay for a range that has behaved for ten minutes.
+        Assert.Equal(1, RangeSplitTrigger.NextConsecutive(4, elapsedSinceLastMs: 2 * MaxMs + 1, maxBackoffMs: MaxMs));
+        Assert.Equal(1, RangeSplitTrigger.NextConsecutive(9, elapsedSinceLastMs: 60 * MaxMs, maxBackoffMs: MaxMs));
+    }
+
+    [Fact]
     public void ACeilingBelowTheBaseDelayIsRaisedToIt()
     {
         // Both values are derived from configuration (the checker interval and the indivisibility

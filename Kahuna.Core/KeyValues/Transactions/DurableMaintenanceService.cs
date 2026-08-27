@@ -125,11 +125,17 @@ internal sealed class DurableMaintenanceService
 
 
 
+    // The partition after which the next capped recovery pass resumes its rotation. Without the
+    // rotation, a backlog concentrated on the store's first-enumerated partitions would fill the
+    // per-pass cap on every tick and a later partition's due intents would never be swept — an
+    // orphan there would silently cross the record-retention horizon un-aborted and wedge forever.
+    private int recoverySweepResumeAfterPartition = -1;
+
     /// <summary>
     /// Participant-side recovery for the durable-intent path: on each partition this node leads, resolves due
-    /// unresolved prepared intents to their canonical decision (presuming abort only past the decision deadline,
-    /// for anchors this node also leads). No-op unless the durable-intent path is enabled. Runs off the request
-    /// path; idempotent with a concurrent finalize.
+    /// unresolved prepared intents to their canonical decision, presuming abort only past the decision deadline
+    /// (the abort drive routes to the anchor partition's leader when it is remote). No-op unless the
+    /// durable-intent path is enabled. Runs off the request path; idempotent with a concurrent finalize.
     /// </summary>
     internal async Task RecoverPreparedIntents(CancellationToken cancellationToken)
     {
@@ -142,30 +148,33 @@ internal sealed class DurableMaintenanceService
         if (due.Count == 0)
             return;
 
-        // Cap the cross-partition fan-out per pass so a large backlog spread over many partitions is drained
-        // across successive collection ticks rather than fanning out to every partition (and its recovery
-        // lookups) at once. Deferred partitions' intents stay due and are picked up next pass.
-        int partitionCap = durableRecoveryMaxPartitionsPerPass;
-
-        HashSet<int> partitions = [];
+        // Every led partition with due intents, deduplicated; sorted so the rotation below is stable.
+        SortedSet<int> ledDuePartitions = [];
         foreach (PreparedIntent intent in due)
         {
             if (cancellationToken.IsCancellationRequested)
                 return;
-            if (partitionCap > 0 && partitions.Count >= partitionCap)
-                break;
 
             int partitionId = locator.LocateRange(intent.Key).PartitionId;
-            if (partitions.Contains(partitionId))
+            if (ledDuePartitions.Contains(partitionId))
                 continue;
             if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
                 continue;
 
-            partitions.Add(partitionId);
+            ledDuePartitions.Add(partitionId);
         }
 
-        if (partitions.Count == 0)
+        if (ledDuePartitions.Count == 0)
             return;
+
+        // Cap the cross-partition fan-out per pass so a large backlog spread over many partitions is drained
+        // across successive collection ticks rather than fanning out to every partition (and its recovery
+        // lookups) at once. The cap rotates: each pass resumes after the last partition the previous pass
+        // swept, so a persistent backlog on the low partitions cannot starve the high ones out of recovery.
+        int partitionCap = durableRecoveryMaxPartitionsPerPass;
+
+        List<int> partitions = SelectRotated([.. ledDuePartitions], recoverySweepResumeAfterPartition, partitionCap);
+        recoverySweepResumeAfterPartition = partitions[^1];
 
         DurableTransactionRecovery recovery = BuildPreparedIntentRecovery();
         foreach (int partitionId in partitions)
@@ -179,6 +188,27 @@ internal sealed class DurableMaintenanceService
                 logger.LogError(ex, "Prepared-intent recovery sweep failed for partition {Partition}", partitionId);
             }
         }
+    }
+
+    /// <summary>
+    /// Takes up to <paramref name="cap"/> items from <paramref name="sorted"/>, resuming strictly after
+    /// <paramref name="resumeAfter"/> and wrapping to the front — the rotation that keeps a capped sweep
+    /// fair across passes. A non-positive cap takes everything. Pure, so the fairness is directly testable.
+    /// </summary>
+    internal static List<int> SelectRotated(List<int> sorted, int resumeAfter, int cap)
+    {
+        if (cap <= 0 || sorted.Count <= cap)
+            return sorted;
+
+        int start = 0;
+        while (start < sorted.Count && sorted[start] <= resumeAfter)
+            start++;
+
+        List<int> taken = new(cap);
+        for (int i = 0; i < cap; i++)
+            taken.Add(sorted[(start + i) % sorted.Count]);
+
+        return taken;
     }
 
     /// <summary>
@@ -662,18 +692,27 @@ internal sealed class DurableMaintenanceService
     {
         int anchorPartition = locator.LocateRange(anchorKey).PartitionId;
 
-        // Only drive/read the decision when this node leads the anchor partition; otherwise the local record store
-        // is not authoritative and applying an abort locally could diverge from the real remote decision.
-        if (raft.Joined && !await raft.AmILeaderIfHosted(anchorPartition, cancellationToken).ConfigureAwait(false))
-            return null;
-
-        // Drive the abort through the ordered scheduler seam (this node leads the anchor partition), which applies
-        // it in Raft order — never overwriting a commit that won earlier in the log. Then read back the winner.
+        // Drive the abort through the durable gateway, which forwards to the anchor partition's leader when it
+        // is remote; the leader's scheduler applies it in Raft order and the record state machine never lets an
+        // abort overwrite a commit that already won. The drive must NOT be gated on this node leading the anchor
+        // partition: the recovery sweep runs on the intent's key-partition leader, and when the anchor partition
+        // is led elsewhere no node would ever be authorized to resolve the intent — an abandoned cross-partition
+        // transaction would then stay undecided forever and its intent would refuse every scan of its key space.
+        //
+        // projectRecordLocally: false — this abort can lose at the anchor, and projecting a losing abort into
+        // this node's record store would mint a divergent local tombstone over the canonical commit.
         byte[] delta = TransactionRecordStore.SerializeDelta([abort]);
         // A recovery-driven abort is terminal work resolving an already-prepared transaction — admit as Terminal.
-        await ReplicateDurableThroughScheduler(anchorPartition, ReplicationTypes.TransactionRecord, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+        await durableReplication.ReplicateDurableThroughScheduler(
+            anchorPartition, ReplicationTypes.TransactionRecord, delta, Writes.WriteAdmissionClass.Terminal,
+            cancellationToken, projectRecordLocally: false).ConfigureAwait(false);
 
-        return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
+        // Read back the winner — never assume the abort won. The local store is authoritative only when this
+        // node leads the anchor partition; otherwise ask the anchor leader.
+        if (!raft.Joined || await raft.AmILeaderIfHosted(anchorPartition, cancellationToken).ConfigureAwait(false))
+            return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
+
+        return await LookupDurableRecordRouted(abort.TransactionId, abort.Epoch, anchorKey, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

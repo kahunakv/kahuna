@@ -96,7 +96,7 @@ internal sealed class DurableReplicationGateway
         return leader == raft.GetLocalEndpoint() ? null : leader;
     }
 
-    internal async Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
+    internal async Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken, bool projectRecordLocally = true)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
@@ -108,7 +108,14 @@ internal sealed class DurableReplicationGateway
             // lost-session consult resolve locally until the anchor-routed record lookup replaces it. The record
             // identity is this transaction's own, so the projection never misrepresents another transaction;
             // prepared intents are not projected (a remote conflict is already reflected in a false result here).
-            if (ok && logType == ReplicationTypes.TransactionRecord)
+            //
+            // The projection is only sound for a delta whose sender is the transition's sole author — the
+            // coordinator projecting its own decision. A recovery-driven presumed abort must pass
+            // projectRecordLocally: false — its abort can LOSE at the anchor to a commit that already won, and
+            // projecting the losing abort into a store that holds no record for the transaction would mint a
+            // local abort tombstone that diverges from the canonical commit, misleads this node's scan-decision
+            // lookups, and hides the committed value.
+            if (ok && projectRecordLocally && logType == ReplicationTypes.TransactionRecord)
                 transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = logType, LogData = data });
 
             return ok;

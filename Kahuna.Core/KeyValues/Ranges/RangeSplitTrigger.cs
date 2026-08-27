@@ -635,9 +635,13 @@ internal sealed class RangeSplitTrigger : IDisposable
 
         foreach (int id in drainRefusedAt.Keys)
         {
-            if (!activeIds.Contains(id) ||
-                (drainRefusedAt.TryGetValue(id, out DrainRefusal refusal) &&
-                 (now - refusal.Tick) * 1000.0 / Stopwatch.Frequency >= DrainBackoffMsFor(refusal.Consecutive)))
+            // Only a descriptor that no longer exists is dropped here. Removing an entry once its
+            // delay expired would discard the consecutive count with it, so the next refusal would
+            // start again at one delay and the doubling could never get past the second step — the
+            // range would be re-attempted every other pass forever, which is most of what the
+            // backoff exists to prevent. The count is cleared where it should be: on a split that
+            // succeeds, and on leadership loss. Growth stays bounded by the descriptor count.
+            if (!activeIds.Contains(id))
                 drainRefusedAt.TryRemove(id, out _);
         }
     }
@@ -661,10 +665,16 @@ internal sealed class RangeSplitTrigger : IDisposable
     /// </summary>
     private void RecordDrainRefusal(RangeDescriptor descriptor)
     {
+        long nowTick = Stopwatch.GetTimestamp();
         DrainRefusal refusal = drainRefusedAt.AddOrUpdate(
             descriptor.PartitionId,
-            _ => new DrainRefusal(Stopwatch.GetTimestamp(), 1),
-            (_, previous) => new DrainRefusal(Stopwatch.GetTimestamp(), previous.Consecutive + 1));
+            _ => new DrainRefusal(nowTick, 1),
+            (_, previous) => new DrainRefusal(
+                nowTick,
+                NextConsecutive(
+                    previous.Consecutive,
+                    (nowTick - previous.Tick) * 1000.0 / Stopwatch.Frequency,
+                    drainRefusalBackoffMax.TotalMilliseconds)));
 
         RangeSplitMetrics.DrainRefusals.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
 
@@ -680,6 +690,16 @@ internal sealed class RangeSplitTrigger : IDisposable
     /// </summary>
     private double DrainBackoffMsFor(int consecutive) => ComputeDrainBackoffMs(
         drainRefusalBackoff.TotalMilliseconds, drainRefusalBackoffMax.TotalMilliseconds, consecutive);
+
+    /// <summary>
+    /// The streak value for a fresh refusal on a descriptor that has refused before. A refusal that
+    /// follows the previous one closely continues the streak, so a range that keeps failing to drain
+    /// is retried ever more rarely. One that arrives long after the last — more than twice the
+    /// maximum delay, meaning the range drained or was left alone for that whole time — starts over,
+    /// so a range is not punished for an episode that has since passed.
+    /// </summary>
+    internal static int NextConsecutive(int previousConsecutive, double elapsedSinceLastMs, double maxBackoffMs)
+        => elapsedSinceLastMs > 2 * maxBackoffMs ? 1 : previousConsecutive + 1;
 
     /// <summary>
     /// The doubling itself, separated from the trigger's state so it can be checked directly.
