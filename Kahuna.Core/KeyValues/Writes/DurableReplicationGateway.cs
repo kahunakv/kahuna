@@ -131,13 +131,23 @@ internal sealed class DurableReplicationGateway
     /// The re-fence applies on the local aggregator path; a forward to a remote leader carries no fence (the
     /// remote's freeze-to-dispatch race is a follow-up).
     /// </summary>
-    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
+    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken, bool projectRecordLocally = true)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
             bool ok = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
-            if (ok && logType == ReplicationTypes.TransactionRecord)
+
+            // Same projection contract as the unfenced variant: sound only for a delta whose sender is the
+            // transition's sole author. A terminal DECISION forwarded to a remote leader must pass
+            // projectRecordLocally: false — the remote apply can reject it in favour of a decision that
+            // already won (a routed presumed abort racing a commit, or the reverse), and `ok` reports only
+            // that the batch replicated, not that the transition applied. Projecting the losing delta mints
+            // a local record that permanently diverges from the canonical one (the canonical winner's later
+            // replica apply is rejected by the terminal-transition rules), and every local consumer of that
+            // store — the scan-decision overlay, a settle pass, a decision read-back — then acts on the
+            // wrong outcome.
+            if (ok && projectRecordLocally && logType == ReplicationTypes.TransactionRecord)
                 transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = logType, LogData = data });
 
             return ok;

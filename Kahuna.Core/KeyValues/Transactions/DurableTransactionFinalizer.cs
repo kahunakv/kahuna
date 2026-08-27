@@ -144,6 +144,20 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// would silently discard that write. Null disables the check (protocol tests that fabricate intents).</summary>
     public delegate Task<StagedBaseValidation> ValidateStagedBasesDelegate(DurableFinalizeInput input, CancellationToken cancellationToken);
 
+    /// <summary>Replicates the terminal decision delta onto the anchor partition WITHOUT projecting the sent
+    /// delta into this node's record store: unlike the record init, a decision can lose at the anchor to one
+    /// that already won (a routed presumed abort racing this commit, or the reverse), and the replicate's
+    /// success reports only that the batch committed — not that the transition applied. Null falls back to the
+    /// ordinary fenced/unfenced replicate, whose sender-side projection is then trusted (single-node and
+    /// protocol-test configurations, where the local apply IS the canonical apply).</summary>
+    public delegate Task<bool> ReplicateDecisionDelegate(int partitionId, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
+    /// <summary>Reads the transaction's canonical record by its anchor key — locally when this node leads the
+    /// anchor partition, routed to the anchor leader otherwise. The decision winner and the resolution
+    /// direction must come from this, never from a node-local store a losing decision's projection could have
+    /// diverged. Null falls back to the local record store (single-node and protocol tests).</summary>
+    public delegate Task<TransactionRecord?> LookupRecordRoutedDelegate(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken);
+
     private readonly TransactionRecordStore recordStore;
 
     // Consulted by the one-phase fast path's pre-flight check (foreign durable intent on any written key ⇒
@@ -173,6 +187,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Null disables the up-front staged-base check (protocol tests that fabricate intents).
     private readonly ValidateStagedBasesDelegate? validateStagedBases;
+
+    // Projection-free decision replicate; null falls back to the ordinary fenced/unfenced replicate.
+    private readonly ReplicateDecisionDelegate? replicateDecision;
+
+    // Canonical record read for the decision winner and the resolution direction; null reads the local store.
+    private readonly LookupRecordRoutedDelegate? lookupRecordRouted;
 
     // Resolves a key's CURRENT data partition at resolution time, so a materialize running after a range
     // split/merge lands on the key's new owner instead of the partition frozen at prepare time. Null keeps
@@ -211,10 +231,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ResolveDecidedBlockersDelegate? resolveDecidedBlockers = null,
         ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle = null,
         ValidateStagedBasesDelegate? validateStagedBases = null,
-        Func<string, int>? resolveCurrentPartition = null)
+        Func<string, int>? resolveCurrentPartition = null,
+        ReplicateDecisionDelegate? replicateDecision = null,
+        LookupRecordRoutedDelegate? lookupRecordRouted = null)
     {
         this.validateStagedBases = validateStagedBases;
         this.resolveCurrentPartition = resolveCurrentPartition;
+        this.replicateDecision = replicateDecision;
+        this.lookupRecordRouted = lookupRecordRouted;
         this.recordStore = recordStore;
         this.intentStore = intentStore;
         this.replicateOnePhaseBundle = replicateOnePhaseBundle;
@@ -720,13 +744,21 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         byte[] delta = TransactionRecordStore.SerializeDelta([decision]);
 
         // The decision is terminal work finishing an already-prepared transaction: admit it as Terminal so an
-        // ordinary-write burst saturating the anchor partition can never reject it.
-        if (!await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
+        // ordinary-write burst saturating the anchor partition can never reject it. The projection-free
+        // decision replicate is preferred: a decision can lose at a remote anchor to one that already won, and
+        // projecting the losing delta into this node's store would diverge it from the canonical record.
+        bool replicated = replicateDecision is not null
+            ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
+            : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+
+        if (!replicated)
             return Retry();
 
-        // The winner is whatever the canonical record actually reflects after apply, not what we requested — a
-        // concurrent recovery abort may have won the race in the log.
-        TransactionRecord? record = recordStore.Get(input.TransactionId, input.Epoch);
+        // The winner is whatever the CANONICAL record actually reflects after apply, not what we requested — a
+        // concurrent recovery abort may have won the race in the log. Read it by the anchor route: the local
+        // store answers only when this node leads the anchor partition, so a sender-side projection can never
+        // report a decision the anchor rejected.
+        TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
         if (record is null)
             return Retry();
 
@@ -749,13 +781,41 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     private async Task ResolveAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
     {
-        TransactionRecord? record = recordStore.Get(input.TransactionId, input.Epoch);
+        // The resolution DIRECTION must come from the canonical record: materializing legs off a node-local
+        // answer that disagrees with the anchor turns an aborted transaction's prepared leg into a durable
+        // write nobody counted — the conserved-total drift signature. A null or non-terminal answer leaves
+        // resolution to the recovery sweep, which reads the same canonical route.
+        TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
         if (record is null || !record.IsTerminal)
             return;
 
         bool commit = record.Decision == TransactionDecision.Commit;
 
         await Task.WhenAll(input.Partitions.Select(partition => ResolvePartitionAsync(partition, commit, localApplyGate, cancellationToken))).ConfigureAwait(false);
+    }
+
+    /// <summary>The transaction's canonical record — routed by the anchor key when the routed lookup is wired
+    /// (local exactly when this node leads the anchor partition), the local store otherwise (single-node and
+    /// protocol-test configurations, where the local apply is the canonical apply). A lookup that cannot reach
+    /// the anchor answers null — the callers treat that as indeterminate (retry / leave to recovery), which is
+    /// always safe; answering from a possibly-divergent local store is not.</summary>
+    private async Task<TransactionRecord?> ReadCanonicalRecordAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
+    {
+        if (lookupRecordRouted is null)
+            return recordStore.Get(input.TransactionId, input.Epoch);
+
+        try
+        {
+            return await lookupRecordRouted(input.TransactionId, input.Epoch, input.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task ResolvePartitionAsync(

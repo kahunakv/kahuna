@@ -289,8 +289,8 @@ internal sealed partial class KeyValuesManager : IDisposable
         durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
 
     /// <summary>Replicates a durable entry fenced on a range lock's key and generation.</summary>
-    internal Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
-        durableReplication.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken);
+    internal Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken, bool projectRecordLocally = true) =>
+        durableReplication.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken, projectRecordLocally);
 
     /// <summary>Replicates an anchor's init+prepare as one atomic batch. Reports batch commit and prepare
     /// acknowledgement independently.</summary>

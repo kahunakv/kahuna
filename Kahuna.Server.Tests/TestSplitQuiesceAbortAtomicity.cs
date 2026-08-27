@@ -182,6 +182,121 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
     }
 
     /// <summary>
+    /// The drain-shaped variant: transfers hammer their pairs with no pacing while split attempts
+    /// run in a loop — each attempt holds the quiesce for its drain against the sustained load —
+    /// and every node's prepared-intent recovery sweep runs concurrently, so presumed aborts race
+    /// live finalizes exactly as they do in production once the abort drive routes. Whatever mix of
+    /// commits, quiesce-refused aborts, and presumed aborts the run produces, each pair must end
+    /// with equal values and equal revisions: an aborted transaction whose first leg was
+    /// materialized off a wrong decision answer breaks the revision equality even when a later
+    /// commit overwrites the value.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentTransfers_HeldDrainWithRecoverySweeps_StayPairwiseAtomic()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver) = await Setup(ct);
+
+        const int pairs = 8;
+
+        string[] legOne = [.. Enumerable.Range(0, pairs).Select(i => $"xq-left/dpair{i}")];
+        string[] legTwo = [.. Enumerable.Range(0, pairs).Select(i => $"{Space}/z-dpair{i}")];
+
+        foreach (string key in legOne.Concat(legTwo))
+        {
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryAsync(
+                () => driver.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, V("base"), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Set, type);
+        }
+
+        bool stop = false;
+        int totalCommits = 0;
+
+        async Task Worker(int pair)
+        {
+            int attempt = 0;
+            while (!Volatile.Read(ref stop))
+            {
+                attempt++;
+                byte[] script = Encoding.UTF8.GetBytes(
+                    $"BEGIN SET `{legOne[pair]}` 'd{pair}a{attempt}' SET `{legTwo[pair]}` 'd{pair}a{attempt}' COMMIT END");
+
+                KeyValueTransactionResult result = await driver.TryExecuteTransactionScript(script, null, null);
+                if (result.Type == KeyValueResponseType.Set)
+                    Interlocked.Increment(ref totalCommits);
+            }
+        }
+
+        // Every node's recovery sweep runs continuously — the presumed-abort pressure.
+        async Task Sweeper(KahunaManager manager)
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                try
+                {
+                    await manager.KeyValues.RecoverPreparedIntents(ct);
+                }
+                catch
+                {
+                    // The sweep is background machinery; a transient failure only skips one pass.
+                }
+
+                await Task.Delay(50, ct);
+            }
+        }
+
+        Task[] workers = [.. Enumerable.Range(0, pairs).Select(Worker)];
+        Task[] sweepers = [.. kahunas.Select(Sweeper)];
+
+        // Split attempts in a loop for the whole stress window: refused attempts hold the drain
+        // against the load; a successful attempt ends the loop with the range divided.
+        SplitOutcome outcome = SplitOutcome.PartitionCreationFailed;
+        System.Diagnostics.Stopwatch stress = System.Diagnostics.Stopwatch.StartNew();
+
+        while (stress.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            (_, driver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
+            outcome = await driver.ForceSplitAtKeyAsync(Space, SplitKey, null, ct);
+            if (outcome.IsSuccess)
+                break;
+            await Task.Delay(100, ct);
+        }
+
+        // Let the load run a moment past the split (or past the stress window when no attempt
+        // landed), then stop everything.
+        await Task.Delay(1_000, ct);
+        Volatile.Write(ref stop, true);
+        await Task.WhenAll(workers.Concat(sweepers));
+
+        Assert.True(totalCommits > 0, "No transfer committed at all — the run says nothing about atomicity");
+
+        foreach (string key in legOne.Concat(legTwo))
+        {
+            string k = key;
+            foreach (KahunaManager manager in kahunas)
+            {
+                KahunaManager observer = manager;
+                await WaitUntilAsync(() => observer.DurablePreparedIntentStore.Get(k) is null, timeoutMs: 30_000);
+            }
+        }
+
+        for (int i = 0; i < pairs; i++)
+        {
+            (string? valueOne, long revisionOne) = await ReadKey(driver, legOne[i], ct);
+            (string? valueTwo, long revisionTwo) = await ReadKey(driver, legTwo[i], ct);
+
+            Assert.True(valueOne == valueTwo,
+                $"pair {i}: legs diverged — '{valueOne}' vs '{valueTwo}' (a transaction applied one leg only)");
+            Assert.True(revisionOne == revisionTwo,
+                $"pair {i}: revision drift — {revisionOne} vs {revisionTwo} (an aborted transaction left a leg durable)");
+        }
+    }
+
+    /// <summary>
     /// The sustained variant: pairs of accounts transfer continuously — one leg hash-routed, one in
     /// the moving half — while a split of the ranged space runs start to finish. Every transaction
     /// writes the same tag to both legs, so atomicity leaves each pair with equal values and equal

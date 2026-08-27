@@ -1443,7 +1443,18 @@ internal sealed class TransactionCoordinator : IDisposable
         // Re-resolve each intent's current data partition at resolution time: a range split/merge between the
         // decision and a (deferred or retried) materialization moves the key's ownership, and materializing
         // into the frozen partition would hide the committed value from every reader of the new range.
-        resolveCurrentPartition: key => manager.LocateDurablePartition(key).PartitionId);
+        resolveCurrentPartition: key => manager.LocateDurablePartition(key).PartitionId,
+        // The terminal decision replicates WITHOUT the sender-side record projection: a decision forwarded to
+        // a remote anchor leader can lose to one that already won there (a routed presumed abort racing this
+        // commit, or the reverse), and projecting the losing delta would diverge this node's record store from
+        // the canonical record for good — the divergent answer then mis-directs scans and resolution.
+        replicateDecision: (partitionId, delta, fenceKey, fenceGeneration, cancellationToken) =>
+            manager.ReplicateDurableThroughSchedulerFenced(
+                partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration,
+                Writes.WriteAdmissionClass.Terminal, cancellationToken, projectRecordLocally: false),
+        // The decision winner and the resolution direction read the CANONICAL record: locally exactly when
+        // this node leads the anchor partition, routed to the anchor leader otherwise.
+        lookupRecordRouted: manager.LookupDurableRecordRouted);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
