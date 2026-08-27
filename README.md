@@ -1,6 +1,6 @@
 # 🦎 Kahuna
 
-<img src="https://github.com/user-attachments/assets/d73a177f-5b9a-4e63-9b8d-9bcf067da002" height="250" alt="kahuna">
+<img width="946" height="693" alt="cli" src="https://github.com/user-attachments/assets/4ee77393-a0f0-48a3-b1e0-836dbf6cf3b0" />
 
 Distributed systems are difficult to build correctly. Execution can be non-deterministic. Edge cases are hard to predict. These factors make it difficult to reason about correct solutions.
 
@@ -211,6 +211,11 @@ and manages their lifecycle through a custom resource definition. You can run Ka
 Kubernetes workload.
 
 > **Note:** This operator is in alpha. APIs and behavior can change between releases.
+>
+
+## Web Dashboard
+
+<img width="1296" height="860" alt="webui" src="https://github.com/user-attachments/assets/b05b1159-9ea5-4957-aa60-ab8e745cf17b" />
 
 ---
 
