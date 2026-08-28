@@ -250,6 +250,15 @@ internal sealed class RangeMerger
         Func<Task>? duringQuiesce,
         CancellationToken ct)
     {
+        // The transaction-state reads below (settle barrier, receipts/records/intents handoff) run
+        // over node-global stores ordered by raw key, where a null end bound means "+infinity"
+        // rather than this range's "end of the key space". Bound them to the key space: an
+        // unbounded read of a tail range gathers every other key space's live intents that sort
+        // above the start key, so under sustained writes the settle barrier never observes an
+        // empty range — and a completed cutover would hand foreign key spaces' records and intents
+        // to the survivor.
+        string? movingEndKey = KeySpaceBounds.MovingEndKey(keySpace, right.EndKey);
+
         // -- 2. Settle the moving range's durable intents before the copy ---------
         // Under deferred settlement a committed value can exist only as a decided-but-unsettled
         // prepared intent, and the copy below captures base rows: cutting over now would move the
@@ -257,11 +266,11 @@ internal sealed class RangeMerger
         // prepares, so settling here is stable — decided intents materialize into the moving range
         // and the copy carries the rows. An intent still undecided inside its window refuses this
         // attempt; the trigger retries once its coordinator has decided.
-        if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, right.EndKey, ct))
+        if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, movingEndKey, ct))
         {
             logger.LogWarning(
                 "RangeMerger: moving range [{Start},{End}) holds unsettled durable intents; refusing this merge attempt",
-                right.StartKey, right.EndKey ?? "+inf");
+                right.StartKey, movingEndKey);
             return MergeOutcome.UnsettledMovingIntents;
         }
 
@@ -355,7 +364,7 @@ internal sealed class RangeMerger
                 bool gathered;
                 (gathered, movedReceipts, movedRecords, movedIntents) =
                     await manager.GetRangeTransactionStateFromPartitionLeaderAsync(
-                        right.PartitionId, right.StartKey, right.EndKey, ct);
+                        right.PartitionId, right.StartKey, movingEndKey, ct);
 
                 if (!gathered)
                 {
@@ -367,9 +376,9 @@ internal sealed class RangeMerger
             }
             else
             {
-                movedReceipts = manager.GetLocalCompletionReceiptsForRange(right.StartKey, right.EndKey);
-                movedRecords = manager.GetLocalTransactionRecordsForRange(right.StartKey, right.EndKey);
-                movedIntents = manager.GetLocalPreparedIntentsForRange(right.StartKey, right.EndKey);
+                movedReceipts = manager.GetLocalCompletionReceiptsForRange(right.StartKey, movingEndKey);
+                movedRecords = manager.GetLocalTransactionRecordsForRange(right.StartKey, movingEndKey);
+                movedIntents = manager.GetLocalPreparedIntentsForRange(right.StartKey, movingEndKey);
             }
 
             if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct))

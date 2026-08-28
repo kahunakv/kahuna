@@ -71,7 +71,10 @@ internal sealed class TransactionCoordinator : IDisposable
     /// duplicate commit/rollback that arrives once the session is gone replays the recorded terminal answer
     /// (Committed/RolledBack/expired) instead of an unknown result. Bounded by size and HLC age (configuration
     /// <c>TransactionOutcomeRetentionMax</c> / <c>TransactionOutcomeRetentionTtl</c>); after eviction a
-    /// duplicate receives an unknown <see cref="KeyValueResponseType.Errored"/>, never a conflict Aborted.
+    /// duplicate falls through to the durable-record consult: with a routable anchor it receives the
+    /// record's true outcome or a retryable <see cref="KeyValueResponseType.MustRetry"/> while the record
+    /// is absent, and only an unanchored handle receives the unknown
+    /// <see cref="KeyValueResponseType.Errored"/> — never a conflict Aborted.
     /// Lookups are lock-free; inserts and eviction are O(1) — see <see cref="TerminalOutcomeWindow"/> for the
     /// structure and why a scanning implementation is not acceptable on this path.
     /// </summary>
@@ -314,16 +317,17 @@ internal sealed class TransactionCoordinator : IDisposable
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
             // The session is gone. If its outcome is still within the idempotency window, a duplicate commit
-            // replays the recorded terminal answer; otherwise it is unknown (evicted or never existed) and
-            // reported as Errored — never a conflict Aborted.
+            // replays the recorded terminal answer; otherwise the durable record is consulted below, and only
+            // a handle with no routable anchor is reported as the unknown Errored — never a conflict Aborted.
             if (terminalOutcomes.TryGet(transactionId, out TerminalOutcomeWindow.RetainedOutcome retained))
                 return (retained.Outcome.Type, retained.Outcome.RecordAnchorKey);
 
             // The in-memory session is gone (evicted, restarted, or it lived on a node that failed), but an
             // all-persistent transaction's outcome survives as its canonical durable record anchored on the
             // data partition. Consult that record — routed to the anchor leader so a remote anchor is found:
-            // committed → Committed; undecided → MustRetry (recovery finishes it). Only a genuinely absent record
-            // stays unknown Errored.
+            // committed → Committed; undecided → MustRetry (recovery finishes it); absent → MustRetry too,
+            // because absence proves nothing (a finalize still in flight and a not-yet-propagated commit both
+            // look absent). Only a handle with no routable anchor stays unknown Errored.
             (bool found, KeyValueResponseType durableRecord) = await TryConsultDurableTransactionRecord(handle);
             if (found)
                 return (durableRecord, handle.RecordAnchorKey);

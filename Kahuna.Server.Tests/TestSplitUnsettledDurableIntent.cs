@@ -381,6 +381,85 @@ public sealed class TestSplitUnsettledDurableIntent : BaseCluster
     }
 
     /// <summary>
+    /// A tail range's descriptor carries a null end key, which means "to the end of its key
+    /// space" — not "+infinity". The split's transaction-state reads (the settle barrier and the
+    /// state handoff) run over node-global stores ordered by raw key, so an unbounded end there
+    /// sweeps every key space that sorts above the split key: a live intent in a completely
+    /// unrelated key space then refuses the attempt, and because a busy cluster always carries a
+    /// few live intents somewhere, the first split of every key space starves until the load
+    /// stops. The split must ignore foreign key spaces entirely: it completes despite the foreign
+    /// undecided intent, and leaves that intent exactly where it was — not settled, not moved.
+    /// </summary>
+    [Fact]
+    public async Task Split_UndecidedIntentInForeignKeySpaceAbove_DoesNotBlockOrMove()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, int sourcePartition) =
+            await Setup(replicationFactor: 0, ct);
+
+        // A key space that sorts ordinally above every key of the split's space ("xn:v..." > "xn:u/...").
+        const string foreignSpace = "xn:v";
+        const string foreignKey = foreignSpace + "/z0";
+
+        HLCTimestamp foreignTx = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp foreignCommitTs = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+
+        // Undecided and inside its decision window: nothing may settle it or presume its outcome,
+        // so a barrier that (incorrectly) gathers it can only refuse the split.
+        PreparedIntent foreignIntent = new(
+            TransactionId: foreignTx, Epoch: 1, Key: foreignKey, ManifestHash: 42,
+            RecordAnchorKey: "xn-tx/anchor-foreign",
+            CommitTimestamp: foreignCommitTs, State: KeyValueState.Set, Value: V("foreign-undecided"),
+            Bucket: foreignSpace,
+            Revision: 1, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 0, BaseState: KeyValueState.Set,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0),
+            Resolution: PreparedIntentResolution.Pending);
+
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(
+            sourcePartition, Array.Empty<TransactionRecord>(), new List<PreparedIntent> { foreignIntent }, ct));
+
+        await WaitUntilAsync(
+            () => kahunas.Any(m => m.DurablePreparedIntentStore.Get(foreignKey) is { } i && i.TransactionId == foreignTx),
+            timeoutMs: 30_000);
+
+        SplitOutcome outcome = SplitOutcome.PartitionCreationFailed;
+
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            (_, driver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
+
+            outcome = await driver.ForceSplitAtKeyAsync(Space, SplitKey, null, ct);
+
+            if (outcome.IsSuccess || outcome.Status is SplitStatus.NoRange or SplitStatus.InvalidSplitKey
+                or SplitStatus.BelowMinRangeSize)
+                break;
+
+            await Task.Delay(200, ct);
+        }
+
+        Assert.True(outcome.IsSuccess,
+            $"A foreign key space's undecided intent must not block a split of another key space; got {outcome.Status}");
+
+        // The foreign intent is not part of the moved range: it stays in place, still pending,
+        // still owned by its transaction — the split neither settled it nor handed it to the child.
+        foreach (KahunaManager manager in kahunas)
+        {
+            PreparedIntent? survivor = manager.DurablePreparedIntentStore.Get(foreignKey);
+            if (survivor is not null)
+            {
+                Assert.Equal(foreignTx, survivor.TransactionId);
+                Assert.Equal(PreparedIntentResolution.Pending, survivor.Resolution);
+            }
+        }
+
+        Assert.True(
+            kahunas.Any(m => m.DurablePreparedIntentStore.Get(foreignKey) is not null),
+            "The foreign undecided intent must survive the split untouched");
+    }
+
+    /// <summary>
     /// A bounded scan page must not refuse for an undecided intent that lies ordinally past every
     /// row the page returns: the intent cannot affect those rows, and it belongs to the page that
     /// reaches it. Without the clamp, a limit-1 probe of a busy range refuses whenever any

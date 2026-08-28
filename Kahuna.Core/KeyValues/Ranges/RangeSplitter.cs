@@ -186,6 +186,15 @@ internal sealed class RangeSplitter
             return SplitOutcome.BelowMinRangeSize;
         }
 
+        // The transaction-state reads below (pre-gate, settle barrier, receipts/records/intents
+        // handoff) run over node-global stores ordered by raw key, where a null end bound means
+        // "+infinity" rather than this descriptor's "end of the key space". Bound them to the key
+        // space: an unbounded read of a tail range gathers every other key space's live intents
+        // that sort above the split key, so under sustained writes the settle barrier never
+        // observes an empty range and every first split of a key space starves — and a completed
+        // cutover would hand foreign key spaces' records and intents to P'.
+        string? movingEndKey = KeySpaceBounds.MovingEndKey(keySpace, descriptor.EndKey);
+
         // ── 3b. Zero-impact admission gate: settle what can settle, judge the rest ──────────
         // Everything past this point costs the cluster real work — the bulk copy replicates the
         // whole moving half, and the quiesce that follows stamps write intents on every resident
@@ -196,11 +205,11 @@ internal sealed class RangeSplitter
         // intent has already out-waited a full drain budget, because its coordinator would very
         // likely stall the quiesced drain to its deadline too. The refusal is the same retryable
         // outcome as the barrier's, so the trigger's drain backoff paces the re-attempt.
-        if (!await manager.PreSettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, descriptor.EndKey, ct))
+        if (!await manager.PreSettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, movingEndKey, ct))
         {
             logger.LogWarning(
                 "RangeSplitter: moving range [{Key},{End}) is unlikely to drain; refusing this split attempt before the copy and quiesce",
-                splitKey, descriptor.EndKey ?? "+inf");
+                splitKey, movingEndKey);
             return SplitOutcome.UnsettledMovingIntents;
         }
 
@@ -301,11 +310,11 @@ internal sealed class RangeSplitter
             // here is stable: decided intents materialize into the source range and the catch-up copy
             // carries the rows. An intent still undecided inside its window refuses this attempt —
             // the trigger retries once its coordinator has decided.
-            if (!await manager.SettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, descriptor.EndKey, ct))
+            if (!await manager.SettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, movingEndKey, ct))
             {
                 logger.LogWarning(
                     "RangeSplitter: moving range [{Key},{End}) holds unsettled durable intents; refusing this split attempt",
-                    splitKey, descriptor.EndKey ?? "+inf");
+                    splitKey, movingEndKey);
                 return SplitOutcome.UnsettledMovingIntents;
             }
 
@@ -370,7 +379,7 @@ internal sealed class RangeSplitter
                 bool gathered;
                 (gathered, movedReceipts, movedRecords, movedIntents) =
                     await manager.GetRangeTransactionStateFromPartitionLeaderAsync(
-                        descriptor.PartitionId, splitKey, descriptor.EndKey, ct);
+                        descriptor.PartitionId, splitKey, movingEndKey, ct);
 
                 if (!gathered)
                 {
@@ -382,9 +391,9 @@ internal sealed class RangeSplitter
             }
             else
             {
-                movedReceipts = manager.GetLocalCompletionReceiptsForRange(splitKey, descriptor.EndKey);
-                movedRecords = manager.GetLocalTransactionRecordsForRange(splitKey, descriptor.EndKey);
-                movedIntents = manager.GetLocalPreparedIntentsForRange(splitKey, descriptor.EndKey);
+                movedReceipts = manager.GetLocalCompletionReceiptsForRange(splitKey, movingEndKey);
+                movedRecords = manager.GetLocalTransactionRecordsForRange(splitKey, movingEndKey);
+                movedIntents = manager.GetLocalPreparedIntentsForRange(splitKey, movingEndKey);
             }
 
             if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(newPartitionId, movedReceipts, ct))
