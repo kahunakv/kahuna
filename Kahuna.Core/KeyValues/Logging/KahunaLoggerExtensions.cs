@@ -198,6 +198,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitChecker: performed {Count} split(s).")]
     public static partial void LogRangeSplitCheckerPerformed(this ILogger<IKahuna> logger, int count);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitTrigger: {Space} P{Partition} could not drain its moving half ({Count} in a row); not re-attempting for {BackoffMs} ms")]
+    public static partial void LogRangeSplitTriggerDrainRefused(this ILogger<IKahuna> logger, string space, int partition, int count, double backoffMs);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "RangeMergeTrigger: retry-retired P{Id}")]
     public static partial void LogRangeMergeTriggerRetryRetired(this ILogger<IKahuna> logger, int id);
 

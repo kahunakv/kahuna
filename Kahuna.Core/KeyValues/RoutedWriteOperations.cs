@@ -211,6 +211,20 @@ internal sealed class RoutedWriteOperations
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return (List<KahunaSetKeyValueResponseItem>)recovered;
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                // A completed batch must NEVER be re-driven. The caller's same-id resend contract sends the
+                // identical batch again only when its previous call answered every item transient; a batch
+                // that confirmed nothing cancelled its registration (see the completion below), so a
+                // legitimate resend re-registers as New. Reaching a COMPLETED record therefore means the
+                // caller's transient view is stale — the first drive's detached completion folded its
+                // confirmed effects after the caller stopped waiting. Re-executing the batch here would
+                // mutate participants outside the operation registry: the freeze cannot see the re-drive
+                // (nothing is pending), so it can land mid-commit or after rollback released the keys,
+                // re-staging values and re-planting write intents for a transaction that is already
+                // finalized. Answer transient instead: the caller's own retry budget bounds the loop, and
+                // its statement fails conflict-retryable while the folded working set stays consistent.
+                DurableTransactionMetrics.CompletedBatchRedriveRefusals.Add(1);
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
@@ -219,10 +233,6 @@ internal sealed class RoutedWriteOperations
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.Errored);
-            // New and AlreadyCompleted both execute: a batch is re-driven on retry rather than replaying a
-            // cached list, and CompleteOperation is a no-op if it already completed. Re-driving is safe here
-            // because CamusDB reissues the identical batch under the same operation id; the coordinator folds
-            // the confirmed keys only once via the completion below.
         }
 
         List<KahunaSetKeyValueResponseItem> responses =
@@ -338,6 +348,16 @@ internal sealed class RoutedWriteOperations
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
                     return (List<KahunaDeleteKeyValueResponseItem>)recovered;
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.AlreadyCompleted:
+                // Same contract as the set-many path: a completed batch is never re-driven. A legitimate
+                // same-id resend only exists for a batch that confirmed nothing, and that batch cancelled
+                // its registration, so it re-registers as New. A COMPLETED record here is the stale-view
+                // race (the first drive's detached completion won after the caller stopped waiting), and a
+                // re-drive would mutate participants invisibly to the freeze — staging deletes and planting
+                // write intents for a transaction that may already be finalizing. Answer transient; the
+                // caller's bounded retry budget resolves it.
+                DurableTransactionMetrics.CompletedBatchRedriveRefusals.Add(1);
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
@@ -346,8 +366,6 @@ internal sealed class RoutedWriteOperations
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.Errored);
-            // New and AlreadyCompleted both execute: a batch is re-driven on retry (deletes are idempotent)
-            // rather than replaying a cached list, and CompleteOperation is a no-op if it already completed.
         }
 
         List<KahunaDeleteKeyValueResponseItem> responses =

@@ -519,6 +519,14 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan RangeSplitSettleWindow { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// Upper bound on how long a range split or merge holds its quiesce while it drains the moving
+    /// range's unsettled durable intents before the cutover. Writes into the moving range stay
+    /// refused (retryably) for at most this long per attempt. Zero disables the wait: one settle
+    /// pass runs and an unsettled intent refuses the attempt. Clamped to 15 seconds internally.
+    /// </summary>
+    public TimeSpan RangeMoveSettleTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// Key count below which two adjacent ranges become eligible to be merged back into one.
     /// 0 disables auto-merge: the periodic merge checker is not started at all, so cold ranges
     /// accumulate until something merges them by hand.

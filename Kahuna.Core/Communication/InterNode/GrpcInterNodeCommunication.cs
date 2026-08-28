@@ -1921,16 +1921,23 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return batchResponse.ReplicateKeyValueRangePage?.Success ?? false;
     }
 
-    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcGetRangeTransactionStateRequest request = new() { PartitionId = partitionId };
+        GrpcGetRangeTransactionStateRequest request = new()
+        {
+            PartitionId = partitionId,
+            Kinds = (int)kinds,
+            MaxItems = maxItems
+        };
 
         if (startKey is not null)
             request.StartKey = startKey;
         if (endKey is not null)
             request.EndKey = endKey;
+        if (cursor is not null)
+            request.Cursor = cursor;
 
         GrpcServerBatcherResponse batchResponse;
 
@@ -1942,7 +1949,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcGetRangeTransactionStateResponse? response = batchResponse.GetRangeTransactionState;
 
         if (response is null || !response.Success)
-            return (false, [], [], []);
+            return (false, [], [], [], false, null);
 
         List<CompletionReceiptRecord> receipts = new(response.Receipts.Count);
 
@@ -1955,7 +1962,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
                 (KeyValueDurability)entry.Durability));
         }
 
-        return (true, receipts, response.TransactionRecords.ToByteArray(), response.PreparedIntents.ToByteArray());
+        return (
+            true,
+            receipts,
+            response.TransactionRecords.ToByteArray(),
+            response.PreparedIntents.ToByteArray(),
+            response.HasMore,
+            response.HasNextCursor ? response.NextCursor : null);
     }
 
     public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)

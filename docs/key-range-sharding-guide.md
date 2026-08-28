@@ -606,6 +606,7 @@ The count-based knobs (the load-based ones live in the
 | `--range-split-min-range-size` | 10 | Minimum keys each half must keep. |
 | `--range-merge-min-size` | 10 | Below this, adjacent ranges become merge candidates. **`0` disables auto-merge entirely.** |
 | `--range-split-settle-window` | 10s | Post-split cooldown. Must be ≥ `--raft-min-leader-stability-ms`; startup fails otherwise. |
+| `--range-move-settle-timeout` | 10s | Maximum time a split or merge waits, inside its quiesce, for the moving range's in-flight transactions to decide and settle before the cutover. `0` disables the wait — a range under sustained writes may then never split. Clamped to 15s. |
 | `--range-collection-interval` | 60s | Sampling cadence. See the warning below. |
 
 A `0` on a threshold is not "no limit" — the corresponding background actor is never spawned, so the

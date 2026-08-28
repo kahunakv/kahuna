@@ -605,6 +605,9 @@ public sealed class KahunaCommandLineOptions
     [Option("range-split-settle-window", Required = false, HelpText = "Seconds a freshly split range must settle before it may be split again. Must be at least --raft-min-leader-stability-ms, or the new partition can be re-split before its leader has stabilised; startup fails if it is shorter. Default 10.", Default = 10)]
     public int RangeSplitSettleWindowSeconds { get; set; } = 10;
 
+    [Option("range-move-settle-timeout", Required = false, HelpText = "Maximum seconds a range split or merge holds its quiesce while it waits for the moving range's in-flight transactions to decide and settle before the cutover. Writes into the moving range are refused (retryably) for at most this long per attempt. 0 disables the wait, so a range under sustained writes may never split. Clamped to 15. Default 10.", Default = 10)]
+    public int RangeMoveSettleTimeoutSeconds { get; set; } = 10;
+
     [Option("range-merge-min-size", Required = false, HelpText = "Key count below which two adjacent ranges become eligible to be merged back together. 0 disables auto-merge entirely (the checker is not started). Default 10.", Default = 10)]
     public int RangeMergeMinSize { get; set; } = 10;
 

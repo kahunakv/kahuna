@@ -88,6 +88,25 @@ internal sealed class RangeSplitTrigger : IDisposable
 
     private readonly TimeSpan indivisibleCooldown;
 
+    // Per-descriptor backoff after a move was refused because the moving range still held unsettled
+    // durable intents. Unlike the indivisibility guard, which refuses a range whose shape cannot be
+    // improved, this refusal says "not right now": the range is being written and its coordinators
+    // have not all decided. Without a backoff the checker re-attempts on the very next pass, and each
+    // attempt takes the quiesce and refuses writes into the moving half for the whole drain window —
+    // so a range that is busy enough to be worth splitting pays that cost every pass while making no
+    // progress. The delay doubles per consecutive refusal so a range that stays busy is retried
+    // rarely, and it is cleared the moment a split succeeds.
+    private readonly ConcurrentDictionary<int, DrainRefusal> drainRefusedAt = new();
+
+    /// <summary>When a descriptor's drain was last refused, and how many times in a row.</summary>
+    private readonly record struct DrainRefusal(long Tick, int Consecutive);
+
+    /// <summary>Delay after the first drain refusal; doubles per consecutive refusal.</summary>
+    private readonly TimeSpan drainRefusalBackoff;
+
+    /// <summary>Ceiling for the doubled delay.</summary>
+    private readonly TimeSpan drainRefusalBackoffMax;
+
     // Serializes the allocate + create-partition + split-async region across every split entry
     // point. RangeSplitCheckerActor (count, ~60s), RangeSplitLoadCheckerActor (load, ~5s) and the
     // manual admin split all reach it, the first two as separate Nixie actors with separate
@@ -129,6 +148,11 @@ internal sealed class RangeSplitTrigger : IDisposable
         this.loadWindow             = configuration.RangeSplitLoadWindow;
         this.loadImbalanceMax       = configuration.RangeSplitLoadImbalanceMax;
         this.indivisibleCooldown    = configuration.RangeSplitIndivisibleCooldown;
+        // One checker pass is the natural unit: the first refusal costs the range its next pass, and
+        // the ceiling matches the indivisibility cooldown so no cooldown here outlives that one.
+        // Both are derived, so a drain refusal needs no configuration of its own.
+        this.drainRefusalBackoff    = configuration.CollectionInterval;
+        this.drainRefusalBackoffMax = configuration.RangeSplitIndivisibleCooldown;
         this.settleWindow           = configuration.RangeSplitSettleWindow;
         this.logger                 = logger;
     }
@@ -152,6 +176,7 @@ internal sealed class RangeSplitTrigger : IDisposable
             hotSince.Clear();
             settledAt.Clear();
             indivisibleAt.Clear();
+            drainRefusedAt.Clear();
             return 0;
         }
 
@@ -190,26 +215,47 @@ internal sealed class RangeSplitTrigger : IDisposable
             {
                 ct.ThrowIfCancellationRequested();
 
-                // Skip descriptors that just split (settle window): a still-hot child must not
-                // re-split while its predecessor's leadership transfer is in flight.
-                if (IsInSettleWindow(descriptor.PartitionId))
+                try
                 {
-                    RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
-                    continue;
+                    // Skip descriptors that just split (settle window): a still-hot child must not
+                    // re-split while its predecessor's leadership transfer is in flight.
+                    if (IsInSettleWindow(descriptor.PartitionId))
+                    {
+                        RangeSplitMetrics.SettleSkips.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+                        continue;
+                    }
+
+                    // Skip if the indivisibility guard refused this descriptor recently — avoids
+                    // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
+                    if (IsInIndivisibleCooldown(descriptor.PartitionId))
+                        continue;
+
+                    // Skip if the moving half could not be drained recently. The range is simply
+                    // busy, so re-attempting now would re-quiesce it and refuse its writes again for
+                    // nothing.
+                    if (IsInDrainRefusalBackoff(descriptor.PartitionId))
+                        continue;
+
+                    // Count branch: split when sampled key count >= threshold.
+                    string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, ct);
+                    if (splitKey is null)
+                        continue;
+
+                    if (await ExecuteSplitAsync(descriptor, splitKey, ct))
+                        splitsDone++;
                 }
-
-                // Skip if the indivisibility guard refused this descriptor recently — avoids
-                // re-sampling 4096 keys every CollectionInterval for a persistently-skewed range.
-                if (IsInIndivisibleCooldown(descriptor.PartitionId))
-                    continue;
-
-                // Count branch: split when sampled key count >= threshold.
-                string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, ct);
-                if (splitKey is null)
-                    continue;
-
-                if (await ExecuteSplitAsync(descriptor, splitKey, ct))
-                    splitsDone++;
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // One descriptor's failure (a dropped or oversized gather, a leadership change
+                    // mid-split) must not end the pass: every other range still gets evaluated.
+                    logger.LogError(ex,
+                        "RangeSplitTrigger: split evaluation failed for {Space} P{Partition}; continuing with the remaining ranges",
+                        descriptor.KeySpace, descriptor.PartitionId);
+                }
             }
         }
 
@@ -260,6 +306,12 @@ internal sealed class RangeSplitTrigger : IDisposable
                 continue;
             }
 
+            // Same backoff the count branch honours: a range whose drain was just refused is busy,
+            // and the load branch polls far more often, so without this it would carry the whole
+            // re-attempt cost on its own.
+            if (IsInDrainRefusalBackoff(partitionId))
+                continue;
+
             if (!EvaluateLoadPredicate(partitionId, out double ops, out int depth, out double commitWait))
             {
                 // Predicate no longer holds — clear debounce so the next hot window starts fresh.
@@ -299,19 +351,34 @@ internal sealed class RangeSplitTrigger : IDisposable
                 continue;
             }
 
-            // Load branch uses 2*minRangeSize as the effective threshold — a small-but-hot range
-            // can split even if it is far below the count threshold.
-            string? splitKey = await TryComputeSplitKeyAsync(descriptor, 2 * minRangeSize, ct);
-
-            // Whether the split is indivisible, too small, or succeeds, reset the debounce so
-            // the load branch doesn't retry on every poll interval.
+            // Whether the attempt is indivisible, too small, fails, or succeeds, reset the debounce
+            // so the load branch re-arms a full window instead of retrying on every poll interval.
             hotSince.TryRemove(partitionId, out _);
 
-            if (splitKey is null)
-                continue; // indivisible or too small — TryComputeSplitKeyAsync already logged
+            try
+            {
+                // Load branch uses 2*minRangeSize as the effective threshold — a small-but-hot range
+                // can split even if it is far below the count threshold.
+                string? splitKey = await TryComputeSplitKeyAsync(descriptor, 2 * minRangeSize, ct);
 
-            if (await ExecuteSplitAsync(descriptor, splitKey, ct))
-                splitsDone++;
+                if (splitKey is null)
+                    continue; // indivisible or too small — TryComputeSplitKeyAsync already logged
+
+                if (await ExecuteSplitAsync(descriptor, splitKey, ct))
+                    splitsDone++;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // One descriptor's failure must not end the poll: every other hot range still gets
+                // evaluated, and the debounce reset above rate-limits the retry to one per window.
+                logger.LogError(ex,
+                    "RangeSplitTrigger: load split evaluation failed for {Space} P{Partition}; continuing with the remaining ranges",
+                    descriptor.KeySpace, partitionId);
+            }
         }
 
         return splitsDone;
@@ -352,7 +419,15 @@ internal sealed class RangeSplitTrigger : IDisposable
             ct);
 
         if (!outcome.IsSuccess)
+        {
+            // A refused drain is the one failure that is expected to repeat: the range is being
+            // written and its coordinators have not all decided. Back off before re-attempting, so
+            // the next pass does not re-quiesce it and refuse its writes again for nothing.
+            if (outcome.Status == SplitStatus.UnsettledMovingIntents)
+                RecordDrainRefusal(descriptor);
+
             return false;
+        }
 
         int newId = outcome.NewPartitionId;
 
@@ -375,6 +450,7 @@ internal sealed class RangeSplitTrigger : IDisposable
         // (which inherits the parent partition ID) — the split changed the situation.
         hotSince.TryRemove(descriptor.PartitionId, out _);
         indivisibleAt.TryRemove(descriptor.PartitionId, out _);
+        drainRefusedAt.TryRemove(descriptor.PartitionId, out _);
 
         RangeSplitMetrics.Splits.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
 
@@ -556,6 +632,18 @@ internal sealed class RangeSplitTrigger : IDisposable
             if (!activeIds.Contains(id))
                 hotSince.TryRemove(id, out _);
         }
+
+        foreach (int id in drainRefusedAt.Keys)
+        {
+            // Only a descriptor that no longer exists is dropped here. Removing an entry once its
+            // delay expired would discard the consecutive count with it, so the next refusal would
+            // start again at one delay and the doubling could never get past the second step — the
+            // range would be re-attempted every other pass forever, which is most of what the
+            // backoff exists to prevent. The count is cleared where it should be: on a split that
+            // succeeds, and on leadership loss. Growth stays bounded by the descriptor count.
+            if (!activeIds.Contains(id))
+                drainRefusedAt.TryRemove(id, out _);
+        }
     }
 
     /// <summary>
@@ -569,6 +657,72 @@ internal sealed class RangeSplitTrigger : IDisposable
 
         double elapsedMs = (Stopwatch.GetTimestamp() - refusedTick) * 1000.0 / Stopwatch.Frequency;
         return elapsedMs < indivisibleCooldown.TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// Records that a move of <paramref name="descriptor"/> was refused because its moving half still
+    /// held unsettled durable intents, and lengthens the backoff for a range that keeps refusing.
+    /// </summary>
+    private void RecordDrainRefusal(RangeDescriptor descriptor)
+    {
+        long nowTick = Stopwatch.GetTimestamp();
+        DrainRefusal refusal = drainRefusedAt.AddOrUpdate(
+            descriptor.PartitionId,
+            _ => new DrainRefusal(nowTick, 1),
+            (_, previous) => new DrainRefusal(
+                nowTick,
+                NextConsecutive(
+                    previous.Consecutive,
+                    (nowTick - previous.Tick) * 1000.0 / Stopwatch.Frequency,
+                    drainRefusalBackoffMax.TotalMilliseconds)));
+
+        RangeSplitMetrics.DrainRefusals.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+
+        double backoffMs = DrainBackoffMsFor(refusal.Consecutive);
+        logger.LogRangeSplitTriggerDrainRefused(
+            descriptor.KeySpace, descriptor.PartitionId, refusal.Consecutive, backoffMs);
+    }
+
+    /// <summary>
+    /// The backoff after <paramref name="consecutive"/> refusals in a row: the base delay doubled
+    /// once per extra refusal, capped. The shift is bounded before it is applied — a range that has
+    /// refused thirty times would otherwise overflow the multiplier rather than saturate it.
+    /// </summary>
+    private double DrainBackoffMsFor(int consecutive) => ComputeDrainBackoffMs(
+        drainRefusalBackoff.TotalMilliseconds, drainRefusalBackoffMax.TotalMilliseconds, consecutive);
+
+    /// <summary>
+    /// The streak value for a fresh refusal on a descriptor that has refused before. A refusal that
+    /// follows the previous one closely continues the streak, so a range that keeps failing to drain
+    /// is retried ever more rarely. One that arrives long after the last — more than twice the
+    /// maximum delay, meaning the range drained or was left alone for that whole time — starts over,
+    /// so a range is not punished for an episode that has since passed.
+    /// </summary>
+    internal static int NextConsecutive(int previousConsecutive, double elapsedSinceLastMs, double maxBackoffMs)
+        => elapsedSinceLastMs > 2 * maxBackoffMs ? 1 : previousConsecutive + 1;
+
+    /// <summary>
+    /// The doubling itself, separated from the trigger's state so it can be checked directly.
+    /// <paramref name="consecutive"/> counts refusals in a row and is 1 for the first one.
+    /// </summary>
+    internal static double ComputeDrainBackoffMs(double baseMs, double maxMs, int consecutive)
+    {
+        double ceiling = Math.Max(baseMs, maxMs);
+        int doublings = Math.Clamp(consecutive - 1, 0, 20);
+        return Math.Min(baseMs * (1L << doublings), ceiling);
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> while a descriptor whose drain was refused is still inside its backoff,
+    /// meaning neither branch should attempt it again yet.
+    /// </summary>
+    private bool IsInDrainRefusalBackoff(int partitionId)
+    {
+        if (!drainRefusedAt.TryGetValue(partitionId, out DrainRefusal refusal))
+            return false;
+
+        double elapsedMs = (Stopwatch.GetTimestamp() - refusal.Tick) * 1000.0 / Stopwatch.Frequency;
+        return elapsedMs < DrainBackoffMsFor(refusal.Consecutive);
     }
 
     /// <summary>

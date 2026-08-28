@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using Nixie;
 using Nixie.Routers;
 
@@ -100,9 +102,11 @@ internal sealed class DurableMaintenanceService
     private Task<bool> ForgetCompletionReceiptsToPartitionLeaderAsync(int partitionId, IReadOnlyList<CompletionReceiptRecord> receipts, CancellationToken cancellationToken) =>
         rangeStateTransfer.ForgetCompletionReceiptsToPartitionLeaderAsync(partitionId, receipts, cancellationToken);
 
-    private Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
+    // The settle barrier consumes only the intents, so the gather skips receipts and records: they
+    // add nothing to the settle decision and only inflate the response toward the transport's limit.
+    private Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeIntentsFromPartitionLeaderAsync(
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
-        rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken);
+        rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, KeyValueRangeStateKinds.Intents, cancellationToken);
 
     private Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
@@ -121,11 +125,17 @@ internal sealed class DurableMaintenanceService
 
 
 
+    // The partition after which the next capped recovery pass resumes its rotation. Without the
+    // rotation, a backlog concentrated on the store's first-enumerated partitions would fill the
+    // per-pass cap on every tick and a later partition's due intents would never be swept — an
+    // orphan there would silently cross the record-retention horizon un-aborted and wedge forever.
+    private int recoverySweepResumeAfterPartition = -1;
+
     /// <summary>
     /// Participant-side recovery for the durable-intent path: on each partition this node leads, resolves due
-    /// unresolved prepared intents to their canonical decision (presuming abort only past the decision deadline,
-    /// for anchors this node also leads). No-op unless the durable-intent path is enabled. Runs off the request
-    /// path; idempotent with a concurrent finalize.
+    /// unresolved prepared intents to their canonical decision, presuming abort only past the decision deadline
+    /// (the abort drive routes to the anchor partition's leader when it is remote). No-op unless the
+    /// durable-intent path is enabled. Runs off the request path; idempotent with a concurrent finalize.
     /// </summary>
     internal async Task RecoverPreparedIntents(CancellationToken cancellationToken)
     {
@@ -138,30 +148,33 @@ internal sealed class DurableMaintenanceService
         if (due.Count == 0)
             return;
 
-        // Cap the cross-partition fan-out per pass so a large backlog spread over many partitions is drained
-        // across successive collection ticks rather than fanning out to every partition (and its recovery
-        // lookups) at once. Deferred partitions' intents stay due and are picked up next pass.
-        int partitionCap = durableRecoveryMaxPartitionsPerPass;
-
-        HashSet<int> partitions = [];
+        // Every led partition with due intents, deduplicated; sorted so the rotation below is stable.
+        SortedSet<int> ledDuePartitions = [];
         foreach (PreparedIntent intent in due)
         {
             if (cancellationToken.IsCancellationRequested)
                 return;
-            if (partitionCap > 0 && partitions.Count >= partitionCap)
-                break;
 
             int partitionId = locator.LocateRange(intent.Key).PartitionId;
-            if (partitions.Contains(partitionId))
+            if (ledDuePartitions.Contains(partitionId))
                 continue;
             if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
                 continue;
 
-            partitions.Add(partitionId);
+            ledDuePartitions.Add(partitionId);
         }
 
-        if (partitions.Count == 0)
+        if (ledDuePartitions.Count == 0)
             return;
+
+        // Cap the cross-partition fan-out per pass so a large backlog spread over many partitions is drained
+        // across successive collection ticks rather than fanning out to every partition (and its recovery
+        // lookups) at once. The cap rotates: each pass resumes after the last partition the previous pass
+        // swept, so a persistent backlog on the low partitions cannot starve the high ones out of recovery.
+        int partitionCap = durableRecoveryMaxPartitionsPerPass;
+
+        List<int> partitions = SelectRotated([.. ledDuePartitions], recoverySweepResumeAfterPartition, partitionCap);
+        recoverySweepResumeAfterPartition = partitions[^1];
 
         DurableTransactionRecovery recovery = BuildPreparedIntentRecovery();
         foreach (int partitionId in partitions)
@@ -175,6 +188,27 @@ internal sealed class DurableMaintenanceService
                 logger.LogError(ex, "Prepared-intent recovery sweep failed for partition {Partition}", partitionId);
             }
         }
+    }
+
+    /// <summary>
+    /// Takes up to <paramref name="cap"/> items from <paramref name="sorted"/>, resuming strictly after
+    /// <paramref name="resumeAfter"/> and wrapping to the front — the rotation that keeps a capped sweep
+    /// fair across passes. A non-positive cap takes everything. Pure, so the fairness is directly testable.
+    /// </summary>
+    internal static List<int> SelectRotated(List<int> sorted, int resumeAfter, int cap)
+    {
+        if (cap <= 0 || sorted.Count <= cap)
+            return sorted;
+
+        int start = 0;
+        while (start < sorted.Count && sorted[start] <= resumeAfter)
+            start++;
+
+        List<int> taken = new(cap);
+        for (int i = 0; i < cap; i++)
+            taken.Add(sorted[(start + i) % sorted.Count]);
+
+        return taken;
     }
 
     /// <summary>
@@ -465,24 +499,125 @@ internal sealed class DurableMaintenanceService
         return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
     }
 
+    // The drain below must leave the caller's 30-second quiesce window enough room for the catch-up
+    // copy, the state handoff and the cutover that follow it, whatever the operator configured.
+    private const long MovingIntentDrainMaxMs = 15_000;
+
+    // Delay between drain passes. Undecided intents belong to in-flight coordinators whose decisions
+    // land within tens to hundreds of milliseconds; polling faster only re-gathers an unchanged set.
+    private const int MovingIntentDrainDelayMs = 100;
+
     /// <summary>
     /// The pre-cutover settlement barrier of a range split/merge: gathers the moving range's prepared intents
     /// from the source partition's leader (the authoritative store) and settles every decided one through the
     /// recovery path, so the data copy that follows carries materialized rows instead of values that exist only
-    /// as intents. Returns true when the moving range holds no unsettled durable intent; false — the caller must
-    /// refuse this move attempt and retry later — when an intent is still undecided inside its window, a settle
-    /// could not complete, or the gather could not reach the source leader. Without this barrier a cutover races
-    /// deferred settlement: the copied rows predate the commit and the child range serves the prior revision.
+    /// as intents. Without this barrier a cutover races deferred settlement: the copied rows predate the commit
+    /// and the child range serves the prior revision.
+    ///
+    /// <para>The barrier drains rather than gates. The caller holds the quiesce, so no new prepare can enter
+    /// the moving range and the intent set can only shrink: each pass settles every decided intent, and an
+    /// intent still undecided inside its window belongs to an in-flight coordinator whose decision lands
+    /// shortly — so the loop waits briefly and re-gathers instead of refusing outright. A refusal on first
+    /// contact would starve the move: a range under sustained writes always carries a few just-prepared
+    /// intents, so a barrier that never waits refuses every attempt and the split lands only after the load
+    /// stops. The wait is bounded by <see cref="KahunaConfiguration.RangeMoveSettleTimeout"/> (clamped so the
+    /// quiesce window keeps room for the copy and cutover that follow).</para>
+    ///
+    /// <para>Returns true when a gather confirms the moving range holds no durable intent at all; false — the
+    /// caller must refuse this move attempt retryably — when an intent is still unsettled at the deadline, the
+    /// gather could not reach the source leader, or a gather or settle failed.</para>
     /// </summary>
     internal async Task<bool> SettleMovingRangeIntentsAsync(
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
     {
-        const int maxPasses = 3;
+        double budgetMs = Math.Min(configuration.RangeMoveSettleTimeout.TotalMilliseconds, MovingIntentDrainMaxMs);
+        long startTick = Stopwatch.GetTimestamp();
 
-        for (int pass = 0; pass < maxPasses; pass++)
+        while (true)
+        {
+            bool ok;
+            IReadOnlyList<PreparedIntent> intents;
+            int unsettled;
+
+            try
+            {
+                (ok, _, _, intents) =
+                    await GetRangeIntentsFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+                if (!ok)
+                    return false;
+
+                if (intents.Count == 0)
+                    return true;
+
+                DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+                HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+                unsettled = await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // A transport failure (an oversized gather response, a dropped call) refuses this attempt
+                // retryably; it must not propagate and take down the caller's whole trigger pass.
+                logger.LogWarning(ex,
+                    "Settle barrier: gather/settle failed for partition {Partition} [{Start},{End}); refusing this move attempt",
+                    sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf");
+                return false;
+            }
+
+            // The deadline bounds the whole loop, not only the undecided case: a pass whose settles all
+            // landed still needs its confirming re-gather to come back empty, and if that confirmation
+            // keeps lagging past the deadline the attempt refuses rather than spinning inside the quiesce.
+            double elapsedMs = (Stopwatch.GetTimestamp() - startTick) * 1000.0 / Stopwatch.Frequency;
+
+            if (elapsedMs >= budgetMs)
+            {
+                logger.LogWarning(
+                    "Settle barrier: partition {Partition} [{Start},{End}) still gathered {Gathered} durable intents ({Unsettled} unsettled) after {Elapsed:F0} ms; refusing this move attempt",
+                    sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf", intents.Count, unsettled, elapsedMs);
+                return false;
+            }
+
+            // Unsettled intents are undecided coordinators: give their decisions real time to land before
+            // the re-gather. A fully settled pass re-gathers after the same short delay, which lets the
+            // settle deltas' ordered apply land so the confirming gather reads them back as absent.
+            await Task.Delay(MovingIntentDrainDelayMs, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The zero-impact admission gate a split runs before it invests in an attempt: one settle pass
+    /// over the moving range's intents with no quiesce held, followed by an age check on whatever
+    /// could not settle. Returns true when the quiesced drain that follows is expected to finish
+    /// quickly; false — the caller should refuse the attempt retryably and back off — when it is not.
+    ///
+    /// <para>Why it exists: everything after this point costs the cluster real work — a bulk copy of
+    /// the whole moving half, and then a quiesce whose exclusive range lock stamps write intents on
+    /// every resident key and refuses the range's writes for up to the full drain budget. An attempt
+    /// that ends refused at the in-quiesce barrier pays all of that for nothing, and under sustained
+    /// load those refused attempts — not the completed splits — are what halves client throughput.
+    /// This gate moves the common refusal to a point where it disturbs nothing.</para>
+    ///
+    /// <para>The verdict is a heuristic on intent age, not a zero-intent requirement — requiring zero
+    /// without a quiesce would re-create the starvation this machinery exists to avoid, because new
+    /// prepares are still flowing. Decided intents settle here (useful work in any outcome). A
+    /// survivor is an undecided coordinator: a young one (inside the drain budget) is expected to
+    /// decide within the quiesced drain, an old one has already out-waited a full budget without a
+    /// decision and would very likely stall the quiesced drain to its deadline too.</para>
+    /// </summary>
+    internal async Task<bool> PreSettleMovingRangeIntentsAsync(
+        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken)
+    {
+        double budgetMs = Math.Min(configuration.RangeMoveSettleTimeout.TotalMilliseconds, MovingIntentDrainMaxMs);
+
+        try
         {
             (bool ok, _, _, IReadOnlyList<PreparedIntent> intents) =
-                await GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+                await GetRangeIntentsFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
 
             if (!ok)
                 return false;
@@ -493,14 +628,43 @@ internal sealed class DurableMaintenanceService
             DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-            if (await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false) > 0)
+            if (await recovery.SettleSuppliedIntentsAsync(sourcePartitionId, intents, now, cancellationToken).ConfigureAwait(false) == 0)
+                return true;
+
+            // Survivors of the settle pass are undecided coordinators (or settles that must retry).
+            // Re-gather so the aged set reflects what actually remains, then judge by age.
+            (ok, _, _, intents) =
+                await GetRangeIntentsFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken).ConfigureAwait(false);
+
+            if (!ok)
                 return false;
 
-            // Loop to re-gather: the settles above replicated through the source partition, so the next
-            // gather confirms they landed (and catches an intent that raced in before the caller's fence).
-        }
+            now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-        return false;
+            long oldestAgeMs = 0;
+            foreach (PreparedIntent intent in intents)
+                oldestAgeMs = Math.Max(oldestAgeMs, now.L - intent.CommitTimestamp.L);
+
+            if (oldestAgeMs <= budgetMs)
+                return true;
+
+            logger.LogInformation(
+                "Pre-settle gate: partition {Partition} [{Start},{End}) holds {Count} unsettled durable intents, oldest {OldestMs} ms; refusing before the quiesce",
+                sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf", intents.Count, oldestAgeMs);
+
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Pre-settle gate: gather/settle failed for partition {Partition} [{Start},{End}); refusing this move attempt",
+                sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf");
+            return false;
+        }
     }
 
     private DurableTransactionRecovery BuildPreparedIntentRecovery() => new(
@@ -522,24 +686,37 @@ internal sealed class DurableMaintenanceService
         // past it, the absent record may be a reclaimed commit and the sweep holds the intent instead of
         // presuming abort — the guard against discarding a committed leg whose settlement kept failing.
         runtime.Configuration.TransactionOutcomeRetentionTtl,
-        logger);
+        logger,
+        // The abort fence: a locally visible terminal Abort is definitive, so a commit-direction settle
+        // must never push that transaction's value into the log whatever decision its caller read.
+        locallyAborted: (transactionId, epoch) =>
+            transactionRecordStore.Get(transactionId, epoch) is { Decision: TransactionDecision.Abort });
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {
         int anchorPartition = locator.LocateRange(anchorKey).PartitionId;
 
-        // Only drive/read the decision when this node leads the anchor partition; otherwise the local record store
-        // is not authoritative and applying an abort locally could diverge from the real remote decision.
-        if (raft.Joined && !await raft.AmILeaderIfHosted(anchorPartition, cancellationToken).ConfigureAwait(false))
-            return null;
-
-        // Drive the abort through the ordered scheduler seam (this node leads the anchor partition), which applies
-        // it in Raft order — never overwriting a commit that won earlier in the log. Then read back the winner.
+        // Drive the abort through the durable gateway, which forwards to the anchor partition's leader when it
+        // is remote; the leader's scheduler applies it in Raft order and the record state machine never lets an
+        // abort overwrite a commit that already won. The drive must NOT be gated on this node leading the anchor
+        // partition: the recovery sweep runs on the intent's key-partition leader, and when the anchor partition
+        // is led elsewhere no node would ever be authorized to resolve the intent — an abandoned cross-partition
+        // transaction would then stay undecided forever and its intent would refuse every scan of its key space.
+        //
+        // projectRecordLocally: false — this abort can lose at the anchor, and projecting a losing abort into
+        // this node's record store would mint a divergent local tombstone over the canonical commit.
         byte[] delta = TransactionRecordStore.SerializeDelta([abort]);
         // A recovery-driven abort is terminal work resolving an already-prepared transaction — admit as Terminal.
-        await ReplicateDurableThroughScheduler(anchorPartition, ReplicationTypes.TransactionRecord, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+        await durableReplication.ReplicateDurableThroughScheduler(
+            anchorPartition, ReplicationTypes.TransactionRecord, delta, Writes.WriteAdmissionClass.Terminal,
+            cancellationToken, projectRecordLocally: false).ConfigureAwait(false);
 
-        return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
+        // Read back the winner — never assume the abort won. The local store is authoritative only when this
+        // node leads the anchor partition; otherwise ask the anchor leader.
+        if (!raft.Joined || await raft.AmILeaderIfHosted(anchorPartition, cancellationToken).ConfigureAwait(false))
+            return transactionRecordStore.Get(abort.TransactionId, abort.Epoch);
+
+        return await LookupDurableRecordRouted(abort.TransactionId, abort.Epoch, anchorKey, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

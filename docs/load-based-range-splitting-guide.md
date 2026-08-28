@@ -122,6 +122,7 @@ bursty report could trip a split. Keep `RangeSplitLoadWindow` ≥ ~10s.
 | `RangeSplitLoadImbalanceMax` | *(embedded only)* | `0.8` | A range is "indivisible" if no split key gets each child below this fraction of the writes. |
 | `RangeSplitSettleWindow` | `--range-split-settle-window` | `10s` | Post-split cooldown; neither child is re-evaluated until it elapses. **Must be ≥ `MinLeaderStability`** (validated at startup). |
 | `RangeSplitIndivisibleCooldown` | *(embedded only)* | `5min` | How long an indivisible range is skipped before the count branch re-samples it. |
+| `RangeMoveSettleTimeout` | `--range-move-settle-timeout` | `10s` | Maximum time a split or merge holds its quiesce while it waits for the moving range's in-flight transactions to decide and settle before the cutover. Writes into the moving range are refused (retryably) for at most this long per attempt. `0` disables the wait, so a range under sustained writes may never split. Clamped to `15s`. |
 
 ### Count-split knobs (pre-existing)
 

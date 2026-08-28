@@ -147,13 +147,17 @@ internal sealed partial class KeyValuesManager
     public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) =>
         rangeStateTransfer.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
 
-    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(
-        int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
-        rangeStateTransfer.GetRangeTransactionStateLocal(partitionId, startKey, endKey, cancellationToken);
+    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(
+        int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken) =>
+        rangeStateTransfer.GetRangeTransactionStateLocal(partitionId, startKey, endKey, kinds, cursor, maxItems, cancellationToken);
 
     internal Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
         rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, cancellationToken);
+
+    internal Task<(bool Ok, IReadOnlyCollection<CompletionReceiptRecord> Receipts, IReadOnlyList<TransactionRecord> Records, IReadOnlyList<PreparedIntent> Intents)> GetRangeTransactionStateFromPartitionLeaderAsync(
+        int sourcePartitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, CancellationToken cancellationToken) =>
+        rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, kinds, cancellationToken);
 
     internal Task<bool> ImportCompletionReceiptsReplicated(
         int partitionId,

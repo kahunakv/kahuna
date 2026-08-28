@@ -72,7 +72,8 @@ internal sealed class KeyValueReplicator
         UnflushedKeyValueWritesIndex? unflushedWrites = null,
         PartitionDurabilityTracker? durabilityTracker = null,
         Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null,
-        Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null)
+        Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null,
+        Func<HLCTimestamp, long, bool>? transactionLocallyAborted = null)
     {
         this.backgroundWriter           = backgroundWriter;
         this.persistentRouter           = persistentRouter;
@@ -84,8 +85,16 @@ internal sealed class KeyValueReplicator
         this.durabilityTracker          = durabilityTracker;
         this.hydrateFromBackend         = hydrateFromBackend;
         this.hydrateRevisionFromBackend = hydrateRevisionFromBackend;
+        this.transactionLocallyAborted  = transactionLocallyAborted;
         this.logger                     = logger;
     }
+
+    // Answers whether this node's record store holds a terminal Abort for (transactionId, epoch). A local
+    // Abort is definitive: an abort can never overwrite a commit, and terminal records reach local stores
+    // only through the canonical log — so a local Abort implies the canonical decision is Abort, and any
+    // durable-commit apply for that transaction would materialize an aborted leg. Null disables the fence
+    // (direct-construction tests without a record store).
+    private readonly Func<HLCTimestamp, long, bool>? transactionLocallyAborted;
 
     /// <summary>
     /// Applies the transactional commit metadata carried on a committed persistent mutation as a follower
@@ -189,6 +198,22 @@ internal sealed class KeyValueReplicator
     /// </summary>
     public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)
     {
+        // Abort fence: every durable-commit apply — the finalizer's resolution, a recovery settle, the
+        // helping pass, and the commit-repair ladder, local or forwarded — crosses this method. A locally
+        // visible terminal Abort for the intent's transaction is definitive (see the field's comment), so
+        // applying this commit would durably materialize an aborted transaction's leg: the conserved-total
+        // drift signature. Refuse loudly instead; the intent stays unsettled and the recovery sweep, which
+        // reads the canonical record, discards it. The log line is the attribution: its stack names the
+        // producer that tried.
+        if (transactionLocallyAborted is not null && transactionLocallyAborted(intent.TransactionId, intent.Epoch))
+        {
+            Transactions.DurableTransactionMetrics.AbortFencedCommitApplies.Add(1);
+            logger.LogError(
+                "Refusing durable commit apply for key {Key} at revision {Revision}: transaction {TransactionId} epoch {Epoch} is aborted",
+                intent.Key, intent.Revision, intent.TransactionId, intent.Epoch);
+            return false;
+        }
+
         KeyValueResponseType first = await AskDurableCommit(partitionId, intent, hydratedEntry: null, backendHydrated: false).ConfigureAwait(false);
 
         if (first == KeyValueResponseType.Committed)
@@ -641,6 +666,11 @@ internal sealed class KeyValueReplicator
         }
     }
 
+    /// <summary>Byte equality with null treated as empty — the comparison behind the same-revision
+    /// divergent-apply witness, where any difference at an equal revision is the alarm.</summary>
+    private static bool ValuesEqual(byte[]? a, byte[]? b) =>
+        (a ?? []).AsSpan().SequenceEqual(b ?? []);
+
     /// <summary>
     /// Replicates the specified log entry for the given partition.
     /// </summary>
@@ -678,16 +708,37 @@ internal sealed class KeyValueReplicator
                     // precedes any watermark advance over this index.
                     RegisterPendingApply(partitionId, log.Id, keyValueMessage);
 
+                    // Collision witness: this apply is about to become durable unconditionally (the overlay
+                    // record and the queued flush below run for every committed entry; the actor's head
+                    // guards protect only the resident cache). A record whose revision equals the newest
+                    // recorded write for the key but whose value differs is therefore a correctness alarm,
+                    // not a replay: revisions identify a mutation, and the one legitimate producer of a
+                    // same-revision pair — an aborted attempt and its client replay, which both stage
+                    // base+1 — must never have BOTH records reach a log. Say it loudly with both sides'
+                    // identities, so a conserved-total drift attributes to its producer from the log alone.
+                    if (unflushedWrites is not null
+                        && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite newest)
+                        && newest.Revision == keyValueMessage.Revision
+                        && !keyValueMessage.NoRevision
+                        && !ValuesEqual(newest.Value, messageValue))
+                    {
+                        Transactions.DurableTransactionMetrics.SameRevisionDivergentApplies.Add(1);
+                        logger.LogError(
+                            "Same-revision divergent apply for key {Key} at revision {Revision}: log entry {LogIndex} (transaction {TransactionId}) overwrites a different value already recorded at this revision",
+                            keyValueMessage.Key, keyValueMessage.Revision, log.Id,
+                            new HLCTimestamp(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter));
+                    }
+
                     // Record before enqueueing so a read that misses the actor cache observes this
                     // committed write even before the background flush lands it in the backend.
                     unflushedWrites?.Record(
-                        keyValueMessage.Key, 
-                        messageValue, 
+                        keyValueMessage.Key,
+                        messageValue,
                         keyValueMessage.Revision,
-                        expires, 
-                        lastUsed, 
-                        lastModified, 
-                        KeyValueState.Set, 
+                        expires,
+                        lastUsed,
+                        lastModified,
+                        KeyValueState.Set,
                         keyValueMessage.NoRevision
                     );
 

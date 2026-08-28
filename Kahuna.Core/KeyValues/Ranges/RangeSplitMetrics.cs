@@ -60,6 +60,18 @@ internal static class RangeSplitMetrics
             description: "Load-splits skipped because no peer node is available to host the child partition.");
 
     /// <summary>
+    /// Moves refused because the moving half still held unsettled durable intents. Unlike
+    /// <see cref="IndivisibleRefusals"/> this is a "not right now": the range is being written and
+    /// its coordinators have not all decided. A count that keeps climbing while
+    /// <see cref="Splits"/> stays flat means the range is too busy to drain inside the move's
+    /// settle timeout, so it is being retried on a lengthening backoff and never dividing.
+    /// </summary>
+    internal static readonly Counter<long> DrainRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.range.split.drain_refusals",
+            description: "Moves refused because the moving range still held unsettled durable intents.");
+
+    /// <summary>
     /// Merge candidate pairs skipped because at least one partition's write rate meets or
     /// exceeds the split threshold. Merging would immediately re-trigger a split; the pair
     /// is left to cool before the next checker pass.

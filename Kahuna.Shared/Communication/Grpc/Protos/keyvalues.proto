@@ -1305,6 +1305,18 @@ message GrpcGetRangeTransactionStateRequest {
   // The source partition whose confirmed leader must answer: a follower's stores can lag the
   // newest prepared intent, and a handoff missing an intent strands its transaction after cutover.
   int32 PartitionId = 3;
+  // Bitmask selecting which state kinds the response carries: 1 receipts, 2 records, 4 intents.
+  // 0 (unset) means all three — the pre-paging wire behaviour, which an old peer also answers with.
+  int32 Kinds = 4;
+  // Resume strictly after this range key (the receipt/intent key, or the record's anchor key).
+  // The number of items in a busy range has no ceiling, so an unpaged response can exceed the
+  // transport's message limit; the caller pages instead. Absent means "from StartKey".
+  optional string Cursor = 5;
+  // Cap on the items in this page. Applied only when exactly one kind is selected — a shared
+  // cursor cannot page heterogeneous kinds. Items that share one range key never straddle a page
+  // (the resume is strictly-after by key), so a page can exceed the cap by that key's items.
+  // 0 means unbounded (the pre-paging behaviour).
+  int32 MaxItems = 6;
 }
 
 message GrpcGetRangeTransactionStateResponse {
@@ -1313,6 +1325,10 @@ message GrpcGetRangeTransactionStateResponse {
   // Serialized TransactionRecordSnapshotMessage / PreparedIntentSnapshotMessage blobs, empty when none.
   bytes TransactionRecords = 3;
   bytes PreparedIntents = 4;
+  // True when the page was cut by MaxItems and more items remain past NextCursor. An old peer
+  // never sets it — its response already carried everything.
+  bool HasMore = 5;
+  optional string NextCursor = 6;
 }
 
 // A batch of coordinator decision records serialized as one CoordinatorDecisionSnapshotMessage blob.

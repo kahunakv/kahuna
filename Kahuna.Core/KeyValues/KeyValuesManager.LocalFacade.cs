@@ -169,6 +169,10 @@ internal sealed partial class KeyValuesManager
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken) =>
         durableMaintenance.TryResolveDecidedDurableBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken);
 
+    internal Task<bool> PreSettleMovingRangeIntentsAsync(
+        int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
+        durableMaintenance.PreSettleMovingRangeIntentsAsync(sourcePartitionId, startKey, endKey, cancellationToken);
+
     internal Task<bool> SettleMovingRangeIntentsAsync(
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
         durableMaintenance.SettleMovingRangeIntentsAsync(sourcePartitionId, startKey, endKey, cancellationToken);

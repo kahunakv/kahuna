@@ -539,7 +539,9 @@ public sealed class TestRangeSplit : BaseCluster
     ///
     /// <para>Sequence:</para>
     /// <list type="number">
-    ///   <item>tx1 acquires Shared on [−∞, +∞) via P2 leader.</item>
+    ///   <item>tx1 acquires Shared on [−∞, Space+"/m") via P2 leader — the half P2 retains. The lock
+    ///     must not overlap the moving half: the split takes its own exclusive lock over it to
+    ///     quiesce, and a foreign lock there makes the split refuse and retry later.</item>
     ///   <item>Split at <c>Space + "/m"</c> — P2 retains [Space, Space+"/m"), new partition gets [Space+"/m", +∞).</item>
     ///   <item>tx2 acquires Shared on [−∞, +∞) via P2 leader → Locked (S∩S coexist, proves Mode=Shared survived).</item>
     ///   <item>tx3 acquires Exclusive on [−∞, +∞) via P2 leader → AlreadyLocked (X conflicts with Shared, proves matrix).</item>
@@ -560,9 +562,9 @@ public sealed class TestRangeSplit : BaseCluster
 
             HLCTimestamp tx1 = NextTx(p2Raft);
 
-            // Step 1: tx1 acquires Shared over the whole range on P2.
+            // Step 1: tx1 acquires Shared over the retained half on P2.
             (KeyValueResponseType sharedBefore, _) = await dataLeader.TryAcquireRangeLock(
-                tx1, Space, null, true, null, false, 60_000,
+                tx1, Space, null, true, Space + "/m", false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Shared);
             Assert.Equal(KeyValueResponseType.Locked, sharedBefore);
 
@@ -593,6 +595,53 @@ public sealed class TestRangeSplit : BaseCluster
                 tx3, Space, null, true, null, false, 60_000,
                 KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.AlreadyLocked, exclusiveAfter);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    /// <summary>
+    /// A split must not run while another transaction holds a range lock over the moving half. The
+    /// quiesce lock is what orders the split's window exactly against in-flight writes; the acquire
+    /// answers AlreadyLocked for a foreign holder, and treating that as success would run the whole
+    /// copy-and-cutover without the lock. The split must refuse retryably with the map untouched,
+    /// and a retry after the foreign lock is released must succeed.
+    /// </summary>
+    [Fact]
+    public async Task ForeignLock_OverMovingHalf_RefusesSplitRetryably()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            (IRaft p2Raft, _) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            HLCTimestamp tx1 = NextTx(p2Raft);
+
+            // A foreign Shared lock overlapping the moving half. Shared is the subtler case: it
+            // coexists with other Shared locks, but the split's Exclusive acquire must still refuse.
+            (KeyValueResponseType acquired, _) = await dataLeader.TryAcquireRangeLock(
+                tx1, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            SplitOutcome refused = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.Equal(SplitStatus.QuiesceFailed, refused.Status);
+
+            // The map must be untouched: one whole-space descriptor, original generation.
+            Assert.Single(nodes[0].Item2.RangeMapStore.Current.Descriptors, d => d.KeySpace == Space);
+
+            KeyValueResponseType released = await dataLeader.TryReleaseExclusiveRangeLock(
+                tx1, Space, Space + "/m", true, null, false, KeyValueDurability.Persistent);
+            Assert.Equal(KeyValueResponseType.Unlocked, released);
+
+            SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.True(outcome.IsSuccess, $"Split failed after the foreign lock was released: {outcome.Status}");
         }
         finally
         {
