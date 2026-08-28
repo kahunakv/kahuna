@@ -28,6 +28,17 @@ public sealed class KahunaCommandLineOptions
     [Option("https-certificate-password", Required = false, HelpText = "Password of the HTTPs certificate", Default = "")]
     public string HttpsCertificatePassword { get; set; } = "";
     
+    // The dashboard is read-only — it writes nothing, takes no lock and starts no backup — so it is
+    // on by default, and this switch turns it off. A deployment that treats an unauthenticated
+    // browser page as surface it does not want should set it: the REST API carries no
+    // authentication, so the page is reachable by anyone who can reach the port. With it set, the
+    // HTTP root returns the plain text it always returned.
+    [Option("disable-dashboard", Required = false, HelpText = "Do not serve the browser operator dashboard at the HTTP root")]
+    public bool DisableDashboard { get; set; }
+
+    [Option("dashboard-refresh-seconds", Required = false, HelpText = "How often the dashboard polls this node, in seconds (1-300)", Default = 5)]
+    public int DashboardRefreshSeconds { get; set; }
+
     [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
     public string Storage { get; set; } = "";
     
@@ -618,6 +629,9 @@ public sealed class KahunaCommandLineOptions
     /// </summary>
     public bool GetPersistentRevisionCleanupOnWrite() =>
         DisablePersistentRevisionCleanupOnWrite ? false : true;
+
+    public bool GetDashboard() =>
+        DisableDashboard ? false : true;
 
     public bool GetWalSyncWrites() =>
         DisableWalSyncWrites ? false : true;

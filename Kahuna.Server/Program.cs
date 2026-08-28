@@ -11,6 +11,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Diagnostics;
 
 using Kommander;
 using Kommander.Diagnostics;
@@ -150,9 +151,18 @@ else
         return manager;
     });
     builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
-    builder.Services.AddSingleton(opts);
     builder.Services.AddHostedService<ReplicationService>();
 }
+
+// Registered outside both branches: the dashboard's summary endpoint reads the resolved storage
+// paths and the node name from here, and it answers on a standalone node as well as a clustered one.
+builder.Services.AddSingleton(opts);
+
+// Kahuna and Kommander publish their instruments whether or not anything listens, so without this
+// collector the node's own throughput, WAL batching, executor queue depth and commit latency are
+// readable only after someone wires up OpenTelemetry or Prometheus. Constructed by the container and
+// disposed with it, which stops the MeterListener at shutdown — a leaked listener observes forever.
+builder.Services.AddSingleton<EngineMetricsCollector>();
 
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
@@ -312,7 +322,7 @@ if (!httpsConfigured)
 app.UseRetryableExceptionMapping();
 
 app.MapRestRaftRoutes();
-app.MapRestKahunaRoutes();
+app.MapRestKahunaRoutes(opts);
 
 app.MapGrpcRaftRoutes();
 app.MapGrpcKahunaRoutes();
