@@ -251,6 +251,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Test-only access to the transaction coordinator for driving renewal and reap directly.</summary>
     internal TransactionCoordinator Coordinator => txCoordinator;
 
+    /// <summary>Test-only access to the routed scan operations, for overriding the per-page retry budget.</summary>
+    internal RoutedScanOperations RoutedScans => routedScans;
+
     /// <summary>Test-only access to the Raft instance for HLC timestamp generation in tests.</summary>
     internal IRaft Raft => raft;
 

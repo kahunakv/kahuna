@@ -1,0 +1,110 @@
+using System.Text;
+using Kahuna;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
+using Microsoft.Extensions.Logging;
+
+namespace Kahuna.Server.Tests;
+
+/// <summary>
+/// A range scan whose page keeps answering transient must fail loudly instead of retrying forever.
+/// The durable producer of that state is a foreign write intent whose commit timestamp never
+/// resolves: a snapshot page containing the key answers WaitingForReplication on every attempt, and
+/// before the budget existed the scan loop retried in silence for the life of the process — an
+/// aggregate read or a reconciliation pass over the range simply never returned, with no log line
+/// and no counter. The budget converts that permanent invisible hang into a retryable server error
+/// that names the range, while a scan whose pages make progress never trips it.
+/// </summary>
+public sealed class TestScanRetryBudget
+{
+    private readonly ILoggerFactory loggerFactory;
+
+    public TestScanRetryBudget(ITestOutputHelper outputHelper)
+    {
+        loggerFactory = TestLogFactory.Create(outputHelper);
+    }
+
+    private static async Task<EmbeddedKahunaNode> StartNode(ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
+            PartitionExecutorPoolSize = 1,
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("scanbudget/k00", ct);
+        return node;
+    }
+
+    private static async Task<List<(string Key, ReadOnlyKeyValueEntry Entry)>> DrainScan(
+        IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> scan)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> rows = [];
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in scan)
+            rows.Add((key, entry));
+        return rows;
+    }
+
+    [Fact]
+    public async Task ScanPage_BlockedByUnresolvedForeignIntent_FailsLoudlyWithinBudget()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        manager.KeyValues.RoutedScans.TestScanPageRetryBudgetMs = 1_500;
+
+        const string prefix = "scanbudget";
+
+        // Ten committed rows so the poisoned key sits past page 0 (page size 4 below).
+        for (int i = 0; i < 10; i++)
+        {
+            (KeyValueResponseType set, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, $"{prefix}/k{i:D2}", Encoding.UTF8.GetBytes($"v{i}"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, set);
+        }
+
+        // A foreign transaction stages a write on one mid-range key and never decides: the staged
+        // write intent carries no commit timestamp, so a snapshot page containing the key cannot
+        // prove the write lands outside its snapshot and answers WaitingForReplication every time.
+        HLCTimestamp foreignTx = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
+        (KeyValueResponseType staged, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            foreignTx, $"{prefix}/k06", Encoding.UTF8.GetBytes("staged"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, staged);
+
+        // The snapshot is minted after the staging, so the intent's fate genuinely matters to it.
+        HLCTimestamp snapshot = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
+
+        KahunaServerException thrown = await Assert.ThrowsAsync<KahunaServerException>(() =>
+            DrainScan(node.Kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, prefix,
+                null, true, null, false,
+                pageSize: 4, snapshot,
+                KeyValueDurability.Persistent, ct)));
+
+        Assert.Contains("did not settle", thrown.Message);
+
+        // Once the foreign intent is released the same scan completes: the budget only converts a
+        // permanent obstruction into an error, it never fails a range that can serve.
+        (KeyValueResponseType released, _) = await manager.KeyValues.LocateAndTryReleaseExclusiveLock(
+            foreignTx, $"{prefix}/k06", KeyValueDurability.Persistent, ct);
+        Assert.True(
+            released is KeyValueResponseType.Unlocked or KeyValueResponseType.DoesNotExist,
+            $"release answered {released}");
+
+        List<(string Key, ReadOnlyKeyValueEntry Entry)> rows = await DrainScan(node.Kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, prefix,
+            null, true, null, false,
+            pageSize: 4, snapshot,
+            KeyValueDurability.Persistent, ct));
+
+        Assert.Equal(10, rows.Count);
+    }
+}

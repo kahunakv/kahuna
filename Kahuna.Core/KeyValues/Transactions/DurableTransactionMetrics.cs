@@ -175,6 +175,19 @@ internal static class DurableTransactionMetrics
             description: "Same-id resends of a completed many-key batch refused instead of re-executed.");
 
     /// <summary>
+    /// Scans that exhausted the per-page retry budget: one page kept answering
+    /// MustRetry/WaitingForReplication for the whole budget, so the scan failed loudly instead of
+    /// hanging. The paired error log names the range and the cursor. A firing means some key in the
+    /// page cannot serve — typically a foreign write intent whose commit timestamp never resolves
+    /// (an orphaned session-owned intent is one durable producer) — and the range stays unscannable
+    /// until that state clears; the counter makes the wedge visible instead of silent.
+    /// </summary>
+    internal static readonly Counter<long> ScanPageRetryBudgetExhausted =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.scan_page_retry_budget_exhausted",
+            description: "Range scans failed loudly after one page answered transient for the whole retry budget.");
+
+    /// <summary>
     /// Operation completions carrying at least one confirmed working-set effect (a modified key, a staged
     /// mutation, an acquired lock, or a read observation) that arrived for an operation record that is
     /// absent or no longer pending — so the effect was applied at a participant but can never enter the

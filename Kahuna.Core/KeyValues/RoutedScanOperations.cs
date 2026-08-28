@@ -30,6 +30,18 @@ internal sealed class RoutedScanOperations
         this.registrar = registrar;
     }
 
+    // How long one scan page may keep answering MustRetry/WaitingForReplication before the scan fails
+    // loudly instead of retrying in silence. Generous against real settlement lag (which resolves in
+    // milliseconds to seconds) yet finite, so an unresolvable page — an orphaned foreign write intent
+    // with no commit timestamp — cannot hang aggregate reads and reconciliation forever. Reset on every
+    // page that makes progress. Test-overridable so the failure path is testable without a minute-long wait.
+    private const int DefaultScanPageRetryBudgetMs = 60_000;
+
+    private int ScanPageRetryBudgetMs => TestScanPageRetryBudgetMs > 0 ? TestScanPageRetryBudgetMs : DefaultScanPageRetryBudgetMs;
+
+    /// <summary>Overrides the per-page scan retry budget for tests. Zero or negative restores the default.</summary>
+    internal int TestScanPageRetryBudgetMs { private get; set; }
+
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
     private IRaft raft => runtime.Raft;
 
@@ -363,6 +375,13 @@ internal sealed class RoutedScanOperations
         // Seed from caller's T when supplied; Zero means "capture on first successful page".
         HLCTimestamp snapshotTs = readTimestamp;
         int backoffMs           = 1;
+        // Consecutive-transient budget for one page. Without it a page that never stops answering
+        // MustRetry/WaitingForReplication — an orphaned foreign write intent with no commit timestamp
+        // is one durable producer of that state — spins this loop forever, and the caller observes a
+        // scan that simply never returns: reconciliation and aggregate reads then hang in silence.
+        // The budget turns that hang into a loud, retryable failure. It resets on every page that
+        // makes progress, so a long scan over a healthy range never trips it.
+        long pageRetryDeadline  = Environment.TickCount64 + ScanPageRetryBudgetMs;
         // Each streamed page registers as its own coordinator operation (distinct bounds → distinct digest),
         // so it needs a distinct, deterministic operationId derived from the caller's base id and the page
         // number. An empty coordinatorKey means "legacy raw paging" and never registers.
@@ -398,6 +417,23 @@ internal sealed class RoutedScanOperations
                 // acceptable: MustRetry/WaitingForReplication means the leader wasn't ready yet,
                 // so there is no meaningful earlier snapshot to preserve.  Pages 1+ always carry
                 // the snapshotTs latched from the first successful page-0 cursor.
+                if (Environment.TickCount64 >= pageRetryDeadline)
+                {
+                    // The page has answered transient for the whole budget: this is no longer
+                    // settlement lag but a page that cannot serve — most often a key inside it
+                    // holding a foreign write intent whose commit timestamp never resolves.
+                    // Failing loudly is mandatory here: a silent break would hand the caller a
+                    // TRUNCATED result as if the range ended, and a silent continue is the
+                    // permanent invisible hang this budget exists to end.
+                    Transactions.DurableTransactionMetrics.ScanPageRetryBudgetExhausted.Add(1);
+                    logger.LogError(
+                        "Range scan page over {Prefix} [{Cursor},{EndKey}) still answers {Type} after {BudgetMs} ms of retries; failing the scan",
+                        prefix, cursorKey ?? "-inf", endKey ?? "+inf", page.Type, ScanPageRetryBudgetMs);
+                    throw new KahunaServerException(
+                        $"Range scan page over '{prefix}' did not settle within {ScanPageRetryBudgetMs} ms " +
+                        $"(last response: {page.Type}); a key in the page may hold an unresolved write intent. Retry the scan.");
+                }
+
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("LocateAndScanRange_3201");
                 await Task.Delay(backoffMs, ct);
                 backoffMs = Math.Min(backoffMs * 2, 1000);
@@ -405,6 +441,7 @@ internal sealed class RoutedScanOperations
             }
 
             backoffMs = 1;
+            pageRetryDeadline = Environment.TickCount64 + ScanPageRetryBudgetMs;
 
             if (page.Type != KeyValueResponseType.Get)
                 yield break;
