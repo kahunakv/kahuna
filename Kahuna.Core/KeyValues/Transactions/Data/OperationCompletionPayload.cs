@@ -80,6 +80,23 @@ public sealed class OperationCompletionPayload
     /// <summary>Durability shared by the effect keys/locks above.</summary>
     public KeyValueDurability Durability { get; set; }
 
+    /// <summary>
+    /// True when the payload records at least one confirmed working-set effect: a modified key, a staged
+    /// mutation, an acquired or released lock, or a read observation. A completion carrying an effect that
+    /// cannot fold (its registration is absent or no longer pending) leaves a participant mutation the
+    /// transaction can never own, so the discard sites use this to alarm instead of staying silent.
+    /// </summary>
+    public bool HasWorkingSetEffect =>
+        !string.IsNullOrEmpty(ModifiedKey) ||
+        ModifiedKeys is { Count: > 0 } ||
+        AcquiredPointLocks is { Count: > 0 } ||
+        !string.IsNullOrEmpty(AcquiredPointLock) || !string.IsNullOrEmpty(ReleasedPointLock) ||
+        !string.IsNullOrEmpty(AcquiredPrefixLock) || !string.IsNullOrEmpty(ReleasedPrefixLock) ||
+        AcquiredRangeLock is not null || ReleasedRangeLock is not null ||
+        Read is not null ||
+        ReadObservations is { Count: > 0 } ||
+        StagedMutations is { Count: > 0 };
+
     /// <summary>The response to cache for an idempotent replay of this operation id.</summary>
     public KeyValueResponseType CachedType { get; set; }
 

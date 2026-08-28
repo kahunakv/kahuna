@@ -946,6 +946,21 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool[] materialized = new bool[partition.Intents.Count];
         int next = 0;
 
+        // Abort fence, re-checked at the last moment before any value reaches the log: the resolution
+        // direction was read from the canonical record, but a locally visible terminal Abort is definitive
+        // (an abort never overwrites a commit, and terminal records replicate only through the canonical
+        // log), and a materialization proposed past it would durably apply an aborted transaction's leg on
+        // every replica. Report nothing materialized; the recovery sweep re-reads the canonical record.
+        if (partition.Intents.Count > 0)
+        {
+            PreparedIntent fenceProbe = partition.Intents[0];
+            if (recordStore.Get(fenceProbe.TransactionId, fenceProbe.Epoch) is { Decision: TransactionDecision.Abort })
+            {
+                DurableTransactionMetrics.AbortFencedCommitApplies.Add(partition.Intents.Count);
+                return materialized;
+            }
+        }
+
         // One scratch message serves the whole partition; each serialization fully consumes it before the next
         // intent overwrites it.
         KeyValueMessage scratch = new();

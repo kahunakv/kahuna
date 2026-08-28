@@ -182,6 +182,145 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
     }
 
     /// <summary>
+    /// The retryable-abort replay shape from the 1.4.6 run (row 1261): an interactive transfer
+    /// stages both legs, then a split takes the quiesce over leg 2's range, and the commit's 2PC
+    /// prepares leg 1 durably before leg 2's prepare refuses. The transaction ends retryably; the
+    /// client replays from BEGIN, exactly as instructed, and the replay commits. The transfer must
+    /// apply exactly once: leg 1 gains exactly one revision carrying the replay's value — a leaked
+    /// first leg from the aborted attempt shows up as a second revision the journal never counted.
+    /// </summary>
+    [Fact]
+    public async Task Interactive_RetryableAbortDuringQuiesce_ReplayAppliesExactlyOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver) = await Setup(ct);
+
+        const string legOne = "xq-left/replay1";
+        const string legTwo = Space + "/z-replay1";
+
+        // Clean keys at the head of the moving half so the split's probe and gate pass and the
+        // attempt reaches its quiesce window.
+        foreach (string key in new[] { legOne, legTwo, Space + "/n0", Space + "/n1" })
+        {
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryAsync(
+                () => driver.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, V("base"), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Set, type);
+        }
+
+        (_, long legOneBaseRevision) = await ReadKey(driver, legOne, ct);
+        (_, long legTwoBaseRevision) = await ReadKey(driver, legTwo, ct);
+
+        // Attempt A: stage both legs before any quiesce exists, exactly as a client that began its
+        // transfer moments before the splitter fired.
+        (KeyValueResponseType started, TransactionHandle handle) = await driver.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                DecisionDurability = DecisionDurability.Durable,
+                Timeout = 2_000
+            }, ct);
+        Assert.Equal(KeyValueResponseType.Set, started);
+
+        foreach (string key in new[] { legOne, legTwo })
+        {
+            (KeyValueResponseType set, _, _) = await driver.LocateAndTrySetKeyValue(
+                handle.TransactionId, key, V("attempt-a"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct, 0, handle.CoordinatorKey, TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, set);
+        }
+
+        // The split takes and HOLDS the quiesce over the moving half while attempt A commits: the
+        // 2PC prepares leg 1 durably, leg 2's prepare refuses against the quiesce, and the decision
+        // deadline turns the attempt into the retryable abort the client is told to replay.
+        TaskCompletionSource quiesced = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (_, KahunaManager splitDriver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
+        Task<SplitOutcome> splitTask = splitDriver.ForceSplitAtKeyAsync(Space, SplitKey, async () =>
+        {
+            quiesced.TrySetResult();
+            await release.Task;
+        }, ct);
+
+        await quiesced.Task.WaitAsync(TimeSpan.FromSeconds(30), ct);
+
+        (KeyValueResponseType commitA, _) = await driver.LocateAndCommitTransaction(handle, ct);
+        Assert.True(commitA is not (KeyValueResponseType.Committed or KeyValueResponseType.Set),
+            $"Attempt A must not commit through the held quiesce; got {commitA}");
+
+        release.TrySetResult();
+        SplitOutcome splitOutcome = await splitTask;
+        Assert.True(splitOutcome.IsSuccess, $"Split failed: {splitOutcome.Status}");
+
+        // Settle attempt A's abandoned durable state before the replay, the way the periodic
+        // machinery would between a client's retries.
+        foreach (KahunaManager manager in kahunas)
+            await manager.KeyValues.RecoverPreparedIntents(ct);
+
+        // The replay: a fresh transaction, from BEGIN, as the retryable outcome instructs.
+        KeyValueResponseType commitB = KeyValueResponseType.MustRetry;
+        for (int attempt = 0; attempt < 20 && commitB != KeyValueResponseType.Committed; attempt++)
+        {
+            (KeyValueResponseType startedB, TransactionHandle handleB) = await driver.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    Locking = KeyValueTransactionLocking.Pessimistic,
+                    DecisionDurability = DecisionDurability.Durable,
+                    Timeout = 5_000
+                }, ct);
+            Assert.Equal(KeyValueResponseType.Set, startedB);
+
+            bool staged = true;
+            foreach (string key in new[] { legOne, legTwo })
+            {
+                (KeyValueResponseType set, _, _) = await driver.LocateAndTrySetKeyValue(
+                    handleB.TransactionId, key, V("replay"), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct, 0, handleB.CoordinatorKey, TransactionOperationId.NewRandom());
+
+                if (set != KeyValueResponseType.Set)
+                {
+                    staged = false;
+                    break;
+                }
+            }
+
+            if (staged)
+                (commitB, _) = await driver.LocateAndCommitTransaction(handleB, ct);
+
+            if (commitB != KeyValueResponseType.Committed)
+                await Task.Delay(250, ct);
+        }
+
+        Assert.Equal(KeyValueResponseType.Committed, commitB);
+
+        // Let every abandoned artifact drain before the reconciliation read.
+        foreach (KahunaManager manager in kahunas)
+        {
+            await manager.KeyValues.RecoverPreparedIntents(ct);
+            KahunaManager observer = manager;
+            await WaitUntilAsync(() =>
+                observer.DurablePreparedIntentStore.Get(legOne) is null
+                && observer.DurablePreparedIntentStore.Get(legTwo) is null, timeoutMs: 30_000);
+        }
+
+        // Exactly once: each leg carries the replay's value at exactly one revision above its base.
+        // A leaked first leg from attempt A shows as a second revision (or attempt A's value).
+        (string? legOneValue, long legOneRevision) = await ReadKey(driver, legOne, ct);
+        (string? legTwoValue, long legTwoRevision) = await ReadKey(driver, legTwo, ct);
+
+        Assert.Equal("replay", legOneValue);
+        Assert.Equal("replay", legTwoValue);
+        Assert.True(legOneRevision == legOneBaseRevision + 1,
+            $"leg 1 applied {legOneRevision - legOneBaseRevision} times (revision {legOneBaseRevision} -> {legOneRevision}); the aborted attempt leaked a durable write");
+        Assert.True(legTwoRevision == legTwoBaseRevision + 1,
+            $"leg 2 applied {legTwoRevision - legTwoBaseRevision} times (revision {legTwoBaseRevision} -> {legTwoRevision})");
+    }
+
+    /// <summary>
     /// The drain-shaped variant: transfers hammer their pairs with no pacing while split attempts
     /// run in a loop — each attempt holds the quiesce for its drain against the sustained load —
     /// and every node's prepared-intent recovery sweep runs concurrently, so presumed aborts race

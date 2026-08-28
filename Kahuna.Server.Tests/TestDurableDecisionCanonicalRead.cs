@@ -1,5 +1,6 @@
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -111,5 +112,87 @@ public sealed class TestDurableDecisionCanonicalRead : BaseCluster
 
         Assert.NotNull(routed);
         Assert.Equal(TransactionDecision.Abort, routed.Decision);
+    }
+
+    /// <summary>
+    /// The abort fence at the durable-commit choke point: whatever path asks for a commit apply — a
+    /// finalize resolution, a recovery settle, the helping pass, or the commit-repair ladder — the
+    /// apply must refuse when a terminal Abort for the transaction is locally visible, because that
+    /// Abort is definitive and the apply would durably materialize an aborted transaction's leg.
+    /// This drives the exact field signature: one aborted transfer's first-leg intent, pushed at
+    /// the commit-apply entry point, must leave the row byte-identical and revision-identical.
+    /// </summary>
+    [Fact]
+    public async Task DurableCommitApply_ForAbortedTransaction_IsFencedAndLeavesTheRowUntouched()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 0);
+
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+        KahunaManager driver = managers[0];
+
+        const string key = "xd-fence/leg1";
+        const string anchorKey = "xd-tx/anchor-fenced";
+
+        (KeyValueResponseType seedType, _, _) = await RetryOnMustRetryAsync(
+            () => driver.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "base"u8.ToArray(), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct),
+            r => r.Item1);
+        Assert.Equal(KeyValueResponseType.Set, seedType);
+
+        HLCTimestamp now = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp txId = new(now.N, now.L - 5_000, now.C);
+        HLCTimestamp deadline = new(now.N, now.L + 60_000, now.C);
+
+        // The canonical outcome: the transaction is aborted, cluster-wide, through the real import path.
+        TransactionRecordStore scratch = new();
+        scratch.Apply(new InitializeTransactionCommand(
+            txId, 1, "xd-coord", anchorKey, txId, deadline, 42,
+            [new TransactionParticipantRef(key, KeyValueDurability.Persistent)],
+            HLCTimestamp.Zero, txId));
+        scratch.Apply(new AbortTransactionCommand(
+            txId, 1, 42, TransactionAbortClass.Conflict, OpId: now, AttemptHlc: now,
+            anchorKey, CommitTimestamp: txId, DecisionDeadline: deadline, CreatedAt: txId));
+
+        int anchorPartition = driver.KeyValues.LocateDurablePartition(anchorKey).PartitionId;
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(
+            anchorPartition, new List<TransactionRecord>(scratch.Snapshot()), Array.Empty<PreparedIntent>(), ct));
+
+        foreach (KahunaManager manager in managers)
+        {
+            KahunaManager observer = manager;
+            await WaitUntilAsync(
+                () => observer.DurableTransactionRecordStore.Get(txId, 1) is { Decision: TransactionDecision.Abort },
+                timeoutMs: 30_000);
+        }
+
+        // The aborted transaction's first-leg intent, pushed at the durable commit-apply entry point —
+        // the message every materializing path ultimately sends.
+        PreparedIntent intent = new(
+            TransactionId: txId, Epoch: 1, Key: key, ManifestHash: 42, RecordAnchorKey: anchorKey,
+            CommitTimestamp: now, State: KeyValueState.Set, Value: "phantom"u8.ToArray(), Bucket: "xd-fence",
+            Revision: 1, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 0, BaseState: KeyValueState.Set,
+            RecoveryDeadline: deadline, Resolution: PreparedIntentResolution.Pending);
+
+        int keyPartition = driver.KeyValues.LocateDurablePartition(key).PartitionId;
+
+        bool applied = await driver.DurableOperationLocal(
+            keyPartition, 1, "", PreparedIntentStore.SerializeIntents([intent]), ct);
+
+        Assert.False(applied, "A durable commit apply for an aborted transaction must be fenced");
+
+        // The row is untouched: value and revision identical to the seed on every node's view.
+        (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
+            () => driver.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            r => r.Item1);
+
+        Assert.Equal(KeyValueResponseType.Get, readType);
+        Assert.Equal("base", System.Text.Encoding.UTF8.GetString(entry!.Value!));
+        Assert.Equal(0, entry.Revision);
     }
 }

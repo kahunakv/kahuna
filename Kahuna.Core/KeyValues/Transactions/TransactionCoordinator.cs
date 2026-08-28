@@ -604,7 +604,20 @@ internal sealed class TransactionCoordinator : IDisposable
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload? payload, object? response)
     {
         if (sessions.TryGetValue(transactionId, out TransactionContext? context))
-            return context.CompleteOperation(operationId, payload, response);
+        {
+            string? anchor = context.CompleteOperation(operationId, payload, response, out bool discardedEffects);
+
+            // A completion carrying confirmed effects whose registration no longer exists: the participant
+            // applied a mutation this transaction can never own (a transient result cancelled the
+            // registration while the apply was still in flight). The fold is gone for good — the session
+            // could finalize without it — so say it loudly; the metric pairs with this line for attribution.
+            if (discardedEffects)
+                logger.LogError(
+                    "Discarding effect-bearing completion of operation {OperationId} for transaction {TransactionId}: its registration was cancelled while the participant apply was in flight",
+                    operationId, transactionId);
+
+            return anchor;
+        }
 
         // The session is gone (reaped/aborted, or never existed). Signalling rather than returning a null
         // anchor — which reads as success — keeps a participant that already applied the operation from

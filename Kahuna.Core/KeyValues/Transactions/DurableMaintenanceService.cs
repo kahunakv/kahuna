@@ -686,7 +686,11 @@ internal sealed class DurableMaintenanceService
         // past it, the absent record may be a reclaimed commit and the sweep holds the intent instead of
         // presuming abort — the guard against discarding a committed leg whose settlement kept failing.
         runtime.Configuration.TransactionOutcomeRetentionTtl,
-        logger);
+        logger,
+        // The abort fence: a locally visible terminal Abort is definitive, so a commit-direction settle
+        // must never push that transaction's value into the log whatever decision its caller read.
+        locallyAborted: (transactionId, epoch) =>
+            transactionRecordStore.Get(transactionId, epoch) is { Decision: TransactionDecision.Abort });
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {

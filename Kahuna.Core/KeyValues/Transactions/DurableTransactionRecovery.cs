@@ -46,6 +46,12 @@ internal sealed class DurableTransactionRecovery
 
     private readonly DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally;
 
+    // A locally visible terminal Abort is definitive (an abort never overwrites a commit, and terminal
+    // records replicate only through the canonical log). Checked immediately before a commit-direction
+    // materialization is proposed, so a settle racing a decision it read moments earlier can never push
+    // an aborted transaction's value into the log. Null disables the fence (protocol tests).
+    private readonly Func<HLCTimestamp, long, bool>? locallyAborted;
+
     // The record retention horizon (ms). An absent record for an intent older than this is ambiguous — orphan
     // or reclaimed-after-commit — and must not be presumed aborted. Matches the retention GC's TTL.
     private readonly long recordRetentionMs;
@@ -59,13 +65,15 @@ internal sealed class DurableTransactionRecovery
         DriveAbortDelegate driveAbort,
         DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally = null,
         TimeSpan? recordRetentionTtl = null,
-        ILogger<IKahuna>? logger = null)
+        ILogger<IKahuna>? logger = null,
+        Func<HLCTimestamp, long, bool>? locallyAborted = null)
     {
         this.intentStore = intentStore;
         this.replicate = replicate;
         this.lookupRecord = lookupRecord;
         this.driveAbort = driveAbort;
         this.applyCommitLocally = applyCommitLocally;
+        this.locallyAborted = locallyAborted;
         this.logger = logger;
 
         // Default mirrors KahunaConfiguration.TransactionOutcomeRetentionTtl; a non-positive TTL means age-based
@@ -319,6 +327,20 @@ internal sealed class DurableTransactionRecovery
 
         if (commit)
         {
+            // Abort fence, re-checked at the last moment before any value reaches the log: the commit
+            // direction was read moments ago, but a locally visible terminal Abort is definitive and a
+            // materialization proposed past it would durably apply an aborted transaction's leg on every
+            // replica. Leave the whole group unsettled; the next sweep re-reads the canonical record.
+            PreparedIntent fenceProbe = group[0];
+            if (locallyAborted is not null && locallyAborted(fenceProbe.TransactionId, fenceProbe.Epoch))
+            {
+                DurableTransactionMetrics.AbortFencedCommitApplies.Add(group.Count);
+                logger?.LogError(
+                    "Refusing commit-direction settle for transaction {TransactionId} epoch {Epoch} ({Count} intents): a terminal Abort is locally visible",
+                    fenceProbe.TransactionId, fenceProbe.Epoch, group.Count);
+                return;
+            }
+
             settleable = new(group.Count);
 
             // One scratch message serves the whole group; each serialization fully consumes it before the next

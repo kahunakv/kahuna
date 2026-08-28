@@ -304,12 +304,30 @@ internal class TransactionContext
     /// a no-op, so a replayed completion never double-records an effect.
     /// </summary>
     /// <summary>Returns the transaction's record anchor after this effect is folded in (null if none yet).</summary>
-    internal string? CompleteOperation(TransactionOperationId operationId, OperationCompletionPayload? payload, object? response)
+    internal string? CompleteOperation(TransactionOperationId operationId, OperationCompletionPayload? payload, object? response) =>
+        CompleteOperation(operationId, payload, response, out _);
+
+    /// <summary>
+    /// Returns the transaction's record anchor after this effect is folded in (null if none yet).
+    /// <paramref name="discardedEffects"/> reports the alarming shape of a discarded completion: the
+    /// operation's registration no longer exists (a transient result cancelled it while the participant
+    /// apply was still in flight) yet the payload carries confirmed working-set effects — a participant
+    /// mutation this transaction can never own. A discard against a still-present COMPLETED record is a
+    /// legitimate idempotent replay (its fold already happened) and does not set the flag.
+    /// </summary>
+    internal string? CompleteOperation(TransactionOperationId operationId, OperationCompletionPayload? payload, object? response, out bool discardedEffects)
     {
         lock (registryLock)
         {
+            discardedEffects = false;
+
             if (operations is null || !operations.TryGetValue(operationId, out OperationRecord? record))
+            {
+                discardedEffects = payload is { HasWorkingSetEffect: true };
+                if (discardedEffects)
+                    DurableTransactionMetrics.DiscardedOperationEffects.Add(1);
                 return RecordAnchorKey;
+            }
 
             if (record.Status != OperationStatus.Pending)
                 return RecordAnchorKey;

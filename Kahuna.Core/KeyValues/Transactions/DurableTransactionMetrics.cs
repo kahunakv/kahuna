@@ -131,10 +131,60 @@ internal static class DurableTransactionMetrics
     /// Surface it to an operator; the safe manual resolutions are re-materializing the value or an explicit,
     /// audited discard.
     /// </summary>
+    /// <summary>
+    /// A replicated key/value apply carried the same revision as the newest write already recorded for the
+    /// key but a DIFFERENT value. Revisions are supposed to identify a mutation uniquely, but an aborted
+    /// attempt and its client replay both stage base+1, so a stale record of the aborted attempt proposed
+    /// around the abort/replay boundary collides with the replay's committed record at the same revision —
+    /// and a revision-monotonic durable head cannot tell them apart. Any non-zero count is a correctness
+    /// alarm: the paired error log names both transactions and the log index, which attributes the
+    /// conserved-total drift this collision produces.
+    /// </summary>
+    /// <summary>
+    /// Durable-commit applies or materialization proposals refused because a terminal Abort for the
+    /// transaction is locally visible. A local Abort is definitive (an abort can never overwrite a
+    /// commit, and terminal records replicate only through the canonical log), so each refusal is a
+    /// materialization of an aborted leg that was about to happen — the conserved-total drift.
+    /// The paired error log's call path names the producer.
+    /// </summary>
+    internal static readonly Counter<long> AbortFencedCommitApplies =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.abort_fenced_commit_applies",
+            description: "Durable commit applies refused because the transaction's record is a terminal Abort.");
+
+    internal static readonly Counter<long> SameRevisionDivergentApplies =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.same_revision_divergent_applies",
+            description: "Replicated key/value applies whose revision equals the newest recorded write but whose value differs.");
+
     internal static readonly Counter<long> RecordlessIntentHolds =
         Meter.CreateCounter<long>(
             "kahuna.transactions.recordless_intent_holds",
             description: "Due prepared intents held by recovery because their record is absent past the retention horizon.");
+
+    /// <summary>
+    /// Same-id resends of an already-completed many-key batch that were refused instead of re-executed.
+    /// The first drive's detached completion folded the batch's confirmed effects after the caller stopped
+    /// waiting for it, so the caller resent a batch the coordinator already owns. Re-executing it would
+    /// mutate participants invisibly to the session freeze; the refusal answers transient and lets the
+    /// caller's bounded retry budget resolve the stale view. A firing marks the ack-loss race, not an error.
+    /// </summary>
+    internal static readonly Counter<long> CompletedBatchRedriveRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.completed_batch_redrive_refusals",
+            description: "Same-id resends of a completed many-key batch refused instead of re-executed.");
+
+    /// <summary>
+    /// Operation completions carrying at least one confirmed working-set effect (a modified key, a staged
+    /// mutation, an acquired lock, or a read observation) that arrived for an operation record that is
+    /// absent or no longer pending — so the effect was applied at a participant but can never enter the
+    /// coordinator's working set. The transaction may then finalize without a mutation a participant
+    /// holds. Any firing is a correctness alarm: the paired error log names the transaction and operation.
+    /// </summary>
+    internal static readonly Counter<long> DiscardedOperationEffects =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.discarded_operation_effects",
+            description: "Effect-bearing operation completions discarded because their registration was absent or not pending.");
 
     /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying

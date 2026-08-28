@@ -253,14 +253,5 @@ internal sealed class OperationRegistrar
     /// <summary>True when the payload records at least one working-set effect: a modified key, an acquired
     /// or released lock, a read observation, or a staged mutation. The fold itself reads the payload
     /// directly, so this predicate only drives the no-effect cancel decision above.</summary>
-    private static bool HasEffect(OperationCompletionPayload payload) =>
-        !string.IsNullOrEmpty(payload.ModifiedKey) ||
-        (payload.ModifiedKeys is { Count: > 0 }) ||
-        (payload.AcquiredPointLocks is { Count: > 0 }) ||
-        !string.IsNullOrEmpty(payload.AcquiredPointLock) || !string.IsNullOrEmpty(payload.ReleasedPointLock) ||
-        !string.IsNullOrEmpty(payload.AcquiredPrefixLock) || !string.IsNullOrEmpty(payload.ReleasedPrefixLock) ||
-        payload.AcquiredRangeLock is not null || payload.ReleasedRangeLock is not null ||
-        payload.Read is not null ||
-        (payload.ReadObservations is { Count: > 0 }) ||
-        (payload.StagedMutations is { Count: > 0 });
+    private static bool HasEffect(OperationCompletionPayload payload) => payload.HasWorkingSetEffect;
 }

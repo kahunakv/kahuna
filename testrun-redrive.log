@@ -1,0 +1,12 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  Kahuna.Shared -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Shared/bin/Debug/net10.0/Kahuna.Shared.dll
+  Kahuna.Client -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Client/bin/Debug/net10.0/Kahuna.Client.dll
+  Kahuna.Core -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Core/bin/Debug/net10.0/Kahuna.Core.dll
+  Kahuna.Server -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Server/bin/Debug/net10.0/Kahuna.Server.dll
+  Kahuna.Server.Tests -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/bin/Debug/net10.0/Kahuna.Server.Tests.dll
+Test run for /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/bin/Debug/net10.0/Kahuna.Server.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+Results File: /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/TestResults/redrive-validation.trx
+
+Passed!  - Failed:     0, Passed:   114, Skipped:     0, Total:   114, Duration: 2 m 28 s - Kahuna.Server.Tests.dll (net10.0)

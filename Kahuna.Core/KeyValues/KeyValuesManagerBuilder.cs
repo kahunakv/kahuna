@@ -352,7 +352,12 @@ internal sealed class KeyValuesManagerBuilder
             // committed head's retained history row on the same queued scheduler, off the actor. Rare
             // (only after a below-head durable read on a refusal streak), so no batching executor.
             hydrateRevisionFromBackend: (partitionId, key, revision) =>
-                backendReadScheduler.EnqueueTask(partitionId, () => persistenceBackend.GetKeyValueRevision(key, revision)));
+                backendReadScheduler.EnqueueTask(partitionId, () => persistenceBackend.GetKeyValueRevision(key, revision)),
+            // The abort fence for durable-commit applies: a locally visible terminal Abort is definitive,
+            // so no path — resolution, recovery settle, helping, or commit repair — may materialize a leg
+            // of that transaction.
+            transactionLocallyAborted: (transactionId, epoch) =>
+                transactionRecordStore.Get(transactionId, epoch) is { Decision: Transactions.Data.TransactionDecision.Abort });
 
         // Commit-settlement convergence check: at the same apply position that advances the staged-base
         // fence's committed head, verify this node's replicator actually processed the commit's kv record —
