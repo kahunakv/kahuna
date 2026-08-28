@@ -618,6 +618,22 @@ public sealed class KahunaConfiguration
     public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
 
     /// <summary>
+    /// Milliseconds one range-scan page may keep answering transient (MustRetry/WaitingForReplication)
+    /// before the scan fails loudly with the range and cursor named, instead of retrying in silence. The
+    /// budget resets on every page that makes progress; genuine settlement lag resolves in milliseconds,
+    /// so exhausting it means a page that cannot serve — e.g. a key holding an orphaned write intent that
+    /// will never resolve. The failure is retryable, so a false positive under extreme lag costs one
+    /// retried scan; the budget never firing costs an unattributed hang.
+    ///
+    /// <para><b>Ordering constraint:</b> this value must stay comfortably below the smallest client
+    /// command deadline in front of the scan, or the client cancels the call first and the named error is
+    /// raised into a request nobody is waiting on — the caller then sees only an anonymous cancellation.
+    /// The shipped client stack's default command deadline is 10 s, hence the 5 s default. A value
+    /// &lt;= 0 falls back to the built-in default.</para>
+    /// </summary>
+    public int ScanPageRetryBudgetMs { get; set; } = 5_000;
+
+    /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed head.
     /// The fence refuses a validated-base prepare's acknowledgement when the base moved — the lost-update
     /// guard — and, because pruned memory is indistinguishable from "no commit happened", it also refuses any

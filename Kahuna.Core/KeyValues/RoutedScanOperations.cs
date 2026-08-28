@@ -31,13 +31,20 @@ internal sealed class RoutedScanOperations
     }
 
     // How long one scan page may keep answering MustRetry/WaitingForReplication before the scan fails
-    // loudly instead of retrying in silence. Generous against real settlement lag (which resolves in
-    // milliseconds to seconds) yet finite, so an unresolvable page — an orphaned foreign write intent
-    // with no commit timestamp — cannot hang aggregate reads and reconciliation forever. Reset on every
-    // page that makes progress. Test-overridable so the failure path is testable without a minute-long wait.
-    private const int DefaultScanPageRetryBudgetMs = 60_000;
+    // loudly instead of retrying in silence. Finite so an unresolvable page — an orphaned foreign write
+    // intent with no commit timestamp — cannot hang aggregate reads and reconciliation forever, and low
+    // enough to fire BELOW the smallest client command deadline in front of the scan (10 s in the shipped
+    // client stack): a budget above that deadline raises the named error into a call the client has
+    // already cancelled, so nobody ever sees it. Genuine settlement lag resolves in milliseconds, and the
+    // budget resets on every page that makes progress, so exhausting it means the page cannot serve; the
+    // thrown error is retryable, so a false positive under extreme lag costs one retried scan.
+    // Test-overridable so the failure path is testable without a multi-second wait.
+    private const int DefaultScanPageRetryBudgetMs = 5_000;
 
-    private int ScanPageRetryBudgetMs => TestScanPageRetryBudgetMs > 0 ? TestScanPageRetryBudgetMs : DefaultScanPageRetryBudgetMs;
+    private int ScanPageRetryBudgetMs =>
+        TestScanPageRetryBudgetMs > 0 ? TestScanPageRetryBudgetMs
+        : runtime.Configuration.ScanPageRetryBudgetMs > 0 ? runtime.Configuration.ScanPageRetryBudgetMs
+        : DefaultScanPageRetryBudgetMs;
 
     /// <summary>Overrides the per-page scan retry budget for tests. Zero or negative restores the default.</summary>
     internal int TestScanPageRetryBudgetMs { private get; set; }

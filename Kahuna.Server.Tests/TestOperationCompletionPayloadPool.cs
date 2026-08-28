@@ -1,4 +1,5 @@
 
+using System.Linq;
 using System.Reflection;
 
 using Kahuna.Server.KeyValues;
@@ -16,9 +17,11 @@ namespace Kahuna.Server.Tests;
 public class TestOperationCompletionPayloadPool
 {
     /// <summary>
-    /// The number of public instance properties <see cref="OperationCompletionPayload"/> currently
-    /// declares. When a property is added, it must join <see cref="OperationCompletionPayload.Clear"/>
-    /// and the population + assertions below, then this count.
+    /// The number of settable public instance properties <see cref="OperationCompletionPayload"/>
+    /// currently declares. A read-only computed property (like <see cref="OperationCompletionPayload.HasWorkingSetEffect"/>)
+    /// derives from the settable ones and needs no slot in <see cref="OperationCompletionPayload.Clear"/>, so it
+    /// is excluded from this count. When a new settable property is added, it must join
+    /// <see cref="OperationCompletionPayload.Clear"/> and the population + assertions below, then this count.
     /// </summary>
     private const int ExpectedPropertyCount = 16;
 
@@ -75,13 +78,16 @@ public class TestOperationCompletionPayloadPool
     [Fact]
     public void PropertyCount_MatchesClearCoverage()
     {
-        PropertyInfo[] properties = typeof(OperationCompletionPayload).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        PropertyInfo[] settableProperties = typeof(OperationCompletionPayload)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(property => property.CanWrite)
+            .ToArray();
 
         Assert.True(
-            properties.Length == ExpectedPropertyCount,
-            $"OperationCompletionPayload declares {properties.Length} public properties but the recycle " +
-            $"contract covers {ExpectedPropertyCount}. Add the new property to Clear() and to this test, " +
-            "then update ExpectedPropertyCount.");
+            settableProperties.Length == ExpectedPropertyCount,
+            $"OperationCompletionPayload declares {settableProperties.Length} settable public properties but " +
+            $"the recycle contract covers {ExpectedPropertyCount}. Add the new property to Clear() and to this " +
+            "test, then update ExpectedPropertyCount.");
     }
 
     [Fact]

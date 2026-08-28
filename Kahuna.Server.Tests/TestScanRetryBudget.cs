@@ -25,9 +25,10 @@ public sealed class TestScanRetryBudget
         loggerFactory = TestLogFactory.Create(outputHelper);
     }
 
-    private static async Task<EmbeddedKahunaNode> StartNode(ILoggerFactory loggerFactory, CancellationToken ct)
+    private static async Task<EmbeddedKahunaNode> StartNode(
+        ILoggerFactory loggerFactory, CancellationToken ct, int scanPageRetryBudgetMs = 0)
     {
-        EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        EmbeddedKahunaOptions options = new()
         {
             ReadIOThreads = 1,
             WriteIOThreads = 1,
@@ -35,7 +36,11 @@ public sealed class TestScanRetryBudget
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }, loggerFactory);
+        };
+        if (scanPageRetryBudgetMs > 0)
+            options.ScanPageRetryBudgetMs = scanPageRetryBudgetMs;
+
+        EmbeddedKahunaNode node = new(options, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("scanbudget/k00", ct);
         return node;
@@ -106,5 +111,45 @@ public sealed class TestScanRetryBudget
             KeyValueDurability.Persistent, ct));
 
         Assert.Equal(10, rows.Count);
+    }
+
+    [Fact]
+    public async Task ScanPageRetryBudget_ConfiguredThroughOptions_ReachesTheScanPath()
+    {
+        // Same blocked-page shape as above, but the budget arrives through the configuration
+        // (EmbeddedKahunaOptions → KahunaConfiguration → the scan path) instead of the test override,
+        // proving the operator-facing knob is actually wired end to end. The knob exists because the
+        // budget must stay below the smallest client command deadline in front of the scan; a
+        // deployment that raises its deadline tunes this alongside it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct, scanPageRetryBudgetMs: 1_500);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        const string prefix = "scanbudget";
+
+        for (int i = 0; i < 10; i++)
+        {
+            (KeyValueResponseType set, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, $"{prefix}/k{i:D2}", Encoding.UTF8.GetBytes($"v{i}"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, set);
+        }
+
+        HLCTimestamp foreignTx = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
+        (KeyValueResponseType staged, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            foreignTx, $"{prefix}/k06", Encoding.UTF8.GetBytes("staged"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, staged);
+
+        HLCTimestamp snapshot = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
+
+        KahunaServerException thrown = await Assert.ThrowsAsync<KahunaServerException>(() =>
+            DrainScan(node.Kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, prefix,
+                null, true, null, false,
+                pageSize: 4, snapshot,
+                KeyValueDurability.Persistent, ct)));
+
+        Assert.Contains("1500 ms", thrown.Message);
     }
 }

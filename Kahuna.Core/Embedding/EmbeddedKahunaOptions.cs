@@ -541,6 +541,14 @@ public sealed class EmbeddedKahunaOptions
     public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
 
     /// <summary>
+    /// Milliseconds one range-scan page may keep answering transient before the scan fails loudly with
+    /// the range and cursor named. Must stay below the smallest client command deadline in front of the
+    /// scan, or the named error is raised into a cancelled call. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.ScanPageRetryBudgetMs"/>.
+    /// </summary>
+    public int ScanPageRetryBudgetMs { get; set; } = 5_000;
+
+    /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
     /// head. Must comfortably exceed the longest transaction lifetime the deployment allows. See
     /// <see cref="Server.Configuration.KahunaConfiguration.StagedBaseFenceRetentionMs"/>.

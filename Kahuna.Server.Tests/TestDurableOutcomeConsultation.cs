@@ -13,8 +13,10 @@ namespace Kahuna.Server.Tests;
 /// gone: a repeated commit or rollback reads the resident record for the handle's transaction id — a committed
 /// record answers <c>Committed</c>, an undecided record answers <c>MustRetry</c> (recovery finishes it), a
 /// conflict-aborted record answers <c>Aborted</c> — so a retry works even after the coordinating session was
-/// evicted or its node failed; a transaction with no resident record stays unknown <c>Errored</c>; and a rollback
-/// cannot override a durably committed transaction.
+/// evicted or its node failed; a handle whose anchor resolves to <b>no resident record</b> answers the retryable
+/// <c>MustRetry</c> (absence is indeterminate — the finalize may be in flight or the commit may not have
+/// propagated — never a fabricated terminal <c>Errored</c> for a transaction that may have committed); and a
+/// rollback cannot override a durably committed transaction.
 /// </summary>
 public sealed class TestDurableOutcomeConsultation
 {
@@ -108,18 +110,22 @@ public sealed class TestDurableOutcomeConsultation
     }
 
     [Fact]
-    public async Task MissingSession_NoRecord_CommitReturnsErrored()
+    public async Task MissingSession_NoResidentRecord_CommitReturnsMustRetry()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = new(EmbeddedOptions());
         await node.StartAsync(ct);
 
+        // The handle carries an anchor but no record is resident for it. Absence is NOT proof the transaction
+        // never committed — a durable finalize in flight, or a commit record not yet propagated to the routed
+        // leader, both present this way — so the consult answers the retryable MustRetry, never a terminal
+        // Errored that would tell the caller a possibly-committed transaction applied nothing.
         HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         TransactionHandle handle = new(txId, "lost-coord", "consult-absent:aaa");
 
         (KeyValueResponseType type, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
 
-        Assert.Equal(KeyValueResponseType.Errored, type);
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
     }
 
     [Fact]

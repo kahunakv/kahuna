@@ -246,12 +246,22 @@ internal sealed class TransactionCoordinator : IDisposable
     /// record answers <c>Committed</c>; an abort answers <c>Aborted</c> (terminal whatever its class); an undecided
     /// record answers <c>MustRetry</c> (recovery finishes it). The lookup is routed by the handle's anchor key to
     /// the anchor partition leader, so the record is found even when it lives on another node — closing the
-    /// cross-node lost-session gap. Returns Found=false only when no record exists at all, so the caller falls
-    /// through to the unknown outcome.
+    /// cross-node lost-session gap.
+    ///
+    /// <para>A routed lookup that comes back with no resident record does <b>not</b> answer Found=false: an
+    /// absent record is <b>not</b> proof the transaction never committed. A durable finalize still in flight, and
+    /// a commit record that has not yet propagated to the leader this read resolved to, both present as a
+    /// momentary absence. Reporting a definite <c>Errored</c> for that absence told a client that a transaction
+    /// which actually committed had applied nothing — observed downstream as an uncounted durable write (a
+    /// conserved-total drift). So absence answers the retryable <c>MustRetry</c> instead: a finalize retry
+    /// re-observes the record once it settles, and a genuinely, permanently unknown transaction surfaces through
+    /// the caller's own bounded-retry exhaustion as an unresolved/indeterminate outcome — never a fabricated
+    /// terminal failure. Found=false is returned only when there is no anchor to consult at all.</para>
     /// </summary>
     private async Task<(bool Found, KeyValueResponseType Response)> TryConsultDurableTransactionRecord(TransactionHandle handle)
     {
-        // No anchor ⇒ no persistent write was ever confirmed, so no canonical record can exist to consult.
+        // No anchor ⇒ the handle carries no route to any canonical record, so the outcome cannot be consulted
+        // here at all. The caller decides how to report an unconsultable lost session.
         if (string.IsNullOrEmpty(handle.RecordAnchorKey))
             return (false, KeyValueResponseType.Errored);
 
@@ -269,8 +279,11 @@ internal sealed class TransactionCoordinator : IDisposable
             return (true, KeyValueResponseType.MustRetry);
         }
 
+        // No resident record on the routed anchor leader: indeterminate, not terminal. See the summary — a
+        // finalize that is in flight or a not-yet-propagated commit both look like this, and a definite Errored
+        // would mislabel a committed transaction as having done nothing. Retry re-observes the truth.
         if (record is null)
-            return (false, KeyValueResponseType.Errored);
+            return (true, KeyValueResponseType.MustRetry);
 
         KeyValueResponseType response = record.Decision switch
         {

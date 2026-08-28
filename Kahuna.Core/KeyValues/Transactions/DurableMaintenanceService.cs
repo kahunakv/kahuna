@@ -648,9 +648,10 @@ internal sealed class DurableMaintenanceService
             if (oldestAgeMs <= budgetMs)
                 return true;
 
-            logger.LogInformation(
-                "Pre-settle gate: partition {Partition} [{Start},{End}) holds {Count} unsettled durable intents, oldest {OldestMs} ms; refusing before the quiesce",
-                sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf", intents.Count, oldestAgeMs);
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation(
+                    "Pre-settle gate: partition {Partition} [{Start},{End}) holds {Count} unsettled durable intents, oldest {OldestMs} ms; refusing before the quiesce",
+                    sourcePartitionId, startKey ?? "-inf", endKey ?? "+inf", intents.Count, oldestAgeMs);
 
             return false;
         }
