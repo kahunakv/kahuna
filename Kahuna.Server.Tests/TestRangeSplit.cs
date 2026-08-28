@@ -603,14 +603,14 @@ public sealed class TestRangeSplit : BaseCluster
     }
 
     /// <summary>
-    /// A split must not run while another transaction holds a range lock over the moving half. The
-    /// quiesce lock is what orders the split's window exactly against in-flight writes; the acquire
-    /// answers AlreadyLocked for a foreign holder, and treating that as success would run the whole
-    /// copy-and-cutover without the lock. The split must refuse retryably with the map untouched,
-    /// and a retry after the foreign lock is released must succeed.
+    /// A split must not run while another transaction holds an <b>Exclusive</b> range lock over the
+    /// moving half — that holder is a writer mid-flight, and the quiesce fence is what orders the
+    /// split's window exactly against in-flight writes. The acquire answers AlreadyLocked for the
+    /// foreign holder, the split refuses retryably with the map untouched, and a retry after the
+    /// foreign lock is released succeeds.
     /// </summary>
     [Fact]
-    public async Task ForeignLock_OverMovingHalf_RefusesSplitRetryably()
+    public async Task ForeignExclusiveLock_OverMovingHalf_RefusesSplitRetryably()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -623,15 +623,18 @@ public sealed class TestRangeSplit : BaseCluster
 
             HLCTimestamp tx1 = NextTx(p2Raft);
 
-            // A foreign Shared lock overlapping the moving half. Shared is the subtler case: it
-            // coexists with other Shared locks, but the split's Exclusive acquire must still refuse.
             (KeyValueResponseType acquired, _) = await dataLeader.TryAcquireRangeLock(
                 tx1, Space, Space + "/m", true, null, false, 60_000,
-                KeyValueDurability.Persistent, RangeLockMode.Shared);
+                KeyValueDurability.Persistent, RangeLockMode.Exclusive);
             Assert.Equal(KeyValueResponseType.Locked, acquired);
 
+            // The refusal may surface at either stage: the holder's per-key write intents make the
+            // split's pre-copy probe indeterminate, and a holder observed later refuses the quiesce
+            // fence itself. Both are retryable refusals with the map untouched.
             SplitOutcome refused = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
-            Assert.Equal(SplitStatus.QuiesceFailed, refused.Status);
+            Assert.True(
+                refused.Status is SplitStatus.QuiesceFailed or SplitStatus.ProbeIndeterminate,
+                $"Expected a retryable refusal (QuiesceFailed or ProbeIndeterminate), got: {refused.Status}");
 
             // The map must be untouched: one whole-space descriptor, original generation.
             Assert.Single(nodes[0].Item2.RangeMapStore.Current.Descriptors, d => d.KeySpace == Space);
@@ -642,6 +645,45 @@ public sealed class TestRangeSplit : BaseCluster
 
             SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
             Assert.True(outcome.IsSuccess, $"Split failed after the foreign lock was released: {outcome.Status}");
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    /// <summary>
+    /// A foreign <b>Shared</b> range lock over the moving half must NOT starve the split. The
+    /// quiesce acquires a WriteFence, which tolerates readers: the shared holder's phantom
+    /// protection is preserved by clamping the lock onto the children at cutover, while every
+    /// writer is still fenced through the write-path range-lock check. A long-lived Serializable
+    /// scanner must not be able to defer a split indefinitely.
+    /// </summary>
+    [Fact]
+    public async Task ForeignSharedLock_OverMovingHalf_SplitProceeds()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        ((IRaft, KahunaManager)[] nodes, _, KahunaManager dataLeader, _) =
+            await Setup([Space + "/a"], [Space + "/z"]);
+
+        try
+        {
+            (IRaft p2Raft, _) = await LeaderOf(RangeMapStore.FirstDataPartitionId, nodes);
+
+            HLCTimestamp tx1 = NextTx(p2Raft);
+
+            (KeyValueResponseType acquired, _) = await dataLeader.TryAcquireRangeLock(
+                tx1, Space, Space + "/m", true, null, false, 60_000,
+                KeyValueDurability.Persistent, RangeLockMode.Shared);
+            Assert.Equal(KeyValueResponseType.Locked, acquired);
+
+            SplitOutcome outcome = await SplitViaLeaders(Space, Space + "/m", nodes, ct);
+            Assert.True(outcome.IsSuccess,
+                $"Split must proceed under a foreign Shared range lock, got: {outcome.Status}");
+
+            // Two descriptors: the space actually divided under the held shared lock.
+            Assert.Equal(2, nodes[0].Item2.RangeMapStore.Current.Descriptors.Count(d => d.KeySpace == Space));
         }
         finally
         {

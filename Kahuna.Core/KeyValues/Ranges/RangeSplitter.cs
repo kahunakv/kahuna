@@ -230,19 +230,27 @@ internal sealed class RangeSplitter
             return SplitOutcome.TransferFailed;
         }
 
-        // ── 6. Quiesce: exclusive range lock on [K,E) ────────────────────────────
+        // ── 6. Quiesce: write-fence range lock on [K,E) ──────────────────────────
         // Uses the internal split HLC as the transaction id for the range lock.
         HLCTimestamp splitTxId = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         // Route to the DATA partition leader (not the local actor) so the lock is recorded where
         // the 2PC handlers for [K,E) run.
-        (KeyValueResponseType lockResult, _) = await manager.LocateAndTryAcquireExclusiveRangeLock(
+        //
+        // WriteFence, not Exclusive: the quiesce must block every writer into [K,E) — which any
+        // foreign range lock does through the write-path check — but it must not be starved by a
+        // long-lived Serializable scanner's Shared range lock (that lock is clamped onto the
+        // children at cutover, so the scanner keeps its protection), and it must not plant per-key
+        // write intents that wedge every snapshot scan of the moving range for the copy window.
+        // A foreign Exclusive holder — a writer mid-flight — still refuses the fence below.
+        (KeyValueResponseType lockResult, _) = await manager.LocateAndTryAcquireRangeLock(
             splitTxId,
             keySpace,
             splitKey, true,
             descriptor.EndKey, false,
             QuiesceTtlMs,
             KeyValueDurability.Persistent,
+            RangeLockMode.WriteFence,
             ct);
 
         // Only Locked will do. AlreadyLocked names a foreign holder — a re-entrant acquire under the

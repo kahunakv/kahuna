@@ -159,17 +159,23 @@ internal sealed class RangeMerger
             return MergeOutcome.ConcurrentMove;
         }
 
-        // -- 1c. Quiesce: exclusive range lock on [B,C) ---------------------------
+        // -- 1c. Quiesce: write-fence range lock on [B,C) -------------------------
         // Route to the DATA partition leader (not the local actor) so the lock is recorded where the
         // writes and 2PC handlers for [B,C) run. Uses the merge's own HLC as the lock's transaction
         // id, which is also the quiesce owner below.
-        (KeyValueResponseType lockResult, _) = await manager.LocateAndTryAcquireExclusiveRangeLock(
+        //
+        // WriteFence, not Exclusive — same rationale as the splitter's quiesce: the fence blocks
+        // every writer through the write-path check, tolerates a reader's Shared range lock (which
+        // is carried across the cutover), and plants no per-key write intents that would wedge
+        // snapshot scans of [B,C) for the copy window. A foreign Exclusive holder still refuses it.
+        (KeyValueResponseType lockResult, _) = await manager.LocateAndTryAcquireRangeLock(
             mergeTxId,
             keySpace,
             right.StartKey, true,
             right.EndKey, false,
             QuiesceTtlMs,
             KeyValueDurability.Persistent,
+            RangeLockMode.WriteFence,
             ct);
 
         // Only Locked will do. AlreadyLocked names a foreign holder — a re-entrant acquire under the

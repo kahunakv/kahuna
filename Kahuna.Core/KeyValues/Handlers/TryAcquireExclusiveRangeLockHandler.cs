@@ -76,7 +76,10 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 return KeyValueStaticResponses.LockedResponse;
             }
 
-            // Conflict check: S∩S coexist; any pairing involving X conflicts.
+            // Conflict check: S∩S coexist; a WriteFence coexists with S in both directions (the fence
+            // blocks writers through the write-path check, not through reader exclusion, and a reader's
+            // Shared lock must not starve a split's quiesce); every pairing involving X conflicts, and
+            // two WriteFences conflict (two concurrent splits over one range must serialize).
             foreach (KeyValueRangeLock existing in existingLocks)
             {
                 if (existing.TransactionId == message.TransactionId)
@@ -87,6 +90,12 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 
                 if (message.RangeLockMode == RangeLockMode.Shared && existing.Mode == RangeLockMode.Shared)
                     continue; // S∩S always compatible
+
+                if (message.RangeLockMode == RangeLockMode.WriteFence && existing.Mode == RangeLockMode.Shared)
+                    continue; // a fence tolerates readers
+
+                if (message.RangeLockMode == RangeLockMode.Shared && existing.Mode == RangeLockMode.WriteFence)
+                    continue; // readers tolerate a fence
 
                 if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                         existing.StartKey, existing.StartInclusive, existing.EndKey, existing.EndInclusive))
@@ -101,6 +110,9 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
     {
         // Exclusive acquires place per-key write intents so existing keys are immediately locked.
         // Shared acquires skip intents — write-path conflict is enforced by TrySetHandler.
+        // WriteFence acquires also skip intents: the fence must block writers (the write path refuses
+        // a mutation under any foreign range lock) without wedging readers, and a per-key write intent
+        // makes every snapshot scan of the range wait for the holder.
         if (message.RangeLockMode == RangeLockMode.Exclusive)
         {
             KeyValueResponse intents = PlaceWriteIntents(currentTime, message);
