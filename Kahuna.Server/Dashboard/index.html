@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<!--
+    This file is part of Kahuna
+
+    For the full copyright and license information, please view the LICENSE.txt
+    file that was distributed with this source code.
+
+    Only the frames are rendered here. Every value arrives from an endpoint after
+    load.
+
+    Server-rendering a node value would make the page stale from its first
+    second, and would leave two code paths — one on the server, one in the
+    browser — drawing the same number, which is exactly how the two come to
+    disagree.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kahuna node</title>
+    <link rel="stylesheet" href="/dashboard/dashboard.css" />
+    <script>
+        // Stamp the theme before the first paint. Doing this from dashboard.js
+        // would be too late: the page would render in the wrong theme and then
+        // visibly swap. The try/catch matters because a private window can
+        // throw on storage access, and a page that cannot read a preference
+        // must still render.
+        (function () {
+            try {
+                var saved = localStorage.getItem('kahuna-theme');
+                if (saved === 'dark' || saved === 'light') {
+                    document.documentElement.setAttribute('data-theme', saved);
+                }
+            } catch (e) { /* fall through to the operating-system preference */ }
+        }());
+    </script>
+</head>
+<body>
+
+<nav class="nav">
+    <div class="shell">
+        <span class="brand">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 16c2.2 0 2.2-2.6 4.4-2.6S9.6 16 11.8 16s2.2-2.6 4.4-2.6S18.4 16 20.6 16" />
+                <path d="M4 8.5c3-3.5 8-4.5 12-2" />
+                <path d="M16 6.5l1.6 3.4" />
+            </svg>
+            <b>Kahuna</b>
+        </span>
+        <span class="nav-links">
+            <a href="/" aria-current="page">Dashboard</a>
+            <a href="https://kahunakv.github.io/" rel="noopener">Docs</a>
+        </span>
+        <span class="nav-right">
+            <button class="btn-quiet" id="theme-toggle" type="button" aria-live="polite">Dark theme</button>
+        </span>
+    </div>
+</nav>
+
+<header class="band">
+    <div class="shell">
+        <p class="eyebrow">Node</p>
+        <div class="band-head" id="band-head">
+            <h1>Reading this node…</h1>
+        </div>
+        <div class="band-meta" id="band-meta"></div>
+        <dl class="strip" id="band-strip"></dl>
+    </div>
+</header>
+
+<main>
+    <div class="shell">
+        <div class="grid">
+
+            <section class="card col-2">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Engine</p>
+                        <h2>This process, since start</h2>
+                    </div>
+                    <span class="when" id="metrics-when"></span>
+                </div>
+                <div id="metrics-body"></div>
+                <p class="card-note">
+                    Counters accumulate from process start, so a restart resets every rate. Rates are
+                    measured in this browser between two readings. All of it describes this node only.
+                </p>
+            </section>
+
+            <section class="card">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Cluster</p>
+                        <h2>Roster</h2>
+                    </div>
+                </div>
+                <p class="card-note" id="roster-version" style="margin: 0 0 .9rem;"></p>
+                <div class="panel">
+                    <div class="panel-body" id="roster-body"></div>
+                </div>
+                <p class="card-note">
+                    Membership is replicated, so every node reports the same roster. A version behind
+                    another node's is replication lag, not disagreement.
+                </p>
+            </section>
+
+            <section class="card col-2">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Placement</p>
+                        <h2>Partitions and their replicas</h2>
+                    </div>
+                    <span class="when" id="placement-mode"></span>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="placement-body"></div>
+                </div>
+                <p class="card-note">
+                    A partition this node does not host is served by forwarding to one that does,
+                    which is normal rather than degraded. Under full replication every node hosts
+                    every partition, so no replica set is listed and nothing is ever forwarded.
+                </p>
+            </section>
+
+            <section class="card">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Recovery</p>
+                        <h2>Backups</h2>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="backups-body"></div>
+                </div>
+                <p class="card-note">
+                    Read from this node's catalog. Reading the list starts nothing.
+                </p>
+            </section>
+
+            <section class="card col-3">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Key ranges</p>
+                        <h2>How this node routes each key space</h2>
+                    </div>
+                    <span class="when" id="ranges-when"></span>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="ranges-body"></div>
+                </div>
+                <p class="card-note">
+                    Descriptors are replicated; the routing mode is node-local. A key space can carry
+                    descriptors here and still hash on a node where it was never registered, so
+                    compare this panel across nodes rather than trusting one.
+                </p>
+            </section>
+
+        </div>
+    </div>
+</main>
+
+<footer>
+    <div class="shell">
+        <span>Kahuna</span>
+        <span>Every number on this page is node-local. Nothing here writes.</span>
+        <span>For alerting and history, export the Kahuna and Kommander meters.</span>
+    </div>
+</footer>
+
+<script src="/dashboard/dashboard.js"></script>
+</body>
+</html>

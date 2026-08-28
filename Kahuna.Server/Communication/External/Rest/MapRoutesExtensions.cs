@@ -1,4 +1,6 @@
 
+using Kahuna.Server;
+
 namespace Kahuna.Communication.External.Rest;
 
 /// <summary>
@@ -10,10 +12,12 @@ namespace Kahuna.Communication.External.Rest;
 /// </remarks>
 public static class MapRoutesExtensions
 {
-    public static void MapRestKahunaRoutes(this WebApplication app)
+    public static void MapRestKahunaRoutes(this WebApplication app, KahunaCommandLineOptions opts)
     {
-        app.MapGet("/", () => "Kahuna.Server");
-        
+        // Owns the HTTP root: the dashboard page when it is enabled, and the plain text response the
+        // root has always given when it is not.
+        DashboardHandlers.MapDashboardRoutes(app, opts);
+
         LocksHandlers.MapLocksRoutes(app);
         KeyValuesHandlers.MapKeyValueRoutes(app);
         SequencesHandlers.MapSequenceRoutes(app);

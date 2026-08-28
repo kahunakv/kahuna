@@ -55,6 +55,20 @@
   <Folder Include="Communication\External\" />
 </ItemGroup>
 
+<!-- The operator dashboard's three assets, embedded rather than placed under wwwroot. This project
+     ships as a .NET global tool; embedded resources travel with the assembly, so the tool, the
+     container image and a plain `dotnet run` all serve the same bytes with no static-web-asset
+     manifest to be absent at the wrong moment. The None Remove is required because the SDK's
+     default globbing already claims these files, and an item cannot be both. LogicalName is set
+     explicitly so a folder rename cannot silently change the resource name DashboardAssets asks
+     for — that failure would only appear at the first request, not at build. -->
+<ItemGroup>
+  <None Remove="Dashboard\**" />
+  <EmbeddedResource Include="Dashboard\index.html" LogicalName="Kahuna.Server.Dashboard.index.html" />
+  <EmbeddedResource Include="Dashboard\dashboard.css" LogicalName="Kahuna.Server.Dashboard.dashboard.css" />
+  <EmbeddedResource Include="Dashboard\dashboard.js" LogicalName="Kahuna.Server.Dashboard.dashboard.js" />
+</ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Kahuna.Core\Kahuna.Core.csproj" />
     <ProjectReference Include="..\Kahuna.Shared\Kahuna.Shared.csproj" />

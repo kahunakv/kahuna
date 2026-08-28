@@ -1,0 +1,401 @@
+/*
+ * This file is part of Kahuna
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Design system for the operator dashboard.
+ *
+ * Every palette value, radius and component treatment here comes from the
+ * documentation site (kahunakv.github.io), so the two read as one product. That
+ * site is a Docusaurus project; nothing of Docusaurus or Infima is imported —
+ * only the values are carried across, which is why this file has no build step
+ * and no dependency.
+ *
+ * The full light palette is declared on bare :root. Dark redefines only the
+ * tokens that change, twice: once for the operating-system preference and once
+ * for an explicit stamp, so a toggle wins in both directions. No color is ever
+ * declared only inside a dark block — a token that exists in one theme and not
+ * the other renders one theme's text on the other theme's ground.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+:root {
+  --primary:          #1ca64b;
+  --primary-light:    #22bf56;
+  --primary-lightest: #54db81;
+  --heading:          #0b1f14;
+  --bg:               #ffffff;
+  --surface:          #ffffff;
+  --surface-sunken:   #f4f9f5;
+  --border:           #dfe9e1;
+  --border-strong:    #c4d8c9;
+  --text:             #2f3b34;
+  --muted:            #5c6f63;
+  --primary-wash:     rgba(28, 166, 75, 0.10);
+  --focus-ring:       rgba(28, 166, 75, 0.30);
+  --card-shadow:      0 12px 34px rgba(11, 31, 20, 0.06);
+
+  /* Semantic state, deliberately separate from the accent hue. The accent here
+     is itself green, so a healthy dot drawn in the accent would be invisible as
+     a signal. State is never carried by color alone — every dot is rendered
+     beside its word. */
+  --ok:       #0f9d63;
+  --warn:     #a8720a;
+  --bad:      #c2453f;
+  --ok-dot:   #34d399;
+  --warn-dot: #fbbf24;
+  --bad-dot:  #f87171;
+
+  /* The node band is dark in both themes, so its colors never vary. */
+  --band-ink:     #f2fff5;
+  --band-sub:     #d7fbe3;
+  --band-faint:   #a9d9bd;
+  --band-eyebrow: #d9ff77;
+  --band-rule:    rgba(146, 255, 40, 0.20);
+  --band-panel:   rgba(4, 20, 14, 0.72);
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell,
+          "Noto Sans", sans-serif;
+  --mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+  --shell: 1180px;
+  --nav-h: 3.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --primary:          #8fd892;
+    --primary-light:    #a7e0a9;
+    --primary-lightest: #d1f0d2;
+    --heading:          #eafaee;
+    --bg:               #0b1512;
+    --surface:          #10201a;
+    --surface-sunken:   #0d1a15;
+    --border:           #1e3a2c;
+    --border-strong:    #2c5340;
+    --text:             #cfe6d6;
+    --muted:            #93ac9c;
+    --primary-wash:     rgba(143, 216, 146, 0.14);
+    --focus-ring:       rgba(167, 224, 169, 0.36);
+    --card-shadow:      0 12px 34px rgba(0, 0, 0, 0.32);
+    --ok:   #34d399;
+    --warn: #fbbf24;
+    --bad:  #f87171;
+  }
+}
+
+:root[data-theme="dark"] {
+  --primary:          #8fd892;
+  --primary-light:    #a7e0a9;
+  --primary-lightest: #d1f0d2;
+  --heading:          #eafaee;
+  --bg:               #0b1512;
+  --surface:          #10201a;
+  --surface-sunken:   #0d1a15;
+  --border:           #1e3a2c;
+  --border-strong:    #2c5340;
+  --text:             #cfe6d6;
+  --muted:            #93ac9c;
+  --primary-wash:     rgba(143, 216, 146, 0.14);
+  --focus-ring:       rgba(167, 224, 169, 0.36);
+  --card-shadow:      0 12px 34px rgba(0, 0, 0, 0.32);
+  --ok:   #34d399;
+  --warn: #fbbf24;
+  --bad:  #f87171;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { color: var(--heading); margin: 0; text-wrap: balance; }
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+:where(a, button, input):focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.shell { width: 100%; max-width: var(--shell); margin: 0 auto; padding: 0 1.25rem; }
+
+/* Every value that refreshes is mono and tabular. A proportional digit changes
+   width as the value changes, so a two-second poll would shift each row it
+   sits in and make the page twitch. */
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ── Navigation ────────────────────────────────────────────────────────── */
+.nav {
+  position: sticky; top: 0; z-index: 20;
+  height: var(--nav-h);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.nav .shell { height: 100%; display: flex; align-items: center; gap: 1.25rem; }
+.brand { display: flex; align-items: center; gap: .6rem; }
+.brand svg { width: 26px; height: 26px; display: block; color: var(--primary); }
+.brand b { color: var(--heading); font-size: 1.05rem; letter-spacing: -0.01em; }
+.nav-links { display: flex; gap: 1.1rem; margin-left: .5rem; }
+.nav-links a { color: var(--muted); font-size: .92rem; font-weight: 600; }
+.nav-links a[aria-current] { color: var(--primary); }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: .6rem; }
+
+.btn-quiet {
+  font: inherit; font-size: .85rem; font-weight: 700;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: .38rem .7rem;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.btn-quiet:hover { color: var(--primary); border-color: var(--primary-light); }
+
+/* ── Node band ─────────────────────────────────────────────────────────── */
+/* The documentation site's hero treatment, reused for node identity. */
+.band {
+  position: relative;
+  overflow: hidden;
+  color: var(--band-ink);
+  border-bottom: 1px solid rgba(146, 255, 40, 0.22);
+  padding: 2.75rem 0 2.25rem;
+  background:
+    radial-gradient(circle at 18% 22%, rgba(146, 255, 40, 0.16), transparent 26%),
+    radial-gradient(circle at 82% 18%, rgba(44, 255, 188, 0.14), transparent 26%),
+    linear-gradient(135deg, #051612 0%, #08241c 46%, #0b3025 100%);
+}
+.band::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  opacity: .2;
+  background-image:
+    linear-gradient(rgba(146, 255, 40, 0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(146, 255, 40, 0.14) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: linear-gradient(to bottom, black, transparent 74%);
+          mask-image: linear-gradient(to bottom, black, transparent 74%);
+}
+.band .shell { position: relative; z-index: 1; }
+
+.eyebrow {
+  margin: 0 0 .7rem;
+  color: var(--primary);
+  font-size: .78rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+}
+/* The site defines the eyebrow twice: lime on the dark hero, accent everywhere
+   else. Keep both, or a card kicker is unreadable on white. */
+.band .eyebrow { color: var(--band-eyebrow); }
+
+.band-head { display: flex; flex-wrap: wrap; align-items: center; gap: .9rem; }
+.band-head h1 {
+  color: #fff; margin: 0;
+  font-family: var(--mono);
+  font-size: clamp(1.4rem, 3vw, 2.1rem);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: .35rem;
+  padding: .25rem .6rem;
+  border-radius: 999px;
+  background: var(--primary-wash);
+  color: var(--primary);
+  font-size: .72rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+}
+.band .pill { background: rgba(86, 255, 52, 0.18); color: #d9ff77; }
+
+.state { display: inline-flex; align-items: center; gap: .45rem; font-size: .85rem; font-weight: 700; }
+.dot { flex: 0 0 auto; width: .48rem; height: .48rem; border-radius: 50%; }
+.dot-ok   { background: var(--ok-dot);   box-shadow: 0 0 12px rgba(52, 211, 153, 0.55); }
+.dot-warn { background: var(--warn-dot); box-shadow: 0 0 12px rgba(251, 191, 36, 0.55); }
+.dot-bad  { background: var(--bad-dot);  box-shadow: 0 0 12px rgba(248, 113, 113, 0.55); }
+
+/* Two states that are both normal. A partition this node hosts and one it
+   forwards are equally healthy — replica placement putting a partition
+   elsewhere is the feature working, not a fault — so neither gets the warning
+   amber, and neither gets the healthy green that would imply the other is
+   worse. */
+.dot-info { background: var(--primary); }
+.dot-idle { background: transparent; border: 1.5px solid var(--border-strong); }
+.band .state { color: var(--band-sub); }
+.band .dot-idle { border-color: rgba(215, 251, 227, 0.45); }
+
+.band-meta {
+  display: flex; flex-wrap: wrap; gap: .4rem 1.5rem;
+  margin-top: .9rem; color: var(--band-faint); font-size: .85rem;
+}
+.band-meta b { color: var(--band-sub); font-weight: 600; }
+.band-meta code { font-family: var(--mono); font-size: .82rem; overflow-wrap: anywhere; }
+
+/* Stat strip — the site's proof grid. */
+.strip {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 2rem 0 0;
+  border: 1px solid var(--band-rule);
+  border-radius: 14px;
+  background: var(--band-panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+  -webkit-backdrop-filter: blur(12px);
+          backdrop-filter: blur(12px);
+}
+.strip > div { padding: 1.15rem 1.25rem; min-width: 0; }
+.strip > div + div { border-left: 1px solid rgba(146, 255, 40, 0.16); }
+.strip dt {
+  margin: 0 0 .25rem; color: var(--band-faint);
+  font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+}
+.strip dd {
+  margin: 0; color: #fff; font-size: 1.8rem; line-height: 1.1;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.strip small { display: block; margin-top: .3rem; color: var(--band-faint); font-size: .78rem; }
+
+/* ── Card grid ─────────────────────────────────────────────────────────── */
+main { padding: 2.25rem 0 3.5rem; }
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.col-2 { grid-column: span 2; }
+.col-3 { grid-column: span 3; }
+
+.card {
+  display: flex; flex-direction: column; min-width: 0;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+}
+.card > h2 { font-size: 1.34rem; line-height: 1.22; margin-bottom: 1rem; }
+.card-head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.card-head h2 { font-size: 1.28rem; line-height: 1.22; }
+.card-head .when { margin-left: auto; color: var(--muted); font-size: .78rem; }
+.card-note { color: var(--muted); font-size: .8rem; margin: .9rem 0 0; }
+
+/* Panel with a header strip — the site's code-snippet frame. */
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.panel-head {
+  display: flex; align-items: center; gap: .6rem;
+  min-height: 56px; padding: .9rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.panel-head strong { color: var(--heading); font-size: .9rem; }
+.panel-head .when { margin-left: auto; color: var(--muted); font-size: .78rem; }
+/* Wide content scrolls inside its own container so the page body never does. */
+.panel-body { overflow-x: auto; }
+
+/* ── Tables ────────────────────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+thead th {
+  text-align: left; padding: .6rem 1rem;
+  color: var(--muted); font-size: .72rem; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+tbody td { padding: .62rem 1rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: 0; }
+td.r, th.r { text-align: right; }
+.key { font-family: var(--mono); font-size: .84rem; color: var(--heading); overflow-wrap: anywhere; }
+.dim { color: var(--muted); }
+.here { color: var(--primary); font-weight: 700; }
+
+/* A range bound that is open on one side is a different fact from an empty
+   string bound. The sentinel is rendered as a word, never as blank space. */
+.bound { font-family: var(--mono); font-size: .82rem; }
+.bound.open { color: var(--muted); font-style: italic; font-family: var(--font); }
+
+/* ── Metric rows ───────────────────────────────────────────────────────── */
+.metric {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8.5rem;
+  align-items: center; gap: 1rem;
+  padding: .7rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.metric:last-child { border-bottom: 0; }
+.metric .name { color: var(--heading); font-weight: 600; font-size: .92rem; }
+.metric .name small {
+  display: block; color: var(--muted); font-weight: 400;
+  font-family: var(--mono); font-size: .74rem; overflow-wrap: anywhere;
+}
+.metric .val {
+  text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 1.12rem; color: var(--heading);
+}
+.metric .val u { display: block; text-decoration: none; color: var(--muted); font-size: .74rem; }
+
+.metric-group {
+  margin: 0 0 .35rem;
+  color: var(--primary);
+  font-size: .72rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+}
+.metric-group + .metric { border-top: 1px solid var(--border); }
+.metric-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 2rem; }
+
+/* ── Degraded panel ────────────────────────────────────────────────────── */
+/* One appearance for every reason a panel has no data: a failed poll, a
+   disabled subsystem, a node too early in boot. The rest of the page keeps
+   working. */
+.notice-box {
+  display: flex; gap: .75rem; align-items: flex-start;
+  padding: 1rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: .88rem;
+}
+.notice-box strong { color: var(--heading); display: block; }
+
+.stale { color: var(--warn); font-size: .78rem; }
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 1.5rem 0;
+  color: var(--muted);
+  font-size: .82rem;
+}
+footer .shell { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+@media (max-width: 980px) {
+  .grid { grid-template-columns: 1fr; }
+  .col-2, .col-3 { grid-column: span 1; }
+  .metric-cols { grid-template-columns: 1fr; }
+  .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .strip > div:nth-child(3) { border-left: 0; }
+  .strip > div:nth-child(n+3) { border-top: 1px solid rgba(146, 255, 40, 0.16); }
+  .nav-links { display: none; }
+}
+
+/* The page refreshes on a timer. Decorative movement would hide the one change
+   that matters, so only a state change transitions — and not even that here. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
