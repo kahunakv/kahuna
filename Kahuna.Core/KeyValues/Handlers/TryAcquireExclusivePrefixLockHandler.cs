@@ -51,7 +51,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             }
 
             // Locked by another transaction but check if the lease is still active
-            if (KeyValueWriteIntentLease.IsLive(writeIntent, currentTime))
+            if (KeyValueWriteIntentLease.IsLive(context, message.Key, writeIntent, currentTime))
                 return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, writeIntent.TransactionId);
             
             // The lock is expired, remove it
@@ -103,7 +103,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
 
                 // Another transaction holds a live write intent on this key. Leave it in place —
                 // the LocksByPrefix entry is enough to block that transaction's commit as a phantom.
-                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
+                if (KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                     continue;
             }
 
@@ -114,6 +114,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             {
                 TransactionId = message.TransactionId,
                 Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
+                AcquiredAt = currentTime,
             };
 
             context.Logger.LogAssignedWriteIntent(key, message.TransactionId);
@@ -122,7 +123,8 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         context.LocksByPrefix.Add(message.Key, new()
         {
             TransactionId = message.TransactionId,
-            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs)
+            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
+            AcquiredAt = currentTime
         });
 
         return KeyValueStaticResponses.LockedResponse;

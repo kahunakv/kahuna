@@ -634,6 +634,23 @@ public sealed class KahunaConfiguration
     public int ScanPageRetryBudgetMs { get; set; } = 5_000;
 
     /// <summary>
+    /// Milliseconds a session-owned write intent or range lock — one requested with <c>expiresMs == 0</c>,
+    /// so it carries no clock deadline — may stay live without its owning session releasing it. Past this
+    /// age the session has been finalized or reaped, so no legitimate transaction can still hold the key and
+    /// the record is dropped on next touch. Without the ceiling an intent whose session vanished before its
+    /// cleanup ran is immortal at the actor, and a snapshot scan of any page containing that key can never
+    /// serve.
+    ///
+    /// <para>A value of <c>0</c> means derived: <c>MaxTransactionTimeout</c> plus the reaper grace window
+    /// plus the maximum participant-effect TTL, which is exactly the span the session machinery already
+    /// bounds itself by. An explicit value below <c>MaxTransactionTimeout</c> plus the reaper grace window is
+    /// rejected at load, because a ceiling under the session bound could expire a live transaction's lock —
+    /// the one outcome this setting must never produce. Prepared intents are exempt at any age; their fate
+    /// belongs to the decision machinery.</para>
+    /// </summary>
+    public int SessionOwnedIntentCeilingMs { get; set; }
+
+    /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed head.
     /// The fence refuses a validated-base prepare's acknowledgement when the base moved — the lost-update
     /// guard — and, because pruned memory is indistinguishable from "no commit happened", it also refuses any

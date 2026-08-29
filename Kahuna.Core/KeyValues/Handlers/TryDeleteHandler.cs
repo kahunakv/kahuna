@@ -129,7 +129,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
+                if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                     return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
 
                 entry.WriteIntent = null;
@@ -142,7 +142,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
+                if (KeyValueWriteIntentLease.IsLive(context, entry.Bucket, intent, currentTime))
                     return (new(KeyValueResponseType.MustRetry, 0), entry, currentTime);
 
                 context.LocksByPrefix.Remove(entry.Bucket);

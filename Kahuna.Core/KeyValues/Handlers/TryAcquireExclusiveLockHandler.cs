@@ -65,7 +65,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             }
 
             // Check if the lease is still active
-            if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
+            if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
             {
                 // A holder whose transaction is already durably decided is not a live conflict: its intent is
                 // only waiting for the resolution that clears it, which under deferred settlement runs in the
@@ -83,6 +83,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         {
             TransactionId = message.TransactionId,
             Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
+            AcquiredAt = currentTime,
         };
         
         context.Logger.LogAssignedWriteIntent(message.Key, message.TransactionId);

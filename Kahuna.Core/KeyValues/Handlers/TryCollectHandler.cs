@@ -115,7 +115,7 @@ internal sealed class TryCollectHandler : BaseHandler
             if (tombstoneEntry.State is not (KeyValueState.Deleted or KeyValueState.Undefined))
                 continue; // stale queue entry — entry was re-set after the tombstone was enqueued
 
-            if (HasLiveWriteIntent(tombstoneEntry, currentTime) || tombstoneEntry.ReplicationIntent is not null)
+            if (HasLiveWriteIntent(tombstoneKey, tombstoneEntry, currentTime) || tombstoneEntry.ReplicationIntent is not null)
             {
                 deferredTombstones ??= [];
                 deferredTombstones.Add(tombstoneKey);
@@ -168,7 +168,7 @@ internal sealed class TryCollectHandler : BaseHandler
             if (expiredEntry.Expires == HLCTimestamp.Zero || (expiredEntry.Expires - currentTime) > TimeSpan.Zero)
                 continue; // defensive: expiry cleared or not yet due
 
-            if (HasLiveWriteIntent(expiredEntry, currentTime) || expiredEntry.ReplicationIntent is not null)
+            if (HasLiveWriteIntent(expiredKey, expiredEntry, currentTime) || expiredEntry.ReplicationIntent is not null)
             {
                 deferredExpiry ??= [];
                 deferredExpiry.Add((expiredKey, heapExpiry));
@@ -226,7 +226,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
             if (candidateKey is not null
                 && !keysToEvict.Contains(candidateKey)
-                && !HasLiveWriteIntent(lruCandidate, currentTime)
+                && !HasLiveWriteIntent(candidateKey, lruCandidate, currentTime)
                 && lruCandidate.ReplicationIntent is null
                 && !lruCandidate.IsDirty())
             {
@@ -323,23 +323,23 @@ internal sealed class TryCollectHandler : BaseHandler
     /// place when it has expired. The op handlers (TryGet/TrySet/TryExists/…) already treat an
     /// expired intent as gone and null it lazily on access; the collector must apply the same rule
     /// or a cold key whose owning transaction was abandoned would pin the entry against eviction
-    /// forever (and re-enqueue itself on the tombstone/expiry path every cycle). An intent with
-    /// Expires == Zero is an unprepared lock/intent with no determined deadline and is treated as live.
+    /// forever (and re-enqueue itself on the tombstone/expiry path every cycle). The rule is the
+    /// shared lease policy, not a local copy of it — that includes the ceiling that kills a
+    /// session-owned intent whose session can no longer exist, which is precisely the abandoned
+    /// case this sweep is here to reclaim.
     /// </summary>
-    private static bool HasLiveWriteIntent(KeyValueEntry entry, HLCTimestamp currentTime)
+    private bool HasLiveWriteIntent(string? key, KeyValueEntry entry, HLCTimestamp currentTime)
     {
         KeyValueWriteIntent? intent = entry.WriteIntent;
 
         if (intent is null)
             return false;
 
-        if (intent.Expires != HLCTimestamp.Zero && (intent.Expires - currentTime) <= TimeSpan.Zero)
-        {
-            entry.WriteIntent = null;
-            return false;
-        }
+        if (KeyValueWriteIntentLease.IsLive(context, key, intent, currentTime))
+            return true;
 
-        return true;
+        entry.WriteIntent = null;
+        return false;
     }
 
     /// <summary>
@@ -374,12 +374,11 @@ internal sealed class TryCollectHandler : BaseHandler
             inspected++;
 
             if (context.LocksByPrefix.TryGetValue(bucket, out KeyValueWriteIntent? prefixIntent)
-                && prefixIntent.Expires != HLCTimestamp.Zero
-                && prefixIntent.Expires - currentTime <= TimeSpan.Zero)
+                && !KeyValueWriteIntentLease.IsLive(context, bucket, prefixIntent, currentTime))
                 context.LocksByPrefix.Remove(bucket);
 
             if (context.LocksByRange.TryGetValue(bucket, out List<KeyValueRangeLock>? rangeLocks)
-                && RangeLockChecks.PruneExpired(rangeLocks, currentTime, int.MaxValue))
+                && RangeLockChecks.PruneExpired(context, bucket, rangeLocks, currentTime, int.MaxValue))
                 context.LocksByRange.Remove(bucket);
         }
     }
@@ -454,7 +453,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
             if (candidateKey is not null
                 && !keysToEvict.Contains(candidateKey)
-                && !HasLiveWriteIntent(candidate, currentTime)
+                && !HasLiveWriteIntent(candidateKey, candidate, currentTime)
                 && candidate.ReplicationIntent is null
                 && !candidate.IsDirty())
             {

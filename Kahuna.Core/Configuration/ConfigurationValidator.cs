@@ -2,6 +2,8 @@
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 
+using Kahuna.Server.KeyValues.Transactions;
+
 namespace Kahuna.Server.Configuration;
 
 /// <summary>
@@ -122,6 +124,21 @@ public static class ConfigurationValidator
             throw new KahunaServerException(
                 $"MaxTransactionTimeout ({configuration.MaxTransactionTimeout} ms) must be >= DefaultTransactionTimeout ({configuration.DefaultTransactionTimeout} ms); " +
                 "a maximum below the default would clamp every default-length session.");
+
+        // The ceiling exists to kill an orphaned session-owned lock, never to expire a live one. A session
+        // can occupy its whole clamped timeout plus the reaper's grace window before the reaper may claim
+        // it, so any ceiling below that sum could take a key from a transaction that still legitimately
+        // holds it. Zero means derived, which always clears the floor by the participant-effect window.
+        if (configuration.SessionOwnedIntentCeilingMs != 0)
+        {
+            int ceilingFloorMs = configuration.MaxTransactionTimeout + TransactionCoordinator.ReapGraceMs;
+
+            if (configuration.SessionOwnedIntentCeilingMs < ceilingFloorMs)
+                throw new KahunaServerException(
+                    $"SessionOwnedIntentCeilingMs ({configuration.SessionOwnedIntentCeilingMs} ms) must be >= {ceilingFloorMs} ms — " +
+                    $"MaxTransactionTimeout ({configuration.MaxTransactionTimeout} ms) plus the {TransactionCoordinator.ReapGraceMs} ms reaper grace window — " +
+                    "or the ceiling could expire the write intent of a transaction that is still live. Use 0 to derive it.");
+        }
 
         if (configuration.DefaultAdmissionWaitMs <= 0)
             throw new KahunaServerException(

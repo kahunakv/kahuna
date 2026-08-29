@@ -27,7 +27,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         // Prune abandoned expired range locks on the way in so they neither block a fresh acquire
         // nor accumulate on a hot key space; drop the bucket entirely once it holds no live locks.
         if (context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? existingLocks)
-            && RangeLockChecks.PruneExpired(existingLocks, currentTime, int.MaxValue))
+            && RangeLockChecks.PruneExpired(context, message.Key, existingLocks, currentTime, int.MaxValue))
         {
             context.LocksByRange.Remove(message.Key);
             existingLocks = null;
@@ -55,7 +55,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                     {
                         if (other.TransactionId == message.TransactionId)
                             continue;
-                        if (other.Expires != HLCTimestamp.Zero && other.Expires - currentTime <= TimeSpan.Zero)
+                        if (!RangeLockChecks.IsLive(other, currentTime, context.SessionOwnedIntentCeilingMs))
                             continue;
                         if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                                 other.StartKey, other.StartInclusive, other.EndKey, other.EndInclusive))
@@ -85,8 +85,8 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 if (existing.TransactionId == message.TransactionId)
                     continue;
 
-                if (existing.Expires != HLCTimestamp.Zero && existing.Expires - currentTime <= TimeSpan.Zero)
-                    continue; // expired
+                if (!RangeLockChecks.IsLive(existing, currentTime, context.SessionOwnedIntentCeilingMs))
+                    continue; // expired, or orphaned past the session-owned ceiling
 
                 if (message.RangeLockMode == RangeLockMode.Shared && existing.Mode == RangeLockMode.Shared)
                     continue; // S∩S always compatible
@@ -178,7 +178,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 }
 
                 // Another tx holds a live write intent — leave it; LocksByRange will block their commit.
-                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
+                if (KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                     continue;
             }
 
@@ -189,6 +189,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             {
                 TransactionId = message.TransactionId,
                 Expires       = requestedExpiry,
+                AcquiredAt    = currentTime,
             };
 
             context.Logger.LogAssignedWriteIntentRangeLock(key, message.TransactionId);

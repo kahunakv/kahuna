@@ -229,7 +229,9 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
 
         foreach (KeyValueRangeLock lk in allLocks)
         {
-            // Skip expired.
+            // Skip expired. A lock orphaned past the session-owned ceiling never reaches here: the
+            // actor that owns the list prunes it on the way out, and the destination refuses to import
+            // one, so this filter only has to apply the deadline.
             if (lk.Expires != HLCTimestamp.Zero && lk.Expires - now <= TimeSpan.Zero)
                 continue;
 
@@ -362,6 +364,8 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
             if (excludeTxId != HLCTimestamp.Zero && lk.TransactionId == excludeTxId)
                 continue;
 
+            // Deadline only: an orphaned zero-deadline lock was already dropped by the source actor's
+            // prune, and the destination refuses to import one past the ceiling.
             if (lk.Expires != HLCTimestamp.Zero && lk.Expires - now <= TimeSpan.Zero)
                 continue;
 

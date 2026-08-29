@@ -84,7 +84,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
                     return null;
                 }
 
-                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, now))
+                if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, now))
                     return null;
                 entry.WriteIntent = null;
             }

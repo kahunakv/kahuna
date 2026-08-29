@@ -117,8 +117,16 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
 
     /// <summary>Installs a resident entry at revision 5 carrying <paramref name="intentOwner"/>'s staged
     /// write intent and MVCC snapshot — the state a partition leader holds for a key mid-2PC.</summary>
+    /// <summary>
+    /// Seeds an entry held by a foreign session-owned write intent. The intent is stamped with the harness's
+    /// current clock so it is live under the session-owned liveness ceiling: these tests are about what a
+    /// notification does while a foreign holder is genuinely live, and an intent anchored in the synthetic
+    /// past would instead be treated as orphaned and cleared before the notification is even considered.
+    /// </summary>
     private static KeyValueEntry SeedEntryWithIntent(KeyValueContext context, string key, HLCTimestamp intentOwner)
     {
+        HLCTimestamp acquiredAt = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
         KeyValueEntry entry = new()
         {
             Bucket = null,
@@ -128,7 +136,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
             State = KeyValueState.Set,
             LastModified = Ts(5_000),
             CachedBytes = 100_000,
-            WriteIntent = new() { TransactionId = intentOwner, Expires = HLCTimestamp.Zero },
+            WriteIntent = new() { TransactionId = intentOwner, Expires = HLCTimestamp.Zero, AcquiredAt = acquiredAt },
             MvccEntries = new()
             {
                 [intentOwner] = new KeyValueMvccEntry
@@ -458,15 +466,15 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     }
 
     /// <summary>
-    /// The run-S wedge, end to end: the head-advancing commit's ONE coherence notification arrives while an
-    /// orphan foreign intent is live and is dropped (by design — the defer itself is unchanged); its settle
+    /// The run-S wedge, end to end: the head-advancing commit's ONE coherence notification arrives while a
+    /// foreign intent is live and is dropped (by design — the defer itself is unchanged); its settle
     /// advances the fence's committed head; every later read-modify-write validates one behind and is refused.
     /// The refusal streak must trigger the wedge-repair hook within a handful of refusals — not 157,036 — and
     /// the reconcile it drives must converge the entry from the node's own durable row so the next attempt
     /// (validating the re-read, moved base) is acknowledged.
     /// </summary>
     [Fact]
-    public void RunSKernel_DroppedNotificationBehindOrphanIntent_HealsViaStreakReconcile()
+    public void RunSKernel_DroppedNotificationBehindLiveIntent_HealsViaStreakReconcile()
     {
         Harness h = BuildHarness("inv-runs-kernel");
         PreparedIntentStore intents = new();
@@ -475,18 +483,19 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         intents.AttachFenceWedgeRepairer((key, validatedBase, committedHead) =>
             repairRequests.Add((key, validatedBase, committedHead)));
 
-        // The healed old leader's state: entry at revision 5 with T0's orphan session lock (never expires,
-        // cleanup went to the then-current leader).
-        HLCTimestamp orphan = Ts(500);
-        KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/k", orphan);
+        // The healed old leader's state: entry at revision 5 with T0's session lock, whose cleanup went to
+        // the then-current leader. The holder is still inside its liveness ceiling, which is the window the
+        // wedge forms in: past the ceiling the intent is dropped and the notification applies instead.
+        HLCTimestamp holder = Ts(500);
+        KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/k", holder);
 
         // The onset commit T (revision 6, base 5) elsewhere: its one notification arrives here while the
-        // orphan is live — dropped. Its settle applies — the head reaches 6.
+        // holder is live — dropped. Its settle applies — the head reaches 6.
         HLCTimestamp tx = Ts(1_000);
         KeyValueResponse? dropped = h.Handler.Execute(
             MaterializationOf("acct/k", tx, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: false));
         Assert.Null(dropped);
-        Assert.Equal(5, entry.Revision); // frozen: the notification was deferred behind the orphan intent
+        Assert.Equal(5, entry.Revision); // frozen: the notification was deferred behind the live intent
 
         PreparedIntent committed = new(
             TransactionId: tx, Epoch: 1, Key: "acct/k",
@@ -522,7 +531,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Assert.True(attempts <= 6, $"the repair must trigger within a handful of refusals, took {attempts}");
 
         // The repair's reconcile: the node's own durable row has revision 6 (the replicator recorded and
-        // flushed it before the notification was dropped). Adopting it clears the orphan and converges.
+        // flushed it before the notification was dropped). Adopting it clears the intent and converges.
         ReadOnlyKeyValueEntry durableRow = new("v6"u8.ToArray(), 6, HLCTimestamp.Zero, Ts(6_000), Ts(6_000), KeyValueState.Set);
         h.Handler.Execute(ReconcileOf("acct/k", durableRow));
 

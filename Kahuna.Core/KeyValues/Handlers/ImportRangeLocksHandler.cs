@@ -35,13 +35,15 @@ internal sealed class ImportRangeLocksHandler : BaseHandler
         else
         {
             // Prune expired destination locks first so re-import dedups against live locks only.
-            RangeLockChecks.PruneExpired(locks, currentTime, int.MaxValue);
+            RangeLockChecks.PruneExpired(context, message.Key, locks, currentTime, int.MaxValue);
         }
 
         foreach (KeyValueRangeLock entry in message.RangeLockImportList)
         {
-            // Never import an already-expired lock as if it were live.
-            if (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime <= TimeSpan.Zero)
+            // Never import an already-expired lock as if it were live. A zero-deadline lock past the
+            // session-owned ceiling is expired too: importing one would resurrect an orphaned lock on the
+            // destination range, where nothing but the ceiling can clear it again.
+            if (!RangeLockChecks.IsLive(entry, currentTime, context.SessionOwnedIntentCeilingMs))
                 continue;
 
             // Deduplicate: skip if this tx already has an overlapping entry (handles re-import).

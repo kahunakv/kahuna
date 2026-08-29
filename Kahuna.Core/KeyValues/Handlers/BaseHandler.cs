@@ -440,9 +440,7 @@ internal abstract class BaseHandler
         // after the session is reaped. Any MVCC snapshot whose owning transaction started more than this
         // span ago must be from a dead session — using the *maximum* (not the default) timeout is what keeps
         // this safe for a long-running transaction started with a larger-than-default timeout.
-        long sessionMaxLifespanMs = context.Configuration.MaxTransactionTimeout
-            + TransactionCoordinator.ReapGraceMs
-            + TransactionCoordinator.MaxParticipantEffectTtlMs;
+        long sessionMaxLifespanMs = TransactionCoordinator.SessionMaxLifespanMs(context.Configuration);
 
         List<HLCTimestamp>? stale = null;
         foreach ((HLCTimestamp txId, KeyValueMvccEntry mvcc) in entry.MvccEntries)

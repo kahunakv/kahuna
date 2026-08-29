@@ -1,0 +1,23 @@
+  Determining projects to restore...
+  Restored /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/Kahuna.Server.Tests.csproj (in 131 ms).
+  4 of 5 projects are up-to-date for restore.
+  Kahuna.Shared -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Shared/bin/Debug/net10.0/Kahuna.Shared.dll
+  Kahuna.Client -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Client/bin/Debug/net10.0/Kahuna.Client.dll
+  Kahuna.Core -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Core/bin/Debug/net10.0/Kahuna.Core.dll
+  Kahuna.Server -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Server/bin/Debug/net10.0/Kahuna.Server.dll
+  Kahuna.Server.Tests -> /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/bin/Debug/net10.0/Kahuna.Server.Tests.dll
+Test run for /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/bin/Debug/net10.0/Kahuna.Server.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+[xUnit.net 00:05:53.70]     Kahuna.Server.Tests.TestRangeSplit.Lock_SpanningSplit_EnforcedOnNewPartition [SKIP]
+  Skipped Kahuna.Server.Tests.TestRangeSplit.Lock_SpanningSplit_EnforcedOnNewPartition [1 ms]
+[xUnit.net 00:06:10.76]     Kahuna.Server.Tests.TestRangeMerge.Lock_OnMergedPartition_ReleaseCleansSurvivor [SKIP]
+  Skipped Kahuna.Server.Tests.TestRangeMerge.Lock_OnMergedPartition_ReleaseCleansSurvivor [1 ms]
+[xUnit.net 00:06:14.00]     Kahuna.Server.Tests.TestRangeSplit.Lock_SpanningSplit_ReleaseCleansBothHalves [SKIP]
+  Skipped Kahuna.Server.Tests.TestRangeSplit.Lock_SpanningSplit_ReleaseCleansBothHalves [1 ms]
+[xUnit.net 00:06:23.59]     Kahuna.Server.Tests.TestRangeMerge.Lock_OnMergedPartition_Enforced [SKIP]
+  Skipped Kahuna.Server.Tests.TestRangeMerge.Lock_OnMergedPartition_Enforced [1 ms]
+[xUnit.net 00:06:59.20]     Kahuna.Server.Tests.TestRangeSplit.SharedLock_SpanningSplit_BothHalvesCoexist [SKIP]
+  Skipped Kahuna.Server.Tests.TestRangeSplit.SharedLock_SpanningSplit_BothHalvesCoexist [1 ms]
+Results File: /Volumes/Data HD/Repositories/kahuna/Kahuna.Server.Tests/TestResults/affected.trx
+
+Passed!  - Failed:     0, Passed:   220, Skipped:     5, Total:   225, Duration: 7 m 30 s - Kahuna.Server.Tests.dll (net10.0)

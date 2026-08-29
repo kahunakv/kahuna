@@ -80,7 +80,10 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (KeyValueWriteIntentLease.IsLive(intent, message.CommitId))
+                // Liveness is evaluated at the commit id rather than at a fresh clock read. The coordinator
+                // mints that timestamp at prepare, so it tracks this actor's clock closely enough for both
+                // the deadline comparison and the age the session-owned ceiling measures.
+                if (KeyValueWriteIntentLease.IsLive(context, entry.Bucket, intent, message.CommitId))
                     return new(KeyValueResponseType.MustRetry, 0);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
@@ -153,8 +156,8 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         // stamped at MVCC write time in TrySetHandler). This lets snapshot readers determine whether the
         // in-flight write will commit at-or-before their readTimestamp without blocking the actor.
         // CommitId is a different coordinator-supplied fence value and is NOT used here.
-        HLCTimestamp intentExpires = context.Raft.HybridLogicalClock
-            .TrySendOrLocalEvent(context.Raft.GetLocalNodeId()) + DefaultTxCompleteTimeout;
+        HLCTimestamp prepareTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        HLCTimestamp intentExpires = prepareTime + DefaultTxCompleteTimeout;
 
         if (entry.WriteIntent is null)
         {
@@ -162,6 +165,7 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
             {
                 TransactionId    = message.TransactionId,
                 Expires          = intentExpires,
+                AcquiredAt       = prepareTime,
                 CommitTimestamp  = mvccEntry.LastModified,
                 RecordAnchorKey  = message.RecordAnchorKey
             };

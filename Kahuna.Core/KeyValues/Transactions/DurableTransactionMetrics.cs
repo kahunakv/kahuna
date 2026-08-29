@@ -188,6 +188,19 @@ internal static class DurableTransactionMetrics
             description: "Range scans failed loudly after one page answered transient for the whole retry budget.");
 
     /// <summary>
+    /// Session-owned locks dropped because they outlived the liveness ceiling: a write intent or range lock
+    /// requested with no deadline whose owning session never released it. Past the ceiling the session is
+    /// provably finalized or reaped, so the lock is orphaned and the key would otherwise stay unservable to
+    /// snapshot scans for the life of the process. The <c>kind</c> tag separates point and prefix intents
+    /// from range locks; the paired warning names the key and the owning transaction, which is the only
+    /// record of who left it behind. A firing marks a wedge that healed, not a failed operation.
+    /// </summary>
+    internal static readonly Counter<long> SessionOwnedIntentCeilingExpiries =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.session_owned_intent_ceiling_expiries",
+            description: "Session-owned write intents and range locks dropped after outliving the liveness ceiling.");
+
+    /// <summary>
     /// Operation completions carrying at least one confirmed working-set effect (a modified key, a staged
     /// mutation, an acquired lock, or a read observation) that arrived for an operation record that is
     /// absent or no longer pending — so the effect was applied at a participant but can never enter the

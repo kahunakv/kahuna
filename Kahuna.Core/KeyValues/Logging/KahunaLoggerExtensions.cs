@@ -181,6 +181,12 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "Assigned {Key} write intent to TxId={TransactionId} (range lock)")]
     public static partial void LogAssignedWriteIntentRangeLock(this ILogger<IKahuna> logger, string key, HLCTimestamp transactionId);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Session-owned write intent on {Key} outlived the {CeilingMs} ms liveness ceiling and was dropped; its owner TxId={TransactionId} never released it")]
+    public static partial void LogSessionOwnedIntentCeilingExpiry(this ILogger<IKahuna> logger, string? key, HLCTimestamp transactionId, int ceilingMs);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Session-owned range lock over bucket {Bucket} outlived the {CeilingMs} ms liveness ceiling and was dropped; its owner TxId={TransactionId} never released it")]
+    public static partial void LogSessionOwnedRangeLockCeilingExpiry(this ILogger<IKahuna> logger, string? bucket, HLCTimestamp transactionId, int ceilingMs);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "Successfully commmitted key/value {Key} Partition={Partition} ProposalIndex={ProposalIndex}")]
     public static partial void LogSuccessfullyCommittedKeyValue(this ILogger<IKahuna> logger, string key, int partition, long proposalIndex);
 

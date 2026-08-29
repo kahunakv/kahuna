@@ -24,7 +24,9 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>
     /// Grace added on top of a session's own timeout before the reaper reclaims it. Kept at or above
     /// the write-intent TTL (DefaultTxCompleteTimeout, 15 s) so that by the time a session is reaped
-    /// any commit it could still attempt would already fail on expired intents.
+    /// any commit it could still attempt would already fail on expired intents. A session-owned intent
+    /// carries no deadline of its own; the liveness ceiling built from this constant is what makes the
+    /// same statement true for it (see <see cref="SessionMaxLifespanMs"/>).
     /// </summary>
     internal const int ReapGraceMs = 15_000;
 
@@ -35,6 +37,16 @@ internal sealed class TransactionCoordinator : IDisposable
     /// expiring it, so it never abandons a session whose in-flight effect could still land at a participant.
     /// </summary>
     internal const int MaxParticipantEffectTtlMs = 15_000;
+
+    /// <summary>
+    /// Longest wall-clock span, in milliseconds, that any interactive session can still matter: its clamped
+    /// maximum timeout, plus the reaper's grace window, plus the maximum time a dispatched effect can still
+    /// land at a participant after the session is reaped. Past this span from a session's start, that session
+    /// is provably gone and anything it left behind is orphaned. Both consumers of that fact — the MVCC
+    /// snapshot trim and the session-owned lock ceiling — read the span from here so they cannot drift apart.
+    /// </summary>
+    internal static int SessionMaxLifespanMs(KahunaConfiguration configuration) =>
+        configuration.MaxTransactionTimeout + ReapGraceMs + MaxParticipantEffectTtlMs;
 
     /// <summary>
     /// Maximum number of phase-two (commit/rollback) retry attempts when a participant returns

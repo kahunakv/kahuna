@@ -154,6 +154,16 @@ internal sealed class KeyValueContext
 
     public KahunaConfiguration Configuration  { get; }
 
+    /// <summary>
+    /// Milliseconds a session-owned (zero-deadline) write intent or range lock may live before it is treated
+    /// as orphaned. Resolved per evaluation from the configured value, or derived from the span the session
+    /// machinery already bounds itself by when the operator leaves it at zero. Read on the actor thread only.
+    /// </summary>
+    public int SessionOwnedIntentCeilingMs =>
+        Configuration.SessionOwnedIntentCeilingMs > 0
+            ? Configuration.SessionOwnedIntentCeilingMs
+            : Transactions.TransactionCoordinator.SessionMaxLifespanMs(Configuration);
+
     public ILogger<IKahuna> Logger  { get; }
 
     public long ApproximateStoreBytes => approximateStoreBytes;

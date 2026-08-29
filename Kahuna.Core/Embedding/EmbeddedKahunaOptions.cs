@@ -549,6 +549,15 @@ public sealed class EmbeddedKahunaOptions
     public int ScanPageRetryBudgetMs { get; set; } = 5_000;
 
     /// <summary>
+    /// Milliseconds a session-owned write intent or range lock — one requested with no expiry — may stay
+    /// live without its owner releasing it, after which it is treated as orphaned and dropped. Zero derives
+    /// it from the span the session machinery already bounds itself by. An embedded host sets this to
+    /// compress the timeline; a deployed node's value is floor-checked at configuration load. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.SessionOwnedIntentCeilingMs"/>.
+    /// </summary>
+    public int SessionOwnedIntentCeilingMs { get; set; }
+
+    /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
     /// head. Must comfortably exceed the longest transaction lifetime the deployment allows. See
     /// <see cref="Server.Configuration.KahunaConfiguration.StagedBaseFenceRetentionMs"/>.

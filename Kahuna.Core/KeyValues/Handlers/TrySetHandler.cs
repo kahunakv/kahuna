@@ -186,7 +186,7 @@ internal sealed class TrySetHandler : BaseHandler
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
-                if (KeyValueWriteIntentLease.IsLive(entry.WriteIntent, currentTime))
+                if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                     return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
 
                 entry.WriteIntent = null;
@@ -199,7 +199,7 @@ internal sealed class TrySetHandler : BaseHandler
         {
             if (intent.TransactionId != message.TransactionId)
             {
-                if (KeyValueWriteIntentLease.IsLive(intent, currentTime))
+                if (KeyValueWriteIntentLease.IsLive(context, entry.Bucket, intent, currentTime))
                     return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
