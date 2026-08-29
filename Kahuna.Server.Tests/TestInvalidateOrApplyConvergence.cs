@@ -115,17 +115,19 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         return new(context, new InvalidateOrApplyHandler(context), store, raft);
     }
 
-    /// <summary>Installs a resident entry at revision 5 carrying <paramref name="intentOwner"/>'s staged
-    /// write intent and MVCC snapshot — the state a partition leader holds for a key mid-2PC.</summary>
     /// <summary>
-    /// Seeds an entry held by a foreign session-owned write intent. The intent is stamped with the harness's
-    /// current clock so it is live under the session-owned liveness ceiling: these tests are about what a
-    /// notification does while a foreign holder is genuinely live, and an intent anchored in the synthetic
-    /// past would instead be treated as orphaned and cleared before the notification is even considered.
+    /// Installs a resident entry at revision 5 carrying <paramref name="intentOwner"/>'s staged write intent
+    /// and MVCC snapshot — the state a partition leader holds for a key mid-2PC.
+    ///
+    /// <para>The intent is stamped from the harness clock, so it is live under the session-owned liveness
+    /// ceiling. Pass <paramref name="orphaned"/> to age that stamp past the ceiling instead, which is the
+    /// holder whose session can no longer exist — the policy drops such a holder on sight.</para>
     /// </summary>
-    private static KeyValueEntry SeedEntryWithIntent(KeyValueContext context, string key, HLCTimestamp intentOwner)
+    private static KeyValueEntry SeedEntryWithIntent(
+        KeyValueContext context, string key, HLCTimestamp intentOwner, bool orphaned = false)
     {
-        HLCTimestamp acquiredAt = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+        HLCTimestamp acquiredAt = orphaned ? now - context.SessionOwnedIntentCeilingMs - 1_000 : now;
 
         KeyValueEntry entry = new()
         {
@@ -227,6 +229,31 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Assert.Equal(5, entry.Revision);
         Assert.NotNull(entry.WriteIntent);
         Assert.Equal(holder, entry.WriteIntent!.TransactionId);
+    }
+
+    /// <summary>
+    /// The same notification behind a holder whose session can no longer exist must not defer. Deferring
+    /// froze the entry for the life of the process: reads kept serving the superseded revision while the
+    /// staged-base fence's committed head advanced on the replicated settle, refusing every later
+    /// read-modify-write of the key. The single-shot notification is the only signal that clears the intent
+    /// on a replica that lost leadership mid-transaction, so once the holder is provably gone the apply must
+    /// go through — that is the wedge healing instead of forming.
+    /// </summary>
+    [Fact]
+    public void ForeignOrphanedIntentNotification_AppliesAndClearsTheIntent()
+    {
+        Harness h = BuildHarness("inv-foreign-orphan");
+        HLCTimestamp holder = Ts(1_000);
+        HLCTimestamp other = Ts(2_000);
+        KeyValueEntry entry = SeedEntryWithIntent(h.Context, "acct/c", holder, orphaned: true);
+
+        KeyValueResponse? response = h.Handler.Execute(
+            MaterializationOf("acct/c", other, revision: 6, "v6"u8.ToArray(), Ts(6_000), forceResident: false));
+
+        Assert.Null(response);
+        Assert.Equal(6, entry.Revision);
+        Assert.Equal("v6"u8.ToArray(), entry.Value);
+        Assert.Null(entry.WriteIntent);
     }
 
     [Fact]
