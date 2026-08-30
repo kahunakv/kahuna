@@ -134,6 +134,18 @@ internal sealed class PreparedIntentStore
     /// refusal streak, and must not block or re-enter the store.</summary>
     public void AttachFenceWedgeRepairer(Action<string, long, long> repairer) => onFenceWedgeRepair = repairer;
 
+    // Invoked (outside the apply gate) with the refused prepare's intent and the remembered committed-head
+    // revision whenever THIS node's fence flags a replicated validated-base prepare as stale. The verdict is
+    // deterministically correct at the prepare's apply position (heads record only real commits, in log
+    // order), even when the acknowledging leader's frozen memory admitted the prepare — so the wiring drives
+    // a best-effort abort at the transaction's anchor. Must not block and must not re-enter the store.
+    private Action<PreparedIntent, long>? onStaleBaseVeto;
+
+    /// <summary>Wires the replica stale-base veto hook (manager construction): (refused intent, committed head
+    /// revision). Runs on the apply path outside the gate, once per stale-flagged prepare apply on this node,
+    /// and must not block or re-enter the store. See <see cref="ApplyDeltaAckPrepares"/> for the trigger.</summary>
+    public void AttachStaleBaseVetoer(Action<PreparedIntent, long> vetoer) => onStaleBaseVeto = vetoer;
+
     /// <summary>Sets the staged-base fence retention horizon. The caller must pass a value comfortably above
     /// the longest possible transaction lifetime: the staleness gate refuses to acknowledge a validated-base
     /// prepare from a transaction older than this horizon, so a horizon below real transaction lifetimes turns
@@ -559,23 +571,37 @@ internal sealed class PreparedIntentStore
     /// flagged an applied prepare's validated base as moved (<see cref="PreparedIntentApplyResult.StaleBase"/>).
     /// Neither is an acknowledged prepare: the producer must abort rather than commit a mutation whose
     /// recoverable intent it never owned, or whose base a competitor already re-committed (a lost update).
-    /// Resolve/remove deltas carry no prepares, so they always report true.</summary>
+    /// Resolve/remove deltas carry no prepares, so they always report true.
+    ///
+    /// <para>A stale-flagged prepare additionally fires the replica veto hook: the acknowledgement that folds
+    /// this method's return value is the LEADER's alone, so on any other node the flag would otherwise be a
+    /// verdict with no effect — and a leader whose own memory is frozen admits exactly the prepares the healthy
+    /// replicas refuse (the fsync-gate fork producer). The hook runs after the applies, outside the gate. The
+    /// restore path (<see cref="Restore"/>) deliberately bypasses this method, so replayed history never
+    /// vetoes; ordered live catch-up cannot produce a false flag, because heads advance in the same log order
+    /// the prepares apply in.</para></summary>
     public bool ApplyDeltaAckPrepares(RaftLog log)
     {
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
 
         bool allPreparesAccepted = true;
+        List<PreparedIntent>? staleFlagged = null;
 
         if (TryTakeLocallyProposed(log.LogData, out PreparedIntentCommand[]? proposed))
         {
             foreach (PreparedIntentCommand command in proposed)
             {
                 PreparedIntentApplyResult result = Apply(command);
-                if (command is PrepareIntentCommand && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
+                if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
+                {
                     allPreparesAccepted = false;
+                    if (result.StaleBase)
+                        (staleFlagged ??= []).Add(prepare.Intent);
+                }
             }
 
+            FireStaleBaseVetoes(staleFlagged);
             return allPreparesAccepted;
         }
 
@@ -585,11 +611,31 @@ internal sealed class PreparedIntentStore
         {
             PreparedIntentCommand command = ToCommand(message, delta.Header);
             PreparedIntentApplyResult result = Apply(command);
-            if (command is PrepareIntentCommand && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
+            if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
+            {
                 allPreparesAccepted = false;
+                if (result.StaleBase)
+                    (staleFlagged ??= []).Add(prepare.Intent);
+            }
         }
 
+        FireStaleBaseVetoes(staleFlagged);
         return allPreparesAccepted;
+    }
+
+    /// <summary>Fires the veto hook for each stale-flagged prepare of one delta apply, with the head revision
+    /// re-read at invocation (a benign race with a concurrent settle can only raise it). No gate is held here;
+    /// the wiring schedules detached work.</summary>
+    private void FireStaleBaseVetoes(List<PreparedIntent>? staleFlagged)
+    {
+        if (staleFlagged is null || onStaleBaseVeto is null)
+            return;
+
+        foreach (PreparedIntent intent in staleFlagged)
+        {
+            committedHeads.TryGetValue(intent.Key, out CommittedHead head);
+            onStaleBaseVeto(intent, head.Revision);
+        }
     }
 
     private bool ApplyLog(RaftLog log)

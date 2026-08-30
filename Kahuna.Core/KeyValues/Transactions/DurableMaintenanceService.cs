@@ -720,6 +720,81 @@ internal sealed class DurableMaintenanceService
         return await LookupDurableRecordRouted(abort.TransactionId, abort.Epoch, anchorKey, cancellationToken).ConfigureAwait(false);
     }
 
+    // Transactions this node has already vetoed, so the finalizer's prepare-retry (which re-proposes the same
+    // delta up to its retry budget) costs one veto instead of one per retry. Bounded by a wholesale clear at the
+    // cap — vetoes are rare by construction, so the map staying tiny is the norm and a clear only risks one
+    // duplicate veto per entry, which the record state machine absorbs idempotently.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), byte> vetoedTransactions = new();
+
+    private const int VetoedTransactionsMaxTracked = 4_096;
+
+    /// <summary>
+    /// Drives a replica stale-base veto: proposes an Abort for the prepare's transaction at its anchor and
+    /// classifies the outcome. Invoked (detached) when THIS node's fence memory proves a replicated
+    /// validated-base prepare's base moved while the acknowledging leader admitted it — the leader-local
+    /// enforcement hole behind the fsync-gate lost-update forks, where the healthy majority computed the
+    /// refusal and had no way to make it count.
+    ///
+    /// <para>Safety rests on two facts. The verdict is deterministically correct at the prepare's apply
+    /// position: committed heads record only real settled commits and advance in the same log order the
+    /// prepare applied in, so a node can be behind (admits, never vetoes) but never wrongly ahead. And the
+    /// abort is harmless when it loses: the record state machine never lets an abort overwrite a commit, so a
+    /// veto that arrives after the decision degrades to a counted, logged no-op.</para>
+    ///
+    /// <para>Outcomes: abort won — a lost update was prevented (counted as upheld); commit already recorded —
+    /// a confirmed stale-base commit exists (counted as late, logged as an error: this is a fork the veto
+    /// missed, or one found retroactively during catch-up); still undecided — the drive itself could not
+    /// resolve the record (counted as sent only; the recovery sweep owns the transaction from here).</para>
+    /// </summary>
+    internal async Task VetoStaleBasePrepareAsync(PreparedIntent intent, long committedHeadRevision, CancellationToken cancellationToken = default)
+    {
+        if (!vetoedTransactions.TryAdd((intent.TransactionId, intent.Epoch), 0))
+            return;
+
+        if (vetoedTransactions.Count > VetoedTransactionsMaxTracked)
+            vetoedTransactions.Clear();
+
+        DurableTransactionMetrics.StaleBaseVetoSent();
+        logger.LogWarning(
+            "Stale-base veto for transaction {TransactionId} (epoch {Epoch}): this node's fence memory proves key {Key} moved past the validated base (base revision {BaseRevision}, committed head {HeadRevision}); driving an abort at anchor {AnchorKey}",
+            intent.TransactionId, intent.Epoch, intent.Key, intent.BaseRevision, committedHeadRevision, intent.RecordAnchorKey);
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        AbortTransactionCommand abort = new(
+            intent.TransactionId, intent.Epoch, intent.ManifestHash, TransactionAbortClass.Conflict,
+            OpId: now, AttemptHlc: now,
+            intent.RecordAnchorKey,
+            CommitTimestamp: intent.CommitTimestamp,
+            DecisionDeadline: intent.RecoveryDeadline,
+            CreatedAt: now);
+
+        TransactionRecord? after = await DriveDurableAbortAsync(abort, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+
+        switch (after?.Decision)
+        {
+            case TransactionDecision.Abort:
+                DurableTransactionMetrics.StaleBaseVetoUpheld();
+                logger.LogWarning(
+                    "Stale-base veto upheld for transaction {TransactionId}: the abort won at the anchor; a lost update on key {Key} was prevented (base revision {BaseRevision}, committed head {HeadRevision})",
+                    intent.TransactionId, intent.Key, intent.BaseRevision, committedHeadRevision);
+                break;
+
+            case TransactionDecision.Commit:
+                DurableTransactionMetrics.StaleBaseVetoLate();
+                logger.LogError(
+                    "Stale-base veto arrived late for transaction {TransactionId}: the commit is already recorded, so key {Key} carries a committed write validated against revision {BaseRevision} while this node's committed head was {HeadRevision} — an acknowledged stale-base commit",
+                    intent.TransactionId, intent.Key, intent.BaseRevision, committedHeadRevision);
+                break;
+
+            default:
+                logger.LogWarning(
+                    "Stale-base veto for transaction {TransactionId} did not resolve the record (key {Key}); the recovery sweep owns the transaction from here",
+                    intent.TransactionId, intent.Key);
+                break;
+        }
+    }
+
     /// <summary>
     /// Releases an exclusive range lock on the leader of <paramref name="partitionId"/>, forwarding
     /// via IPC if this node is not the leader. Used by <see cref="RangeSplitter"/> to release the

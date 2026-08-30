@@ -442,6 +442,32 @@ internal sealed class KeyValuesManagerBuilder
         localMutationTickets = new(runtime);
         localScans = new(runtime, localKeyValues);
         durableMaintenance = new(runtime, manager, txCoordinator, rangeStateTransfer, localLocks);
+
+        // Replica stale-base veto: when THIS node's fence memory proves a replicated validated-base prepare's
+        // base moved, the verdict is deterministically correct — but the acknowledgement folds only the
+        // LEADER's verdict, and a leader whose memory is frozen admits exactly the prepares the healthy
+        // replicas refuse (the fsync-gate fork producer: g152r1 recorded 60+ refusal verdicts on healthy nodes
+        // against zero on the leader that acknowledged). The veto drives a best-effort abort at the
+        // transaction's anchor; the record state machine keeps it harmless when it loses the race. Detached:
+        // the hook fires on the partition apply path and must not block it.
+        DurableMaintenanceService vetoMaintenance = durableMaintenance;
+        ILogger<IKahuna> vetoLogger = logger;
+        preparedIntentStore.AttachStaleBaseVetoer((intent, committedHeadRevision) =>
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await vetoMaintenance.VetoStaleBasePrepareAsync(intent, committedHeadRevision).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // Best-effort by design: a failed veto leaves exactly the pre-veto behavior (the fork
+                    // witness still records the outcome); it must never take the apply path down with it.
+                    vetoLogger.LogWarning(ex,
+                        "Stale-base veto failed for transaction {TransactionId} on key {Key}",
+                        intent.TransactionId, intent.Key);
+                }
+            }));
         operationRegistrar = new(runtime, txCoordinator);
         routedWrites = new(runtime, operationRegistrar);
         routedReads = new(runtime, operationRegistrar);

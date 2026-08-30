@@ -127,6 +127,66 @@ internal static class DurableTransactionMetrics
             description: "Validated-base prepares admitted because the fence held no committed head for the key.");
 
     /// <summary>
+    /// Stale-base vetoes dispatched by replicas. When a node applies a replicated validated-base prepare and its
+    /// own fence memory proves the base moved, that verdict is deterministically correct (heads record only real
+    /// commits, in log order) even when the acknowledging leader's memory is frozen and admitted the prepare —
+    /// the exact hole behind the fsync-gate lost-update forks. Each veto drives a best-effort Abort at the
+    /// transaction's anchor; the record state machine makes it safe (an abort never overwrites a commit).
+    /// </summary>
+    internal static readonly Counter<long> StaleBaseVetoesSent =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.stale_base_vetoes_sent",
+            description: "Replica-side aborts driven for prepares whose validated base this node's fence proved stale.");
+
+    private static long staleBaseVetoesSent;
+
+    /// <summary>Process-wide count behind <see cref="StaleBaseVetoesSent"/>, readable for tests.</summary>
+    internal static long StaleBaseVetoesSentCount => Interlocked.Read(ref staleBaseVetoesSent);
+
+    internal static void StaleBaseVetoSent()
+    {
+        Interlocked.Increment(ref staleBaseVetoesSent);
+        StaleBaseVetoesSent.Add(1);
+    }
+
+    /// <summary>Vetoes whose abort won at the anchor: a lost update was prevented by a replica's verdict after
+    /// the leader had already admitted the stale base. Any occurrence means the leader-local fence was blind.</summary>
+    internal static readonly Counter<long> StaleBaseVetoesUpheld =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.stale_base_vetoes_upheld",
+            description: "Replica stale-base vetoes whose abort won at the transaction's anchor.");
+
+    private static long staleBaseVetoesUpheld;
+
+    /// <summary>Process-wide count behind <see cref="StaleBaseVetoesUpheld"/>, readable for tests.</summary>
+    internal static long StaleBaseVetoesUpheldCount => Interlocked.Read(ref staleBaseVetoesUpheld);
+
+    internal static void StaleBaseVetoUpheld()
+    {
+        Interlocked.Increment(ref staleBaseVetoesUpheld);
+        StaleBaseVetoesUpheld.Add(1);
+    }
+
+    /// <summary>Vetoes that found the commit already recorded. Each is a confirmed acknowledged stale-base
+    /// commit that got past every fence — the residual race window, or a fork discovered retroactively during a
+    /// catch-up replay. Always investigated; the paired log line names the key and both revisions.</summary>
+    internal static readonly Counter<long> StaleBaseVetoesLate =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.stale_base_vetoes_late",
+            description: "Replica stale-base vetoes that found the transaction already committed.");
+
+    private static long staleBaseVetoesLate;
+
+    /// <summary>Process-wide count behind <see cref="StaleBaseVetoesLate"/>, readable for tests.</summary>
+    internal static long StaleBaseVetoesLateCount => Interlocked.Read(ref staleBaseVetoesLate);
+
+    internal static void StaleBaseVetoLate()
+    {
+        Interlocked.Increment(ref staleBaseVetoesLate);
+        StaleBaseVetoesLate.Add(1);
+    }
+
+    /// <summary>
     /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
     /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
     /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals
