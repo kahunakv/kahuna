@@ -71,6 +71,17 @@ internal sealed class PointReadContinuation : ReadContinuation
             }
         }
 
+        // A disk row (or absence) below this node's committed-head memory is provably stale — the
+        // key has committed history the local durable state does not reflect. Serving or installing
+        // it would hand a promoted leader a stale base; refuse and let the scheduled convergence
+        // repair advance the local state before the caller's retry. The resident branch above is
+        // deliberately not guarded: a resident entry converges in mailbox order.
+        if (BaseHandler.HydratedRowProvablyStale(context, key, disk))
+        {
+            Resolve(KeyValueStaticResponses.MustRetryResponse);
+            return;
+        }
+
         // Disk entry is newer (or nothing was resident) — populate cache and serve disk value.
         if (disk is not null)
         {

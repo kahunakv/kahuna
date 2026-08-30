@@ -285,6 +285,51 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Whether a persistent cache-miss hydration produced a row that is provably stale: the staged-base fence's
+    /// committed-head memory (fed by replicated commit settlements on this node) records a newer committed
+    /// durable-transaction write than the hydrated row reflects. Every recorded head is a real commit, so a
+    /// lower hydrated revision means this node's local durable state lost committed history — the precondition
+    /// under which a freshly promoted leader serves a stale base and a read-modify-write silently discards the
+    /// missing writes. When stale, this counts and logs the witness and schedules the convergence repair
+    /// (parked-head re-drive plus local-history reconcile); the caller must answer MustRetry instead of serving
+    /// or installing the row.
+    ///
+    /// <para>Deliberately consulted only for hydrations, never for resident entries: a resident entry lagging
+    /// its own committed head transiently is ordinary actor-mailbox latency and is healed in mailbox order,
+    /// while a hydration below the head has no pending message that will fix it. A null <paramref name="hydrated"/>
+    /// is stale only against a head whose state is <see cref="KeyValueState.Set"/> — a deleted or pruned head
+    /// legitimately hydrates as absent.</para>
+    /// </summary>
+    protected bool HydratedRowProvablyStale(string key, KeyValueEntry? hydrated) =>
+        HydratedRowProvablyStale(context, key, hydrated);
+
+    /// <summary>Static form of <see cref="HydratedRowProvablyStale(string, KeyValueEntry?)"/> for read
+    /// continuations, which carry the context as a parameter rather than a field.</summary>
+    internal static bool HydratedRowProvablyStale(KeyValueContext context, string key, KeyValueEntry? hydrated)
+    {
+        Transactions.PreparedIntentStore? intentStore = context.PreparedIntentStore;
+        if (intentStore is null || !intentStore.TryGetCommittedHead(key, out long headRevision, out KeyValueState headState))
+            return false;
+
+        long observedRevision = hydrated?.Revision ?? -1;
+
+        if (headRevision <= observedRevision)
+            return false;
+
+        if (hydrated is null && headState != KeyValueState.Set)
+            return false;
+
+        Transactions.DurableTransactionMetrics.StaleHydrationRefused();
+        intentStore.RequestConvergenceRepair(key, observedRevision);
+
+        context.Logger.LogWarning(
+            "Refusing stale hydration for key {Key}: the loaded persistent row is at revision {ObservedRevision} but this node's committed-head memory records revision {HeadRevision}; answering MustRetry and scheduling the convergence repair",
+            key, observedRevision, headRevision);
+
+        return true;
+    }
+
+    /// <summary>
     /// Calculates the bucket name for the key.
     /// </summary>
     /// <param name="key"></param>

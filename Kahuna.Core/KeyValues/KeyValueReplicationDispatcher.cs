@@ -33,6 +33,13 @@ internal sealed class KeyValueReplicationDispatcher
 
     private readonly KeyValueReplicator replicator;
 
+    // Highest log id this node's key-value subsystem applied per partition, across restore and the committed
+    // apply path. Log ids are shared across subsystems, so gaps here prove nothing — but the value itself,
+    // logged in the leadership-change fingerprint below, makes a node whose apply stream stalled (frozen id
+    // while peers advance) visible from the node logs alone, which a silent per-partition stall otherwise
+    // never is. One dictionary write per applied entry.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> lastAppliedByPartition = new();
+
     internal KeyValueReplicationDispatcher(KeyValuesRuntime runtime, KeyValueRestorer restorer, KeyValueReplicator replicator)
     {
         this.runtime = runtime;
@@ -90,6 +97,8 @@ internal sealed class KeyValueReplicationDispatcher
     /// <returns></returns>
     public Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
+        TrackApplied(partitionId, log.Id);
+
         if (log.LogType == ReplicationTypes.RangeMap)
         {
             RegisterSynchronousApply(partitionId, log.Id);
@@ -160,6 +169,8 @@ internal sealed class KeyValueReplicationDispatcher
     /// <returns></returns>
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
+        TrackApplied(partitionId, log.Id);
+
         if (log.LogType == ReplicationTypes.RangeMap)
         {
             RegisterSynchronousApply(partitionId, log.Id);
@@ -261,21 +272,45 @@ internal sealed class KeyValueReplicationDispatcher
     /// <summary>
     /// Called by Kommander when partition leadership changes.
     ///
-    /// <para>Intentionally a no-op. The per-key <c>InvalidateOrApply</c> messages from
+    /// <para>Takes no corrective action. The per-key <c>InvalidateOrApply</c> messages from
     /// <see cref="KeyValueReplicator"/> keep every resident cache entry coherent as committed logs
     /// are applied on followers. Correctness at promotion depends on a node having applied all
     /// committed entries up to its commit frontier <em>before</em> it serves as leader — Kommander
-    /// now guarantees exactly that (it drains pending committed applies, and applies entries it
+    /// guarantees exactly that (it drains pending committed applies, and applies entries it
     /// commits via the leader path, before advertising the node as leader). With that guarantee a
     /// newly promoted leader's cache is already current, so no additional sweep or serving gate is
     /// needed here. The promotion-races-apply invariant is exercised by
     /// <c>PromotedLeader_RacingCommit_ServesLatestRevision</c>.</para>
+    ///
+    /// <para>What it does do is log the node's per-partition apply fingerprint: a violation of the
+    /// promotion guarantee (a stalled apply stream, an empty committed-head memory) is silent in
+    /// operation and only ever visible in hindsight, so every leadership change records the local
+    /// evidence needed to attribute one from node logs.</para>
     /// </summary>
     public Task<bool> OnLeaderChanged(int partitionId, string node)
     {
-        if (logger.IsEnabled(LogLevel.Debug))
-            logger.LogDebug("KeyValues: leader for partition {PartitionId} is now {Node}", partitionId, node);
+        // A leadership change is exactly the moment a node's applied projection becomes (or stops being)
+        // authoritative, and a stale projection at this moment is otherwise invisible: log the fingerprint —
+        // the subsystem's highest applied log id for the partition plus the durable-transaction store sizes —
+        // so that comparing this line across nodes localizes a silently stalled apply stream or an empty
+        // committed-head memory without any metric scrape. One line per node per leadership change.
+        if (logger.IsEnabled(LogLevel.Information))
+        {
+            lastAppliedByPartition.TryGetValue(partitionId, out long lastApplied);
+            logger.LogInformation(
+                "KeyValues: leader for partition {PartitionId} is now {Node} (local applied kv log id {LastApplied}, committed heads {CommittedHeads}, live intents {LiveIntents})",
+                partitionId, node, lastApplied,
+                runtime.PreparedIntentStore.CommittedHeadCount, runtime.PreparedIntentStore.LiveIntentCount);
+        }
 
         return Task.FromResult(true);
+    }
+
+    /// <summary>Records the highest applied log id per partition for the leadership-change fingerprint.
+    /// Monotonic; re-deliveries below the recorded id are ignored.</summary>
+    private void TrackApplied(int partitionId, long logId)
+    {
+        lastAppliedByPartition.AddOrUpdate(
+            partitionId, logId, (_, current) => logId > current ? logId : current);
     }
 }

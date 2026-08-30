@@ -338,7 +338,12 @@ internal sealed class PreparedIntentStore
             return $"transaction began before the staged-base fence retention horizon; its validated base for key {intent.Key} cannot be verified";
 
         if (!committedHeads.TryGetValue(intent.Key, out CommittedHead head))
+        {
+            // The only silent path around the fence: nothing to check is indistinguishable from "no commit
+            // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
+            DurableTransactionMetrics.FenceAdmissionsAbsentHead.Add(1);
             return null;
+        }
 
         // BaseState says whether the validated base was an existing value (the finalize-input builder maps an
         // observed non-existent base to Undefined). PreparedIntent.UnknownBaseRevision (no base at all) never
@@ -358,6 +363,51 @@ internal sealed class PreparedIntentStore
         return head.Revision > intent.BaseRevision
             ? $"committed base for key {intent.Key} changed after validation: validated revision {intent.BaseRevision}, committed head is now revision {head.Revision}"
             : null;
+    }
+
+    /// <summary>
+    /// Reads the fence's committed-head memory for <paramref name="key"/>: the revision and state of the last
+    /// durable-transaction commit whose settlement this node applied within retention. Lock-free (the map is
+    /// concurrent and heads are monotonic per key), so read paths may probe it per operation. False means the
+    /// memory holds nothing for the key — which can mean "no commit ever happened" or "the memory was pruned
+    /// or never fed"; callers must not treat absence as proof of no history.
+    /// </summary>
+    internal bool TryGetCommittedHead(string key, out long revision, out KeyValueState state)
+    {
+        if (committedHeads.TryGetValue(key, out CommittedHead head))
+        {
+            revision = head.Revision;
+            state = head.State;
+            return true;
+        }
+
+        revision = -1;
+        state = KeyValueState.Undefined;
+        return false;
+    }
+
+    /// <summary>Number of keys currently held in the committed-head memory. Observability only — logged in the
+    /// leadership-change fingerprint so a promotion with an empty memory is visible in the node log.</summary>
+    internal int CommittedHeadCount => committedHeads.Count;
+
+    /// <summary>Number of live prepared intents currently held. Observability only — logged in the
+    /// leadership-change fingerprint alongside <see cref="CommittedHeadCount"/>.</summary>
+    internal int LiveIntentCount => intents.Count;
+
+    /// <summary>
+    /// Requests the convergence repair for a key whose locally visible durable row was observed strictly below
+    /// the committed-head memory — the same wiring the fence-wedge watchdog drives (re-drive the parked head
+    /// mutation, then reconcile from local revision history). A no-op when the memory does not actually exceed
+    /// <paramref name="observedRevision"/> (a benign race with a concurrent settle) or when no hook is wired.
+    /// Never blocks: the wired hook only schedules detached work. Returns whether a repair was requested.
+    /// </summary>
+    internal bool RequestConvergenceRepair(string key, long observedRevision)
+    {
+        if (!committedHeads.TryGetValue(key, out CommittedHead head) || head.Revision <= observedRevision)
+            return false;
+
+        onFenceWedgeRepair?.Invoke(key, observedRevision, head.Revision);
+        return true;
     }
 
     /// <summary>Records a committed intent's mutation as its key's committed head and advances the pruning

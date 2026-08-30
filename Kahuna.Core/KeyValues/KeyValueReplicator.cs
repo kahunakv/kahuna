@@ -61,6 +61,12 @@ internal sealed class KeyValueReplicator
 
     private readonly ILogger<IKahuna> logger;
 
+    // Reads the key's remembered committed head from the staged-base fence memory (-1 when absent). Feeds the
+    // below-head fork witness in Replicate: a committed record entering the log below history this node already
+    // saw settle is how a stale-base commit permanently overwrites acknowledged writes, and the witness makes
+    // that fork attributable from the node log alone. Null (bare unit-test construction) disables the witness.
+    private readonly Func<string, long>? committedHeadRevisionProbe;
+
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KeyValueActorRing persistentRouter,
@@ -73,7 +79,8 @@ internal sealed class KeyValueReplicator
         PartitionDurabilityTracker? durabilityTracker = null,
         Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null,
         Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null,
-        Func<HLCTimestamp, long, bool>? transactionLocallyAborted = null)
+        Func<HLCTimestamp, long, bool>? transactionLocallyAborted = null,
+        Func<string, long>? committedHeadRevisionProbe = null)
     {
         this.backgroundWriter           = backgroundWriter;
         this.persistentRouter           = persistentRouter;
@@ -86,7 +93,32 @@ internal sealed class KeyValueReplicator
         this.hydrateFromBackend         = hydrateFromBackend;
         this.hydrateRevisionFromBackend = hydrateRevisionFromBackend;
         this.transactionLocallyAborted  = transactionLocallyAborted;
+        this.committedHeadRevisionProbe = committedHeadRevisionProbe;
         this.logger                     = logger;
+    }
+
+    /// <summary>
+    /// Fork witness on the committed-entry apply path: warns and counts when a committed key-value record
+    /// applies at a revision strictly below the key's remembered committed head. The benign producer is a late
+    /// re-driven materialization the head guards no-op; anything else is a committed record entering the log
+    /// below settled history — the permanent-overwrite shape of a lost update — and this line is what lets a
+    /// conserved-total drift in a soak run attribute to its producing transaction from the node log alone.
+    /// </summary>
+    private void WitnessBelowHeadMaterialization(KeyValueMessage keyValueMessage, long logIndex)
+    {
+        if (committedHeadRevisionProbe is null || keyValueMessage.NoRevision)
+            return;
+
+        long headRevision = committedHeadRevisionProbe(keyValueMessage.Key);
+        if (headRevision <= keyValueMessage.Revision)
+            return;
+
+        Transactions.DurableTransactionMetrics.BelowHeadMaterializations.Add(1);
+        logger.LogWarning(
+            "Committed key-value record for key {Key} applied at revision {Revision}, below this node's remembered committed head {HeadRevision} (transaction {TransactionId}, log entry {LogIndex})",
+            keyValueMessage.Key, keyValueMessage.Revision, headRevision,
+            new HLCTimestamp(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
+            logIndex);
     }
 
     // Answers whether this node's record store holds a terminal Abort for (transactionId, epoch). A local
@@ -708,6 +740,8 @@ internal sealed class KeyValueReplicator
                     // precedes any watermark advance over this index.
                     RegisterPendingApply(partitionId, log.Id, keyValueMessage);
 
+                    WitnessBelowHeadMaterialization(keyValueMessage, log.Id);
+
                     // Collision witness: this apply is about to become durable unconditionally (the overlay
                     // record and the queued flush below run for every committed entry; the actor's head
                     // guards protect only the resident cache). A record whose revision equals the newest
@@ -794,6 +828,8 @@ internal sealed class KeyValueReplicator
                     HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
 
                     RegisterPendingApply(partitionId, log.Id, keyValueMessage);
+
+                    WitnessBelowHeadMaterialization(keyValueMessage, log.Id);
 
                     unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
                         expires, lastUsed, lastModified, KeyValueState.Deleted, keyValueMessage.NoRevision);

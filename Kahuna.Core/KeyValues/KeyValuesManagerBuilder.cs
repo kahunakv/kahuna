@@ -357,7 +357,12 @@ internal sealed class KeyValuesManagerBuilder
             // so no path — resolution, recovery settle, helping, or commit repair — may materialize a leg
             // of that transaction.
             transactionLocallyAborted: (transactionId, epoch) =>
-                transactionRecordStore.Get(transactionId, epoch) is { Decision: Transactions.Data.TransactionDecision.Abort });
+                transactionRecordStore.Get(transactionId, epoch) is { Decision: Transactions.Data.TransactionDecision.Abort },
+            // Feeds the below-head fork witness: a committed kv record applying below the key's remembered
+            // committed head is the permanent-overwrite shape of a lost update, and the witness line makes it
+            // attributable from the node log. A lock-free dictionary probe per committed kv apply.
+            committedHeadRevisionProbe: key =>
+                preparedIntentStore.TryGetCommittedHead(key, out long headRevision, out _) ? headRevision : -1);
 
         // Commit-settlement convergence check: at the same apply position that advances the staged-base
         // fence's committed head, verify this node's replicator actually processed the commit's kv record —

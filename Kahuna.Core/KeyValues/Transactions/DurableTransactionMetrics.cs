@@ -77,6 +77,56 @@ internal static class DurableTransactionMetrics
             description: "Prepare acknowledgements refused because the written key's committed base moved before the prepare applied.");
 
     /// <summary>
+    /// Cache-miss hydrations refused because the loaded persistent row (or its absence) sits strictly below the
+    /// staged-base fence's committed-head memory for the key. That state is provably stale: every recorded head
+    /// is a real durable-transaction commit, so a lower local row means this node's visible state lost committed
+    /// history — the exact precondition of a lost update on a freshly promoted leader whose resident cache is
+    /// cold. Each refusal answers MustRetry and schedules the convergence repair instead of installing the stale
+    /// row as the key's base. Any sustained rate means local durable state is not converging with settles.
+    /// </summary>
+    internal static readonly Counter<long> StaleHydrationsRefused =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.stale_hydrations_refused",
+            description: "Cache-miss reads refused because the hydrated row was below the key's remembered committed head.");
+
+    private static long staleHydrationsRefused;
+
+    /// <summary>Process-wide count behind <see cref="StaleHydrationsRefused"/>, readable so tests can assert the
+    /// refusal actually fired rather than assume it.</summary>
+    internal static long StaleHydrationsRefusedCount => Interlocked.Read(ref staleHydrationsRefused);
+
+    internal static void StaleHydrationRefused()
+    {
+        Interlocked.Increment(ref staleHydrationsRefused);
+        StaleHydrationsRefused.Add(1);
+    }
+
+    /// <summary>
+    /// Committed key-value materialization records that applied at a revision strictly below the key's
+    /// remembered committed head. A late re-driven materialization that the head guards no-op is the benign
+    /// producer; anything else is a fork witness — a committed record entering the log below history this node
+    /// already saw settle, which is how a stale-base commit permanently overwrites acknowledged writes. Each
+    /// occurrence is logged with both revisions and the transaction id so a conserved-total drift in a soak run
+    /// attributes to its producer from the log alone.
+    /// </summary>
+    internal static readonly Counter<long> BelowHeadMaterializations =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.below_head_materializations",
+            description: "Committed key-value records applied at a revision below the key's remembered committed head.");
+
+    /// <summary>
+    /// Validated-base prepares the staged-base fence admitted because it held NO committed-head memory for the
+    /// key. Admission on absence is correct when the key genuinely never had a durable-transaction commit within
+    /// retention — but it is also the only silent path around the fence: a node whose settle applies lagged (or
+    /// whose memory was lost) admits a stale base here without any refusal. The counter separates "fence proved
+    /// the base current" from "fence had nothing to check", which a loss investigation needs to tell apart.
+    /// </summary>
+    internal static readonly Counter<long> FenceAdmissionsAbsentHead =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.fence_admissions_absent_head",
+            description: "Validated-base prepares admitted because the fence held no committed head for the key.");
+
+    /// <summary>
     /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
     /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
     /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals

@@ -131,6 +131,13 @@ internal sealed class TryGetHandler : BaseHandler
                     message.Key,
                     context.PointReadExecutor);
 
+                // A hydrated row below this node's committed-head memory must not become a
+                // transaction's MVCC base: the missing committed writes would be silently
+                // discarded by the read-modify-write built on it. Refuse and let the scheduled
+                // convergence repair advance the local state before the client's retry.
+                if (HydratedRowProvablyStale(message.Key, diskEntry))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
                 if (diskEntry is not null)
                 {
                     diskEntry.FlushedRevision = diskEntry.Revision;
@@ -189,6 +196,12 @@ internal sealed class TryGetHandler : BaseHandler
                 ResolvePartition(message.Key),
                 message.Key,
                 context.PointReadExecutor);
+
+            // A snapshot read resolves at-or-before against the hydrated head; a head below the
+            // committed-head memory is missing newer revisions and can resolve the wrong as-of
+            // version. Refuse and let the convergence repair land before the retry.
+            if (HydratedRowProvablyStale(message.Key, diskEntry))
+                return KeyValueStaticResponses.MustRetryResponse;
 
             if (diskEntry is not null)
             {

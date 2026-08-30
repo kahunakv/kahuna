@@ -127,6 +127,12 @@ internal sealed class TryExistsHandler : BaseHandler
                     message.Key,
                     context.PointReadExecutor);
 
+                // Same stale-base refusal as the transactional TryGet: an existence check below the
+                // committed-head memory can wrongly report absent (or a stale revision) and become
+                // a conditional write's base. Refuse and let the convergence repair land first.
+                if (HydratedRowProvablyStale(message.Key, diskEntry))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
                 if (diskEntry is not null)
                 {
                     diskEntry.FlushedRevision = diskEntry.Revision;
@@ -181,6 +187,11 @@ internal sealed class TryExistsHandler : BaseHandler
                 ResolvePartition(message.Key),
                 message.Key,
                 context.PointReadExecutor);
+
+            // A stale head resolves the wrong as-of version for the snapshot read; refuse and let
+            // the convergence repair land before the retry.
+            if (HydratedRowProvablyStale(message.Key, diskEntry))
+                return KeyValueStaticResponses.MustRetryResponse;
 
             if (diskEntry is not null)
             {
