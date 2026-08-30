@@ -234,6 +234,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-slow-wal-machine-log", Required = false, HelpText = "Raft WAL state-machine slow operation log threshold in milliseconds", Default = 25)]
     public int RaftSlowWalMachineLog { get; set; } = 25;
 
+    [Option("raft-invariant-checks", Required = false, HelpText = "Reaction when a Raft consensus invariant check fails: Off, Log (record and continue), or Throw (crash at the offending transition). Diagnostic only; never changes protocol behavior. Defaults to Throw in a debug build and Log in a release build")]
+    public Kommander.Diagnostics.RaftInvariantPolicy RaftInvariantChecks { get; set; } = Kommander.Diagnostics.RaftInvariants.DefaultPolicy;
+
     [Option("raft-compact-every-operations", Required = false, HelpText = "Committed operations between automatic Raft WAL compactions", Default = 10000)]
     public int RaftCompactEveryOperations { get; set; } = 10000;
 
@@ -353,6 +356,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-dead-member-eviction-grace", Required = false, HelpText = "Grace period before a Dead node is committed as removed from the roster in milliseconds", Default = 30000)]
     public int RaftDeadMemberEvictionGrace { get; set; } = 30000;
+
+    [Option("raft-self-repair-peer-down-grace", Required = false, HelpText = "How long the promotion-gate self-repair (gap-skipping committed drain and orphaned-tail truncation) defers while a voter peer is not Alive, in milliseconds. 0 disables the grace", Default = 30000)]
+    public int RaftSelfRepairPeerDownGrace { get; set; } = 30000;
 
     [Option("raft-ping-interval", Required = false, HelpText = "Interval between SWIM ping rounds in milliseconds (0 disables the failure detector). Must be > 0 and < raft-start-election-timeout when quiescence is enabled.", Default = 1000)]
     public int RaftPingInterval { get; set; } = 1000;

@@ -32,6 +32,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.EndElectionTimeoutIncrement)] = nameof(KahunaCommandLineOptions.RaftEndElectionTimeoutIncrement),
         [nameof(RaftConfiguration.SlowRaftStateMachineLog)] = nameof(KahunaCommandLineOptions.RaftSlowStateMachineLog),
         [nameof(RaftConfiguration.SlowRaftWALMachineLog)] = nameof(KahunaCommandLineOptions.RaftSlowWalMachineLog),
+        [nameof(RaftConfiguration.InvariantChecks)] = nameof(KahunaCommandLineOptions.RaftInvariantChecks),
         [nameof(RaftConfiguration.ReadIOThreads)] = nameof(KahunaCommandLineOptions.ReadIOThreads),
         [nameof(RaftConfiguration.WriteIOThreads)] = nameof(KahunaCommandLineOptions.WriteIOThreads),
         [nameof(RaftConfiguration.CompactEveryOperations)] = nameof(KahunaCommandLineOptions.RaftCompactEveryOperations),
@@ -65,6 +66,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.IndirectPingFanout)] = nameof(KahunaCommandLineOptions.RaftIndirectPingFanout),
         [nameof(RaftConfiguration.SuspicionTimeout)] = nameof(KahunaCommandLineOptions.RaftSuspicionTimeout),
         [nameof(RaftConfiguration.DeadMemberEvictionGrace)] = nameof(KahunaCommandLineOptions.RaftDeadMemberEvictionGrace),
+        [nameof(RaftConfiguration.SelfRepairPeerDownGrace)] = nameof(KahunaCommandLineOptions.RaftSelfRepairPeerDownGrace),
         [nameof(RaftConfiguration.PingInterval)] = nameof(KahunaCommandLineOptions.RaftPingInterval),
         [nameof(RaftConfiguration.GrpcChannelsPerNode)] = nameof(KahunaCommandLineOptions.RaftGrpcChannelsPerNode),
         [nameof(RaftConfiguration.GrpcEnableMultipleHttp2Connections)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableMultipleHttp2Connections),
@@ -125,11 +127,15 @@ public sealed class TestKommanderConfigurationSurface
     /// Writable RaftConfiguration members that are code-level hooks rather than operator-settable
     /// options: they carry live objects no CLI value can express and are wired by the host
     /// (KahunaManager assigns the application-durability provider after construction, before the
-    /// node joins).
+    /// node joins), or they exist only to let a Deterministic Simulation Testing harness drive
+    /// time and scheduling explicitly and must never be touched in production.
     /// </summary>
     private static readonly HashSet<string> NonCliHookProperties =
     [
-        nameof(RaftConfiguration.ApplicationDurabilityProvider)
+        nameof(RaftConfiguration.ApplicationDurabilityProvider),
+        nameof(RaftConfiguration.TickSource),
+        nameof(RaftConfiguration.EnableInternalTimers),
+        nameof(RaftConfiguration.EnableInternalSchedulingThreads)
     ];
 
     [Fact]

@@ -432,6 +432,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         EndElectionTimeoutIncrement = opts.RaftEndElectionTimeoutIncrement,
         SlowRaftStateMachineLog = opts.RaftSlowStateMachineLog,
         SlowRaftWALMachineLog = opts.RaftSlowWalMachineLog,
+        InvariantChecks = opts.RaftInvariantChecks,
         ReadIOThreads = opts.ReadIOThreads,
         WriteIOThreads = opts.WriteIOThreads,
         // Share a bounded thread pool across all partitions so a large cluster (and split-created
@@ -483,6 +484,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         IndirectPingFanout = opts.RaftIndirectPingFanout,
         SuspicionTimeout = TimeSpan.FromMilliseconds(opts.RaftSuspicionTimeout),
         DeadMemberEvictionGrace = TimeSpan.FromMilliseconds(opts.RaftDeadMemberEvictionGrace),
+        SelfRepairPeerDownGrace = TimeSpan.FromMilliseconds(opts.RaftSelfRepairPeerDownGrace),
         PingInterval = opts.RaftPingInterval == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(opts.RaftPingInterval),
         // A node evicted from the roster while it was down (dead-member eviction firing across a
         // slow restart) re-runs the join flow instead of parking as NotMember forever. KAHUNA_AUTO_REJOIN=0
