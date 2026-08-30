@@ -98,6 +98,39 @@ internal sealed class KeyValueEntry
     public HLCTimestamp LastAppliedTransactionId { get; set; }
 
     /// <summary>
+    /// Newest committed head notification that could not apply because a live replication intent
+    /// owned the entry's apply at delivery time. The coherence notification is single-shot; without
+    /// this slot the deferral discards it, and the entry then serves a stale head to reads gated by
+    /// a quorum-confirmed leadership check. Drained by the intent's completion/release, or by the
+    /// first read or write that finds the blocking intent gone. Null when nothing is parked.
+    /// </summary>
+    public InvalidateOrApplyData? PendingCommittedHead { get; set; }
+
+    /// <summary>
+    /// Earliest <see cref="LastModified"/> of a head this entry superseded through a revision jump
+    /// (a head advance that skipped committed revisions this entry never saw). Zero when no jump
+    /// was recorded. Together with <see cref="ArchiveGapEnd"/> this bounds the union of all skipped
+    /// windows: revisions inside a window exist only in the durable history, so an in-memory
+    /// archive hit below <see cref="ArchiveGapEnd"/> is not authoritative for a snapshot above
+    /// <see cref="ArchiveGapStart"/>.
+    /// </summary>
+    public HLCTimestamp ArchiveGapStart { get; set; }
+
+    /// <summary>
+    /// Latest <see cref="LastModified"/> of a jump-target head (see <see cref="ArchiveGapStart"/>).
+    /// Zero when no jump was recorded.
+    /// </summary>
+    public HLCTimestamp ArchiveGapEnd { get; set; }
+
+    /// <summary>
+    /// Highest jump-target revision recorded (see <see cref="ArchiveGapStart"/>), or -1 when no
+    /// jump was recorded. The skipped revisions' flush requests were enqueued before the jump
+    /// applied, so once <see cref="FlushedRevision"/> reaches this value minus one the durable
+    /// history answers for every skipped revision and the disk fallback is authoritative.
+    /// </summary>
+    public long ArchiveGapEndRevision { get; set; } = -1;
+
+    /// <summary>
     /// Multiversion Concurrency Control (MVCC) values per TransactionId
     /// </summary>
     public Dictionary<HLCTimestamp, KeyValueMvccEntry>? MvccEntries { get; set; }
@@ -196,6 +229,33 @@ internal sealed class KeyValueEntry
             return false;
         }
 
+        // The archive is also non-contiguous across recorded head-jump windows: committed revisions
+        // a jump skipped were never archived here and exist only in the durable history. A hit
+        // below the window's end is authoritative only when no skipped revision can beat it — the
+        // snapshot must sit at-or-below the window's start, or the hit at-or-above its end.
+        // Otherwise report a miss so the caller consults the persisted revision history.
+        if (ArchiveGapEndRevision >= 0
+            && ArchiveGapEnd.CompareTo(revision.LastModified) > 0
+            && snapshot.CompareTo(ArchiveGapStart) > 0)
+        {
+            revisionNumber = -1;
+            revision = default;
+            return false;
+        }
+
         return true;
     }
+
+    /// <summary>
+    /// True when a snapshot read at <paramref name="snapshot"/> cannot yet trust the persisted
+    /// revision history because a head jump skipped revisions whose flush requests are still
+    /// queued. The skipped revisions were enqueued to the background writer before the jump
+    /// applied, and flush acknowledgements advance <see cref="FlushedRevision"/> through them in
+    /// order — once it covers everything below the jump target the durable history answers for the
+    /// whole window. Callers fail closed (retry) instead of serving a possibly stale as-of row.
+    /// </summary>
+    public bool SnapshotAtRiskFromUnflushedGap(HLCTimestamp snapshot) =>
+        ArchiveGapEndRevision >= 0
+        && snapshot.CompareTo(ArchiveGapStart) > 0
+        && FlushedRevision < ArchiveGapEndRevision - 1;
 }

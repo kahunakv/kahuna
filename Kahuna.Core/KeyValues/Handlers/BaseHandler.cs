@@ -510,6 +510,21 @@ internal abstract class BaseHandler
                     (entry.Value?.Length ?? 0) - (previousArchive.Value?.Length ?? 0));
         }
 
+        // A head advance that skips committed revisions (they were deferred behind an in-flight
+        // operation, or the entry was installed from a durable row and converged past them) leaves
+        // the in-memory archive non-contiguous: the skipped revisions exist only in the durable
+        // history. Record the union of skipped windows so snapshot reads distrust in-memory hits
+        // across them and consult disk instead (see KeyValueEntry.TryGetRevisionAtOrBefore).
+        if (!proposal.NoRevision && entry.Revision >= 0 && proposal.Revision > entry.Revision + 1)
+        {
+            if (entry.ArchiveGapStart == HLCTimestamp.Zero || entry.LastModified.CompareTo(entry.ArchiveGapStart) < 0)
+                entry.ArchiveGapStart = entry.LastModified;
+            if (proposal.LastModified.CompareTo(entry.ArchiveGapEnd) > 0)
+                entry.ArchiveGapEnd = proposal.LastModified;
+            if (proposal.Revision > entry.ArchiveGapEndRevision)
+                entry.ArchiveGapEndRevision = proposal.Revision;
+        }
+
         int previousValueLength = entry.Value?.Length ?? 0;
 
         entry.Value = proposal.Value;
@@ -524,6 +539,126 @@ internal abstract class BaseHandler
         context.EnqueueExpiry(proposal.Key, proposal.Expires);
         if (proposal.State is KeyValueState.Deleted or KeyValueState.Undefined)
             context.EnqueueTombstone(proposal.Key);
+
+        // A parked head the advance reached (or passed) is settled; only a still-newer one stays.
+        if (entry.PendingCommittedHead is { } parked
+            && !(parked.Revision > entry.Revision
+                 || (parked.Revision == entry.Revision && parked.LastModified > entry.LastModified)))
+            ClearPendingCommittedHead(entry);
+    }
+
+    /// <summary>
+    /// Compares every mutation field that determines the visible committed head. Value comparison is
+    /// required for no-revision writes, while state and expiry distinguish delete and extend records
+    /// that legitimately reuse the prior revision number.
+    /// </summary>
+    protected internal static bool HeadMatches(KeyValueEntry entry, InvalidateOrApplyData data) =>
+        entry.Revision == data.Revision
+        && entry.State == data.State
+        && entry.Expires == data.Expires
+        && entry.LastModified == data.LastModified
+        && ((entry.Value is null && data.Value is null)
+            || (entry.Value is not null && data.Value is not null
+                && entry.Value.AsSpan().SequenceEqual(data.Value)));
+
+    /// <summary>
+    /// Orders same-revision delete, extend, and no-revision records by their committed HLC. Revision
+    /// comparison alone cannot distinguish those mutations, while accepting an older notification
+    /// after a newer same-revision head would regress the cache.
+    /// </summary>
+    protected internal static bool IsStrictlyNewer(KeyValueEntry entry, InvalidateOrApplyData data) =>
+        entry.Revision > data.Revision
+        || (entry.Revision == data.Revision && entry.LastModified > data.LastModified);
+
+    /// <summary>
+    /// Parks a committed head notification the entry cannot apply right now (a live replication
+    /// intent owns the entry's apply). The notification is single-shot: dropping it leaves the
+    /// resident entry behind the node's own applied committed state, which a quorum-confirmed read
+    /// then serves as authoritative. Newest-wins per entry; a notification the entry already
+    /// reflects is not worth keeping. Drained by <see cref="TryDrainPendingCommittedHead"/>.
+    /// </summary>
+    protected void ParkPendingCommittedHead(KeyValueEntry entry, InvalidateOrApplyData data)
+    {
+        if (IsStrictlyNewer(entry, data) || HeadMatches(entry, data))
+            return;
+
+        InvalidateOrApplyData? existing = entry.PendingCommittedHead;
+        if (existing is not null
+            && !(data.Revision > existing.Revision
+                 || (data.Revision == existing.Revision && data.LastModified > existing.LastModified)))
+            return;
+
+        context.AdjustEstimatedEntryBytes(entry,
+            KeyValueStoreAccounting.PendingCommittedHeadBytes(data.Value)
+            - (existing is null ? 0 : KeyValueStoreAccounting.PendingCommittedHeadBytes(existing.Value)));
+
+        entry.PendingCommittedHead = data;
+    }
+
+    /// <summary>Releases a parked head notification and reclaims its byte estimate.</summary>
+    protected void ClearPendingCommittedHead(KeyValueEntry entry)
+    {
+        if (entry.PendingCommittedHead is not { } parked)
+            return;
+
+        entry.PendingCommittedHead = null;
+        context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.PendingCommittedHeadBytes(parked.Value));
+    }
+
+    /// <summary>
+    /// Applies a parked committed head once no live intent blocks the entry, so the resident cache
+    /// converges with the node's applied committed state at the first touch after the blocker
+    /// clears — instead of serving a stale head until the next committed write happens to arrive.
+    /// Synchronous and in-memory only, so it is safe at any point inside the actor's message loop.
+    /// An expired replication intent is cleared here exactly as the read guards clear it; a live
+    /// one still owns the apply and keeps the head parked. A live write intent defers too — the
+    /// delivery path already applies strictly-newer committed heads over live foreign intents, so
+    /// a parked head coexisting with one is a transient corner, not a serving state.
+    /// </summary>
+    protected void TryDrainPendingCommittedHead(string key, KeyValueEntry entry, HLCTimestamp currentTime)
+    {
+        InvalidateOrApplyData? parked = entry.PendingCommittedHead;
+        if (parked is null)
+            return;
+
+        // Superseded while parked: another apply path advanced the head to or past it.
+        if (IsStrictlyNewer(entry, parked) || HeadMatches(entry, parked))
+        {
+            ClearPendingCommittedHead(entry);
+            return;
+        }
+
+        if (entry.ReplicationIntent is not null)
+        {
+            if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
+                return;
+
+            entry.ReplicationIntent = null;
+        }
+
+        if (entry.WriteIntent is not null)
+        {
+            if (KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
+                return;
+
+            RemoveMvccEntry(entry, entry.WriteIntent.TransactionId);
+            entry.WriteIntent = null;
+        }
+
+        KeyValueProposal proposal = new(
+            parked.State == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet,
+            key,
+            parked.Value,
+            parked.Revision,
+            parked.NoRevision,
+            parked.Expires,
+            parked.LastUsed,
+            parked.LastModified,
+            parked.State,
+            KeyValueDurability.Persistent);
+
+        ClearPendingCommittedHead(entry);
+        ApplyCommittedHead(entry, proposal, parked.TransactionId);
     }
 
     /// <summary>

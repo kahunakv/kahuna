@@ -169,6 +169,15 @@ internal sealed class TrySetHandler : BaseHandler
         entry = resolvedEntry!;
         exists = entry.State is not (KeyValueState.Deleted or KeyValueState.Undefined);
 
+        // Converge a head parked behind an in-flight operation before staging anything: a write
+        // that assigns its revision from a stale resident head would collide with the committed
+        // history the parked head carries.
+        if (entry.PendingCommittedHead is not null)
+        {
+            TryDrainPendingCommittedHead(message.Key, entry, currentTime);
+            exists = entry.State is not (KeyValueState.Deleted or KeyValueState.Undefined);
+        }
+
         // Validate if there's an active replication enty on the key/value entry
         // clients must retry operations to make sure the entry is fully replicated
         // before modifying the entry

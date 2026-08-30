@@ -67,6 +67,22 @@ internal static class KeyValueStoreAccounting
     private const int MvccEntryOverheadBytes = 160;
 
     /// <summary>
+    /// Heap cost of a parked <see cref="InvalidateOrApplyData"/> record beyond its Value bytes:
+    /// object header 16 + Value/HydratedEntry refs 16 + three HLCTimestamps 72 + Revision 8 +
+    /// PartitionId/State 8 + four bools 4 + padding, rounded up to 128 to bias toward earlier
+    /// eviction. The Value byte array's length is charged separately at the park site.
+    /// </summary>
+    internal const int PendingCommittedHeadOverheadBytes = 128;
+
+    /// <summary>
+    /// Bytes charged for a head notification parked on an entry (see
+    /// <see cref="KeyValueEntry.PendingCommittedHead"/>), and reclaimed when it is drained or
+    /// superseded.
+    /// </summary>
+    internal static long PendingCommittedHeadBytes(byte[]? parkedValue) =>
+        PendingCommittedHeadOverheadBytes + (parkedValue?.Length ?? 0);
+
+    /// <summary>
     /// Bytes charged when a new revision entry is archived into entry.Revisions.
     /// Pass historyJustCreated=true when entry.Revisions was null before this call, so the
     /// one-time <see cref="RevisionHistoryOverheadBytes"/> for the container object is charged.

@@ -83,20 +83,32 @@ internal sealed class CompleteProposalHandler : BaseHandler
         entry.ReplicationIntent = null;
         context.Proposals.Remove(message.ProposalId);
 
+        // The caller is answered with the revision its own write committed at, captured before any
+        // parked head can advance the entry further.
+        long committedRevision = entry.Revision;
+
+        // A committed head that arrived while this proposal was in flight was parked (the delivery
+        // path must not advance the entry under a live replication intent — this apply owns the
+        // archive). With the intent released, converge now so the next read serves the true head.
+        if (entry.PendingCommittedHead is not null)
+            TryDrainPendingCommittedHead(
+                message.Key, entry,
+                context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId()));
+
         KeyValueResponse response;
 
         switch (proposal.Type)
         {
             case KeyValueRequestType.TrySet:
-                response = new(KeyValueResponseType.Set, entry.Revision);
+                response = new(KeyValueResponseType.Set, committedRevision);
                 break;
 
             case KeyValueRequestType.TryExtend:
-                response = new(KeyValueResponseType.Extended, entry.Revision);
+                response = new(KeyValueResponseType.Extended, committedRevision);
                 break;
 
             case KeyValueRequestType.TryDelete:
-                response = new(KeyValueResponseType.Deleted, entry.Revision);
+                response = new(KeyValueResponseType.Deleted, committedRevision);
                 break;
 
             default:

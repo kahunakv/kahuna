@@ -51,6 +51,15 @@ internal sealed class ReleaseProposalHandler : BaseHandler
         entry.ReplicationIntent = null;
         context.Proposals.Remove(message.ProposalId);
 
+        // A committed head that arrived while this proposal was in flight was parked behind the
+        // live replication intent. The proposal did not commit, so nothing else will ever apply
+        // that head here — converge now, or reads serve the superseded revision until the next
+        // committed write for the key happens to arrive.
+        if (entry.PendingCommittedHead is not null)
+            TryDrainPendingCommittedHead(
+                message.Key, entry,
+                context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId()));
+
         // A proposal released for a retryable reason resolves as MustRetry so the caller retries
         // rather than treating a transient failure as terminal: a fence rejection (key-range
         // generation moved → re-resolve LocateRange on the correct partition) or a transient

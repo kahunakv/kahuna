@@ -31,6 +31,12 @@ internal sealed class TryExistsHandler : BaseHandler
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
+        // Converge a head that was parked behind an in-flight operation before serving anything:
+        // this read is gated by a quorum-confirmed leadership check, so a resident entry behind
+        // the node's own applied committed state must not be treated as authoritative.
+        if (entry?.PendingCommittedHead is not null)
+            TryDrainPendingCommittedHead(message.Key, entry, currentTime);
+
         // Durable-intent read visibility: a foreign prepared intent may carry a committed outcome not yet
         // materialized locally. Empty store (durable-intent path disabled) ⇒ null ⇒ no effect.
         //
@@ -191,6 +197,13 @@ internal sealed class TryExistsHandler : BaseHandler
             if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
                     out long snapRevision, out KeyValueRevisionEntry snapshot))
             {
+                // A head jump skipped revisions this entry never archived, and their flush
+                // requests may still be queued: the persisted history cannot answer for the
+                // skipped window yet. Fail closed — MustRetry is safe to retry and the window
+                // closes when the queued flushes are acknowledged.
+                if (entry.SnapshotAtRiskFromUnflushedGap(message.ReadTimestamp))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
                 // In-memory archive trimmed the as-of revision; fall back to the persisted
                 // revision history. Mirrors TryGetHandler's fallback — same reasoning applies.
                 KeyValueEntry? diskSnapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(

@@ -47,11 +47,15 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
             return null;
 
-        // Don't touch an entry whose apply is still owned by an in-flight operation: the owning
+        // An entry whose apply is still owned by an in-flight operation needs care: the owning
         // actor applies the committed value via CompleteProposal (direct write, ReplicationIntent) or
         // the durable-intent resolution (WriteIntent), which archives the correct superseded revision and
-        // adjusts accounting exactly once. Advancing the entry here first would corrupt that archive.
-        // An unrelated expired intent may be cleared before applying the authoritative committed value.
+        // adjusts accounting exactly once. But this notification is single-shot — discarding a committed
+        // head the entry has not seen leaves the resident cache behind the node's own applied state, and
+        // a quorum-confirmed leadership check cannot catch that: reads then serve a stale revision.
+        // So each blocker resolves differently: park behind a live replication intent (its completion
+        // or release drains the parked head), apply over a live foreign write intent when the committed
+        // history provably moved past the intent's staged base, and clear expired blockers inline.
         if (entry.ReplicationIntent is not null || entry.WriteIntent is not null)
         {
             HLCTimestamp now = context.Raft.HybridLogicalClock
@@ -60,7 +64,15 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
             if (entry.ReplicationIntent is not null)
             {
                 if (entry.ReplicationIntent.Expires - now > TimeSpan.Zero)
+                {
+                    // The in-flight direct write owns the apply (its own commit echo is the common
+                    // arrival here, and it must be applied by CompleteProposal exactly once). Park the
+                    // head instead of dropping it: the completion, the release, or the first read or
+                    // write after the intent expires drains it, so the entry converges even when the
+                    // notification was a foreign commit the in-flight proposal lost to.
+                    ParkPendingCommittedHead(entry, data);
                     return null;
+                }
                 entry.ReplicationIntent = null;
             }
 
@@ -85,7 +97,21 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
                 }
 
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, now))
-                    return null;
+                {
+                    // A committed head strictly above the resident entry proves the durable history
+                    // moved past whatever base this intent's owner staged against, so the owner can
+                    // never commit here — its prepare is refused by the staged-base fence and its
+                    // force-resident apply degrades to the idempotent no-op guards. Clearing the
+                    // intent and applying is exactly what the streak-triggered coherence reconcile
+                    // does later from the durable row; doing it at delivery time closes the window
+                    // where a quorum-confirmed read serves the superseded revision. A notification
+                    // that is NOT strictly newer is a replay the guards below would no-op anyway,
+                    // so the live intent stays untouched for it.
+                    if (IsStrictlyNewer(entry, data) || HeadMatches(entry, data))
+                        return null;
+
+                    RemoveMvccEntry(entry, entry.WriteIntent.TransactionId);
+                }
                 entry.WriteIntent = null;
             }
         }
@@ -297,29 +323,6 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         data.LastModified,
         data.State,
         KeyValueDurability.Persistent);
-
-    /// <summary>
-    /// Compares every mutation field that determines the visible committed head. Value comparison is
-    /// required for no-revision writes, while state and expiry distinguish delete and extend records
-    /// that legitimately reuse the prior revision number.
-    /// </summary>
-    private static bool HeadMatches(KeyValueEntry entry, InvalidateOrApplyData data) =>
-        entry.Revision == data.Revision
-        && entry.State == data.State
-        && entry.Expires == data.Expires
-        && entry.LastModified == data.LastModified
-        && ((entry.Value is null && data.Value is null)
-            || (entry.Value is not null && data.Value is not null
-                && entry.Value.AsSpan().SequenceEqual(data.Value)));
-
-    /// <summary>
-    /// Orders same-revision delete, extend, and no-revision records by their committed HLC. Revision
-    /// comparison alone cannot distinguish those mutations, while accepting an older notification
-    /// after a newer same-revision head would regress the cache.
-    /// </summary>
-    private static bool IsStrictlyNewer(KeyValueEntry entry, InvalidateOrApplyData data) =>
-        entry.Revision > data.Revision
-        || (entry.Revision == data.Revision && entry.LastModified > data.LastModified);
 
     /// <summary>
     /// Clears an aborted durable transaction's staged write intent and MVCC snapshot on the owning actor so the key
