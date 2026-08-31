@@ -47,6 +47,48 @@ internal sealed class KeyValueWriteIntent
 }
 
 /// <summary>
+/// The safe-time rule a snapshot read applies to a live foreign write intent: the read must wait
+/// only when the intent's pending commit could become visible at or before the read's snapshot.
+///
+/// A prepared intent answers from its known pending commit timestamp. An un-prepared intent
+/// (<see cref="KeyValueWriteIntent.CommitTimestamp"/> still Zero) has no commit timestamp yet, but
+/// one hard lower bound exists: every staged MVCC write is stamped from an HLC event that folded
+/// the writer's transaction id in (<c>TrySetHandler.ExecuteTransactional</c> uses
+/// <c>ReceiveEvent(node, TransactionId)</c>), and the prepare copies that stamp into
+/// <see cref="KeyValueWriteIntent.CommitTimestamp"/>. The eventual commit timestamp is therefore
+/// strictly above <see cref="KeyValueWriteIntent.TransactionId"/>.
+///
+/// So a transaction that began after the read's snapshot can never commit inside that snapshot,
+/// and the read must not wait on its intent. This is what keeps a snapshot scan live under a
+/// saturating writer: without it, every retry of the scan meets the writer's newest in-flight
+/// intent, waits, and retries into the next one — a split's bulk copy or a split probe then
+/// starves forever even though no blocking write can ever land inside its snapshot.
+/// </summary>
+internal static class KeyValueWriteIntentSafeTime
+{
+    /// <summary>
+    /// Returns whether the intent's pending commit could land at or before
+    /// <paramref name="readTimestamp"/> — that is, whether a snapshot read at that timestamp
+    /// must wait for the intent to resolve. Callers apply this only to a live intent owned by a
+    /// foreign transaction, on a read that carries a snapshot timestamp.
+    /// </summary>
+    internal static bool MayCommitAtOrBefore(KeyValueWriteIntent intent, HLCTimestamp readTimestamp)
+    {
+        HLCTimestamp commitTs = intent.CommitTimestamp;
+
+        if (!commitTs.IsNull())
+            return commitTs.CompareTo(readTimestamp) <= 0;
+
+        // Un-prepared: the eventual commit timestamp is strictly above the transaction id (see the
+        // class summary). A transaction id at or above the snapshot proves the commit lands after
+        // it. A Zero transaction id carries no proof, so the read stays conservative and waits.
+        HLCTimestamp transactionId = intent.TransactionId;
+
+        return transactionId.IsNull() || transactionId.CompareTo(readTimestamp) < 0;
+    }
+}
+
+/// <summary>
 /// Defines the lease contract shared by point and predicate write intents. A zero-duration request
 /// creates a session-owned intent with no clock deadline; it stays live until explicit transaction
 /// cleanup releases it, or until the liveness ceiling proves no session can still own it. Positive

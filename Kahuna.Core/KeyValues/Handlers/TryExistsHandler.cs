@@ -88,12 +88,9 @@ internal sealed class TryExistsHandler : BaseHandler
             {
                 if (!KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                     entry.WriteIntent = null;
-                else if (!message.ReadTimestamp.IsNull())
-                {
-                    HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
-                    if (commitTs.IsNull() || commitTs.CompareTo(message.ReadTimestamp) <= 0)
-                        return KeyValueStaticResponses.WaitingForReplicationResponse;
-                }
+                else if (!message.ReadTimestamp.IsNull()
+                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, message.ReadTimestamp))
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
             }
         }
 

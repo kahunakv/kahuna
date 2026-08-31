@@ -50,6 +50,18 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// <summary>Entries per exported page (bounded memory + checksum granularity).</summary>
     private const int PageSize = 256;
 
+    /// <summary>
+    /// How many times a retryable page read (MustRetry / WaitingForReplication) is re-attempted
+    /// before the export fails. Mirrors the paged copy path's budget in
+    /// <c>RangeStateTransferService</c>: with the intent safe-time rule, a snapshot page blocks
+    /// only on writers that were already in flight when the snapshot was minted, and those decide
+    /// within ordinary commit latency — well inside this budget. Without any retry, one live
+    /// intent fails the whole export, and a split under sustained writes then never lands.
+    /// </summary>
+    private const int PageRetryMaxAttempts = 10;
+
+    private const int PageRetryDelayMs = 200;
+
     private const ulong FnvOffsetBasis = 14695981039346656037UL;
     private const ulong FnvPrime = 1099511628211UL;
 
@@ -115,8 +127,29 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
                 snapshotTs,
                 durability).ConfigureAwait(false);
 
-            // A page that could not be served (MustRetry from a live write intent or an undecided
-            // durable intent, WaitingForReplication, a leadership change) is NOT evidence the range
+            // A retryable answer (MustRetry from a live write intent or an undecided durable
+            // intent, WaitingForReplication) is transient by definition — the blocker is a
+            // transaction that was in flight when the snapshot was minted, and it decides within
+            // ordinary commit latency. Ride it out with a bounded per-page retry instead of
+            // failing the whole export on the first blocked page.
+            for (int attempt = 1;
+                 page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+                     && attempt < PageRetryMaxAttempts;
+                 attempt++)
+            {
+                await Task.Delay(PageRetryDelayMs, ct).ConfigureAwait(false);
+
+                page = await manager.GetByRange(
+                    readerTransactionId,
+                    keySpacePrefix,
+                    cursorKey, cursorInclusive,
+                    endKey, false,
+                    PageSize,
+                    snapshotTs,
+                    durability).ConfigureAwait(false);
+            }
+
+            // A page that could not be served within the retry budget is NOT evidence the range
             // is empty. Treating it as "no data" silently truncates the export — the importer sees a
             // clean terminal sentinel over a snapshot that is missing every key past the cursor — and
             // the cutover then moves a range whose copy lost data. Fail the export; the split/merge

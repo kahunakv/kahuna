@@ -473,18 +473,17 @@ internal sealed class RangeScanContinuation : ReadContinuation
         }
 
         // Write intent from another transaction: for snapshot scans, if the pending commit
-        // could land at-or-before the snapshot timestamp we must wait. For non-snapshot
-        // scans fall through to the committed state (the intent does not block the read).
+        // could land at-or-before the snapshot timestamp we must wait (the shared safe-time
+        // rule — see KeyValueWriteIntentSafeTime, which also proves a writer that began at or
+        // after the snapshot can never commit inside it). For non-snapshot scans fall through
+        // to the committed state (the intent does not block the read).
         if (entry?.WriteIntent != null && entry.WriteIntent.TransactionId != transactionId)
         {
             if (!KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
-            else if (!snapshotTs.IsNull())
-            {
-                HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
-                if (commitTs.IsNull() || commitTs.CompareTo(snapshotTs) <= 0)
-                    return KeyValueStaticResponses.WaitingForReplicationResponse;
-            }
+            else if (!snapshotTs.IsNull()
+                     && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, snapshotTs))
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
         // Transactional MVCC: read-your-own-writes and OCC snapshot tracking.

@@ -235,12 +235,9 @@ internal sealed class BucketScanContinuation : ReadContinuation
         {
             if (!KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
-            else if (!readTimestamp.IsNull())
-            {
-                HLCTimestamp commitTs = entry.WriteIntent.CommitTimestamp;
-                if (commitTs.IsNull() || commitTs.CompareTo(readTimestamp) <= 0)
-                    return KeyValueStaticResponses.WaitingForReplicationResponse;
-            }
+            else if (!readTimestamp.IsNull()
+                     && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, readTimestamp))
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
         if (transactionId != HLCTimestamp.Zero && readTimestamp.IsNull())

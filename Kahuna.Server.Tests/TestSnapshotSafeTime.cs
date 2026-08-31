@@ -202,6 +202,11 @@ public sealed class TestSnapshotSafeTime : BaseCluster
     /// An unprepared (CommitTimestamp == Zero) exclusive lock with a short TTL causes the
     /// retry loop to back off. Once the TTL lapses the actor clears the intent as housekeeping
     /// and returns Get — the wait resolves transparently; the caller never sees WaitingForReplication.
+    ///
+    /// T is captured after the lock transaction began, so the lock's owner is a transaction the
+    /// snapshot cannot rule out — that ordering is what makes the read wait at all. A snapshot
+    /// below the owner's transaction id skips the intent outright and never reaches the
+    /// housekeeping path this test exists for.
     /// </summary>
     [Fact]
     public async Task ExpiredIntent_ClearedByReader_ServesCommittedState()
@@ -218,21 +223,14 @@ public sealed class TestSnapshotSafeTime : BaseCluster
                 string key  = "sst:c:" + Guid.NewGuid().ToString("N")[..8];
                 byte[] valA = "committed"u8.ToArray();
 
-                // Write valA and capture its committed LastModified as T.
+                // Write valA as the base committed revision.
                 (KeyValueResponseType setA, _, _) = await kahuna1.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, key, valA, null, -1, KeyValueFlags.Set, 0,
                     KeyValueDurability.Ephemeral, ct);
                 Assert.Equal(KeyValueResponseType.Set, setA);
 
-                (KeyValueResponseType getA, ReadOnlyKeyValueEntry? entryA) = await kahuna1.LocateAndTryGetValue(
-                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, ct);
-                Assert.Equal(KeyValueResponseType.Get, getA);
-                Assert.NotNull(entryA);
-                HLCTimestamp T = entryA.LastModified;
-
                 // Acquire a short-lived exclusive lock (200 ms TTL). CommitTimestamp == Zero
-                // (plain lock, not a 2PC prepared intent) → handler returns WaitingForReplication
-                // until the lock expires; the retry loop then clears it and returns Get.
+                // (plain lock, not a 2PC prepared intent).
                 (KeyValueResponseType startType, TransactionHandle lockTxHandle) = await kahuna1.LocateAndStartTransaction(
                     new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
                 HLCTimestamp lockTxId = lockTxHandle.TransactionId;
@@ -241,6 +239,11 @@ public sealed class TestSnapshotSafeTime : BaseCluster
                 (KeyValueResponseType lockResult, _, _, _) = await kahuna2.LocateAndTryAcquireExclusiveLock(
                     lockTxId, key, 200, KeyValueDurability.Ephemeral, ct);
                 Assert.Equal(KeyValueResponseType.Locked, lockResult);
+
+                // Capture T strictly above the lock owner's transaction id, so the snapshot cannot
+                // prove the owner's writes land outside it and the safe-time wait engages.
+                await Task.Delay(10, ct);
+                HLCTimestamp T = node1.HybridLogicalClock.TrySendOrLocalEvent(node1.GetLocalNodeId());
 
                 // Read at T: handler loops (WaitingForReplication) until the 200 ms lock
                 // expires, at which point the actor clears it and returns Get + valA.
@@ -251,6 +254,161 @@ public sealed class TestSnapshotSafeTime : BaseCluster
                 Assert.Equal(KeyValueResponseType.Get, r1);
                 Assert.NotNull(snap);
                 Assert.Equal("committed", Encoding.UTF8.GetString(snap.Value!));
+            });
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    // ── UnpreparedIntent_WriterBegunAfterSnapshot_PointReadServesImmediately ─────────
+
+    /// <summary>
+    /// A live unprepared intent whose owning transaction began after the snapshot must not make
+    /// the snapshot read wait: every write that transaction can ever commit is stamped above its
+    /// transaction id, so nothing it does can land at or before the snapshot. The lock's TTL here
+    /// is far longer than the asserted response time, so a read that waits on the intent fails
+    /// this test rather than passing slowly.
+    ///
+    /// This ordering is exactly a range split's bulk copy under sustained writes: the copy mints
+    /// its snapshot, and every write in flight after that moment belongs to a transaction begun
+    /// after the snapshot. A read that waits on those intents starves — each retry meets the
+    /// writer's newest in-flight intent — and the split then never lands on a busy range.
+    /// </summary>
+    [Fact]
+    public async Task UnpreparedIntent_WriterBegunAfterSnapshot_PointReadServesImmediately()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
+
+        try
+        {
+            await RunUnderStableLeadership(node1, 3, async () =>
+            {
+                string key  = "sst:d:" + Guid.NewGuid().ToString("N")[..8];
+                byte[] valA = "before"u8.ToArray();
+
+                (KeyValueResponseType setA, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, valA, null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Ephemeral, ct);
+                Assert.Equal(KeyValueResponseType.Set, setA);
+
+                // The committed write was stamped by its partition leader's clock, which is not
+                // node1's; a 10 ms wall-clock advance puts T above that stamp so the base revision
+                // is visible at T. The delay after T then puts the transaction id strictly above T.
+                await Task.Delay(10, ct);
+                HLCTimestamp T = node1.HybridLogicalClock.TrySendOrLocalEvent(node1.GetLocalNodeId());
+                await Task.Delay(10, ct);
+
+                (KeyValueResponseType startType, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                    new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+                HLCTimestamp txId = txHandle.TransactionId;
+                Assert.Equal(KeyValueResponseType.Set, startType);
+                Assert.True(txId.CompareTo(T) > 0, "the writer must begin after the snapshot");
+
+                // A 10 s TTL: a safe-time wait on this intent cannot resolve inside the assertion
+                // window below, so the old blocking behavior fails loudly instead of passing late.
+                (KeyValueResponseType lockResult, _, _, _) = await kahuna2.LocateAndTryAcquireExclusiveLock(
+                    txId, key, 10_000, KeyValueDurability.Ephemeral, ct);
+                Assert.Equal(KeyValueResponseType.Locked, lockResult);
+
+                System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+                (KeyValueResponseType r1, ReadOnlyKeyValueEntry? snap) = await kahuna3.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, key, -1, T, KeyValueDurability.Ephemeral, ct);
+
+                elapsed.Stop();
+
+                Assert.Equal(KeyValueResponseType.Get, r1);
+                Assert.NotNull(snap);
+                Assert.Equal("before", Encoding.UTF8.GetString(snap.Value!));
+                Assert.True(elapsed.ElapsedMilliseconds < 5_000,
+                    $"the read waited {elapsed.ElapsedMilliseconds} ms on an intent that provably commits above its snapshot");
+
+                await kahuna1.LocateAndTryReleaseExclusiveLock(txId, key, KeyValueDurability.Ephemeral, ct);
+            });
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    // ── UnpreparedIntent_WriterBegunAfterSnapshot_ScanServesThePage ─────────────────
+
+    /// <summary>
+    /// The scan-path counterpart: a snapshot range scan whose window holds a foreign staged write
+    /// (unprepared, CommitTimestamp == Zero) from a transaction begun after the snapshot must serve
+    /// the page with the committed values rather than answer MustRetry/WaitingForReplication.
+    /// Runs both durabilities because they take different scan paths — ephemeral resolves keys
+    /// inline in TryGetByRangeHandler, persistent through the RangeScanContinuation merge — and
+    /// each applies the safe-time rule at its own site.
+    /// </summary>
+    [Theory]
+    [InlineData(KeyValueDurability.Ephemeral)]
+    [InlineData(KeyValueDurability.Persistent)]
+    public async Task UnpreparedIntent_WriterBegunAfterSnapshot_ScanServesThePage(KeyValueDurability durability)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", 3, raftLogger, kahunaLogger);
+
+        try
+        {
+            await RunUnderStableLeadership(node1, 3, async () =>
+            {
+                // '/'-bucketed keys under a slash-free scan prefix: a write routes by the bucket
+                // before the '/', and a scan routes by the prefix string itself, so the two agree
+                // only when the prefix omits the trailing slash. This keeps every key of the scan
+                // on one partition leader — required for the ephemeral arm, whose data is resident
+                // only in that leader's actor.
+                string prefix = "sste" + Guid.NewGuid().ToString("N")[..8];
+
+                for (int i = 0; i < 3; i++)
+                {
+                    (KeyValueResponseType set, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, $"{prefix}/k{i}", Encoding.UTF8.GetBytes($"v{i}"), null, -1,
+                        KeyValueFlags.Set, 0, durability, ct);
+                    Assert.Equal(KeyValueResponseType.Set, set);
+                }
+
+                // The seeds were stamped by their partition leaders' clocks; advance the wall
+                // clock so T sorts above every seed, then again so the writer's transaction id
+                // sorts above T.
+                await Task.Delay(10, ct);
+                HLCTimestamp T = node1.HybridLogicalClock.TrySendOrLocalEvent(node1.GetLocalNodeId());
+                await Task.Delay(10, ct);
+
+                (KeyValueResponseType startType, TransactionHandle txHandle) = await kahuna1.LocateAndStartTransaction(
+                    new() { CoordinatorKey = Guid.NewGuid().ToString(), Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+                HLCTimestamp txId = txHandle.TransactionId;
+                Assert.Equal(KeyValueResponseType.Set, startType);
+                Assert.True(txId.CompareTo(T) > 0, "the writer must begin after the snapshot");
+
+                // Stage a write on the middle key — a live unprepared intent inside the window,
+                // exactly what a split's bulk copy meets under a hammering writer.
+                (KeyValueResponseType staged, _, _) = await kahuna2.LocateAndTrySetKeyValue(
+                    txId, $"{prefix}/k1", "staged"u8.ToArray(), null, -1,
+                    KeyValueFlags.Set, 0, durability, ct);
+                Assert.Equal(KeyValueResponseType.Set, staged);
+
+                KeyValueGetByRangeResult page = await kahuna3.LocateAndGetByRange(
+                    HLCTimestamp.Zero, prefix, null, true, null, false, 100, T, durability, ct);
+
+                Assert.Equal(KeyValueResponseType.Get, page.Type);
+                Assert.Equal(3, page.Items.Count);
+
+                for (int i = 0; i < 3; i++)
+                {
+                    Assert.Equal($"{prefix}/k{i}", page.Items[i].Item1);
+                    Assert.Equal($"v{i}", Encoding.UTF8.GetString(page.Items[i].Item2.Value!));
+                }
+
+                await kahuna1.LocateAndTryReleaseExclusiveLock(txId, $"{prefix}/k1", durability, ct);
             });
         }
         finally
