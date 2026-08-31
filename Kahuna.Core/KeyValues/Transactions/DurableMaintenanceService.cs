@@ -809,10 +809,9 @@ internal sealed class DurableMaintenanceService
 
     // How long a replica may hold the verdict request while waiting for the prepare to apply locally. The
     // prepare already committed on the leader before the confirmation starts, so a healthy follower applies
-    // it within roughly one commit-broadcast hop; this bound only pays off when the follower lags.
+    // it within roughly one commit-broadcast hop; this bound only pays off when the follower lags. The wait
+    // is event-driven — the intent store wakes it on apply — so the bound is a lag ceiling, not a poll tick.
     private const int ReplicaFenceApplyWaitMs = 400;
-
-    private const int ReplicaFenceApplyPollMs = 5;
 
     // Caller-side cap per verdict call, above the server-side wait so a served answer is never abandoned
     // mid-wait, but far below the transport deadline so an unreachable node cannot stall the commit path.
@@ -821,8 +820,9 @@ internal sealed class DurableMaintenanceService
     /// <summary>
     /// Answers THIS node's staged-base fence verdict for one transaction's validated-base prepares.
     /// Deliberately not leader-gated: the verdict is about this node's own memory, and a follower's refusal
-    /// is exactly the evidence the confirmation collects. Waits (bounded) for keys whose prepare has not
-    /// applied here yet, then answers <see cref="KeyValueStagedBaseVerdict.NotApplied"/> for the remainder.
+    /// is exactly the evidence the confirmation collects. Waits (bounded, woken by the intent store's apply
+    /// pulse) for keys whose prepare has not applied here yet, then answers
+    /// <see cref="KeyValueStagedBaseVerdict.NotApplied"/> for the remainder.
     /// </summary>
     internal async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(
         int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
@@ -830,36 +830,15 @@ internal sealed class DurableMaintenanceService
         if (keys.Count == 0)
             return (true, []);
 
-        long deadline = Environment.TickCount64 + Math.Clamp(waitMs, 0, ReplicaFenceApplyWaitMs);
+        // A node that does not host the partition never applies its prepares, so a wait cannot be satisfied:
+        // answer with the instant evaluation instead of holding the request against the full budget. Under
+        // legacy full replication every node hosts every partition, so this only short-circuits asks that
+        // reached a non-replica (the cluster-wide endpoint fallback for an unplaced partition).
+        if (!raft.HostsPartition(partitionId))
+            return (true, preparedIntentStore.EvaluateReplicaFenceVerdicts(transactionId, epoch, keys));
 
-        KeyValueStagedBaseVerdictEntry[] verdicts = preparedIntentStore.EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
-
-        while (Environment.TickCount64 < deadline && !cancellationToken.IsCancellationRequested)
-        {
-            bool anyNotApplied = false;
-            foreach (KeyValueStagedBaseVerdictEntry verdict in verdicts)
-            {
-                if (verdict.Verdict == KeyValueStagedBaseVerdict.NotApplied)
-                {
-                    anyNotApplied = true;
-                    break;
-                }
-            }
-
-            if (!anyNotApplied)
-                break;
-
-            try
-            {
-                await Task.Delay(ReplicaFenceApplyPollMs, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-
-            verdicts = preparedIntentStore.EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
-        }
+        KeyValueStagedBaseVerdictEntry[] verdicts = await preparedIntentStore.EvaluateReplicaFenceVerdictsAsync(
+            transactionId, epoch, keys, Math.Clamp(waitMs, 0, ReplicaFenceApplyWaitMs), cancellationToken).ConfigureAwait(false);
 
         return (true, verdicts);
     }
@@ -875,6 +854,8 @@ internal sealed class DurableMaintenanceService
     /// </summary>
     internal async Task<bool> ConfirmReplicaFenceForCommitAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
     {
+        long fenceStart = Stopwatch.GetTimestamp();
+
         try
         {
             if (!raft.Joined)
@@ -885,7 +866,7 @@ internal sealed class DurableMaintenanceService
 
             // Gather the validated-base work and answer from this node's own verdicts first: they cost
             // nothing, need no wait, and a local refusal must not leave remote calls in flight unobserved.
-            List<(int PartitionId, List<string> Keys, List<PreparedIntent> Intents)>? fenced = null;
+            List<(int PartitionId, List<string> Keys, List<PreparedIntent> Intents, bool LocalAttested)>? fenced = null;
 
             foreach (DurablePartitionPrepare partition in input.Partitions)
             {
@@ -912,7 +893,20 @@ internal sealed class DurableMaintenanceService
                     return false;
                 }
 
-                (fenced ??= []).Add((partition.PartitionId, fencedKeys, fencedIntents));
+                // While a same-identity intent is live, the single-live-intent rule freezes its key's
+                // committed head, so an instant answer other than NotApplied cannot change: when every key
+                // answered, the wait-based local round below would only repeat this evaluation.
+                bool localAttested = true;
+                foreach (KeyValueStagedBaseVerdictEntry verdict in local)
+                {
+                    if (verdict.Verdict == KeyValueStagedBaseVerdict.NotApplied)
+                    {
+                        localAttested = false;
+                        break;
+                    }
+                }
+
+                (fenced ??= []).Add((partition.PartitionId, fencedKeys, fencedIntents, localAttested));
             }
 
             if (fenced is null)
@@ -920,13 +914,12 @@ internal sealed class DurableMaintenanceService
 
             List<Task<bool>>? calls = null;
 
-            foreach ((int partitionId, List<string> fencedKeys, List<PreparedIntent> fencedIntents) in fenced)
+            foreach ((int partitionId, List<string> fencedKeys, List<PreparedIntent> fencedIntents, bool localAttested) in fenced)
             {
-                // When this node hosts the partition, its own verdict joins the wait-based round too: the
-                // instant read above may have run before the prepare applied here, and this node can be the
-                // only current-memory replica left. The wait exits on the first evaluation whenever the
-                // intent is already present, so the common case pays nothing.
-                if (raft.HostsPartition(partitionId))
+                // When this node hosts the partition and its instant verdicts left any key unattested, its
+                // own verdict joins the wait-based round too: the instant read above may have run before the
+                // prepare applied here, and this node can be the only current-memory replica left.
+                if (!localAttested && raft.HostsPartition(partitionId))
                     (calls ??= []).Add(AskLocalFenceVerdictAsync(partitionId, input, fencedKeys, fencedIntents, localEndpoint, cancellationToken));
 
                 foreach (string endpoint in ResolveReplicaEndpoints(partitionId, localEndpoint))
@@ -966,6 +959,10 @@ internal sealed class DurableMaintenanceService
             logger.LogWarning(ex, "Replica fence confirmation failed for transaction {TransactionId}; proceeding unattested", input.TransactionId);
             DurableTransactionMetrics.ReplicaFenceProceededUnattested();
             return true;
+        }
+        finally
+        {
+            DurableTransactionMetrics.FinalizeReplicaFenceMs.Record(Stopwatch.GetElapsedTime(fenceStart).TotalMilliseconds);
         }
     }
 

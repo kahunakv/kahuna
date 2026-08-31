@@ -439,14 +439,29 @@ internal static class DurableTransactionMetrics
             description: "Finalize prepare-stage wall time (record init + all prepares + conflict retries).");
 
     /// <summary>
-    /// Wall time of the finalize's optimistic read-set validation: re-probing every tracked read to confirm no
-    /// committed writer invalidated it. Runs only when every prepare was durable. Scales with read-set size (see
-    /// <see cref="FinalizeReadSetKeys"/>) and with key-actor load, since each probe is an actor ask.
+    /// Wall time of the finalize's validate stage. The stage runs the optimistic read-set validation
+    /// (re-probing every tracked read to confirm no committed writer invalidated it) and the pre-decision
+    /// replica fence confirmation concurrently, so this records the MAX of the two, never their sum — the
+    /// faster half is shadowed. Break a slow stage apart with <see cref="FinalizeReplicaFenceMs"/> (the fence
+    /// alone) and <see cref="FinalizeReadSetKeys"/> (read-set size): a slow stage with a fast fence points at
+    /// read-set probes or key-actor queueing; a slow fence points at replica apply lag or an unreachable
+    /// replica. Runs only when every prepare was durable.
     /// </summary>
     internal static readonly Histogram<double> FinalizeValidateMs =
         Meter.CreateHistogram<double>(
             "kahuna.durable_tx.finalize_validate_ms", unit: "ms",
-            description: "Finalize read-set validation wall time.");
+            description: "Finalize validate-stage wall time (max of read-set validation and replica fence confirmation).");
+
+    /// <summary>
+    /// Wall time of the pre-decision replica fence confirmation alone, recorded on every confirmation call —
+    /// near zero when the transaction carries no validated-base intents or the node has not joined the
+    /// cluster. Kept separate from <see cref="FinalizeValidateMs"/> because that stage records the max of its
+    /// two concurrent halves, which hides fence cost whenever read-set probes run longer.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeReplicaFenceMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_replica_fence_ms", unit: "ms",
+            description: "Pre-decision replica fence confirmation wall time.");
 
     /// <summary>
     /// Wall time of the finalize's decision stage: replicating the terminal commit/abort transition at the anchor

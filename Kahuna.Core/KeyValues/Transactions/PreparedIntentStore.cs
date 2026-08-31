@@ -153,6 +153,38 @@ internal sealed class PreparedIntentStore
     public void ConfigureStagedBaseFence(int retentionMs) =>
         stagedBaseFenceRetentionMs = Math.Max(1, retentionMs);
 
+    // ── Fence-verdict wait ───────────────────────────────────────────────────────
+    //
+    // A pre-decision fence verdict request routinely arrives before the transaction's prepare has applied on
+    // this node: the coordinator releases the verdict request and the apply broadcast from the same
+    // post-durability callback, so the request wins that race deterministically on the synchronous-fsync
+    // commit path. Waiters therefore park on this pulse and are woken by the mutation paths the moment the
+    // intent set changes, instead of sleeping on a poll timer whose full tick every read-modify-write commit
+    // would pay as a latency floor.
+
+    // Completed and replaced whenever the intent set changes while a waiter is parked. Waiters capture the
+    // current instance BEFORE evaluating; a mutation that lands after their evaluation completes the instance
+    // they hold (every replaced instance is completed first), so a wakeup can never be lost. Created with
+    // RunContinuationsAsynchronously so the mutation paths never run waiter continuations inline.
+    private TaskCompletionSource intentSetChangedPulse = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // Number of parked fence waiters. While zero — the common case on every apply that no verdict request is
+    // waiting on — the mutation paths skip the pulse swap and its allocation entirely.
+    private int fenceWaiterCount;
+
+    /// <summary>Wakes parked fence-verdict waiters after a mutation of the intent set. Called outside
+    /// <see cref="applyGate"/>; a single volatile read when no waiter is parked.</summary>
+    private void SignalFenceWaiters()
+    {
+        if (Volatile.Read(ref fenceWaiterCount) == 0)
+            return;
+
+        TaskCompletionSource pulse = Interlocked.Exchange(
+            ref intentSetChangedPulse, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+
+        pulse.TrySetResult();
+    }
+
     /// <summary>Applies one transition to the intent at the command's key and reflects the result in the map:
     /// install/update on <see cref="TransactionApplyOutcome.Applied"/> with a record, delete when the applied
     /// record is null (removal), and leave the map unchanged on a no-op or rejection.</summary>
@@ -254,6 +286,9 @@ internal sealed class PreparedIntentStore
 
         // Outside the gate: the hooks may rent messages, schedule tasks, and enqueue actor work, none of which
         // may run under the apply lock. The hooks must not re-enter this store.
+        if (result.Outcome == TransactionApplyOutcome.Applied)
+            SignalFenceWaiters();
+
         if (settledCommit is not null)
             onCommittedSettleApplied?.Invoke(settledCommit);
 
@@ -478,6 +513,74 @@ internal sealed class PreparedIntentStore
         }
 
         return verdicts;
+    }
+
+    /// <summary>
+    /// The waiting form of <see cref="EvaluateReplicaFenceVerdicts"/>: while any key answers
+    /// <see cref="KeyValueStagedBaseVerdict.NotApplied"/>, parks on the intent-set pulse and re-evaluates
+    /// when the set changes, until every key is attested or <paramref name="waitMs"/> runs out. Event-driven:
+    /// a prepare that applies moments after the request wakes the waiter immediately, so a healthy in-flight
+    /// apply costs the wake latency, never a poll tick. Returns the latest evaluation; cancellation and an
+    /// exhausted budget return it as it stands (<c>NotApplied</c> is never an objection to the caller).
+    /// </summary>
+    internal async Task<KeyValueStagedBaseVerdictEntry[]> EvaluateReplicaFenceVerdictsAsync(
+        HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + waitMs;
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
+        if (!AnyNotApplied(verdicts))
+            return verdicts;
+
+        Interlocked.Increment(ref fenceWaiterCount);
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Capture the pulse BEFORE evaluating: a mutation that applies after this evaluation then
+                // completes the captured instance, so satisfaction can never slip past a parked waiter.
+                Task changed = Volatile.Read(ref intentSetChangedPulse).Task;
+
+                verdicts = EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
+                if (!AnyNotApplied(verdicts))
+                    return verdicts;
+
+                long remainingMs = deadline - Environment.TickCount64;
+                if (remainingMs <= 0)
+                    return verdicts;
+
+                try
+                {
+                    await changed.WaitAsync(TimeSpan.FromMilliseconds(remainingMs), cancellationToken).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    // Budget exhausted; the loop runs one final fresh evaluation and returns it.
+                }
+                catch (OperationCanceledException)
+                {
+                    return verdicts;
+                }
+            }
+
+            return verdicts;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref fenceWaiterCount);
+        }
+    }
+
+    private static bool AnyNotApplied(KeyValueStagedBaseVerdictEntry[] verdicts)
+    {
+        foreach (KeyValueStagedBaseVerdictEntry verdict in verdicts)
+        {
+            if (verdict.Verdict == KeyValueStagedBaseVerdict.NotApplied)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>Empties the committed-head memory, reproducing the state a process restart leaves: the memory
@@ -1204,6 +1307,8 @@ internal sealed class PreparedIntentStore
     /// </summary>
     public int PurgeWhere(Func<string, bool> shouldRemove)
     {
+        int removedCount;
+
         lock (applyGate)
         {
             List<string>? toRemove = null;
@@ -1224,8 +1329,11 @@ internal sealed class PreparedIntentStore
             }
 
             Interlocked.Increment(ref version);
-            return toRemove.Count;
+            removedCount = toRemove.Count;
         }
+
+        SignalFenceWaiters();
+        return removedCount;
     }
 
     /// <summary>Folds transferred intents into this partition's set (idempotent by key + resolution authority).</summary>
@@ -1233,6 +1341,8 @@ internal sealed class PreparedIntentStore
     {
         foreach (PreparedIntent intent in incoming)
             MergeLoad(intent);
+
+        SignalFenceWaiters();
     }
 
     public static byte[] SerializeIntents(IEnumerable<PreparedIntent> intents)

@@ -150,6 +150,110 @@ public sealed class TestReplicaFenceConfirmation : BaseCluster
         Assert.Equal(KeyValueStagedBaseVerdict.Clear, Assert.Single(verdicts).Verdict);
     }
 
+    // ── store-level: the waiting verdict read ───────────────────────────────────
+    //
+    // The waiting read parks until the transaction's prepare applies, woken by the store's apply pulse.
+    // The verdict request routinely arrives before the prepare applies on a replica, so the park-and-wake
+    // path is the common case there, not an edge.
+
+    [Fact]
+    public async Task WaitingVerdictRead_WakesWhenThePrepareApplies()
+    {
+        PreparedIntentStore store = new();
+        CommitThroughStore(store, MakeIntent("rfc/wake", Ts(1_000), epoch: 1, revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        PreparedIntent incoming = MakeIntent("rfc/wake", Ts(1_100), epoch: 1, revision: 7, baseRevision: 6, KeyValueState.Set);
+
+        Task<KeyValueStagedBaseVerdictEntry[]> waiting = store.EvaluateReplicaFenceVerdictsAsync(
+            incoming.TransactionId, 1, ["rfc/wake"], waitMs: 5_000, TestContext.Current.CancellationToken);
+
+        // The request raced ahead of the apply: the read must park, not answer NotApplied.
+        Assert.False(waiting.IsCompleted);
+
+        Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new PrepareIntentCommand(incoming)).Outcome);
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = await waiting.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueStagedBaseVerdict.Clear, Assert.Single(verdicts).Verdict);
+    }
+
+    [Fact]
+    public async Task WaitingVerdictRead_JudgesTheWokenPrepare_StaleBaseStillRefuses()
+    {
+        PreparedIntentStore store = new();
+        CommitThroughStore(store, MakeIntent("rfc/wake-stale", Ts(1_000), epoch: 1, revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        // Validated against revision 5, but the committed head is already 6: the woken evaluation must
+        // judge the freshly applied prepare, not merely report that it exists.
+        PreparedIntent stale = MakeIntent("rfc/wake-stale", Ts(1_100), epoch: 1, revision: 7, baseRevision: 5, KeyValueState.Set);
+
+        Task<KeyValueStagedBaseVerdictEntry[]> waiting = store.EvaluateReplicaFenceVerdictsAsync(
+            stale.TransactionId, 1, ["rfc/wake-stale"], waitMs: 5_000, TestContext.Current.CancellationToken);
+
+        Assert.False(waiting.IsCompleted);
+
+        Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new PrepareIntentCommand(stale)).Outcome);
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = await waiting.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        KeyValueStagedBaseVerdictEntry verdict = Assert.Single(verdicts);
+        Assert.Equal(KeyValueStagedBaseVerdict.StaleBase, verdict.Verdict);
+        Assert.Equal(6, verdict.HeadRevision);
+    }
+
+    [Fact]
+    public async Task WaitingVerdictRead_UnrelatedAppliesDoNotSatisfyIt()
+    {
+        PreparedIntentStore store = new();
+
+        Task<KeyValueStagedBaseVerdictEntry[]> waiting = store.EvaluateReplicaFenceVerdictsAsync(
+            Ts(1_100), 1, ["rfc/park"], waitMs: 5_000, TestContext.Current.CancellationToken);
+
+        Assert.False(waiting.IsCompleted);
+
+        // An apply on another key wakes the waiter, which must re-evaluate and park again: the verdict for
+        // the requested key is still NotApplied, so the read cannot complete on the unrelated wake.
+        PreparedIntent unrelated = MakeIntent("rfc/park-other", Ts(1_200), epoch: 1, revision: 1,
+            PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined);
+        Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new PrepareIntentCommand(unrelated)).Outcome);
+
+        Assert.False(waiting.IsCompleted);
+
+        PreparedIntent target = MakeIntent("rfc/park", Ts(1_100), epoch: 1, revision: 1,
+            PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined);
+        Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new PrepareIntentCommand(target)).Outcome);
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = await waiting.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueStagedBaseVerdict.Clear, Assert.Single(verdicts).Verdict);
+    }
+
+    [Fact]
+    public async Task WaitingVerdictRead_AnswersNotAppliedWhenTheBudgetRunsOut()
+    {
+        PreparedIntentStore store = new();
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = await store.EvaluateReplicaFenceVerdictsAsync(
+            Ts(1_100), 1, ["rfc/never"], waitMs: 50, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueStagedBaseVerdict.NotApplied, Assert.Single(verdicts).Verdict);
+    }
+
+    [Fact]
+    public async Task WaitingVerdictRead_ReturnsTheCurrentVerdictsOnCancellation()
+    {
+        PreparedIntentStore store = new();
+        using CancellationTokenSource cts = new();
+
+        Task<KeyValueStagedBaseVerdictEntry[]> waiting = store.EvaluateReplicaFenceVerdictsAsync(
+            Ts(1_100), 1, ["rfc/cancel"], waitMs: 60_000, cts.Token);
+
+        Assert.False(waiting.IsCompleted);
+
+        cts.Cancel();
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = await waiting.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Equal(KeyValueStagedBaseVerdict.NotApplied, Assert.Single(verdicts).Verdict);
+    }
+
     // ── cluster: the wired end-to-end flow ──────────────────────────────────────
 
     private static async Task<int> LeaderIndexOf(int partition, IRaft[] rafts, CancellationToken ct)
