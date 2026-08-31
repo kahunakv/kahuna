@@ -144,6 +144,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// would silently discard that write. Null disables the check (protocol tests that fabricate intents).</summary>
     public delegate Task<StagedBaseValidation> ValidateStagedBasesDelegate(DurableFinalizeInput input, CancellationToken cancellationToken);
 
+    /// <summary>Collects the staged-base fence verdicts of every replica of the participant partitions before
+    /// the commit decision is proposed — the pre-decision replica fence confirmation. The prepare
+    /// acknowledgement folds only the LEADER's fence verdict, and a leader whose committed-head memory is
+    /// frozen or freshly restored admits exactly the prepares the healthy replicas refuse; the detached
+    /// stale-base veto carried those verdicts but raced the commit at the anchor and lost the race in the
+    /// fsync-gate runs. False means a replica proved a validated base moved: the caller must abort with a
+    /// truthful conflict. Missing verdicts never block the commit. Runs only on the 2PC path — the one-phase
+    /// bundle is restricted to single-process groups for validated-base transactions, where every replica
+    /// shares this process's stores. Null disables the confirmation (single-process groups, protocol tests).</summary>
+    public delegate Task<bool> ConfirmReplicaFenceDelegate(DurableFinalizeInput input, CancellationToken cancellationToken);
+
     /// <summary>Replicates the terminal decision delta onto the anchor partition WITHOUT projecting the sent
     /// delta into this node's record store: unlike the record init, a decision can lose at the anchor to one
     /// that already won (a routed presumed abort racing this commit, or the reverse), and the replicate's
@@ -187,6 +198,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Null disables the up-front staged-base check (protocol tests that fabricate intents).
     private readonly ValidateStagedBasesDelegate? validateStagedBases;
+
+    // Null disables the pre-decision replica fence confirmation (single-process groups, protocol tests).
+    private readonly ConfirmReplicaFenceDelegate? confirmReplicaFence;
 
     // Projection-free decision replicate; null falls back to the ordinary fenced/unfenced replicate.
     private readonly ReplicateDecisionDelegate? replicateDecision;
@@ -233,9 +247,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ValidateStagedBasesDelegate? validateStagedBases = null,
         Func<string, int>? resolveCurrentPartition = null,
         ReplicateDecisionDelegate? replicateDecision = null,
-        LookupRecordRoutedDelegate? lookupRecordRouted = null)
+        LookupRecordRoutedDelegate? lookupRecordRouted = null,
+        ConfirmReplicaFenceDelegate? confirmReplicaFence = null)
     {
         this.validateStagedBases = validateStagedBases;
+        this.confirmReplicaFence = confirmReplicaFence;
         this.resolveCurrentPartition = resolveCurrentPartition;
         this.replicateDecision = replicateDecision;
         this.lookupRecordRouted = lookupRecordRouted;
@@ -500,10 +516,23 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         DurableTransactionMetrics.FinalizePrepareMs.Record(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
+        // The replica fence confirmation runs alongside the read-set validation: both need the prepares
+        // durable and neither depends on the other's answer. A replica proving a validated base moved is the
+        // same truthful conflict a failed validation is — ordered ahead of the decision, where the detached
+        // stale-base veto carrying the same verdict used to race the commit and lose.
         long validateStart = Stopwatch.GetTimestamp();
-        bool validated = allPrepared && await validateReadSet(cancellationToken).ConfigureAwait(false);
+        bool validated = false;
         if (allPrepared)
+        {
+            Task<bool> readSetValidation = validateReadSet(cancellationToken);
+            Task<bool>? replicaFenceConfirmation = confirmReplicaFence?.Invoke(input, cancellationToken);
+
+            validated = await readSetValidation.ConfigureAwait(false);
+            if (replicaFenceConfirmation is not null)
+                validated &= await replicaFenceConfirmation.ConfigureAwait(false);
+
             DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
+        }
 
         // ── Decision barrier: a commit only when every prepare is durable and validation passed; otherwise a
         // conflict abort (validation failed) or a retryable abort (a prepare did not commit). ──

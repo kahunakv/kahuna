@@ -120,6 +120,13 @@ public interface IKahuna
     /// answer can exceed the transport's message limit.</summary>
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
+    /// <summary>Answers THIS node's staged-base fence verdict for each of one transaction's validated-base
+    /// prepares — the replica half of the pre-decision fence confirmation. Deliberately not leader-gated: the
+    /// verdict is about this node's own applied intent and committed-head memory, and a follower's refusal is
+    /// exactly the evidence the confirmation exists to collect. May wait up to <paramref name="waitMs"/>
+    /// (bounded server-side) for the prepare to apply locally before answering NotApplied.</summary>
+    public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken);
+
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent);
 
     /// <summary>Probes many locally owned keys for the conflict classes each one asks for, one result per

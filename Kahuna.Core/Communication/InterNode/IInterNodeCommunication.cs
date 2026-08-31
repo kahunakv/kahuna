@@ -158,6 +158,15 @@ public interface IInterNodeCommunication
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
 
+    /// <summary>
+    /// Asks <paramref name="node"/> — any replica of <paramref name="partitionId"/>, never routed to a
+    /// leader — for its staged-base fence verdict on each of one transaction's validated-base prepares,
+    /// judged against that node's own applied intent and committed-head memory. The replica may wait up to
+    /// <paramref name="waitMs"/> for the prepare to apply locally before answering NotApplied. Serviced is
+    /// false only when the remote node refused to answer; a missing verdict is never an objection.
+    /// </summary>
+    public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken);
+
     /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);
 

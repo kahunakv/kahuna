@@ -1971,6 +1971,43 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             response.HasNextCursor ? response.NextCursor : null);
     }
 
+    public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcGetStagedBaseVerdictsRequest request = new()
+        {
+            PartitionId = partitionId,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Epoch = epoch,
+            WaitMs = waitMs
+        };
+
+        for (int i = 0; i < keys.Count; i++)
+            request.Keys.Add(keys[i]);
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcGetStagedBaseVerdictsResponse? response = batchResponse.GetStagedBaseVerdicts;
+
+        if (response is null || !response.Serviced || response.Verdicts.Count != keys.Count)
+            return (false, []);
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = new KeyValueStagedBaseVerdictEntry[response.Verdicts.Count];
+
+        for (int i = 0; i < response.Verdicts.Count; i++)
+            verdicts[i] = new((KeyValueStagedBaseVerdict)response.Verdicts[i].Verdict, response.Verdicts[i].HeadRevision);
+
+        return (true, verdicts);
+    }
+
     public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);

@@ -189,6 +189,10 @@ internal sealed class KeyValueServerBatcher
                         _ = GetRangeTransactionStateDelayed(semaphore, request, responseStream, context, drain);
                         break;
 
+                    case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
+                        _ = GetStagedBaseVerdictsDelayed(semaphore, request, responseStream, context, drain);
+                        break;
+
                     case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
                         _ = TryReleaseManyExclusiveLocksDelayed(semaphore, request, responseStream, context, drain);
                         break;
@@ -1197,6 +1201,40 @@ internal sealed class KeyValueServerBatcher
             {
                 semaphore.Release();
             }
+        }
+        catch (Exception ex)
+        {
+            await ObserveFault(semaphore, request, responseStream, context, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
+    }
+
+    private async Task GetStagedBaseVerdictsDelayed(
+        SemaphoreSlim semaphore,
+        GrpcBatchServerKeyValueRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        try
+        {
+            // The verdict read may wait (bounded) for the prepare to apply locally, so it must run
+            // OUTSIDE the stream's write semaphore — holding it would stall every other forwarded
+            // request on this shared stream for the duration of that wait.
+            GrpcGetStagedBaseVerdictsResponse resp = await service.GetStagedBaseVerdictsInternal(request.GetStagedBaseVerdicts, context);
+
+            GrpcBatchServerKeyValueResponse response = new()
+            {
+                Type = GrpcServerBatchType.ServerGetStagedBaseVerdicts,
+                RequestId = request.RequestId,
+                GetStagedBaseVerdicts = resp
+            };
+
+            await WriteResponseToStream(semaphore, responseStream, response, context);
         }
         catch (Exception ex)
         {

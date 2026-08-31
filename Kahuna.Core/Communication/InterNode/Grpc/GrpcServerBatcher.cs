@@ -512,6 +512,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcGetStagedBaseVerdictsRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcAcquireSnapshotHoldRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1074,6 +1083,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerGetRangeTransactionState;
             batchRequest.GetRangeTransactionState = itemRequest.GetRangeTransactionState;
         }
+        else if (itemRequest.GetStagedBaseVerdicts is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerGetStagedBaseVerdicts;
+            batchRequest.GetStagedBaseVerdicts = itemRequest.GetStagedBaseVerdicts;
+        }
         else if (itemRequest.AcquireSnapshotHold is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryAcquireSnapshotHold;
@@ -1357,6 +1371,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerGetRangeTransactionState:
                         item.Promise.TrySetResult(new(response.GetRangeTransactionState));
+                        break;
+
+                    case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
+                        item.Promise.TrySetResult(new(response.GetStagedBaseVerdicts));
                         break;
 
                     case GrpcServerBatchType.ServerTryAcquireSnapshotHold:

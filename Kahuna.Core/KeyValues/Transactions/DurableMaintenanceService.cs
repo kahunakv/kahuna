@@ -795,6 +795,265 @@ internal sealed class DurableMaintenanceService
         }
     }
 
+    // ── Replica fence confirmation ───────────────────────────────────────────────
+    //
+    // The staged-base fence's committed-head memory is per-node, and the prepare acknowledgement folds only
+    // the LEADER's verdict — a leader whose memory is frozen or freshly restored admits exactly the prepares
+    // the healthy replicas refuse. The detached stale-base veto made those replica verdicts count, but it
+    // RACED the commit at the anchor and a veto that lost the race only logged (the acknowledged stale-base
+    // commit stood — the fsync-gate lost updates). This pass collects the same verdicts synchronously, before
+    // the finalizer proposes the commit, so a refusal is ordered ahead of the decision instead of raced
+    // against it. A replica that cannot answer contributes nothing: a down node cannot veto either, so the
+    // commit never blocks on absence — the veto remains the backstop for that residual, and its late counter
+    // stays the loss witness.
+
+    // How long a replica may hold the verdict request while waiting for the prepare to apply locally. The
+    // prepare already committed on the leader before the confirmation starts, so a healthy follower applies
+    // it within roughly one commit-broadcast hop; this bound only pays off when the follower lags.
+    private const int ReplicaFenceApplyWaitMs = 400;
+
+    private const int ReplicaFenceApplyPollMs = 5;
+
+    // Caller-side cap per verdict call, above the server-side wait so a served answer is never abandoned
+    // mid-wait, but far below the transport deadline so an unreachable node cannot stall the commit path.
+    private const int ReplicaFenceCallBudgetMs = 1500;
+
+    /// <summary>
+    /// Answers THIS node's staged-base fence verdict for one transaction's validated-base prepares.
+    /// Deliberately not leader-gated: the verdict is about this node's own memory, and a follower's refusal
+    /// is exactly the evidence the confirmation collects. Waits (bounded) for keys whose prepare has not
+    /// applied here yet, then answers <see cref="KeyValueStagedBaseVerdict.NotApplied"/> for the remainder.
+    /// </summary>
+    internal async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(
+        int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+    {
+        if (keys.Count == 0)
+            return (true, []);
+
+        long deadline = Environment.TickCount64 + Math.Clamp(waitMs, 0, ReplicaFenceApplyWaitMs);
+
+        KeyValueStagedBaseVerdictEntry[] verdicts = preparedIntentStore.EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
+
+        while (Environment.TickCount64 < deadline && !cancellationToken.IsCancellationRequested)
+        {
+            bool anyNotApplied = false;
+            foreach (KeyValueStagedBaseVerdictEntry verdict in verdicts)
+            {
+                if (verdict.Verdict == KeyValueStagedBaseVerdict.NotApplied)
+                {
+                    anyNotApplied = true;
+                    break;
+                }
+            }
+
+            if (!anyNotApplied)
+                break;
+
+            try
+            {
+                await Task.Delay(ReplicaFenceApplyPollMs, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            verdicts = preparedIntentStore.EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
+        }
+
+        return (true, verdicts);
+    }
+
+    /// <summary>
+    /// The pre-decision replica fence confirmation, run by the finalizer between the prepare barrier and the
+    /// commit decision. For every participant partition carrying validated-base intents it reads the
+    /// staged-base fence verdict of each replica (this node inline, the rest over the wire). Any
+    /// <see cref="KeyValueStagedBaseVerdict.StaleBase"/> answer returns false — the caller aborts with a
+    /// truthful conflict instead of acknowledging a lost update. Missing verdicts (unreachable node, apply
+    /// lag past the wait budget, transport error) never block the commit; they are counted so the residual
+    /// window stays observable. Never throws.
+    /// </summary>
+    internal async Task<bool> ConfirmReplicaFenceForCommitAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!raft.Joined)
+                return true;
+
+            bool unattested = false;
+            string localEndpoint = raft.GetLocalEndpoint();
+
+            // Gather the validated-base work and answer from this node's own verdicts first: they cost
+            // nothing, need no wait, and a local refusal must not leave remote calls in flight unobserved.
+            List<(int PartitionId, List<string> Keys, List<PreparedIntent> Intents)>? fenced = null;
+
+            foreach (DurablePartitionPrepare partition in input.Partitions)
+            {
+                List<string>? fencedKeys = null;
+                List<PreparedIntent>? fencedIntents = null;
+
+                foreach (PreparedIntent intent in partition.Intents)
+                {
+                    if (!intent.HasValidatedBase)
+                        continue;
+
+                    (fencedKeys ??= []).Add(intent.Key);
+                    (fencedIntents ??= []).Add(intent);
+                }
+
+                if (fencedKeys is null || fencedIntents is null)
+                    continue;
+
+                KeyValueStagedBaseVerdictEntry[] local =
+                    preparedIntentStore.EvaluateReplicaFenceVerdicts(input.TransactionId, input.Epoch, fencedKeys);
+                if (AnyStaleBaseVerdict(input, localEndpoint, fencedIntents, local))
+                {
+                    DurableTransactionMetrics.ReplicaFenceRefused();
+                    return false;
+                }
+
+                (fenced ??= []).Add((partition.PartitionId, fencedKeys, fencedIntents));
+            }
+
+            if (fenced is null)
+                return true;
+
+            List<Task<bool>>? calls = null;
+
+            foreach ((int partitionId, List<string> fencedKeys, List<PreparedIntent> fencedIntents) in fenced)
+            {
+                // When this node hosts the partition, its own verdict joins the wait-based round too: the
+                // instant read above may have run before the prepare applied here, and this node can be the
+                // only current-memory replica left. The wait exits on the first evaluation whenever the
+                // intent is already present, so the common case pays nothing.
+                if (raft.HostsPartition(partitionId))
+                    (calls ??= []).Add(AskLocalFenceVerdictAsync(partitionId, input, fencedKeys, fencedIntents, localEndpoint, cancellationToken));
+
+                foreach (string endpoint in ResolveReplicaEndpoints(partitionId, localEndpoint))
+                {
+                    (calls ??= []).Add(AskReplicaFenceVerdictAsync(
+                        endpoint, partitionId, input, fencedKeys, fencedIntents, cancellationToken));
+                }
+            }
+
+            if (calls is null)
+                return true;
+
+            Task<bool?>[] wrapped = new Task<bool?>[calls.Count];
+            for (int i = 0; i < calls.Count; i++)
+                wrapped[i] = WrapReplicaCall(calls[i]);
+
+            bool refused = false;
+            foreach (bool? answer in await Task.WhenAll(wrapped).ConfigureAwait(false))
+            {
+                if (answer is null)
+                    unattested = true;
+                else if (answer.Value)
+                    refused = true;
+            }
+
+            if (refused)
+                DurableTransactionMetrics.ReplicaFenceRefused();
+            else if (unattested)
+                DurableTransactionMetrics.ReplicaFenceProceededUnattested();
+
+            return !refused;
+        }
+        catch (Exception ex)
+        {
+            // The confirmation is an extra guard ahead of the decision; a broken confirmation path must
+            // degrade to the pre-confirmation behavior (veto backstop), never block or fail commits.
+            logger.LogWarning(ex, "Replica fence confirmation failed for transaction {TransactionId}; proceeding unattested", input.TransactionId);
+            DurableTransactionMetrics.ReplicaFenceProceededUnattested();
+            return true;
+        }
+    }
+
+    /// <summary>Maps one replica call to its three-way outcome: true = refused (stale base proven), false =
+    /// clear, null = no verdict (timeout or transport failure — never an objection).</summary>
+    private static async Task<bool?> WrapReplicaCall(Task<bool> call)
+    {
+        try
+        {
+            return await call.WaitAsync(TimeSpan.FromMilliseconds(ReplicaFenceCallBudgetMs)).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A timeout abandons the underlying call still in flight; observe its eventual fault so an
+            // unreachable replica cannot surface as an unobserved-task exception later.
+            _ = call.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            return null;
+        }
+    }
+
+    /// <summary>The endpoints hosting <paramref name="partitionId"/> other than this node: the partition's
+    /// placed replica set when one exists, every peer under legacy full replication.</summary>
+    private List<string> ResolveReplicaEndpoints(int partitionId, string localEndpoint)
+    {
+        IReadOnlyList<Kommander.System.RaftReplica> replicas = raft.GetPartitionReplicas(partitionId);
+
+        List<string> endpoints = [];
+
+        if (replicas.Count == 0)
+        {
+            foreach (RaftNode node in raft.GetNodes())
+                endpoints.Add(node.Endpoint);
+            return endpoints;
+        }
+
+        foreach (Kommander.System.RaftReplica replica in replicas)
+        {
+            if (!string.Equals(replica.Endpoint, localEndpoint, StringComparison.Ordinal))
+                endpoints.Add(replica.Endpoint);
+        }
+
+        return endpoints;
+    }
+
+    private async Task<bool> AskLocalFenceVerdictAsync(
+        int partitionId, DurableFinalizeInput input,
+        List<string> fencedKeys, List<PreparedIntent> fencedIntents, string localEndpoint, CancellationToken cancellationToken)
+    {
+        (_, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts) = await GetStagedBaseVerdictsLocal(
+            partitionId, input.TransactionId, input.Epoch, fencedKeys, ReplicaFenceApplyWaitMs, cancellationToken).ConfigureAwait(false);
+
+        return AnyStaleBaseVerdict(input, localEndpoint, fencedIntents, verdicts);
+    }
+
+    private async Task<bool> AskReplicaFenceVerdictAsync(
+        string endpoint, int partitionId, DurableFinalizeInput input,
+        List<string> fencedKeys, List<PreparedIntent> fencedIntents, CancellationToken cancellationToken)
+    {
+        (bool serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts) = await interNodeCommunication.GetStagedBaseVerdicts(
+            endpoint, partitionId, input.TransactionId, input.Epoch, fencedKeys, ReplicaFenceApplyWaitMs, cancellationToken).ConfigureAwait(false);
+
+        if (!serviced || verdicts.Count != fencedKeys.Count)
+            throw new KahunaServerException($"Node {endpoint} did not answer the staged-base verdict request.");
+
+        return AnyStaleBaseVerdict(input, endpoint, fencedIntents, verdicts);
+    }
+
+    private bool AnyStaleBaseVerdict(
+        DurableFinalizeInput input, string endpoint,
+        List<PreparedIntent> fencedIntents, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts)
+    {
+        bool refused = false;
+
+        for (int i = 0; i < verdicts.Count && i < fencedIntents.Count; i++)
+        {
+            if (verdicts[i].Verdict != KeyValueStagedBaseVerdict.StaleBase)
+                continue;
+
+            refused = true;
+
+            logger.LogWarning(
+                "Replica fence refused the commit of transaction {TransactionId}: node {Endpoint} proves key {Key} moved past the validated base (base revision {BaseRevision}, committed head {HeadRevision}); aborting before the decision",
+                input.TransactionId, endpoint, fencedIntents[i].Key, fencedIntents[i].BaseRevision, verdicts[i].HeadRevision);
+        }
+
+        return refused;
+    }
+
     /// <summary>
     /// Releases an exclusive range lock on the leader of <paramref name="partitionId"/>, forwarding
     /// via IPC if this node is not the leader. Used by <see cref="RangeSplitter"/> to release the

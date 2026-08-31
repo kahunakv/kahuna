@@ -2415,6 +2415,25 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return response;
     }
 
+    internal async Task<GrpcGetStagedBaseVerdictsResponse> GetStagedBaseVerdictsInternal(GrpcGetStagedBaseVerdictsRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+
+        (bool serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts) = await keyValues.GetStagedBaseVerdictsLocal(
+            request.PartitionId, transactionId, request.Epoch, request.Keys, request.WaitMs, context.CancellationToken);
+
+        GrpcGetStagedBaseVerdictsResponse response = new() { Serviced = serviced };
+
+        for (int i = 0; i < verdicts.Count; i++)
+            response.Verdicts.Add(new GrpcStagedBaseVerdict
+            {
+                Verdict = (int)verdicts[i].Verdict,
+                HeadRevision = verdicts[i].HeadRevision
+            });
+
+        return response;
+    }
+
     internal async Task<GrpcDurableOperationResponse> DurableOperationInternal(GrpcDurableOperationRequest request, ServerCallContext context)
     {
         bool committed = await keyValues.DurableOperationLocal(

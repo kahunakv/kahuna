@@ -1154,6 +1154,18 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, waitMs, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
     public async Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))

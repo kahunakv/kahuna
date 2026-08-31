@@ -187,6 +187,52 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// Commits refused by the pre-decision replica fence confirmation: a replica's staged-base fence proved a
+    /// validated base moved while the acknowledging leader admitted the prepare, and the finalizer read that
+    /// verdict BEFORE proposing the commit — the ordered form of the stale-base veto, which raced the commit
+    /// and lost in the fsync-gate runs. Each refusal is a prevented lost update; the transaction aborts with a
+    /// truthful conflict and the client retries on the moved base.
+    /// </summary>
+    internal static readonly Counter<long> ReplicaFenceRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.replica_fence_refusals",
+            description: "Commits aborted before the decision because a replica's staged-base fence proved a validated base moved.");
+
+    private static long replicaFenceRefusals;
+
+    /// <summary>Process-wide count behind <see cref="ReplicaFenceRefusals"/>, readable for tests.</summary>
+    internal static long ReplicaFenceRefusalsCount => Interlocked.Read(ref replicaFenceRefusals);
+
+    internal static void ReplicaFenceRefused()
+    {
+        Interlocked.Increment(ref replicaFenceRefusals);
+        ReplicaFenceRefusals.Add(1);
+    }
+
+    /// <summary>
+    /// Replica fence confirmations that proceeded to the commit with at least one replica verdict missing —
+    /// the node was unreachable, answered too slowly, or had not applied the prepare within the wait budget.
+    /// The commit is not blocked on an absent verdict (a down replica cannot veto either), so each tick marks
+    /// a window where only the reachable verdicts protected the base; the detached veto remains the backstop
+    /// there, and a rising rate alongside stale_base_vetoes_late localises that residual.
+    /// </summary>
+    internal static readonly Counter<long> ReplicaFenceUnattested =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.replica_fence_unattested",
+            description: "Replica fence confirmations that proceeded with at least one replica verdict unavailable.");
+
+    private static long replicaFenceUnattested;
+
+    /// <summary>Process-wide count behind <see cref="ReplicaFenceUnattested"/>, readable for tests.</summary>
+    internal static long ReplicaFenceUnattestedCount => Interlocked.Read(ref replicaFenceUnattested);
+
+    internal static void ReplicaFenceProceededUnattested()
+    {
+        Interlocked.Increment(ref replicaFenceUnattested);
+        ReplicaFenceUnattested.Add(1);
+    }
+
+    /// <summary>
     /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
     /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
     /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals

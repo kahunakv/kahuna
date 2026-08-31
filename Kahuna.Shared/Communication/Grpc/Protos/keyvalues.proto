@@ -1121,6 +1121,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcTryCheckManyWriteIntentsRequest TryCheckManyWriteIntents = 51;
     GrpcReplicateKeyValueRangePageRequest ReplicateKeyValueRangePage = 52;
     GrpcGetRangeTransactionStateRequest GetRangeTransactionState = 53;
+    GrpcGetStagedBaseVerdictsRequest GetStagedBaseVerdicts = 54;
   }
 }
 
@@ -1179,6 +1180,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcTryCheckManyWriteIntentsResponse TryCheckManyWriteIntents = 50;
     GrpcReplicateKeyValueRangePageResponse ReplicateKeyValueRangePage = 51;
     GrpcGetRangeTransactionStateResponse GetRangeTransactionState = 52;
+    GrpcGetStagedBaseVerdictsResponse GetStagedBaseVerdicts = 53;
   }
 }
 
@@ -1356,6 +1358,37 @@ message GrpcDurableOperationResponse {
   bool Committed = 1;    // replicate: whether the batch committed; commit/rollback: applied
 }
 
+// Asks a replica of one data partition for its staged-base fence verdict on each of one transaction's
+// validated-base prepares, judged against the replica's own applied intent and committed-head memory. The
+// pre-decision half of the replica fence: the commit is proposed only after these verdicts are read, so a
+// refusal that previously raced the commit as a detached veto now arrives ahead of it. Answered by any
+// replica — no leader confirmation, because the verdict is about THIS node's memory.
+message GrpcGetStagedBaseVerdictsRequest {
+  int32 PartitionId = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  int64 Epoch = 5;
+  repeated string Keys = 6;
+  // How long the replica may wait for the prepare to apply locally before answering NotApplied for the
+  // remaining keys. Bounded server-side; 0 answers immediately.
+  int32 WaitMs = 7;
+}
+
+// One key's verdict: 0 NotApplied (this node holds no matching intent and cannot attest), 1 Clear,
+// 2 StaleBase (the fence memory proves the validated base moved). HeadRevision is the committed head the
+// verdict was judged against, -1 when the memory held nothing for the key.
+message GrpcStagedBaseVerdict {
+  int32 Verdict = 1;
+  int64 HeadRevision = 2;
+}
+
+message GrpcGetStagedBaseVerdictsResponse {
+  bool Serviced = 1;
+  // Aligned with the request's Keys, in order.
+  repeated GrpcStagedBaseVerdict Verdicts = 2;
+}
+
 // A linearizable lookup of a transaction's canonical record, routed from a consult site to the partition leader
 // that owns the record's anchor key so the answer is authoritative rather than a node-local projection.
 message GrpcLookupTransactionRecordRequest {
@@ -1442,6 +1475,7 @@ enum GrpcServerBatchType {
   SERVER_TRY_CHECK_MANY_WRITE_INTENTS = 49;
   SERVER_REPLICATE_KEY_VALUE_RANGE_PAGE = 50;
   SERVER_GET_RANGE_TRANSACTION_STATE = 51;
+  SERVER_GET_STAGED_BASE_VERDICTS = 52;
 }
 
 enum GrpcRangeLockMode {

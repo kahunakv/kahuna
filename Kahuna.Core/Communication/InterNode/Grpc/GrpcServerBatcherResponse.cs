@@ -102,6 +102,8 @@ internal readonly struct GrpcServerBatcherResponse
 
     public GrpcServerBatcherResponse(GrpcLookupTransactionRecordResponse lookupTransactionRecord) => payload = lookupTransactionRecord;
 
+    public GrpcServerBatcherResponse(GrpcGetStagedBaseVerdictsResponse getStagedBaseVerdicts) => payload = getStagedBaseVerdicts;
+
     public GrpcServerBatcherResponse(GrpcAcquireSnapshotHoldResponse acquireSnapshotHold) => payload = acquireSnapshotHold;
 
     public GrpcServerBatcherResponse(GrpcRenewSnapshotHoldResponse renewSnapshotHold) => payload = renewSnapshotHold;
@@ -208,6 +210,8 @@ internal readonly struct GrpcServerBatcherResponse
     public GrpcGetRangeTransactionStateResponse? GetRangeTransactionState => payload as GrpcGetRangeTransactionStateResponse;
 
     public GrpcLookupTransactionRecordResponse? LookupTransactionRecord => payload as GrpcLookupTransactionRecordResponse;
+
+    public GrpcGetStagedBaseVerdictsResponse? GetStagedBaseVerdicts => payload as GrpcGetStagedBaseVerdictsResponse;
 
     public GrpcAcquireSnapshotHoldResponse? AcquireSnapshotHold => payload as GrpcAcquireSnapshotHoldResponse;
 

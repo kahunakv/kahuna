@@ -1496,7 +1496,13 @@ internal sealed class TransactionCoordinator : IDisposable
                 Writes.WriteAdmissionClass.Terminal, cancellationToken, projectRecordLocally: false),
         // The decision winner and the resolution direction read the CANONICAL record: locally exactly when
         // this node leads the anchor partition, routed to the anchor leader otherwise.
-        lookupRecordRouted: manager.LookupDurableRecordRouted);
+        lookupRecordRouted: manager.LookupDurableRecordRouted,
+        // Pre-decision replica fence confirmation: the prepare acknowledgement folds only the leader's
+        // staged-base verdict, and a leader whose fence memory is frozen or freshly restored admits exactly
+        // the prepares the healthy replicas refuse. Reading the replicas' verdicts before the decision turns
+        // the racing stale-base veto into an ordered, truthful conflict abort. A single-process group skips
+        // it: every replica shares this process's stores, so there is no divergent memory to consult.
+        confirmReplicaFence: configuration.SingleProcessRaftGroup ? null : manager.ConfirmReplicaFenceForCommitAsync);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task

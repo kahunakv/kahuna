@@ -338,8 +338,18 @@ internal sealed class PreparedIntentStore
     /// committed-head memory. Returns null to acknowledge, or the conflict reason. Caller holds
     /// <see cref="applyGate"/>.
     /// </summary>
-    private string? EvaluateStagedBaseFence(PreparedIntent intent)
+    private string? EvaluateStagedBaseFence(PreparedIntent intent) =>
+        JudgeStagedBase(intent, countAbsentHeadAdmission: true, out _);
+
+    /// <summary>The fence decision itself, shared by the apply-path acknowledgement and the replica verdict
+    /// read (<see cref="EvaluateReplicaFenceVerdicts"/>). Returns null to admit, or the conflict reason.
+    /// <paramref name="headRevision"/> reports the remembered head the verdict was judged against (-1 when the
+    /// memory held nothing). Only the apply path counts the absent-head admission; a verdict read must not
+    /// inflate that counter. Caller holds <see cref="applyGate"/>.</summary>
+    private string? JudgeStagedBase(PreparedIntent intent, bool countAbsentHeadAdmission, out long headRevision)
     {
+        headRevision = -1;
+
         // Staleness gate, the partner of retention pruning: a pruned head cannot be distinguished from "no
         // commit happened", so a prepare from a transaction that BEGAN before the retention horizon (its reads,
         // and therefore its base, may predate every retained head) must not be acknowledged on absence of
@@ -353,9 +363,12 @@ internal sealed class PreparedIntentStore
         {
             // The only silent path around the fence: nothing to check is indistinguishable from "no commit
             // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
-            DurableTransactionMetrics.FenceAdmissionsAbsentHead.Add(1);
+            if (countAbsentHeadAdmission)
+                DurableTransactionMetrics.FenceAdmissionsAbsentHead.Add(1);
             return null;
         }
+
+        headRevision = head.Revision;
 
         // BaseState says whether the validated base was an existing value (the finalize-input builder maps an
         // observed non-existent base to Undefined). PreparedIntent.UnknownBaseRevision (no base at all) never
@@ -420,6 +433,64 @@ internal sealed class PreparedIntentStore
 
         onFenceWedgeRepair?.Invoke(key, observedRevision, head.Revision);
         return true;
+    }
+
+    /// <summary>
+    /// Reads this node's staged-base fence verdict for each of one transaction's validated-base prepares —
+    /// the replica half of the pre-decision fence confirmation. A key whose still-pending intent this store
+    /// holds under the given identity is judged with the same fence the apply path runs; while that intent is
+    /// live, the single-live-intent rule freezes the key's committed head, so the answer equals the verdict at
+    /// the prepare's own apply position. A key without that intent answers
+    /// <see cref="KeyValueStagedBaseVerdict.NotApplied"/> (this node cannot attest), and a resolved intent or
+    /// a blind write answers <see cref="KeyValueStagedBaseVerdict.Clear"/> (nothing left for the fence to
+    /// judge). Evaluated under the apply gate so the (intent, head, watermark) read is consistent.
+    /// </summary>
+    internal KeyValueStagedBaseVerdictEntry[] EvaluateReplicaFenceVerdicts(
+        HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys)
+    {
+        KeyValueStagedBaseVerdictEntry[] verdicts = new KeyValueStagedBaseVerdictEntry[keys.Count];
+
+        lock (applyGate)
+        {
+            for (int i = 0; i < keys.Count; i++)
+            {
+                if (!intents.TryGetValue(keys[i], out PreparedIntent? intent)
+                    || intent.TransactionId != transactionId
+                    || intent.Epoch != epoch)
+                {
+                    verdicts[i] = new(
+                        KeyValueStagedBaseVerdict.NotApplied,
+                        committedHeads.TryGetValue(keys[i], out CommittedHead head) ? head.Revision : -1);
+                    continue;
+                }
+
+                if (!intent.IsPending || !intent.HasValidatedBase)
+                {
+                    verdicts[i] = new(KeyValueStagedBaseVerdict.Clear, -1);
+                    continue;
+                }
+
+                string? conflict = JudgeStagedBase(intent, countAbsentHeadAdmission: false, out long headRevision);
+                verdicts[i] = new(
+                    conflict is null ? KeyValueStagedBaseVerdict.Clear : KeyValueStagedBaseVerdict.StaleBase,
+                    headRevision);
+            }
+        }
+
+        return verdicts;
+    }
+
+    /// <summary>Empties the committed-head memory, reproducing the state a process restart leaves: the memory
+    /// is in-memory only, so every restart opens a window where the fence has no head to judge against. Test
+    /// seam for driving that window deterministically; never called by production code.</summary>
+    internal void ForgetCommittedHeadsForTesting()
+    {
+        lock (applyGate)
+        {
+            committedHeads.Clear();
+            fenceRefusalStreaks.Clear();
+            committedHeadWatermark = HLCTimestamp.Zero;
+        }
     }
 
     /// <summary>Records a committed intent's mutation as its key's committed head and advances the pruning

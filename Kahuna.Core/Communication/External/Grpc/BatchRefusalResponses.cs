@@ -193,6 +193,7 @@ internal static class BatchRefusalResponses
             case GrpcServerBatchType.ServerImportCoordinatorDecisions:
             case GrpcServerBatchType.ServerDurableOperation:
             case GrpcServerBatchType.ServerLookupTransactionRecord:
+            case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
             case GrpcServerBatchType.ServerBeginOperation:
             case GrpcServerBatchType.ServerCompleteOperation:
             case GrpcServerBatchType.ServerGetTransactionWorkingSet:

@@ -118,6 +118,8 @@ internal readonly struct GrpcServerBatcherRequest
 
     public GrpcServerBatcherRequest(GrpcLookupTransactionRecordRequest lookupTransactionRecord) => payload = lookupTransactionRecord;
 
+    public GrpcServerBatcherRequest(GrpcGetStagedBaseVerdictsRequest getStagedBaseVerdicts) => payload = getStagedBaseVerdicts;
+
     public GrpcTryLockRequest? TryLock => payload as GrpcTryLockRequest;
 
     public GrpcUnlockRequest? Unlock => payload as GrpcUnlockRequest;
@@ -224,4 +226,6 @@ internal readonly struct GrpcServerBatcherRequest
     public GrpcGetRangeTransactionStateRequest? GetRangeTransactionState => payload as GrpcGetRangeTransactionStateRequest;
 
     public GrpcLookupTransactionRecordRequest? LookupTransactionRecord => payload as GrpcLookupTransactionRecordRequest;
+
+    public GrpcGetStagedBaseVerdictsRequest? GetStagedBaseVerdicts => payload as GrpcGetStagedBaseVerdictsRequest;
 }
