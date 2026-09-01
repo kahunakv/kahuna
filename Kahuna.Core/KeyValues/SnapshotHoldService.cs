@@ -42,7 +42,10 @@ internal sealed class SnapshotHoldService
         if (await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return await snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        string? leader = await raft.TryResolveLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader is null)
+            return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
+
         if (leader == raft.GetLocalEndpoint())
             return await snapshotFloorStore.AcquireAsync(holderId, timestamp, leaseMs, ct).ConfigureAwait(false);
 
@@ -62,7 +65,10 @@ internal sealed class SnapshotHoldService
         if (await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return await snapshotFloorStore.RenewAsync(holdId, leaseMs, ct).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        string? leader = await raft.TryResolveLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader is null)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
         if (leader == raft.GetLocalEndpoint())
             return await snapshotFloorStore.RenewAsync(holdId, leaseMs, ct).ConfigureAwait(false);
 
@@ -80,7 +86,10 @@ internal sealed class SnapshotHoldService
         if (await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return await snapshotFloorStore.ReleaseAsync(holdId, ct).ConfigureAwait(false);
 
-        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        string? leader = await raft.TryResolveLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader is null)
+            return KeyValueResponseType.MustRetry;
+
         if (leader == raft.GetLocalEndpoint())
             return await snapshotFloorStore.ReleaseAsync(holdId, ct).ConfigureAwait(false);
 
@@ -114,7 +123,10 @@ internal sealed class SnapshotHoldService
         if (await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
             return ReadLocalSnapshotFloor();
 
-        string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        string? leader = await raft.TryResolveLeader(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false);
+        if (leader is null)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
+
         if (leader == raft.GetLocalEndpoint())
         {
             // The election settled on this node after the confirmation above failed; confirm

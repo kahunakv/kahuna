@@ -127,10 +127,17 @@ internal sealed class KeySpaceAdminService
         // to replicate to this node so follow-on routes on this node see it immediately.
         if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
         {
-            string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            // A null target means the seed cannot be routed from here: the meta partition is not
+            // materialized locally, or this call is already serving a forwarded request that has
+            // spent its forward-hop budget. Surface the typed retryable condition — answering
+            // "false" would be indistinguishable from "already seeded", which is a silent lie.
+            string? leader = await raft.TryResolveLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            if (leader is null)
+                throw new PartitionNotHostedException(RangeMapStore.MetaPartitionId);
+
             if (leader == raft.GetLocalEndpoint())
             {
-                // We just became leader between the AmILeader check and WaitForLeader — fall through to seed locally.
+                // We just became leader between the leadership check and the resolution — fall through to seed locally.
             }
             else
             {
@@ -207,7 +214,11 @@ internal sealed class KeySpaceAdminService
 
         if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
         {
-            string leader = await raft.WaitForLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            // See RegisterKeyRangeAsync: a null target is a retryable routing condition, not a no-op.
+            string? leader = await raft.TryResolveLeader(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            if (leader is null)
+                throw new PartitionNotHostedException(RangeMapStore.MetaPartitionId);
+
             if (leader != raft.GetLocalEndpoint())
             {
                 // Forward to the meta-partition leader and wait for the removal to replicate here.

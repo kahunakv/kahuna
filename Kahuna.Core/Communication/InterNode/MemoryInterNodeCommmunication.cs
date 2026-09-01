@@ -1517,7 +1517,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.RegisterKeyRangeAsync(keySpace, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1525,7 +1529,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<bool> EnsureKeyRangeRemoved(string node, string keySpace, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.RemoveKeyRangeAsync(keySpace, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1563,7 +1571,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1572,7 +1584,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         RenewSnapshotHold(string node, string holdId, int leaseMs, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.LocateAndRenewSnapshotHold(holdId, leaseMs, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1581,7 +1597,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         ReleaseSnapshotHold(string node, string holdId, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.LocateAndReleaseSnapshotHold(holdId, cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
@@ -1590,7 +1610,11 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         GetSnapshotFloor(string node, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.GetSnapshotFloor(cancellationToken);
+        }
 
         throw new KahunaServerException($"The node {node} does not exist.");
     }
