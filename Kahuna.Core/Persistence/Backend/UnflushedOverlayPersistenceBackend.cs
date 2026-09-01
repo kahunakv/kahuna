@@ -57,6 +57,10 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
     public bool RemoveDurabilityFloor(int partitionId) => inner.RemoveDurabilityFloor(partitionId);
 
+    // Explicit forwarding is required — the interface's default implementation would otherwise
+    // answer "no reset performed" without ever reaching the real engine.
+    public bool TryRecoverFromStorageFailure() => inner.TryRecoverFromStorageFailure();
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         bool stored = inner.StoreLocks(items);

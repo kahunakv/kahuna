@@ -54,8 +54,21 @@ internal interface IPersistenceBackend
     /// </summary>
     public bool RemoveDurabilityFloor(int partitionId) => true;
 
+    /// <summary>
+    /// Attempts to bring the storage engine back into service after repeated store failures.
+    /// RocksDB latches a background error after a failed WAL append (for example ENOSPC): every
+    /// later write returns the cached error without any new I/O, so the background writer's
+    /// retained-batch retries can never succeed — even after the operator frees disk space. The
+    /// RocksDB backend overrides this to close and reopen the engine so retained batches can
+    /// drain without a process restart. Returns <c>true</c> when the engine was reset and stores
+    /// may be retried immediately; <c>false</c> when the backend performs no reset (the default)
+    /// or a reset is not possible yet (for example, the volume is still full). Callers must
+    /// treat <c>false</c> as "keep the retained batches and retry later", never as data loss.
+    /// </summary>
+    public bool TryRecoverFromStorageFailure() => false;
+
     public LockEntry? GetLock(string resource);
-    
+
     public KeyValueEntry? GetKeyValue(string keyName);
 
     /// <summary>
