@@ -818,7 +818,10 @@ internal sealed class GrpcServerBatcher
     {
         GrpcBatchServerLockRequest batchRequest = new()
         {
-            RequestId = request.RequestId
+            RequestId = request.RequestId,
+
+            // This write is the next hop of the chain the item recorded at enqueue time.
+            ForwardHops = request.ForwardHops + 1
         };
 
         GrpcServerBatcherRequest itemRequest = request.Request;
@@ -853,7 +856,10 @@ internal sealed class GrpcServerBatcher
     {
         GrpcBatchServerKeyValueRequest batchRequest = new()
         {
-            RequestId = request.RequestId
+            RequestId = request.RequestId,
+
+            // This write is the next hop of the chain the item recorded at enqueue time.
+            ForwardHops = request.ForwardHops + 1
         };
 
         GrpcServerBatcherRequest itemRequest = request.Request;

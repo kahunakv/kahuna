@@ -462,11 +462,6 @@ public sealed class LocksService : Locker.LockerBase
         ServerCallContext context
     )
     {
-        // This stream only ever carries requests forwarded by another Kahuna node, so every handler
-        // dispatched from it serves under the forwarded-request marker: a non-hosting receiver
-        // answers MustRetry instead of forwarding onward (replica-placement loop safety).
-        using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.Enter();
-
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -517,44 +512,51 @@ public sealed class LocksService : Locker.LockerBase
         {
             await foreach (GrpcBatchServerLockRequest request in requestStream.ReadAllAsync())
             {
-                switch (request.Type)
+                // Serve each request under the hop count its sender stamped, so the forward budget
+                // spans the whole chain instead of restarting at this process boundary. Each
+                // handler captures the marker when it is created inside the scope; the next
+                // request on this shared stream may carry a different count.
+                using (Kahuna.Server.ForwardedRequestScope.EnterAt(request.ForwardHops))
                 {
-                    case GrpcLockServerBatchType.ServerTypeTryLock:
+                    switch (request.Type)
                     {
-                        GrpcTryLockRequest? lockRequest = request.TryLock;
+                        case GrpcLockServerBatchType.ServerTypeTryLock:
+                        {
+                            GrpcTryLockRequest? lockRequest = request.TryLock;
 
-                        Track(request, TryLockServerDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcLockServerBatchType.ServerTypeUnlock:
-                    {
-                        GrpcUnlockRequest? unlockRequest = request.Unlock;
-
-                        Track(request, TryUnlockServerDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcLockServerBatchType.ServerTypeExtendLock:
-                    {
-                        GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
-
-                        Track(request, ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
-                    }
-                    break;
-                    
-                    case GrpcLockServerBatchType.ServerTypeGetLock:
-                    {
-                        GrpcGetLockRequest? getLockRequest = request.GetLock;
-
-                        Track(request, GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
-                    }
-                    break;
-
-                    case GrpcLockServerBatchType.ServerTypeNone:
-                    default:
-                        logger.LogError("Unknown batch server request type: {Type}", request.Type);
+                            Track(request, TryLockServerDelayed(semaphore, request.RequestId, lockRequest, responseStream, context));
+                        }
                         break;
+                    
+                        case GrpcLockServerBatchType.ServerTypeUnlock:
+                        {
+                            GrpcUnlockRequest? unlockRequest = request.Unlock;
+
+                            Track(request, TryUnlockServerDelayed(semaphore, request.RequestId, unlockRequest, responseStream, context));
+                        }
+                        break;
+                    
+                        case GrpcLockServerBatchType.ServerTypeExtendLock:
+                        {
+                            GrpcExtendLockRequest? extendLockRequest = request.ExtendLock;
+
+                            Track(request, ExtendLockServerDelayed(semaphore, request.RequestId, extendLockRequest, responseStream, context));
+                        }
+                        break;
+                    
+                        case GrpcLockServerBatchType.ServerTypeGetLock:
+                        {
+                            GrpcGetLockRequest? getLockRequest = request.GetLock;
+
+                            Track(request, GetLockServerDelayed(semaphore, request.RequestId, getLockRequest, responseStream, context));
+                        }
+                        break;
+
+                        case GrpcLockServerBatchType.ServerTypeNone:
+                        default:
+                            logger.LogError("Unknown batch server request type: {Type}", request.Type);
+                            break;
+                    }
                 }
             }
         }

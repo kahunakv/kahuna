@@ -105,7 +105,7 @@ internal sealed class KeyValueLocator
         {
             string? leader = await raft.TryResolveLeader(partitionId, cancellationToken);
             if (leader is null)
-                logger.LogKeyValueLeaderNotResolved(partitionId, "Partition is not hosted on this node");
+                logger.LogKeyValueLeaderNotResolved(partitionId, "No forward target: the partition is not hosted here, or the request already arrived forwarded");
 
             return leader;
         }
