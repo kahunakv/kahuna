@@ -60,11 +60,6 @@ internal sealed class KeyValueServerBatcher
         ServerCallContext context
     )
     {
-        // This stream only ever carries requests forwarded by another Kahuna node, so every handler
-        // dispatched from it serves under the forwarded-request marker: a non-hosting receiver
-        // answers MustRetry instead of forwarding onward (replica-placement loop safety).
-        using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.Enter();
-
         StreamDrain drain = new();
 
         using SemaphoreSlim semaphore = new(1, 1);
@@ -75,214 +70,12 @@ internal sealed class KeyValueServerBatcher
             {
                 drain.Enter();
 
-                switch (request.Type)
-                {
-                    case GrpcServerBatchType.ServerTrySetKeyValue:
-                        _ = TrySetKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTrySetManyKeyValue:
-                        _ = TrySetManyKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryDeleteManyKeyValue:
-                        _ = TryDeleteManyKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryGetKeyValue:
-                        _ = TryGetKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryGetManyValues:
-                        _ = TryGetManyValuesDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryDeleteKeyValue:
-                        _ = TryDeleteKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryExtendKeyValue:
-                        _ = TryExtendKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryExistsKeyValue:
-                        _ = TryExistsKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryExistsManyValues:
-                        _ = TryExistsManyValuesDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryCheckWriteIntent:
-                        _ = TryCheckWriteIntentServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryCheckManyWriteIntents:
-                        _ = TryCheckManyWriteIntentsServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryExecuteTransactionScript:
-                        _ = TryExecuteTransactionServerDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
-                        _ = TryAcquireExclusiveLockDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock:
-                        _ = TryAcquireExclusivePrefixLockDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
-                        _ = TryAcquireManyExclusiveLocksDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryReleaseExclusiveLock:
-                        _ = TryReleaseExclusiveLockDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock:
-                        _ = TryReleaseExclusivePrefixLockDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock:
-                        _ = TryAcquireExclusiveRangeLockDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock:
-                        _ = TryReleaseExclusiveRangeLockDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
-                        _ = EnsureKeyRangeSeededDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
-                        _ = EnsureKeyRangeRemovedDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryGetRangeLocks:
-                        _ = GetRangeLocksDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryImportRangeLocks:
-                        _ = ImportRangeLocksDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerImportCompletionReceipts:
-                        _ = ImportCompletionReceiptsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerDurableOperation:
-                        _ = DurableOperationDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerLookupTransactionRecord:
-                        _ = LookupTransactionRecordDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
-                        _ = ReplicateKeyValueRangePageDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerGetRangeTransactionState:
-                        _ = GetRangeTransactionStateDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
-                        _ = GetStagedBaseVerdictsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
-                        _ = TryReleaseManyExclusiveLocksDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryPrepareMutations:
-                        _ = TryPrepareMutationsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryPrepareManyMutations:
-                        _ = TryPrepareManyMutationsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryCommitMutations:
-                        _ = TryCommitMutationsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryCommitManyMutations:
-                        _ = TryCommitManyMutationsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryRollbackMutations:
-                        _ = TryRollbackMutationsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryRollbackManyMutations:
-                        _ = TryRollbackManyMutationsDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryGetByBucket:
-                        _ = GetByBucketDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryGetByRange:
-                        _ = GetByRangeDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryScanByPrefix:
-                        _ = ScanByPrefixDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryStartTransaction:
-                        _ = StartTransactionDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryCommitTransaction:
-                        _ = CommitTransactionDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryRollbackTransaction:
-                        _ = RollbackTransactionDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerBeginOperation:
-                        _ = BeginOperationDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerCompleteOperation:
-                        _ = CompleteOperationDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerGetTransactionWorkingSet:
-                        _ = GetTransactionWorkingSetDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerCloseTransaction:
-                        _ = CloseTransactionDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryAcquireSnapshotHold:
-                        _ = AcquireSnapshotHoldDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryRenewSnapshotHold:
-                        _ = RenewSnapshotHoldDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryReleaseSnapshotHold:
-                        _ = ReleaseSnapshotHoldDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTryGetSnapshotFloor:
-                        _ = GetSnapshotFloorDelayed(semaphore, request, responseStream, context, drain);
-                        break;
-
-                    case GrpcServerBatchType.ServerTypeNone:
-                    default:
-                        logger.LogError("Unknown batch Server request type: {Type}", request.Type);
-                        drain.Exit();
-                        break;
-                }
+                // Serve each request under the hop count its sender stamped, so the forward budget
+                // spans the whole chain instead of restarting at this process boundary. Each
+                // handler captures the marker when it is created inside the scope; the next
+                // request on this shared stream may carry a different count.
+                using (Kahuna.Server.ForwardedRequestScope.EnterAt(request.ForwardHops))
+                    DispatchServerRequest(semaphore, request, responseStream, context, drain);
             }
         }
         catch (IOException ex)
@@ -293,6 +86,229 @@ internal sealed class KeyValueServerBatcher
         {
             drain.Exit();
             await drain.Completed;
+        }
+    }
+
+    /// <summary>
+    /// Starts the handler for one request read off the shared inter-node stream. Handlers are
+    /// started, not awaited: the stream stays readable while they run, and the drain tracks them
+    /// to completion.
+    /// </summary>
+    private void DispatchServerRequest(
+        SemaphoreSlim semaphore,
+        GrpcBatchServerKeyValueRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        switch (request.Type)
+        {
+            case GrpcServerBatchType.ServerTrySetKeyValue:
+                _ = TrySetKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTrySetManyKeyValue:
+                _ = TrySetManyKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryDeleteManyKeyValue:
+                _ = TryDeleteManyKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryGetKeyValue:
+                _ = TryGetKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryGetManyValues:
+                _ = TryGetManyValuesDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryDeleteKeyValue:
+                _ = TryDeleteKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryExtendKeyValue:
+                _ = TryExtendKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryExistsKeyValue:
+                _ = TryExistsKeyValueServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryExistsManyValues:
+                _ = TryExistsManyValuesDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryCheckWriteIntent:
+                _ = TryCheckWriteIntentServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryCheckManyWriteIntents:
+                _ = TryCheckManyWriteIntentsServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryExecuteTransactionScript:
+                _ = TryExecuteTransactionServerDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryAcquireExclusiveLock:
+                _ = TryAcquireExclusiveLockDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryAcquireExclusivePrefixLock:
+                _ = TryAcquireExclusivePrefixLockDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryAcquireManyExclusiveLocks:
+                _ = TryAcquireManyExclusiveLocksDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryReleaseExclusiveLock:
+                _ = TryReleaseExclusiveLockDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryReleaseExclusivePrefixLock:
+                _ = TryReleaseExclusivePrefixLockDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryAcquireExclusiveRangeLock:
+                _ = TryAcquireExclusiveRangeLockDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryReleaseExclusiveRangeLock:
+                _ = TryReleaseExclusiveRangeLockDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
+                _ = EnsureKeyRangeSeededDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
+                _ = EnsureKeyRangeRemovedDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryGetRangeLocks:
+                _ = GetRangeLocksDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryImportRangeLocks:
+                _ = ImportRangeLocksDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerImportCompletionReceipts:
+                _ = ImportCompletionReceiptsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerDurableOperation:
+                _ = DurableOperationDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerLookupTransactionRecord:
+                _ = LookupTransactionRecordDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
+                _ = ReplicateKeyValueRangePageDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerGetRangeTransactionState:
+                _ = GetRangeTransactionStateDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
+                _ = GetStagedBaseVerdictsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryReleaseManyExclusiveLocks:
+                _ = TryReleaseManyExclusiveLocksDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryPrepareMutations:
+                _ = TryPrepareMutationsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryPrepareManyMutations:
+                _ = TryPrepareManyMutationsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryCommitMutations:
+                _ = TryCommitMutationsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryCommitManyMutations:
+                _ = TryCommitManyMutationsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryRollbackMutations:
+                _ = TryRollbackMutationsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryRollbackManyMutations:
+                _ = TryRollbackManyMutationsDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryGetByBucket:
+                _ = GetByBucketDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryGetByRange:
+                _ = GetByRangeDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryScanByPrefix:
+                _ = ScanByPrefixDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryStartTransaction:
+                _ = StartTransactionDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryCommitTransaction:
+                _ = CommitTransactionDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryRollbackTransaction:
+                _ = RollbackTransactionDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerBeginOperation:
+                _ = BeginOperationDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerCompleteOperation:
+                _ = CompleteOperationDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerGetTransactionWorkingSet:
+                _ = GetTransactionWorkingSetDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerCloseTransaction:
+                _ = CloseTransactionDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryAcquireSnapshotHold:
+                _ = AcquireSnapshotHoldDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryRenewSnapshotHold:
+                _ = RenewSnapshotHoldDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryReleaseSnapshotHold:
+                _ = ReleaseSnapshotHoldDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTryGetSnapshotFloor:
+                _ = GetSnapshotFloorDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerTypeNone:
+            default:
+                logger.LogError("Unknown batch Server request type: {Type}", request.Type);
+                drain.Exit();
+                break;
         }
     }
 

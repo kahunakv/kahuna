@@ -36,6 +36,14 @@ internal readonly struct GrpcServerBatcherItem
     public long EnqueuedAtTicks { get; }
 
     /// <summary>
+    /// How many times the operation being forwarded had already been forwarded when it was
+    /// enqueued. Captured in the constructor because that runs on the forwarding call's own async
+    /// flow, where the ambient marker is readable; the batcher's pump, which writes the item to
+    /// the wire, runs on a different flow and would always read zero.
+    /// </summary>
+    public int ForwardHops { get; }
+
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
@@ -54,5 +62,6 @@ internal readonly struct GrpcServerBatcherItem
         Request = request;
         Promise = promise;
         EnqueuedAtTicks = Environment.TickCount64;
+        ForwardHops = ForwardedRequestScope.ChainedHops;
     }
 }

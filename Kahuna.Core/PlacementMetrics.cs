@@ -5,9 +5,9 @@ namespace Kahuna.Server;
 /// <summary>
 /// <see cref="System.Diagnostics.Metrics"/> instruments for per-partition replica placement.
 /// These are how a badly placed cluster is told apart from a healthy one: a hot forward path or a
-/// high hint-miss rate means keys are being served far from their data. All counters are inert
-/// under full replication (replication factor 0) — every partition is hosted locally, so nothing
-/// resolves a remote target.
+/// high hint-miss rate means keys are being served far from their data. All counters except
+/// <see cref="ChainedForwardsRefused"/> are inert under full replication (replication factor 0) —
+/// every partition is hosted locally, so nothing resolves a remote target from the placement map.
 /// </summary>
 internal static class PlacementMetrics
 {
@@ -31,6 +31,14 @@ internal static class PlacementMetrics
     /// </summary>
     internal static readonly Counter<long> ForwardsUnresolved =
         Meter.CreateCounter<long>("kahuna.placement.forwards_unresolved", description: "Non-hosted operations with no forward target.");
+
+    /// <summary>
+    /// Forwards refused because the request had already been forwarded here by another node. A
+    /// sustained rate means two nodes hold disagreeing leadership or placement views for the same
+    /// partition; a brief burst around an election is normal — the caller retries.
+    /// </summary>
+    internal static readonly Counter<long> ChainedForwardsRefused =
+        Meter.CreateCounter<long>("kahuna.placement.chained_forwards_refused", description: "Forwards refused because the request already arrived forwarded.");
 
     /// <summary>Forward resolutions answered by the gossip-fed leader hint.</summary>
     internal static readonly Counter<long> LeaderHintHits =

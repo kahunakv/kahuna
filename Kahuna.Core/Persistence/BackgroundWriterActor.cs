@@ -55,6 +55,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private const int MaxPendingCleanupKeys = 10_000;
 
     /// <summary>
+    /// Consecutive flush cycles that must fail with a storage fault before the writer asks the
+    /// backend to recover its storage engine. Each cycle already spends the full in-cycle retry
+    /// schedule (<see cref="WriteRetries"/> attempts on a ~1s backoff), so this threshold
+    /// represents sustained failure, not a blip. Kept as a mutable internal so tests can drive
+    /// the recovery path without waiting through several real cycles.
+    /// </summary>
+    internal int StoreFailureCyclesBeforeRecovery = 3;
+
+    /// <summary>
     /// Fixed queue key for every batch submitted to the dedicated writer scheduler. Batches aggregate keys
     /// across many partitions into one backend call, so there is no single "real" partition to key on; and
     /// because the writer scheduler is its own instance, nothing else shares its queues — the old collision
@@ -191,6 +200,31 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// Whether a checkpoint operation is pending.
     /// </summary>
     private bool pendingCheckpoint;
+
+    /// <summary>
+    /// True when a store call has failed with a storage fault — a thrown storage exception or a
+    /// <c>false</c> contract return — since the last recovery evaluation. Writer-queue
+    /// backpressure does not set it: a saturated queue is not a storage-engine fault, and a
+    /// close-and-reopen would not help it.
+    /// </summary>
+    private bool storeFaultSinceLastRecoveryCheck;
+
+    /// <summary>
+    /// True when any store call has succeeded since the last recovery evaluation. A single
+    /// success proves the engine writes, so it resets the wedge count even when another store in
+    /// the same cycle failed (that failure is then not an engine wedge).
+    /// </summary>
+    private bool storeSuccessSinceLastRecoveryCheck;
+
+    /// <summary>
+    /// Consecutive flush cycles in which stores only failed. At
+    /// <see cref="StoreFailureCyclesBeforeRecovery"/> the backend is declared wedged and asked
+    /// to recover. Internal read access is the operator/test-visible wedge counter.
+    /// </summary>
+    private int consecutiveStoreFailureCycles;
+
+    /// <summary>Consecutive flush cycles whose stores only failed. Test/observability only.</summary>
+    internal int ConsecutiveStoreFailureCycles => consecutiveStoreFailureCycles;
 
     /// <summary>
     /// Distinct keys touched by successful key-value flushes that are queued for targeted
@@ -339,6 +373,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 // checkpointed and its Raft WAL never compacted.
                 await FlushLocks();
                 await FlushKeyValues();
+                // A backend wedged by a latched storage error (RocksDB after ENOSPC) can never be
+                // un-wedged by the retry loops above — every retry re-collects the cached error.
+                // After enough all-failure cycles, ask the backend to recover its engine; on
+                // success, drain the retained batches immediately instead of waiting a tick.
+                if (await MaybeRecoverPersistenceBackend())
+                {
+                    await FlushLocks();
+                    await FlushKeyValues();
+                }
                 await AdvanceDurabilityFloors(forceSnapshotCapture: false);
                 await CheckpointPartitions();
                 await RunTargetedRevisionCleanup();
@@ -372,6 +415,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 {
                     bool locksFlushed = await FlushLocks(drainFully: true);
                     bool keyValuesFlushed = await FlushKeyValues(drainFully: true);
+
+                    // An explicit flush against a wedged-but-recoverable engine should succeed in
+                    // place rather than fail the backup/close: same recovery gate as the periodic
+                    // tick, then one more full drain.
+                    if ((!locksFlushed || !keyValuesFlushed) && await MaybeRecoverPersistenceBackend())
+                    {
+                        locksFlushed = await FlushLocks(drainFully: true);
+                        keyValuesFlushed = await FlushKeyValues(drainFully: true);
+                    }
+
                     await AdvanceDurabilityFloors(forceSnapshotCapture: true);
                     await RunTargetedRevisionCleanup();
                     if (locksFlushed && keyValuesFlushed)
@@ -723,15 +776,19 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             // Same skip-and-retry treatment for any storage failure (e.g. a full disk): the floor
             // list is recomputed from the tracker every cycle, so nothing is lost by returning —
             // while an escaped exception would abort the rest of the flush pass.
+            storeFaultSinceLastRecoveryCheck = true;
             logger.LogError(ex, "Persisting {Count} advanced durability floors failed; retrying next flush cycle", floorsToPersist.Count);
             return;
         }
 
         if (!stored)
         {
+            storeFaultSinceLastRecoveryCheck = true;
             logger.LogWarning("Failed to persist {Count} advanced durability floors; retrying next flush cycle", floorsToPersist.Count);
             return;
         }
+
+        storeSuccessSinceLastRecoveryCheck = true;
 
         foreach ((int partitionId, long floor) in floorsToPersist)
         {
@@ -740,6 +797,58 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (logger.IsEnabled(LogLevel.Debug))
                 logger.LogDebug("Durability floor of partition #{PartitionId} advanced to {Floor}", partitionId, floor);
         }
+    }
+
+    /// <summary>
+    /// Evaluates the wedge counter and, past the threshold, asks the backend to recover its
+    /// storage engine (for RocksDB: close and reopen, which clears a latched background error
+    /// such as ENOSPC after the operator frees space). The counter advances only on cycles whose
+    /// stores exclusively failed with storage faults: one successful store proves the engine
+    /// writes and resets it, and pure writer-queue backpressure never counts. A recovery request
+    /// that returns <c>false</c> (volume still full, or a backend with no reset capability) keeps
+    /// the counter, so the request repeats on later failed cycles; the retained batches are held
+    /// throughout, so nothing is lost either way.
+    /// </summary>
+    /// <returns><c>true</c> when the engine was recovered and retained batches should be retried now.</returns>
+    private async ValueTask<bool> MaybeRecoverPersistenceBackend()
+    {
+        if (storeSuccessSinceLastRecoveryCheck)
+            consecutiveStoreFailureCycles = 0;
+        else if (storeFaultSinceLastRecoveryCheck)
+            consecutiveStoreFailureCycles++;
+
+        storeFaultSinceLastRecoveryCheck = false;
+        storeSuccessSinceLastRecoveryCheck = false;
+
+        if (consecutiveStoreFailureCycles < StoreFailureCyclesBeforeRecovery)
+            return false;
+
+        logger.LogError(
+            "Persistence backend has failed {Cycles} consecutive flush cycles; requesting a storage-engine recovery",
+            consecutiveStoreFailureCycles);
+
+        bool recovered;
+
+        try
+        {
+            recovered = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.TryRecoverFromStorageFailure());
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Persistence backend storage-engine recovery attempt failed");
+            return false;
+        }
+
+        if (recovered)
+        {
+            consecutiveStoreFailureCycles = 0;
+            logger.LogWarning("Persistence backend storage engine recovered; retrying the retained batches");
+            return true;
+        }
+
+        logger.LogWarning(
+            "Persistence backend storage engine could not be recovered yet; retained batches continue to be retried");
+        return false;
     }
 
     /// <summary>
@@ -845,11 +954,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 try
                 {
                     success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreLocks(items));
+
+                    // A contract-honoring false return is a storage fault the backend already logged.
+                    if (!success)
+                        storeFaultSinceLastRecoveryCheck = true;
                 }
                 catch (ReadBackpressureExceededException)
                 {
                     // Writer queue at its depth limit — treat as a failed attempt so the backoff loop retries,
                     // and the post-loop failure path keeps the batch in pendingLockItems. Never dropped.
+                    // Not a storage fault: it never feeds the wedge counter.
                     success = false;
                 }
                 catch (Exception ex)
@@ -858,6 +972,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     // same retry-then-repark path — an escaped exception would drop the dequeued
                     // batch and freeze the durability floor of every partition it references.
                     success = false;
+                    storeFaultSinceLastRecoveryCheck = true;
                     logger.LogError(ex, "Storing a batch of {Count} locks failed", items.Count);
                 }
                 if (success)
@@ -876,6 +991,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
 
             logger.LogSuccessfullyStoredLocks(items.Count, stopwatch.ElapsedMilliseconds);
+
+            storeSuccessSinceLastRecoveryCheck = true;
 
             ResolveFlushedIndexes(batchIndexes);
 
@@ -1022,11 +1139,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 try
                 {
                     success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreKeyValues(items));
+
+                    // A contract-honoring false return is a storage fault the backend already logged.
+                    if (!success)
+                        storeFaultSinceLastRecoveryCheck = true;
                 }
                 catch (ReadBackpressureExceededException)
                 {
                     // Writer queue at its depth limit — treat as a failed attempt so the backoff loop retries,
                     // and the post-loop failure path keeps the batch in pendingKeyValuesItems. Never dropped.
+                    // Not a storage fault: it never feeds the wedge counter.
                     success = false;
                 }
                 catch (Exception ex)
@@ -1037,6 +1159,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     // partition's durability floor and with it WAL compaction — a permanent wedge
                     // from a transient fault.
                     success = false;
+                    storeFaultSinceLastRecoveryCheck = true;
                     logger.LogError(ex, "Storing a batch of {Count} key-values failed", items.Count);
                 }
                 if (success)
@@ -1058,6 +1181,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             }
 
             logger.LogSuccessfullyStoredKeyValues(items.Count, stopwatch.ElapsedMilliseconds);
+
+            storeSuccessSinceLastRecoveryCheck = true;
 
             ResolveFlushedIndexes(batchIndexes);
 

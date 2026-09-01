@@ -87,6 +87,10 @@ message GrpcBatchClientLockResponse
 message GrpcBatchServerLockRequest {
   GrpcLockServerBatchType Type = 1;
   int32 RequestId = 2;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. The receiver serves under that count so the forward budget spans the whole chain
+  // instead of restarting at every node. Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 7;
   oneof payload {
     GrpcTryLockRequest TryLock = 3;
     GrpcUnlockRequest Unlock = 4;

@@ -353,10 +353,11 @@ internal sealed class DurableReplicationGateway
     {
         // The sender may have routed on a replica guess (no gossiped leader hint yet): every durable
         // kind below requires the partition leader (propose via the local scheduler, apply on leader
-        // state). This node hosts the partition, so its own leader resolution is accurate — redirect
-        // once to the actual leader instead of failing the operation against a follower, which the
-        // sender would only retry against the same guessed replica. Bounded: the redirect target is
-        // the current leader, which serves locally; a mid-flight leadership move just redirects again.
+        // state). Redirect once to the actual leader instead of failing the operation against a
+        // follower, which the sender would only retry against the same guessed replica. Bounded by
+        // the forward-hop budget: the resolver stops answering a remote target once an operation
+        // has spent it, so two nodes with disagreeing leadership views cannot bounce this operation
+        // between them. Past the budget the operation fails and the origin retries.
         if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
         {
             string? actualLeader;

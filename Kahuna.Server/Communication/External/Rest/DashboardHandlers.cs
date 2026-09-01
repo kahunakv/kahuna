@@ -62,6 +62,7 @@ public static class DashboardHandlers
         "kahuna.placement.forwards_unresolved",
         "kahuna.placement.leader_hint_hits",
         "kahuna.placement.leader_hint_misses",
+        "kahuna.placement.chained_forwards_refused",
 
         // Consensus, from Kommander.
         "raft.executor.operations_total",

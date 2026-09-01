@@ -85,7 +85,7 @@ internal sealed class LockLocator
 
         if (leader is null)
         {
-            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
+            logger.LogLockLeaderNotResolved(partitionId, resource, "No forward target: the partition is not hosted here, or the request already arrived forwarded");
 
             return (LockResponseType.MustRetry, 0);
         }
@@ -139,7 +139,7 @@ internal sealed class LockLocator
 
         if (leader is null)
         {
-            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
+            logger.LogLockLeaderNotResolved(partitionId, resource, "No forward target: the partition is not hosted here, or the request already arrived forwarded");
 
             return (LockResponseType.MustRetry, 0);
         }
@@ -193,7 +193,7 @@ internal sealed class LockLocator
 
         if (leader is null)
         {
-            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
+            logger.LogLockLeaderNotResolved(partitionId, resource, "No forward target: the partition is not hosted here, or the request already arrived forwarded");
 
             return LockResponseType.MustRetry;
         }
@@ -249,7 +249,7 @@ internal sealed class LockLocator
 
         if (leader is null)
         {
-            logger.LogLockLeaderNotResolved(partitionId, resource, "Partition is not hosted on this node");
+            logger.LogLockLeaderNotResolved(partitionId, resource, "No forward target: the partition is not hosted here, or the request already arrived forwarded");
 
             return (LockResponseType.MustRetry, null);
         }
