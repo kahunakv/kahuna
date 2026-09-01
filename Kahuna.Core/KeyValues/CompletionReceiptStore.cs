@@ -34,18 +34,28 @@ internal sealed class CompletionReceiptStore
 {
     private readonly ConcurrentDictionary<ReceiptKey, CompletionReceipt> receipts = new();
 
-    // Monotonic change stamp for the receipt set, bumped whenever a receipt is actually added or removed. A
-    // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
-    // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
-    // from a full scan + serialize + rewrite into a counter comparison. Routing changes always arrive together
-    // with replicated receipt handoffs (which bump the stamp), so a skip can never hide a receipt that moved
-    // partitions: until every partition has re-persisted past the handoff, none of them compares equal.
+    // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
+    // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
     private long version;
 
-    // Per-partition value of <see cref="version"/> captured just before that partition's last successful
-    // snapshot write. Captured before the scan, so a mutation racing the scan leaves the stamp ahead and the
-    // next checkpoint rewrites the file.
-    private readonly ConcurrentDictionary<int, long> persistedVersion = new();
+    // Per-partition dirty stamp: the tick of the last mutation whose key routed to that partition. A
+    // partition's checkpoint snapshot is skipped when neither its stamp, nor <see cref="allPartitionsVersion"/>,
+    // nor the routing stamp moved since its last durable write — the file already holds exactly this content —
+    // which turns the common quiet checkpoint from a full scan + serialize + rewrite into a counter comparison.
+    // With the previous single global stamp, one receipt change anywhere re-dirtied every partition, so a busy
+    // checkpoint rescanned the whole set once per partition.
+    private readonly ConcurrentDictionary<int, long> partitionVersion = new();
+
+    // Tick of the last mutation that could not be attributed to one partition: no resolver attached yet
+    // (load-time records), or a bulk sweep that touched many keys. Dirties every partition; over-dirty is safe.
+    private long allPartitionsVersion;
+
+    // Stamps captured just before that partition's last successful snapshot write: the mutation tick it
+    // covered and the routing stamp it routed with. Captured before the scan, so a mutation or a routing
+    // change racing the scan leaves a stamp ahead and the next checkpoint rewrites the file. The routing
+    // stamp is what keeps a skip from hiding a receipt that silently moved partitions when the range map
+    // changed: until every partition has re-persisted under the new routing, none of them compares equal.
+    private readonly ConcurrentDictionary<int, PersistedStamp> persistedVersion = new();
 
     /// <summary>
     /// Directory + filename prefix for the per-partition on-disk snapshots, or null when persistence is
@@ -61,6 +71,10 @@ internal sealed class CompletionReceiptStore
     // Resolves a receipt key to its current owning data partition (RangeRouting.Locate). Attached after
     // construction, once the locator exists; a per-partition snapshot needs it, load does not.
     private Func<string, int>? keyToPartition;
+
+    // Monotonic stamp of the routing the resolver reads (RangeMapStore.MapVersion), or null when routing is
+    // fixed for the store's lifetime (tests, memory-only fallback). Pulled by the checkpoint guard.
+    private Func<long>? routingVersion;
 
     private readonly ILogger<IKahuna>? logger;
 
@@ -98,9 +112,62 @@ internal sealed class CompletionReceiptStore
 
     /// <summary>
     /// Wires the receipt-key → data-partition resolver once the locator is constructed. Called during manager
-    /// construction, before any checkpoint can run.
+    /// construction, before any checkpoint can run. <paramref name="routingVersion"/> reports a stamp that
+    /// changes whenever the resolver's routing may have changed (the range-map version); null means the
+    /// routing is fixed for the store's lifetime.
     /// </summary>
-    public void AttachPartitionResolver(Func<string, int> resolver) => keyToPartition = resolver;
+    public void AttachPartitionResolver(Func<string, int> resolver, Func<long>? routingVersion = null)
+    {
+        keyToPartition = resolver;
+        this.routingVersion = routingVersion;
+    }
+
+    // Marks the partition owning <paramref name="key"/> dirty for the checkpoint guard. Mutators call this
+    // after the dictionary write, so a stamp equal to a pre-scan capture implies the scan saw the mutation.
+    // Without a resolver the mutation cannot be attributed, so every partition is marked instead.
+    //
+    // This runs on the replicated apply/restore path, so it must never throw: routing can legitimately fail
+    // there (a restart replays data-partition entries before the meta partition has rebuilt the range map,
+    // and the resolver throws on an uncovered key-range key). An unattributable mutation falls back to the
+    // all-partitions stamp — over-dirty is safe, a failed apply is not.
+    private void StampDirty(string key)
+    {
+        long tick = Interlocked.Increment(ref version);
+
+        Func<string, int>? resolver = keyToPartition;
+        if (resolver is not null)
+        {
+            try
+            {
+                partitionVersion.AddOrUpdate(resolver(key), static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
+                return;
+            }
+            catch
+            {
+                // Fall through to the all-partitions stamp.
+            }
+        }
+
+        StampMax(ref allPartitionsVersion, tick);
+    }
+
+    // Marks every partition dirty: for bulk sweeps whose per-key attribution would cost more than the
+    // over-inclusive rewrite it avoids.
+    private void StampAllDirty() => StampMax(ref allPartitionsVersion, Interlocked.Increment(ref version));
+
+    // Monotonic max-write: a stamp must never move backward, or two racing mutators could leave the stamp
+    // equal to a checkpoint's pre-scan capture while the later mutation was missed by its scan.
+    private static void StampMax(ref long location, long tick)
+    {
+        long observed = Interlocked.Read(ref location);
+        while (tick > observed)
+        {
+            long prior = Interlocked.CompareExchange(ref location, tick, observed);
+            if (prior == observed)
+                return;
+            observed = prior;
+        }
+    }
 
     /// <summary>
     /// Records a completion receipt for a committed persistent participant. Idempotent: a replayed
@@ -112,7 +179,7 @@ internal sealed class CompletionReceiptStore
             return;
 
         if (receipts.TryAdd(new ReceiptKey(transactionId, key), new CompletionReceipt(recordAnchorKey, durability)))
-            Interlocked.Increment(ref version);
+            StampDirty(key);
     }
 
     /// <summary>
@@ -146,7 +213,7 @@ internal sealed class CompletionReceiptStore
         if (!receipts.TryRemove(new ReceiptKey(transactionId, key), out _))
             return false;
 
-        Interlocked.Increment(ref version);
+        StampDirty(key);
         return true;
     }
 
@@ -208,7 +275,7 @@ internal sealed class CompletionReceiptStore
         }
 
         if (removed > 0)
-            Interlocked.Increment(ref version);
+            StampAllDirty();
 
         return removed;
     }
@@ -412,50 +479,55 @@ internal sealed class CompletionReceiptStore
         if (keyToPartition is null)
             return true;
 
-        // Unchanged since this partition's last durable write: the file already holds exactly this content, so
-        // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
-        // scan and recorded only after a successful write, so a faulted write or a mutation racing the scan
-        // always leaves the partition due for a rewrite.
-        long observedVersion = Interlocked.Read(ref version);
-        if (persistedVersion.TryGetValue(partitionId, out long lastPersisted) && lastPersisted == observedVersion)
+        // Unchanged since this partition's last durable write — no mutation routed here, no bulk sweep, and
+        // no routing change: the file already holds exactly this content, so the checkpoint may proceed
+        // without scanning or rewriting anything. All three stamps are captured before the scan and recorded
+        // only after a successful write, so a faulted write, a mutation racing the scan, or a range-map swap
+        // racing the scan always leaves the partition due for a rewrite.
+        long observedVersion = Math.Max(
+            Interlocked.Read(ref allPartitionsVersion),
+            partitionVersion.TryGetValue(partitionId, out long dirtyTick) ? dirtyTick : 0);
+        long observedRouting = routingVersion?.Invoke() ?? 0;
+
+        if (persistedVersion.TryGetValue(partitionId, out PersistedStamp last)
+            && last.Version == observedVersion && last.RoutingVersion == observedRouting)
             return true;
-
-        GrpcImportCompletionReceiptsRequest message = new();
-
-        foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
-        {
-            if (keyToPartition(receipt.Key.Key) != partitionId)
-                continue;
-
-            GrpcCompletionReceiptEntry entry = new()
-            {
-                TransactionIdNode     = receipt.Key.TransactionId.N,
-                TransactionIdPhysical = receipt.Key.TransactionId.L,
-                TransactionIdCounter  = receipt.Key.TransactionId.C,
-                Key                   = receipt.Key.Key,
-                Durability            = (int)receipt.Value.Durability,
-            };
-
-            if (receipt.Value.RecordAnchorKey is not null)
-                entry.RecordAnchorKey = receipt.Value.RecordAnchorKey;
-
-            message.Receipts.Add(entry);
-        }
 
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
 
         try
         {
-            byte[] data = message.ToByteArray();
-
+            // Entries stream straight into the temp file through one reused entry message, producing the same
+            // bytes as serializing a whole GrpcImportCompletionReceiptsRequest whose routing/forget fields are
+            // at their defaults: each entry is written length-delimited under the repeated field's tag.
+            // Materializing one protobuf object per retained receipt plus one byte[] for the whole set made
+            // every checkpoint's allocation proportional to the store size, which dominated the node's
+            // allocation profile whenever the retained set was large.
             lock (fileLock)
             {
                 string tmp = path + ".tmp";
-                File.WriteAllBytes(tmp, data);
+
+                using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
+                using (CodedOutputStream output = new(file))
+                {
+                    GrpcCompletionReceiptEntry entry = new();
+
+                    foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
+                    {
+                        if (keyToPartition(receipt.Key.Key) != partitionId)
+                            continue;
+
+                        FillSnapshotEntry(entry, new CompletionReceiptRecord(
+                            receipt.Key.TransactionId, receipt.Key.Key, receipt.Value.RecordAnchorKey, receipt.Value.Durability));
+                        output.WriteTag(GrpcImportCompletionReceiptsRequest.ReceiptsFieldNumber, WireFormat.WireType.LengthDelimited);
+                        output.WriteMessage(entry);
+                    }
+                }
+
                 File.Move(tmp, path, overwrite: true);
             }
 
-            persistedVersion[partitionId] = observedVersion;
+            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting);
 
             return true;
         }
@@ -464,6 +536,23 @@ internal sealed class CompletionReceiptStore
             logger?.LogError(ex, "Failed to persist completion-receipt snapshot to {Path}", path);
             return false;
         }
+    }
+
+    // Sets every field of the reused snapshot entry, so the target may be a recycled message. A new proto
+    // field must be set (or cleared) here too, or a recycled entry would leak the previous receipt's value.
+    // Internal so a test can drive two consecutive fills through one entry and assert the reset.
+    internal static void FillSnapshotEntry(GrpcCompletionReceiptEntry entry, CompletionReceiptRecord record)
+    {
+        entry.TransactionIdNode     = record.TransactionId.N;
+        entry.TransactionIdPhysical = record.TransactionId.L;
+        entry.TransactionIdCounter  = record.TransactionId.C;
+        entry.Key                   = record.Key;
+        entry.Durability            = (int)record.Durability;
+
+        if (record.RecordAnchorKey is not null)
+            entry.RecordAnchorKey = record.RecordAnchorKey;
+        else
+            entry.ClearRecordAnchorKey();
     }
 
     // Loads every per-partition snapshot present in the storage directory. A snapshot file that exists but
@@ -515,6 +604,10 @@ internal sealed class CompletionReceiptStore
 
     /// <summary>Composite receipt key. String keys compare with ordinal semantics (default for string).</summary>
     private readonly record struct ReceiptKey(HLCTimestamp TransactionId, string Key);
+
+    // The pair of stamps a partition's snapshot file was written under: the mutation tick it covered and the
+    // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
+    private readonly record struct PersistedStamp(long Version, long RoutingVersion);
 
     private readonly record struct CompletionReceipt(string? RecordAnchorKey, KeyValueDurability Durability);
 

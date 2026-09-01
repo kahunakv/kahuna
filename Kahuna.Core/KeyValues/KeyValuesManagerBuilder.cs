@@ -320,12 +320,15 @@ internal sealed class KeyValuesManagerBuilder
         runtime.Locator = locator;
 
         // Now that the locator exists, wire the anchor/key → data-partition resolvers the durable-intent stores
-        // fence their coordinator-driven mutations on.
-        transactionRecordStore.AttachAnchorResolver(locator.LocateRange);
-        preparedIntentStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
+        // fence their coordinator-driven mutations on. The routing-version delegate lets each store's
+        // per-partition checkpoint guard detect a range-map swap (split/merge/rebalance) that silently moved
+        // keys between partitions, and rewrite every snapshot under the new routing.
+        Func<long> routingVersion = () => rangeMapStore.MapVersion;
+        transactionRecordStore.AttachAnchorResolver(locator.LocateRange, routingVersion);
+        preparedIntentStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId, routingVersion);
 
         // The receipt store's per-partition checkpoint snapshot routes each receipt by its key the same way.
-        completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId);
+        completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId, routingVersion);
 
         preparedIntentRecovery = actorSystem.Spawn<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest>(
             "prepared-intent-recovery",

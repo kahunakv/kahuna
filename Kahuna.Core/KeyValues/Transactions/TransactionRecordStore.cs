@@ -24,18 +24,29 @@ internal sealed class TransactionRecordStore
 {
     private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> records = new();
 
-    // Monotonic change stamp for the record set, bumped whenever a record is installed, updated, or removed. A
-    // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
-    // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
-    // from a full scan + serialize + rewrite into a counter comparison. Records only change partitions through
-    // replicated split/merge transfer deltas, which apply here and bump the stamp, so a skip can never hide a
-    // moved record.
+    // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
+    // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
     private long version;
 
-    // Per-partition value of <see cref="version"/> captured just before that partition's last successful
-    // snapshot write. Captured before the scan, so a mutation racing the scan leaves the stamp ahead and the
-    // next checkpoint rewrites the file.
-    private readonly ConcurrentDictionary<int, long> persistedVersion = new();
+    // Per-partition dirty stamp: the tick of the last mutation whose anchor routed to that partition. A
+    // partition's checkpoint snapshot is skipped when neither its stamp, nor <see cref="allPartitionsVersion"/>,
+    // nor the routing stamp moved since its last durable write — the file already holds exactly this content —
+    // which turns the common quiet checkpoint from a full scan + serialize + rewrite into a counter comparison.
+    // With the previous single global stamp, one record change anywhere re-dirtied every partition, so a busy
+    // checkpoint rescanned the whole set once per partition.
+    private readonly ConcurrentDictionary<int, long> partitionVersion = new();
+
+    // Tick of the last mutation that could not be attributed to one partition: no resolver attached yet
+    // (load-time merges), a removal whose anchor is unknown, or a bulk sweep. Dirties every partition;
+    // over-dirty is safe.
+    private long allPartitionsVersion;
+
+    // Stamps captured just before that partition's last successful snapshot write: the mutation tick it
+    // covered and the routing stamp it routed with. Captured before the scan, so a mutation or a routing
+    // change racing the scan leaves a stamp ahead and the next checkpoint rewrites the file. The routing
+    // stamp is what keeps a skip from hiding a record that silently moved partitions when the range map
+    // changed: until every partition has re-persisted under the new routing, none of them compares equal.
+    private readonly ConcurrentDictionary<int, PersistedStamp> persistedVersion = new();
 
     private readonly string? snapshotDirectory;
 
@@ -72,9 +83,70 @@ internal sealed class TransactionRecordStore
         }
     }
 
-    /// <summary>Wires the anchor-key → data-partition resolver once the locator exists (manager construction).</summary>
-    public void AttachAnchorResolver(Func<string, (int PartitionId, long Generation)> resolver) =>
+    /// <summary>Wires the anchor-key → data-partition resolver once the locator exists (manager construction).
+    /// <paramref name="routingVersion"/> reports a stamp that changes whenever the resolver's routing may have
+    /// changed (the range-map version); null means the routing is fixed for the store's lifetime.</summary>
+    public void AttachAnchorResolver(Func<string, (int PartitionId, long Generation)> resolver, Func<long>? routingVersion = null)
+    {
         resolveAnchorPartition = resolver;
+        this.routingVersion = routingVersion;
+    }
+
+    // Monotonic stamp of the routing the resolver reads (RangeMapStore.MapVersion), or null when routing is
+    // fixed for the store's lifetime (tests, memory-only configuration). Pulled by the checkpoint guard.
+    private Func<long>? routingVersion;
+
+    // Marks the partition owning <paramref name="anchorKey"/> dirty for the checkpoint guard. Mutators call
+    // this after the dictionary write, so a stamp equal to a pre-scan capture implies the scan saw the
+    // mutation. Without a resolver, or without a known anchor, the mutation cannot be attributed, so every
+    // partition is marked instead.
+    //
+    // This runs on the replicated apply/restore path, so it must never throw: routing can legitimately fail
+    // there (a restart replays data-partition entries before the meta partition has rebuilt the range map,
+    // and the resolver throws on an uncovered key-range key). An unattributable mutation falls back to the
+    // all-partitions stamp — over-dirty is safe, a failed apply is not.
+    private void StampDirty(string? anchorKey)
+    {
+        long tick = Interlocked.Increment(ref version);
+
+        Func<string, (int PartitionId, long Generation)>? resolver = resolveAnchorPartition;
+        if (resolver is not null && anchorKey is not null)
+        {
+            try
+            {
+                partitionVersion.AddOrUpdate(resolver(anchorKey).PartitionId, static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
+                return;
+            }
+            catch
+            {
+                // Fall through to the all-partitions stamp.
+            }
+        }
+
+        StampMax(ref allPartitionsVersion, tick);
+    }
+
+    // Marks every partition dirty: for bulk sweeps whose per-key attribution would cost more than the
+    // over-inclusive rewrite it avoids.
+    private void StampAllDirty() => StampMax(ref allPartitionsVersion, Interlocked.Increment(ref version));
+
+    // Monotonic max-write: a stamp must never move backward, or two racing mutators could leave the stamp
+    // equal to a checkpoint's pre-scan capture while the later mutation was missed by its scan.
+    private static void StampMax(ref long location, long tick)
+    {
+        long observed = Interlocked.Read(ref location);
+        while (tick > observed)
+        {
+            long prior = Interlocked.CompareExchange(ref location, tick, observed);
+            if (prior == observed)
+                return;
+            observed = prior;
+        }
+    }
+
+    // The pair of stamps a partition's snapshot file was written under: the mutation tick it covered and the
+    // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
+    private readonly record struct PersistedStamp(long Version, long RoutingVersion);
 
     // Answers whether a live prepared intent owned by (TransactionId, Epoch) exists at a key, consulted by the
     // bundled-prepare gate below. Reading the intent store here is deterministic: both stores apply on the same
@@ -125,12 +197,12 @@ internal sealed class TransactionRecordStore
             if (result.Outcome == TransactionApplyOutcome.Applied && result.Record is not null)
             {
                 records[key] = result.Record;
-                Interlocked.Increment(ref version);
+                StampDirty(result.Record.RecordAnchorKey);
             }
             else if (result.Outcome == TransactionApplyOutcome.Removed)
             {
-                records.TryRemove(key, out _);
-                Interlocked.Increment(ref version);
+                records.TryRemove(key, out TransactionRecord? removed);
+                StampDirty(removed?.RecordAnchorKey ?? existing?.RecordAnchorKey);
             }
 
             return result;
@@ -377,12 +449,18 @@ internal sealed class TransactionRecordStore
         if (snapshotDirectory is null || snapshotPrefix is null || resolveAnchorPartition is null)
             return true;
 
-        // Unchanged since this partition's last durable write: the file already holds exactly this content, so
-        // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
-        // scan and recorded only after a successful write, so a failed write or a mutation racing the scan
-        // always leaves the partition due for a rewrite.
-        long observedVersion = Interlocked.Read(ref version);
-        if (persistedVersion.TryGetValue(partitionId, out long lastPersisted) && lastPersisted == observedVersion)
+        // Unchanged since this partition's last durable write — no mutation routed here, no bulk sweep, and
+        // no routing change: the file already holds exactly this content, so the checkpoint may proceed
+        // without scanning or rewriting anything. All three stamps are captured before the scan and recorded
+        // only after a successful write, so a failed write, a mutation racing the scan, or a range-map swap
+        // racing the scan always leaves the partition due for a rewrite.
+        long observedVersion = Math.Max(
+            Interlocked.Read(ref allPartitionsVersion),
+            partitionVersion.TryGetValue(partitionId, out long dirtyTick) ? dirtyTick : 0);
+        long observedRouting = routingVersion?.Invoke() ?? 0;
+
+        if (persistedVersion.TryGetValue(partitionId, out PersistedStamp last)
+            && last.Version == observedVersion && last.RoutingVersion == observedRouting)
             return true;
 
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
@@ -419,7 +497,7 @@ internal sealed class TransactionRecordStore
                 File.Move(tmp, path, overwrite: true);
             }
 
-            persistedVersion[partitionId] = observedVersion;
+            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting);
             return true;
         }
         catch (Exception ex)
@@ -475,7 +553,7 @@ internal sealed class TransactionRecordStore
         if (!records.TryGetValue(key, out TransactionRecord? existing))
         {
             records[key] = incoming;
-            Interlocked.Increment(ref version);
+            StampDirty(incoming.RecordAnchorKey);
             return;
         }
 
@@ -489,7 +567,7 @@ internal sealed class TransactionRecordStore
         if (!existing.IsTerminal && incoming.IsTerminal)
         {
             records[key] = incoming;
-            Interlocked.Increment(ref version);
+            StampDirty(incoming.RecordAnchorKey);
         }
     }
 
@@ -538,7 +616,7 @@ internal sealed class TransactionRecordStore
             foreach ((HLCTimestamp TransactionId, long Epoch) key in toRemove)
                 records.TryRemove(key, out _);
 
-            Interlocked.Increment(ref version);
+            StampAllDirty();
             return toRemove.Count;
         }
     }

@@ -59,18 +59,28 @@ internal sealed class PreparedIntentStore
 
     private int stagedBaseFenceRetentionMs = DefaultStagedBaseFenceRetentionMs;
 
-    // Monotonic change stamp for the intent set, bumped whenever an intent is installed, updated, or removed. A
-    // partition's checkpoint snapshot is skipped when the set hasn't changed since that partition's last durable
-    // write — the file on disk already reflects exactly this content — which turns the common quiet checkpoint
-    // from a full scan + serialize + rewrite into a counter comparison. Intents only change partitions through
-    // replicated split/merge transfer deltas, which apply here and bump the stamp, so a skip can never hide a
-    // moved intent.
+    // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
+    // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
     private long version;
 
-    // Per-partition value of <see cref="version"/> captured just before that partition's last successful
-    // snapshot write. Captured before the scan, so a mutation racing the scan leaves the stamp ahead and the
-    // next checkpoint rewrites the file.
-    private readonly ConcurrentDictionary<int, long> persistedVersion = new();
+    // Per-partition dirty stamp: the tick of the last mutation whose key routed to that partition. A
+    // partition's checkpoint snapshot is skipped when neither its stamp, nor <see cref="allPartitionsVersion"/>,
+    // nor the routing stamp moved since its last durable write — the file already holds exactly this content —
+    // which turns the common quiet checkpoint from a full scan + serialize + rewrite into a counter comparison.
+    // With the previous single global stamp, one intent change anywhere re-dirtied every partition, so a busy
+    // checkpoint rescanned the whole set once per partition.
+    private readonly ConcurrentDictionary<int, long> partitionVersion = new();
+
+    // Tick of the last mutation that could not be attributed to one partition: no resolver attached yet
+    // (load-time merges), or a bulk sweep that touched many keys. Dirties every partition; over-dirty is safe.
+    private long allPartitionsVersion;
+
+    // Stamps captured just before that partition's last successful snapshot write: the mutation tick it
+    // covered and the routing stamp it routed with. Captured before the scan, so a mutation or a routing
+    // change racing the scan leaves a stamp ahead and the next checkpoint rewrites the file. The routing
+    // stamp is what keeps a skip from hiding an intent that silently moved partitions when the range map
+    // changed: until every partition has re-persisted under the new routing, none of them compares equal.
+    private readonly ConcurrentDictionary<int, PersistedStamp> persistedVersion = new();
 
     private readonly string? snapshotDirectory;
 
@@ -108,8 +118,69 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    /// <summary>Wires the key → data-partition resolver once the locator exists (manager construction).</summary>
-    public void AttachPartitionResolver(Func<string, int> resolver) => resolvePartition = resolver;
+    /// <summary>Wires the key → data-partition resolver once the locator exists (manager construction).
+    /// <paramref name="routingVersion"/> reports a stamp that changes whenever the resolver's routing may have
+    /// changed (the range-map version); null means the routing is fixed for the store's lifetime.</summary>
+    public void AttachPartitionResolver(Func<string, int> resolver, Func<long>? routingVersion = null)
+    {
+        resolvePartition = resolver;
+        this.routingVersion = routingVersion;
+    }
+
+    // Monotonic stamp of the routing the resolver reads (RangeMapStore.MapVersion), or null when routing is
+    // fixed for the store's lifetime (tests, memory-only configuration). Pulled by the checkpoint guard.
+    private Func<long>? routingVersion;
+
+    // Marks the partition owning <paramref name="key"/> dirty for the checkpoint guard. Mutators call this
+    // after the dictionary write, so a stamp equal to a pre-scan capture implies the scan saw the mutation.
+    // Without a resolver the mutation cannot be attributed, so every partition is marked instead.
+    //
+    // This runs on the replicated apply/restore path, so it must never throw: routing can legitimately fail
+    // there (a restart replays data-partition entries before the meta partition has rebuilt the range map,
+    // and the resolver throws on an uncovered key-range key). An unattributable mutation falls back to the
+    // all-partitions stamp — over-dirty is safe, a failed apply is not.
+    private void StampDirty(string key)
+    {
+        long tick = Interlocked.Increment(ref version);
+
+        Func<string, int>? resolver = resolvePartition;
+        if (resolver is not null)
+        {
+            try
+            {
+                partitionVersion.AddOrUpdate(resolver(key), static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
+                return;
+            }
+            catch
+            {
+                // Fall through to the all-partitions stamp.
+            }
+        }
+
+        StampMax(ref allPartitionsVersion, tick);
+    }
+
+    // Marks every partition dirty: for bulk sweeps whose per-key attribution would cost more than the
+    // over-inclusive rewrite it avoids.
+    private void StampAllDirty() => StampMax(ref allPartitionsVersion, Interlocked.Increment(ref version));
+
+    // Monotonic max-write: a stamp must never move backward, or two racing mutators could leave the stamp
+    // equal to a checkpoint's pre-scan capture while the later mutation was missed by its scan.
+    private static void StampMax(ref long location, long tick)
+    {
+        long observed = Interlocked.Read(ref location);
+        while (tick > observed)
+        {
+            long prior = Interlocked.CompareExchange(ref location, tick, observed);
+            if (prior == observed)
+                return;
+            observed = prior;
+        }
+    }
+
+    // The pair of stamps a partition's snapshot file was written under: the mutation tick it covered and the
+    // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
+    private readonly record struct PersistedStamp(long Version, long RoutingVersion);
 
     // Invoked (outside the apply gate) with the committed intent whenever a commit settlement (resolve or
     // removal of a committed intent) applies on this node — the convergence hook: the same apply position
@@ -218,7 +289,7 @@ internal sealed class PreparedIntentStore
                     Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
                 }
 
-                Interlocked.Increment(ref version);
+                StampDirty(key);
             }
 
             // A commit resolution (or the removal of a committed intent — the import/replay orderings where the
@@ -1128,30 +1199,48 @@ internal sealed class PreparedIntentStore
         // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
         // scan and recorded only after a successful write, so a failed write or a mutation racing the scan
         // always leaves the partition due for a rewrite.
-        long observedVersion = Interlocked.Read(ref version);
-        if (persistedVersion.TryGetValue(partitionId, out long lastPersisted) && lastPersisted == observedVersion)
+        long observedVersion = Math.Max(
+            Interlocked.Read(ref allPartitionsVersion),
+            partitionVersion.TryGetValue(partitionId, out long dirtyTick) ? dirtyTick : 0);
+        long observedRouting = routingVersion?.Invoke() ?? 0;
+
+        if (persistedVersion.TryGetValue(partitionId, out PersistedStamp last)
+            && last.Version == observedVersion && last.RoutingVersion == observedRouting)
             return true;
 
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
 
         try
         {
-            PreparedIntentSnapshotMessage message = new();
-            foreach (PreparedIntent intent in intents.Values)
-            {
-                if (resolvePartition(intent.Key) == partitionId)
-                    message.Intents.Add(PrepareProtoOf(intent));
-            }
-
-            byte[] data = ReplicationSerializer.Serialize(message);
+            // Entries stream straight into the temp file through one reused PREPARE-kind message, producing
+            // the same bytes as serializing a whole PreparedIntentSnapshotMessage: each entry is written
+            // length-delimited under the repeated field's tag. Materializing one protobuf object per retained
+            // intent plus one byte[] for the whole set made every checkpoint's allocation proportional to the
+            // store size, which dominated the node's allocation profile whenever the retained set was large.
             lock (fileLock)
             {
                 string tmp = path + ".tmp";
-                File.WriteAllBytes(tmp, data);
+
+                using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
+                using (CodedOutputStream output = new(file))
+                {
+                    PreparedIntentCommandMessage entry = new();
+
+                    foreach (PreparedIntent intent in intents.Values)
+                    {
+                        if (resolvePartition(intent.Key) != partitionId)
+                            continue;
+
+                        FillPrepareProto(entry, intent);
+                        output.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
+                        output.WriteMessage(entry);
+                    }
+                }
+
                 File.Move(tmp, path, overwrite: true);
             }
 
-            persistedVersion[partitionId] = observedVersion;
+            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting);
             return true;
         }
         catch (Exception ex)
@@ -1208,7 +1297,7 @@ internal sealed class PreparedIntentStore
         {
             intents[incoming.Key] = incoming;
             Interlocked.Add(ref totalBytes, IntentBytes(incoming));
-            Interlocked.Increment(ref version);
+            StampDirty(incoming.Key);
             return;
         }
 
@@ -1223,7 +1312,7 @@ internal sealed class PreparedIntentStore
         {
             intents[incoming.Key] = incoming;
             Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
-            Interlocked.Increment(ref version);
+            StampDirty(incoming.Key);
         }
     }
 
@@ -1328,7 +1417,7 @@ internal sealed class PreparedIntentStore
                     Interlocked.Add(ref totalBytes, -IntentBytes(removed));
             }
 
-            Interlocked.Increment(ref version);
+            StampAllDirty();
             removedCount = toRemove.Count;
         }
 

@@ -42,6 +42,7 @@ Kommander
 Nixie
 .idea
 .vscode
+.DS_Store
 Kahuna.Server/*.lst
 nupkgs/
 nupkg/

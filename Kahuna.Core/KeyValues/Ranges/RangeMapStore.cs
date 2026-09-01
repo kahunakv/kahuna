@@ -70,6 +70,14 @@ internal sealed class RangeMapStore : IDisposable
 
     private volatile RangeMap current = RangeMap.Empty;
 
+    // Bumped on every swap of <see cref="current"/>. Lets pull-based consumers (the durable-intent
+    // stores' per-partition checkpoint guards) detect that key→partition routing may have changed
+    // without subscribing to map updates: they record the value they observed and rewrite when it moved.
+    private long mapVersion;
+
+    /// <summary>Monotonic stamp of the installed map: changes whenever <see cref="Current"/> is swapped.</summary>
+    public long MapVersion => Interlocked.Read(ref mapVersion);
+
     /// <param name="storagePath">Directory for the durable snapshot file; empty disables disk persistence.</param>
     /// <param name="storageRevision">Per-node revision so each node's snapshot file is distinct and stable across restarts.</param>
     /// <param name="checkpointEveryMutations">Committed mutations between meta-partition checkpoints; ≤ 0 disables periodic checkpointing.</param>
@@ -159,6 +167,7 @@ internal sealed class RangeMapStore : IDisposable
             }
 
             current = candidate;
+            Interlocked.Increment(ref mapVersion);
 
             // Durable snapshot first (so this entry survives meta-WAL compaction), then maybe
             // checkpoint to let Kommander trim the now-redundant log history.
@@ -440,6 +449,7 @@ internal sealed class RangeMapStore : IDisposable
             }
 
             current = loaded;
+            Interlocked.Increment(ref mapVersion);
             logger.LogRangeMapSnapshotLoaded(snapshotPath, loaded.Descriptors.Count);
         }
         catch (Exception ex)
@@ -480,6 +490,7 @@ internal sealed class RangeMapStore : IDisposable
             }
 
             current = rebuilt;
+            Interlocked.Increment(ref mapVersion);
 
             // Give followers (and the restore replay) a durable local copy too, so a follower whose
             // meta WAL is later compacted can still reconstruct the map from disk on restart.
@@ -524,6 +535,7 @@ internal sealed class RangeMapStore : IDisposable
     public void CommitState(RangeMap parsed)
     {
         current = parsed;
+        Interlocked.Increment(ref mapVersion);
         PersistToDisk(parsed);
     }
 
