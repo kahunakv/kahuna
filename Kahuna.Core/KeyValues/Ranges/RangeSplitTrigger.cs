@@ -237,7 +237,7 @@ internal sealed class RangeSplitTrigger : IDisposable
                         continue;
 
                     // Count branch: split when sampled key count >= threshold.
-                    string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, ct);
+                    string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, rangeIsHot: false, ct);
                     if (splitKey is null)
                         continue;
 
@@ -358,8 +358,10 @@ internal sealed class RangeSplitTrigger : IDisposable
             try
             {
                 // Load branch uses 2*minRangeSize as the effective threshold — a small-but-hot range
-                // can split even if it is far below the count threshold.
-                string? splitKey = await TryComputeSplitKeyAsync(descriptor, 2 * minRangeSize, ct);
+                // can split even if it is far below the count threshold. rangeIsHot: the debounced
+                // predicate held, so a range too small to divide under concentrated writes is
+                // reported as an indivisible refusal rather than declined silently.
+                string? splitKey = await TryComputeSplitKeyAsync(descriptor, 2 * minRangeSize, rangeIsHot: true, ct);
 
                 if (splitKey is null)
                     continue; // indivisible or too small — TryComputeSplitKeyAsync already logged
@@ -760,7 +762,16 @@ internal sealed class RangeSplitTrigger : IDisposable
     /// Minimum sample size required before a split is attempted.
     /// Count branch passes <see cref="threshold"/>; load branch passes <c>2 * minRangeSize</c>.
     /// </param>
-    private async Task<string?> TryComputeSplitKeyAsync(RangeDescriptor descriptor, int effectiveThreshold, CancellationToken ct)
+    /// <param name="rangeIsHot">
+    /// <c>true</c> when the caller has already established the range is under write load (the
+    /// load branch's debounced predicate). A hot range that turns out too small to divide is
+    /// then reported as an indivisible refusal instead of returning silently: the trigger will
+    /// keep declining to act on it for as long as the load lasts, and without the refusal that
+    /// state emits no metric at all. The count branch passes <c>false</c> — it visits every
+    /// range regardless of heat, and a cold small range with a concentrated histogram is not a
+    /// hot-key workload.
+    /// </param>
+    private async Task<string?> TryComputeSplitKeyAsync(RangeDescriptor descriptor, int effectiveThreshold, bool rangeIsHot, CancellationToken ct)
     {
         var sample = new List<(string Key, HLCTimestamp LastModified)>(Math.Min(effectiveThreshold + 64, MaxSampleKeys));
 
@@ -816,6 +827,20 @@ internal sealed class RangeSplitTrigger : IDisposable
         // ComputeSplitKey falls back to the count-based median/percentile path transparently.
         IReadOnlyDictionary<string, long>? writeFreq =
             writeFrequencyRegistry.TryGet(descriptor.PartitionId)?.GetSnapshot();
+
+        // Too small to divide. For a hot range this must still be reported when the writes
+        // concentrate on one key: the size guard inside ComputeSplitKey returns before the
+        // imbalance guard, so without this probe a hot-key range that shrank below the sample
+        // floor would be declined on every pass with no metric ever moving — a hot partition
+        // an operator cannot explain from the counters.
+        if (rangeIsHot && sample.Count < Math.Max(effectiveThreshold, 2 * minRangeSize)
+            && RangeSplitPolicy.HasIndivisibleWriteConcentration(sample, writeFreq, loadImbalanceMax, out double topShare))
+        {
+            logger.LogRangeSplitTriggerIndivisible(descriptor.KeySpace, descriptor.PartitionId, topShare, loadImbalanceMax);
+            indivisibleAt[descriptor.PartitionId] = Stopwatch.GetTimestamp();
+            RangeSplitMetrics.IndivisibleRefusals.Add(1, new KeyValuePair<string, object?>("keyspace", descriptor.KeySpace));
+            return null;
+        }
 
         string? splitKey = RangeSplitPolicy.ComputeSplitKey(sample, effectiveThreshold, minRangeSize, writeFreq, out double achievableImbalance);
 

@@ -32,6 +32,9 @@ internal static class RangeSplitMetrics
     /// <summary>
     /// Splits refused by the indivisibility guard: no split key could put each child below
     /// the configured write-imbalance threshold (all traffic concentrated on one key).
+    /// Also incremented by the load branch when a hot range is too small to divide while its
+    /// writes concentrate on a single key — without that case a hot range below the sample
+    /// floor would be declined on every pass with no counter moving at all.
     /// A persistently high value means a hot-key workload that splitting cannot relieve.
     /// </summary>
     internal static readonly Counter<long> IndivisibleRefusals =

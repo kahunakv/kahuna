@@ -143,6 +143,62 @@ internal static class RangeSplitPolicy
         return sample[splitIndex].Key;
     }
 
+    /// <summary>
+    /// Detects the hot-key shape on a range that is too small for <see cref="ComputeSplitKey"/>
+    /// to divide. Such a range produces no split key, and without this probe it would also
+    /// produce no signal: the size guard returns before the indivisibility guard, so a hot
+    /// range that shrank below <c>2 * minRangeSize</c> keys stays invisible in the metrics
+    /// while the load checker keeps declining to act on it.
+    ///
+    /// <para>
+    /// Returns <c>true</c> when the histogram is warm and the busiest sampled key carries at
+    /// least <paramref name="imbalanceMax"/> of the writes recorded against the sample — the
+    /// same condition the centroid-based guard refuses, reached without a candidate boundary
+    /// because none exists. The warmth bar is the one <c>TryComputeWriteCentroid</c> trusts:
+    /// fewer total writes than sampled keys is decay residue or warm-up noise, not load.
+    /// </para>
+    /// </summary>
+    /// <param name="sample">All keys of the range, in ordinal order. A range small enough for
+    /// this probe fits entirely in one sample, so the counts are exact, not estimates.</param>
+    /// <param name="writeFrequency">Per-key write-count snapshot for the range's partition,
+    /// or <c>null</c> when no tracker exists. Entries outside the sample are ignored: after a
+    /// split, a tracker can briefly carry residue from beyond the range's bounds.</param>
+    /// <param name="imbalanceMax">The configured write-imbalance ceiling; <c>0</c> disables
+    /// the probe, mirroring the centroid guard.</param>
+    /// <param name="topShare">The busiest key's fraction of the sampled writes, for logging.
+    /// <c>0</c> when the probe does not apply.</param>
+    public static bool HasIndivisibleWriteConcentration(
+        IReadOnlyList<(string Key, HLCTimestamp LastModified)> sample,
+        IReadOnlyDictionary<string, long>? writeFrequency,
+        double imbalanceMax,
+        out double topShare)
+    {
+        topShare = 0;
+
+        if (imbalanceMax <= 0 || sample.Count == 0 || writeFrequency is not { Count: > 0 })
+            return false;
+
+        long totalWrites = 0;
+        long maxWrites = 0;
+
+        for (int i = 0; i < sample.Count; i++)
+        {
+            if (!writeFrequency.TryGetValue(sample[i].Key, out long writes))
+                continue;
+
+            totalWrites += writes;
+
+            if (writes > maxWrites)
+                maxWrites = writes;
+        }
+
+        if (totalWrites < sample.Count)
+            return false;
+
+        topShare = (double)maxWrites / totalWrites;
+        return topShare >= imbalanceMax;
+    }
+
     // ── write-centroid helpers ────────────────────────────────────────────────
 
     /// <summary>

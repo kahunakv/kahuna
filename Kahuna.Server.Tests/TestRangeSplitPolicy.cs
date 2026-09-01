@@ -320,4 +320,108 @@ public sealed class TestRangeSplitPolicy
 
         Assert.Equal(0, imbalance); // count path, guard must not fire
     }
+
+    // ── Concentration probe for ranges too small to divide ───────────────────
+    //
+    // These samples are all below 2 * minRangeSize for any realistic minRangeSize, the state
+    // in which ComputeSplitKey returns null before its imbalance guard runs. The probe is what
+    // lets the load branch still report an indivisible refusal there.
+
+    [Fact]
+    public void TooSmallRange_AllWritesOnOneKey_IsConcentrated()
+    {
+        var sample = MakeSample(12);
+        var freq   = new Dictionary<string, long> { ["k0005"] = 500 };
+
+        Assert.True(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0.8, out double topShare));
+        Assert.Equal(1.0, topShare);
+    }
+
+    [Fact]
+    public void TooSmallRange_DominantKeyOverWarmBackground_IsConcentrated()
+    {
+        // 11 background keys with one write each, plus a hot key: the shape a post-split hot
+        // child inherits from its filtered tracker.
+        var sample = MakeSample(12);
+        var freq   = sample.ToDictionary(e => e.Key, _ => 1L);
+        freq["k0005"] = 400;
+
+        Assert.True(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0.8, out double topShare));
+        Assert.True(topShare > 0.9, $"Expected topShare > 0.9, got {topShare:F3}");
+    }
+
+    [Fact]
+    public void TooSmallRange_ShareBelowMax_IsNotConcentrated()
+    {
+        // 40 hot writes over 11 background writes is a 0.784 share — just under the 0.8
+        // ceiling, so the range is small and warm but not yet indivisible.
+        var sample = MakeSample(12);
+        var freq   = sample.ToDictionary(e => e.Key, _ => 1L);
+        freq["k0005"] = 40;
+
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0.8, out double topShare));
+        Assert.True(topShare is > 0.7 and < 0.8, $"Expected topShare just below 0.8, got {topShare:F3}");
+    }
+
+    [Fact]
+    public void TooSmallRange_UniformWrites_IsNotConcentrated()
+    {
+        var sample = MakeSample(12);
+        var freq   = sample.ToDictionary(e => e.Key, _ => 10L);
+
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0.8, out _));
+    }
+
+    [Fact]
+    public void TooSmallRange_ColdHistogram_IsNotConcentrated()
+    {
+        var sample = MakeSample(12);
+
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, null, imbalanceMax: 0.8, out _));
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, new Dictionary<string, long>(), imbalanceMax: 0.8, out _));
+    }
+
+    [Fact]
+    public void TooSmallRange_WeakSignal_IsNotConcentrated()
+    {
+        // Fewer recorded writes than sampled keys is decay residue, not load — the same bar
+        // the centroid path applies before trusting a histogram.
+        var sample = MakeSample(12);
+        var freq   = new Dictionary<string, long> { ["k0005"] = 5 };
+
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0.8, out double topShare));
+        Assert.Equal(0, topShare);
+    }
+
+    [Fact]
+    public void TooSmallRange_OutOfRangeResidue_IsIgnored()
+    {
+        // A tracker can briefly carry entries beyond the range's bounds after a split; only
+        // the sampled keys' writes may count toward the concentration decision.
+        var sample = MakeSample(12);
+        var freq   = new Dictionary<string, long> { ["k0005"] = 500, ["z9999"] = 10_000 };
+
+        Assert.True(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0.8, out double topShare));
+        Assert.Equal(1.0, topShare);
+    }
+
+    [Fact]
+    public void TooSmallRange_DisabledCeilingOrEmptySample_ProbeDoesNotApply()
+    {
+        var sample = MakeSample(12);
+        var freq   = new Dictionary<string, long> { ["k0005"] = 500 };
+
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            sample, freq, imbalanceMax: 0, out _));
+        Assert.False(RangeSplitPolicy.HasIndivisibleWriteConcentration(
+            MakeSample(0), freq, imbalanceMax: 0.8, out _));
+    }
 }
