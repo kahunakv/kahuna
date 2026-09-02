@@ -1,7 +1,5 @@
 
 using System.Collections.Concurrent;
-using System.Diagnostics.CodeAnalysis;
-using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
@@ -789,26 +787,10 @@ internal sealed class PreparedIntentStore
 
     public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
 
-    // The node that proposes a delta serialized it from live command objects moments before Raft hands the very
-    // same byte array back to the local apply path, so the decoded form is registered against the produced bytes
-    // and the local apply reuses it instead of parsing and rebuilding every command. The table is weak on the
-    // byte array, so an entry vanishes with the proposal bytes; any reader that misses — a follower, WAL replay
-    // on restart, state transfer, all of which see freshly materialized arrays — parses as before, so
-    // correctness never depends on a hit. Commands and their intents are immutable, which is what makes reusing
-    // the producer's instances safe even when an in-process transport shares the array across nodes.
-    private static readonly ConditionalWeakTable<byte[], PreparedIntentCommand[]> locallyProposedDeltas = new();
-
-    // A hit is taken single-shot: with the redundant-apply ledger only one local apply runs per committed entry,
-    // and clearing on take keeps the WAL's in-memory retention of the bytes from pinning the decoded commands.
-    // A concurrent second taker simply misses and parses, which is the same double work it did before.
-    private static bool TryTakeLocallyProposed(byte[] data, [NotNullWhen(true)] out PreparedIntentCommand[]? commands)
-    {
-        if (!locallyProposedDeltas.TryGetValue(data, out commands))
-            return false;
-
-        locallyProposedDeltas.Remove(data);
-        return true;
-    }
+    // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
+    // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
+    // producer's instances is safe only because commands and their intents are immutable.
+    private static readonly ProposedDeltaCache<PreparedIntentCommand> locallyProposedDeltas = new();
 
     /// <summary>Applies a delta and reports whether every PREPARE command in it took ownership of its key. Returns
     /// <see langword="false"/> when any prepare is rejected by the state machine — another transaction already
@@ -830,31 +812,14 @@ internal sealed class PreparedIntentStore
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
 
+        if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
+            commands = DecodeDelta(log.LogData);
+
         bool allPreparesAccepted = true;
         List<PreparedIntent>? staleFlagged = null;
 
-        if (TryTakeLocallyProposed(log.LogData, out PreparedIntentCommand[]? proposed))
+        foreach (PreparedIntentCommand command in commands)
         {
-            foreach (PreparedIntentCommand command in proposed)
-            {
-                PreparedIntentApplyResult result = Apply(command);
-                if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
-                {
-                    allPreparesAccepted = false;
-                    if (result.StaleBase)
-                        (staleFlagged ??= []).Add(prepare.Intent);
-                }
-            }
-
-            FireStaleBaseVetoes(staleFlagged);
-            return allPreparesAccepted;
-        }
-
-        PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(log.LogData);
-
-        foreach (PreparedIntentCommandMessage message in delta.Commands)
-        {
-            PreparedIntentCommand command = ToCommand(message, delta.Header);
             PreparedIntentApplyResult result = Apply(command);
             if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
             {
@@ -888,37 +853,304 @@ internal sealed class PreparedIntentStore
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
 
-        if (TryTakeLocallyProposed(log.LogData, out PreparedIntentCommand[]? proposed))
-        {
-            foreach (PreparedIntentCommand command in proposed)
-                Apply(command);
+        if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
+            commands = DecodeDelta(log.LogData);
 
-            return true;
-        }
-
-        PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(log.LogData);
-
-        foreach (PreparedIntentCommandMessage message in delta.Commands)
-            Apply(ToCommand(message, delta.Header));
+        foreach (PreparedIntentCommand command in commands)
+            Apply(command);
 
         return true;
     }
 
-    /// <summary>
-    /// Decodes a prepared-intent delta's transitions without applying them — the single codec any offline
-    /// reader of the write-ahead log must use, so a second decoder can never drift from the live apply path.
-    /// Point-in-time restore replays segments with it to rebuild the intents that by-reference materialization
-    /// records name.
-    /// </summary>
-    internal static IReadOnlyList<PreparedIntentCommand> DecodeDelta(ReadOnlySpan<byte> data)
-    {
-        PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(data);
+    // Wire tags of the delta envelope (field number << 3 | wire type 2, length-delimited), matching
+    // prepared_intent_message.proto: field 1 is the repeated command, field 2 the shared header.
+    private const uint DeltaCommandEntryTag = 1 << 3 | 2;
+    private const uint DeltaHeaderTag = 2 << 3 | 2;
 
-        List<PreparedIntentCommand> commands = new(delta.Commands.Count);
-        foreach (PreparedIntentCommandMessage message in delta.Commands)
-            commands.Add(ToCommand(message, delta.Header));
+    // Scratch slice list for DecodeDelta on this thread. Decode is synchronous, so entries never
+    // survive a call; the backing array persists across deltas.
+    [ThreadStatic]
+    private static List<(int Offset, int Length)>? scratchCommandSlices;
+
+    /// <summary>
+    /// Decodes a prepared-intent delta's transitions without applying them — the single codec every reader
+    /// of these bytes must use (live apply, WAL replay, point-in-time restore), so a second decoder can
+    /// never drift from the apply path.
+    ///
+    /// <para>Reads the wire directly instead of materializing the generated proto messages: a delta decode
+    /// on this path allocates only the commands themselves plus their strings and value bytes, not a
+    /// parallel message graph, and this is the hottest decode in the replication pipeline — every node
+    /// decodes every delta it did not itself propose. The shared header is written after the commands, so
+    /// the envelope walk records each command's slice first and the commands are built afterward against
+    /// the header. When a proto field is added, update <see cref="ReadCommand"/> and the reference decoder
+    /// <see cref="ToCommand"/> together — the encoding test decodes every delta both ways and fails on any
+    /// disagreement.</para>
+    /// </summary>
+    internal static PreparedIntentCommand[] DecodeDelta(byte[] data)
+    {
+        ReadOnlySpan<byte> bytes = data;
+
+        List<(int Offset, int Length)> slices = scratchCommandSlices ??= [];
+        slices.Clear();
+
+        int headerOffset = -1;
+        int headerLength = 0;
+
+        int pos = 0;
+        while (pos < bytes.Length)
+        {
+            ulong tag = ReadWireTag(bytes, ref pos);
+            if (tag == DeltaCommandEntryTag)
+            {
+                int length = ReadLengthPrefix(bytes, ref pos);
+                slices.Add((pos, length));
+                pos += length;
+            }
+            else if (tag == DeltaHeaderTag)
+            {
+                headerLength = ReadLengthPrefix(bytes, ref pos);
+                headerOffset = pos;
+                pos += headerLength;
+            }
+            else
+                SkipField(bytes, ref pos, tag);
+        }
+
+        SharedHeaderFields header = default;
+        bool hasHeader = headerOffset >= 0;
+        if (hasHeader)
+            ReadSharedHeader(bytes.Slice(headerOffset, headerLength), ref header);
+
+        PreparedIntentCommand[] commands = new PreparedIntentCommand[slices.Count];
+        for (int i = 0; i < commands.Length; i++)
+        {
+            (int offset, int length) = slices[i];
+            commands[i] = ReadCommand(bytes.Slice(offset, length), in header, hasHeader);
+        }
 
         return commands;
+    }
+
+    // ── wire primitives for the direct delta reader ───────────────────────────────
+
+    /// <summary>Reads one base-128 varint (up to ten bytes, matching the protobuf limit). Callers narrow
+    /// the result to the field's declared width, which reproduces protobuf's truncation semantics for
+    /// int32-family fields encoded as 64-bit varints.</summary>
+    private static ulong ReadVarint(ReadOnlySpan<byte> data, ref int pos)
+    {
+        ulong result = 0;
+        for (int shift = 0; shift < 70 && pos < data.Length; shift += 7)
+        {
+            byte b = data[pos++];
+            result |= (ulong)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0)
+                return result;
+        }
+
+        throw new InvalidDataException("Malformed varint in a prepared-intent delta.");
+    }
+
+    private static ulong ReadWireTag(ReadOnlySpan<byte> data, ref int pos)
+    {
+        ulong tag = ReadVarint(data, ref pos);
+        if (tag >> 3 == 0)
+            throw new InvalidDataException("Zero field number in a prepared-intent delta.");
+        return tag;
+    }
+
+    private static int ReadLengthPrefix(ReadOnlySpan<byte> data, ref int pos)
+    {
+        ulong length = ReadVarint(data, ref pos);
+        if (length > (ulong)(data.Length - pos))
+            throw new InvalidDataException("Length prefix overruns the prepared-intent delta.");
+        return (int)length;
+    }
+
+    private static string ReadLengthDelimitedString(ReadOnlySpan<byte> data, ref int pos)
+    {
+        int length = ReadLengthPrefix(data, ref pos);
+        string result = System.Text.Encoding.UTF8.GetString(data.Slice(pos, length));
+        pos += length;
+        return result;
+    }
+
+    private static byte[] ReadLengthDelimitedBytes(ReadOnlySpan<byte> data, ref int pos)
+    {
+        int length = ReadLengthPrefix(data, ref pos);
+        byte[] result = data.Slice(pos, length).ToArray();
+        pos += length;
+        return result;
+    }
+
+    /// <summary>Skips one unknown field by its wire type, so a delta written by a newer schema still
+    /// decodes (the unknown data is dropped, never re-serialized — decoded commands are applied, not
+    /// forwarded). Groups are rejected: proto3 never writes them.</summary>
+    private static void SkipField(ReadOnlySpan<byte> data, ref int pos, ulong tag)
+    {
+        switch ((int)(tag & 7))
+        {
+            case 0: ReadVarint(data, ref pos); break;
+            case 1:
+                if (data.Length - pos < 8)
+                    throw new InvalidDataException("Truncated fixed64 field in a prepared-intent delta.");
+                pos += 8;
+                break;
+            case 2: pos += ReadLengthPrefix(data, ref pos); break;
+            case 5:
+                if (data.Length - pos < 4)
+                    throw new InvalidDataException("Truncated fixed32 field in a prepared-intent delta.");
+                pos += 4;
+                break;
+            default:
+                throw new InvalidDataException($"Unsupported wire type {tag & 7} in a prepared-intent delta.");
+        }
+    }
+
+    /// <summary>Raw fields of one delta's shared header, exactly as read from the wire. Absent fields keep
+    /// their proto3 defaults, which is what the generated reader would also report.</summary>
+    private struct SharedHeaderFields
+    {
+        internal int TxNode; internal long TxPhysical; internal uint TxCounter;
+        internal long Epoch;
+        internal long ManifestHash;
+        internal string? AnchorKey;
+        internal int CommitNode; internal long CommitPhysical; internal uint CommitCounter;
+        internal int DeadlineNode; internal long DeadlinePhysical; internal uint DeadlineCounter;
+    }
+
+    // Field numbers follow PreparedIntentDeltaHeaderMessage in prepared_intent_message.proto.
+    private static void ReadSharedHeader(ReadOnlySpan<byte> data, ref SharedHeaderFields header)
+    {
+        const int Varint = 0, Len = 2;
+
+        int pos = 0;
+        while (pos < data.Length)
+        {
+            ulong tag = ReadWireTag(data, ref pos);
+            switch (tag)
+            {
+                case 1 << 3 | Varint: header.TxNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 2 << 3 | Varint: header.TxPhysical = (long)ReadVarint(data, ref pos); break;
+                case 3 << 3 | Varint: header.TxCounter = (uint)ReadVarint(data, ref pos); break;
+                case 4 << 3 | Varint: header.Epoch = (long)ReadVarint(data, ref pos); break;
+                case 5 << 3 | Varint: header.ManifestHash = (long)ReadVarint(data, ref pos); break;
+                case 6 << 3 | Len: header.AnchorKey = ReadLengthDelimitedString(data, ref pos); break;
+                case 7 << 3 | Varint: header.CommitNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 8 << 3 | Varint: header.CommitPhysical = (long)ReadVarint(data, ref pos); break;
+                case 9 << 3 | Varint: header.CommitCounter = (uint)ReadVarint(data, ref pos); break;
+                case 10 << 3 | Varint: header.DeadlineNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 11 << 3 | Varint: header.DeadlinePhysical = (long)ReadVarint(data, ref pos); break;
+                case 12 << 3 | Varint: header.DeadlineCounter = (uint)ReadVarint(data, ref pos); break;
+                default: SkipField(data, ref pos, tag); break;
+            }
+        }
+    }
+
+    /// <summary>Reads one command from its wire slice and builds the final command object, binding the
+    /// header-hoisted fields (transaction identity, epoch, manifest hash, anchor key, commit timestamp,
+    /// recovery deadline) from the shared header when the delta carries one. Field numbers follow
+    /// PreparedIntentCommandMessage in prepared_intent_message.proto, and the header-fallback semantics
+    /// mirror <see cref="ToCommand"/> exactly; the encoding test compares the two decoders so they cannot
+    /// drift apart.</summary>
+    private static PreparedIntentCommand ReadCommand(ReadOnlySpan<byte> data, in SharedHeaderFields header, bool hasHeader)
+    {
+        const int Varint = 0, Len = 2;
+
+        PreparedIntentCommandKindMessage kind = PreparedIntentCommandKindMessage.PreparedIntentPrepare;
+        int txNode = 0; long txPhysical = 0; uint txCounter = 0;
+        long epoch = 0;
+        string key = string.Empty;
+        bool commit = false;
+        long manifestHash = 0;
+        string anchorKey = string.Empty;
+        int commitNode = 0; long commitPhysical = 0; uint commitCounter = 0;
+        int state = 0;
+        byte[] value = [];
+        bool valueNull = false;
+        string bucket = string.Empty;
+        bool bucketNull = false;
+        long revision = 0;
+        int expiresNode = 0; long expiresPhysical = 0; uint expiresCounter = 0;
+        bool noRevision = false;
+        long baseRevision = 0;
+        int baseState = 0;
+        int deadlineNode = 0; long deadlinePhysical = 0; uint deadlineCounter = 0;
+        int resolution = 0;
+
+        int pos = 0;
+        while (pos < data.Length)
+        {
+            ulong tag = ReadWireTag(data, ref pos);
+            switch (tag)
+            {
+                case 1 << 3 | Varint: kind = (PreparedIntentCommandKindMessage)(int)(uint)ReadVarint(data, ref pos); break;
+                case 2 << 3 | Varint: txNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 3 << 3 | Varint: txPhysical = (long)ReadVarint(data, ref pos); break;
+                case 4 << 3 | Varint: txCounter = (uint)ReadVarint(data, ref pos); break;
+                case 5 << 3 | Varint: epoch = (long)ReadVarint(data, ref pos); break;
+                case 6 << 3 | Len: key = ReadLengthDelimitedString(data, ref pos); break;
+                case 7 << 3 | Varint: commit = ReadVarint(data, ref pos) != 0; break;
+                case 8 << 3 | Varint: manifestHash = (long)ReadVarint(data, ref pos); break;
+                case 9 << 3 | Len: anchorKey = ReadLengthDelimitedString(data, ref pos); break;
+                case 10 << 3 | Varint: commitNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 11 << 3 | Varint: commitPhysical = (long)ReadVarint(data, ref pos); break;
+                case 12 << 3 | Varint: commitCounter = (uint)ReadVarint(data, ref pos); break;
+                case 13 << 3 | Varint: state = (int)(uint)ReadVarint(data, ref pos); break;
+                case 14 << 3 | Len: value = ReadLengthDelimitedBytes(data, ref pos); break;
+                case 15 << 3 | Varint: valueNull = ReadVarint(data, ref pos) != 0; break;
+                case 16 << 3 | Len: bucket = ReadLengthDelimitedString(data, ref pos); break;
+                case 17 << 3 | Varint: bucketNull = ReadVarint(data, ref pos) != 0; break;
+                case 18 << 3 | Varint: revision = (long)ReadVarint(data, ref pos); break;
+                case 19 << 3 | Varint: expiresNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 20 << 3 | Varint: expiresPhysical = (long)ReadVarint(data, ref pos); break;
+                case 21 << 3 | Varint: expiresCounter = (uint)ReadVarint(data, ref pos); break;
+                case 22 << 3 | Varint: noRevision = ReadVarint(data, ref pos) != 0; break;
+                case 23 << 3 | Varint: baseRevision = (long)ReadVarint(data, ref pos); break;
+                case 24 << 3 | Varint: baseState = (int)(uint)ReadVarint(data, ref pos); break;
+                case 25 << 3 | Varint: deadlineNode = (int)(uint)ReadVarint(data, ref pos); break;
+                case 26 << 3 | Varint: deadlinePhysical = (long)ReadVarint(data, ref pos); break;
+                case 27 << 3 | Varint: deadlineCounter = (uint)ReadVarint(data, ref pos); break;
+                case 28 << 3 | Varint: resolution = (int)(uint)ReadVarint(data, ref pos); break;
+                default: SkipField(data, ref pos, tag); break;
+            }
+        }
+
+        HLCTimestamp txId = hasHeader
+            ? new(header.TxNode, header.TxPhysical, header.TxCounter)
+            : new(txNode, txPhysical, txCounter);
+        long effectiveEpoch = hasHeader ? header.Epoch : epoch;
+
+        switch (kind)
+        {
+            case PreparedIntentCommandKindMessage.PreparedIntentPrepare:
+                return new PrepareIntentCommand(new PreparedIntent(
+                    txId, effectiveEpoch, key,
+                    hasHeader ? header.ManifestHash : manifestHash,
+                    hasHeader ? header.AnchorKey ?? string.Empty : anchorKey,
+                    hasHeader
+                        ? new HLCTimestamp(header.CommitNode, header.CommitPhysical, header.CommitCounter)
+                        : new HLCTimestamp(commitNode, commitPhysical, commitCounter),
+                    (KeyValueState)state,
+                    valueNull ? null : value,
+                    bucketNull ? null : bucket,
+                    revision,
+                    new HLCTimestamp(expiresNode, expiresPhysical, expiresCounter),
+                    noRevision,
+                    baseRevision, (KeyValueState)baseState,
+                    hasHeader
+                        ? new HLCTimestamp(header.DeadlineNode, header.DeadlinePhysical, header.DeadlineCounter)
+                        : new HLCTimestamp(deadlineNode, deadlinePhysical, deadlineCounter),
+                    (PreparedIntentResolution)resolution));
+
+            case PreparedIntentCommandKindMessage.PreparedIntentResolve:
+                return new ResolveIntentCommand(txId, effectiveEpoch, key, commit);
+
+            case PreparedIntentCommandKindMessage.PreparedIntentRemove:
+                return new RemoveIntentCommand(txId, effectiveEpoch, key);
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind), kind, "unknown prepared-intent command kind");
+        }
     }
 
     /// <summary>Serializes a batch of transitions for one atomic data-partition log entry. The produced bytes
@@ -941,7 +1173,7 @@ internal sealed class PreparedIntentStore
         HoistSharedHeader(delta);
 
         byte[] data = ReplicationSerializer.Serialize(delta);
-        locallyProposedDeltas.AddOrUpdate(data, batch);
+        locallyProposedDeltas.Register(data, batch);
 
         // The proto layer is scaffolding: the bytes are final and the delta cache above holds the decoded
         // commands, never these messages, so they can be recycled for the next serialization on this thread.
@@ -1130,7 +1362,12 @@ internal sealed class PreparedIntentStore
 
     /// <summary>Rebuilds one transition, taking the fields the batch shares from <paramref name="header"/> when the
     /// writer hoisted them there and from the command itself when it did not.</summary>
-    private static PreparedIntentCommand ToCommand(PreparedIntentCommandMessage m, PreparedIntentDeltaHeaderMessage? header)
+    /// <summary>Reference decoder over the generated proto messages, kept as the readable statement of the
+    /// wire semantics. Production decoding is <see cref="DecodeDelta"/>, which reads the same fields directly
+    /// off the wire without the message graph; the encoding test decodes every delta through both and fails
+    /// on any disagreement, so a change here without the matching <see cref="ReadCommand"/> change (or the
+    /// reverse) cannot land silently. Internal for that test.</summary>
+    internal static PreparedIntentCommand ToCommand(PreparedIntentCommandMessage m, PreparedIntentDeltaHeaderMessage? header)
     {
         HLCTimestamp txId = header is null
             ? new(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter)

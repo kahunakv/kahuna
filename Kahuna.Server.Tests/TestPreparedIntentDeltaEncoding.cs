@@ -175,10 +175,114 @@ public sealed class TestPreparedIntentDeltaEncoding
         Assert.Equal(PreparedIntentResolution.Committed, proposer.Get("row/1")!.Resolution);
         Assert.Equal(PreparedIntentResolution.Pending, proposer.Get("row/2")!.Resolution);
 
-        // Re-applying the same entry (redelivery/replay) after the proposal bytes were already claimed must fall
-        // back to decoding and stay an idempotent no-op.
+        // Re-applying the same entry (redelivery/replay) must stay an idempotent no-op. Whether the second
+        // apply reuses the registered commands (take budget left by co-hosted nodes) or falls back to
+        // decoding, the state must not change.
         Assert.True(proposer.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = data }));
         Assert.Equal(PreparedIntentResolution.Committed, proposer.Get("row/1")!.Resolution);
+    }
+
+    /// <summary>The proposal path registers the serialized delta's decoded commands against the produced
+    /// byte array, so a local apply of the exact same array reuses the producer's instances instead of
+    /// decoding. Observable through identity: the serializer aliases the intent's value array into the
+    /// wire bytes, while a decoded intent carries a fresh copy.</summary>
+    [Fact]
+    public void ProposalBytes_ReuseTheProducersCommandsOnLocalApply()
+    {
+        PrepareIntentCommand prepare = new(Intent(Ts(1000), 3, "row/reuse"));
+        byte[] data = PreparedIntentStore.SerializeDelta([prepare]);
+
+        PreparedIntentStore store = new();
+        Assert.True(store.Replicate(PartitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = data }));
+
+        Assert.Same(prepare.Intent.Value, store.Get("row/reuse")!.Value);
+    }
+
+    /// <summary>The live decoder reads the wire directly; the generated proto messages remain as the
+    /// reference decoder. Decodes a delta through both and compares, with every descriptor field of the
+    /// prepare carrying a non-default value, so a field the direct reader fails to consume — for example
+    /// one newly added to the proto — fails here instead of being silently dropped. The negative profile
+    /// forces the ten-byte varint form of every int32/int64 field, where a truncation mismatch between
+    /// the decoders would hide.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DirectReader_MatchesReferenceDecoderOnEveryDescriptorField(bool negative)
+    {
+        PreparedIntentCommandMessage prepare = new();
+
+        foreach (Google.Protobuf.Reflection.FieldDescriptor field in PreparedIntentCommandMessage.Descriptor.Fields.InDeclarationOrder())
+        {
+            object nonDefault = field.FieldType switch
+            {
+                Google.Protobuf.Reflection.FieldType.Enum => Enum.ToObject(field.EnumType.ClrType, field.EnumType.Values[1].Number),
+                Google.Protobuf.Reflection.FieldType.Int32 => negative ? -42 - field.FieldNumber : 42 + field.FieldNumber,
+                Google.Protobuf.Reflection.FieldType.Int64 => negative ? -42L - field.FieldNumber : 42L + field.FieldNumber,
+                Google.Protobuf.Reflection.FieldType.UInt32 => negative ? uint.MaxValue - (uint)field.FieldNumber : 42u + (uint)field.FieldNumber,
+                Google.Protobuf.Reflection.FieldType.Bool => true,
+                Google.Protobuf.Reflection.FieldType.String => negative ? $"fïeld-µ{field.FieldNumber}" : $"field-{field.FieldNumber}",
+                Google.Protobuf.Reflection.FieldType.Bytes => Google.Protobuf.ByteString.CopyFrom((byte)field.FieldNumber, 2, 3),
+                _ => throw new InvalidOperationException(
+                    $"field '{field.Name}' has unhandled type {field.FieldType}; extend this sweep and both decoders together")
+            };
+
+            field.Accessor.SetValue(prepare, nonDefault);
+        }
+
+        // A prepare consumes every payload field; the null markers must stay false so the value and the
+        // bucket flow into the decoded intent instead of being nulled away.
+        prepare.Kind = PreparedIntentCommandKindMessage.PreparedIntentPrepare;
+        prepare.ValueNull = false;
+        prepare.BucketNull = false;
+
+        PreparedIntentDeltaMessage delta = new();
+        delta.Commands.Add(prepare);
+        delta.Commands.Add(new PreparedIntentCommandMessage
+        {
+            Kind = PreparedIntentCommandKindMessage.PreparedIntentResolve,
+            TransactionIdNode = 1, TransactionIdPhysical = 2, TransactionIdCounter = 3,
+            Epoch = 4, Key = "row/resolve", Commit = true
+        });
+
+        // Per-command form: the commands disagree, so this delta carries no shared header.
+        AssertDecodersAgree(ReplicationSerializer.Serialize(delta));
+    }
+
+    /// <summary>Compacted-form twin of the descriptor sweep: the writer hoists the shared header, so the
+    /// direct reader's header binding is compared against the reference decoder too.</summary>
+    [Fact]
+    public void DirectReader_MatchesReferenceDecoderOnACompactedDelta()
+    {
+        HLCTimestamp txId = Ts(1000);
+        const long epoch = 3;
+
+        AssertDecodersAgree(PreparedIntentStore.SerializeDelta([
+            new PrepareIntentCommand(Intent(txId, epoch, "row/1")),
+            new PrepareIntentCommand(Intent(txId, epoch, "row/2")),
+            new ResolveIntentCommand(txId, epoch, "row/1", Commit: true)]));
+    }
+
+    private static void AssertDecodersAgree(byte[] bytes)
+    {
+        PreparedIntentCommand[] direct = PreparedIntentStore.DecodeDelta(bytes);
+        PreparedIntentDeltaMessage reference = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(bytes);
+
+        Assert.Equal(reference.Commands.Count, direct.Length);
+
+        for (int i = 0; i < direct.Length; i++)
+        {
+            PreparedIntentCommand expected = PreparedIntentStore.ToCommand(reference.Commands[i], reference.Header);
+
+            if (expected is PrepareIntentCommand expectedPrepare && direct[i] is PrepareIntentCommand directPrepare)
+            {
+                // Record equality compares the value array by reference; compare its content separately and
+                // the rest of the record with the array reference neutralized.
+                Assert.Equal(expectedPrepare.Intent.Value, directPrepare.Intent.Value);
+                Assert.Equal(expectedPrepare.Intent, directPrepare.Intent with { Value = expectedPrepare.Intent.Value });
+            }
+            else
+                Assert.Equal(expected, direct[i]);
+        }
     }
 
     /// <summary>The serializer recycles proto command messages across deltas on the same thread. A prepare fills

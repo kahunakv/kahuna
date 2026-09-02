@@ -14,6 +14,7 @@ using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Server.Sequencer;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Composition;
+using Kahuna.Utils;
 using Writes = Kahuna.Server.KeyValues.Writes;
 
 namespace Kahuna;
@@ -168,6 +169,10 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         // leaks scheduler threads.
         backendReadScheduler.Start();
         backendWriteScheduler.Start();
+
+        // Registered only after full construction, so a failed constructor never inflates the census.
+        // The census feeds the proposed-delta caches' take budget; see InProcessNodeCensus.
+        InProcessNodeCensus.NodeStarted();
     }
 
     private int disposed;
@@ -180,6 +185,8 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         // actor system), and the DI container also disposes this singleton at teardown. Only the first wins.
         if (Interlocked.Exchange(ref disposed, 1) != 0)
             return;
+
+        InProcessNodeCensus.NodeStopped();
 
         placement.Dispose();
 

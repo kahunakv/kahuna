@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics.CodeAnalysis;
-using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
@@ -222,33 +220,17 @@ internal sealed class TransactionRecordStore
 
     public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
 
-    // The node that proposes a delta serialized it from live command objects moments before Raft hands the very
-    // same byte array back to the local apply path, so the decoded form is registered against the produced bytes
-    // and the local apply reuses it instead of parsing and rebuilding every command. The table is weak on the
-    // byte array, so an entry vanishes with the proposal bytes; any reader that misses — a follower, WAL replay
-    // on restart, state transfer, all of which see freshly materialized arrays — parses as before, so
-    // correctness never depends on a hit. Commands, records, and the participant list are immutable, which is
-    // what makes reusing the producer's instances safe even when an in-process transport shares the array.
-    private static readonly ConditionalWeakTable<byte[], TransactionRecordCommand[]> locallyProposedDeltas = new();
-
-    // A hit is taken single-shot: with the redundant-apply ledger only one local apply runs per committed entry,
-    // and clearing on take keeps the WAL's in-memory retention of the bytes from pinning the decoded commands.
-    // A concurrent second taker simply misses and parses, which is the same double work it did before.
-    private static bool TryTakeLocallyProposed(byte[] data, [NotNullWhen(true)] out TransactionRecordCommand[]? commands)
-    {
-        if (!locallyProposedDeltas.TryGetValue(data, out commands))
-            return false;
-
-        locallyProposedDeltas.Remove(data);
-        return true;
-    }
+    // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
+    // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
+    // producer's instances is safe only because commands, records, and the participant list are immutable.
+    private static readonly ProposedDeltaCache<TransactionRecordCommand> locallyProposedDeltas = new();
 
     private bool ApplyLog(RaftLog log)
     {
         if (log.LogType != ReplicationTypes.TransactionRecord || log.LogData is null)
             return true;
 
-        if (TryTakeLocallyProposed(log.LogData, out TransactionRecordCommand[]? proposed))
+        if (locallyProposedDeltas.TryTake(log.LogData, out TransactionRecordCommand[]? proposed))
         {
             foreach (TransactionRecordCommand command in proposed)
                 Apply(command);
@@ -275,7 +257,7 @@ internal sealed class TransactionRecordStore
             delta.Commands.Add(ToProto(command));
 
         byte[] data = ReplicationSerializer.Serialize(delta);
-        locallyProposedDeltas.AddOrUpdate(data, batch);
+        locallyProposedDeltas.Register(data, batch);
 
         return data;
     }
