@@ -227,6 +227,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     private readonly long maxMaterializationBatchBytes;
 
+    // Emits the value-free by-reference materialization record instead of copying the committed value into the
+    // log a second time. Off unless every node in the cluster applies that record (see the configuration flag's
+    // upgrade order); an older node skips an unknown message type, which loses the write on that node.
+    private readonly bool materializeByReference;
+
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
         // Applied by the ordered scheduler-completion path (the single apply owner), never mutated by the
@@ -248,8 +253,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         Func<string, int>? resolveCurrentPartition = null,
         ReplicateDecisionDelegate? replicateDecision = null,
         LookupRecordRoutedDelegate? lookupRecordRouted = null,
-        ConfirmReplicaFenceDelegate? confirmReplicaFence = null)
+        ConfirmReplicaFenceDelegate? confirmReplicaFence = null,
+        bool materializeByReference = false)
     {
+        this.materializeByReference = materializeByReference;
         this.validateStagedBases = validateStagedBases;
         this.confirmReplicaFence = confirmReplicaFence;
         this.resolveCurrentPartition = resolveCurrentPartition;
@@ -1001,7 +1008,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             while (next < partition.Intents.Count && window.Count < maxMaterializationBatchItems)
             {
-                byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next], scratch);
+                byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next], scratch, materializeByReference);
                 if (window.Count > 0 && windowBytes + record.Length > maxMaterializationBatchBytes)
                     break;
 

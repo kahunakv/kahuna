@@ -3,10 +3,13 @@ using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
 namespace Kahuna.Server.Persistence.Pitr;
@@ -103,6 +106,14 @@ internal static class RestoreEngine
         // bytes that just passed digest verification — a source artifact swapped after the up-front check
         // can never reach the backend. Removed on every exit path.
         string stagingRoot = Directory.CreateTempSubdirectory("kahuna_restore_").FullName;
+
+        // The prepared intents the replayed segments have installed but not yet settled, keyed by the identity
+        // a by-reference materialization record names. A record of that shape carries no value, so this map is
+        // the only place the restore can read the committed mutation from. It is fed from the same segments, in
+        // the same per-partition log order a live replica applies, and it shrinks again on every settle — so it
+        // holds only the intents that are genuinely in flight at the point the replay has reached.
+        Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents = [];
+
         try
         {
             // Skip the first (Full) entry — its state is already in the backend via the checkpoint.
@@ -147,7 +158,16 @@ internal static class RestoreEngine
                     {
                         ct.ThrowIfCancellationRequested();
 
-                        (PersistenceRequestItem item, HLCTimestamp commitHlc)? decoded = ToRequestItem(entry);
+                        // Track intent transitions before the as-of cut, never after it: the cut selects which
+                        // MUTATIONS are restored, and an intent skipped here would leave a by-reference record
+                        // inside the cut with nothing to expand from.
+                        if (entry.LogType == ReplicationTypes.PreparedIntent)
+                        {
+                            TrackIntentTransitions(liveIntents, entry);
+                            continue;
+                        }
+
+                        (PersistenceRequestItem item, HLCTimestamp commitHlc)? decoded = ToRequestItem(entry, liveIntents, manifest.BackupId);
 
                         // Cut on the transaction COMMIT HLC carried in the payload, not the Raft WAL entry
                         // Time. Every participant of a multi-partition transaction shares one commit HLC, but
@@ -340,7 +360,8 @@ internal static class RestoreEngine
     /// is the correct axis for an as-of cut. Returns <c>null</c> for entries that are not
     /// key-value mutations (e.g. range-map or lock entries).
     /// </summary>
-    private static (PersistenceRequestItem item, HLCTimestamp commitHlc)? ToRequestItem(WalSegmentEntry entry)
+    private static (PersistenceRequestItem item, HLCTimestamp commitHlc)? ToRequestItem(
+        WalSegmentEntry entry, Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents, Guid backupId)
     {
         if (entry.LogType != ReplicationTypes.KeyValues)
             return null;
@@ -350,10 +371,35 @@ internal static class RestoreEngine
 
         KeyValueMessage msg = ReplicationSerializer.UnserializeKeyValueMessage(entry.LogData);
 
-        (KeyValueState state, byte[]? value) = KeyValueMessageDecoder.Decode(msg);
+        KeyValueState state;
+        byte[]? value;
 
-        if (state == KeyValueState.Undefined)
-            return null;
+        if ((KeyValueRequestType)msg.Type == KeyValueRequestType.MaterializeIntent)
+        {
+            // A by-reference record carries no value; the committed mutation lives in the prepared intent it
+            // names, which the same segment stream installed earlier in log order.
+            PreparedIntentIdentity identity = new(
+                new HLCTimestamp(msg.TransactionIdNode, msg.TransactionIdPhysical, msg.TransactionIdCounter),
+                msg.Epoch,
+                msg.Key);
+
+            if (!liveIntents.TryGetValue(identity, out PreparedIntent? intent))
+                throw new BackupDriverException(
+                    $"Backup {backupId:N}: log entry {entry.Id} materializes prepared intent " +
+                    $"{identity.TransactionId}/{identity.Epoch} for key '{identity.Key}' by reference, but no " +
+                    "prepare for it appears in the replayed segments; the restore would silently drop a " +
+                    "committed value and is aborted.");
+
+            state = intent.State;
+            value = intent.Value;
+        }
+        else
+        {
+            (state, value) = KeyValueMessageDecoder.Decode(msg);
+
+            if (state == KeyValueState.Undefined)
+                return null;
+        }
 
         PersistenceRequestItem item = new(
             msg.Key,
@@ -375,4 +421,35 @@ internal static class RestoreEngine
 
         return (item, commitHlc);
     }
+
+    /// <summary>
+    /// Folds one replayed prepared-intent delta into the restore's live-intent map: a prepare installs the
+    /// intent, a resolve leaves it in place (a resolved intent is still the value its materialization names),
+    /// and a remove drops it. Decoding goes through the store's own codec, so the restore can never read a
+    /// delta differently from the live apply path.
+    /// </summary>
+    private static void TrackIntentTransitions(
+        Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents, WalSegmentEntry entry)
+    {
+        if (entry.LogData is null || entry.LogData.Length == 0)
+            return;
+
+        foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(entry.LogData))
+        {
+            switch (command)
+            {
+                case PrepareIntentCommand prepare:
+                    liveIntents[new PreparedIntentIdentity(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key)] = prepare.Intent;
+                    break;
+
+                case RemoveIntentCommand remove:
+                    liveIntents.Remove(new PreparedIntentIdentity(remove.TransactionId, remove.Epoch, remove.Key));
+                    break;
+            }
+        }
+    }
 }
+
+/// <summary>The identity a by-reference materialization record names: one key's prepared mutation belonging to
+/// one transaction attempt.</summary>
+internal readonly record struct PreparedIntentIdentity(HLCTimestamp TransactionId, long Epoch, string Key);

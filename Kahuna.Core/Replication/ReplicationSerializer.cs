@@ -90,6 +90,7 @@ public static class ReplicationSerializer
         message.TransactionIdCounter = 0;
         message.ClearRecordAnchorKey();
         message.ClearEmbeddedDecision();
+        message.Epoch = 0;
     }
 
     public static byte[] Serialize(RangeMapMessage message)

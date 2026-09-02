@@ -44,7 +44,8 @@ public sealed class TestKeyValueMessageReuse
         TransactionIdPhysical = 14,
         TransactionIdCounter = 15,
         RecordAnchorKey = "space/anchor",
-        EmbeddedDecision = ByteString.CopyFromUtf8("decision")
+        EmbeddedDecision = ByteString.CopyFromUtf8("decision"),
+        Epoch = 16
     };
 
     /// <summary>

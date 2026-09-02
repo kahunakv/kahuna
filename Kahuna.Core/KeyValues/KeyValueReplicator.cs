@@ -67,6 +67,11 @@ internal sealed class KeyValueReplicator
     // that fork attributable from the node log alone. Null (bare unit-test construction) disables the witness.
     private readonly Func<string, long>? committedHeadRevisionProbe;
 
+    // The node's prepared-intent store: the replicated authority for a durable transaction's pending mutation,
+    // and therefore the value a by-reference materialization record names. Null (bare unit-test construction)
+    // makes every by-reference record a miss, which the miss path reports.
+    private readonly Transactions.PreparedIntentStore? preparedIntentStore;
+
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KeyValueActorRing persistentRouter,
@@ -80,8 +85,10 @@ internal sealed class KeyValueReplicator
         Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null,
         Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null,
         Func<HLCTimestamp, long, bool>? transactionLocallyAborted = null,
-        Func<string, long>? committedHeadRevisionProbe = null)
+        Func<string, long>? committedHeadRevisionProbe = null,
+        Transactions.PreparedIntentStore? preparedIntentStore = null)
     {
+        this.preparedIntentStore        = preparedIntentStore;
         this.backgroundWriter           = backgroundWriter;
         this.persistentRouter           = persistentRouter;
         this.raft                       = raft;
@@ -704,6 +711,246 @@ internal sealed class KeyValueReplicator
         (a ?? []).AsSpan().SequenceEqual(b ?? []);
 
     /// <summary>
+    /// Applies one committed key/value mutation: the single body behind every mutating arm of
+    /// <see cref="Replicate"/>. The value-carrying arms read the mutation straight off the record; the
+    /// by-reference arm reads it from the local prepared intent the record names. Keeping one body is what
+    /// stops the two from drifting — the durability registration, the fork and collision witnesses, the
+    /// unflushed overlay, the queued backend write, the cache-coherence message, the completion receipt and
+    /// the write-frequency sample all live here and only here.
+    /// </summary>
+    /// <param name="witnessBelowHead">
+    /// Runs the below-head fork witness. True for the set and delete mutations, whose revision is meaningful
+    /// against the key's committed head; false for an extend, which does not advance history.
+    /// </param>
+    /// <param name="witnessCollision">
+    /// Runs the same-revision divergent-apply witness. True only for a set: a delete and an extend legitimately
+    /// reuse a revision number, so an equal revision there is not the alarm it is for a set.
+    /// </param>
+    private void ApplyCommittedMutation(
+        int partitionId,
+        RaftLog log,
+        KeyValueMessage keyValueMessage,
+        byte[]? messageValue,
+        KeyValueState state,
+        bool witnessBelowHead,
+        bool witnessCollision)
+    {
+        HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
+        HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
+        HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
+        // Register before enqueueing: the partition's durability floor must not pass
+        // this entry until every durable artifact of its apply lands (see
+        // RegisterPendingApply). Applies arrive in log-id order (leaders deliver their
+        // own committed proposals through this path too), so the registration always
+        // precedes any watermark advance over this index.
+        RegisterPendingApply(partitionId, log.Id, keyValueMessage);
+
+        if (witnessBelowHead)
+            WitnessBelowHeadMaterialization(keyValueMessage, log.Id);
+
+        // Collision witness: this apply is about to become durable unconditionally (the overlay
+        // record and the queued flush below run for every committed entry; the actor's head
+        // guards protect only the resident cache). A record whose revision equals the newest
+        // recorded write for the key but whose value differs is therefore a correctness alarm,
+        // not a replay: revisions identify a mutation, and the one legitimate producer of a
+        // same-revision pair — an aborted attempt and its client replay, which both stage
+        // base+1 — must never have BOTH records reach a log. Say it loudly with both sides'
+        // identities, so a conserved-total drift attributes to its producer from the log alone.
+        if (witnessCollision
+            && unflushedWrites is not null
+            && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite newest)
+            && newest.Revision == keyValueMessage.Revision
+            && !keyValueMessage.NoRevision
+            && !ValuesEqual(newest.Value, messageValue))
+        {
+            Transactions.DurableTransactionMetrics.SameRevisionDivergentApplies.Add(1);
+            logger.LogError(
+                "Same-revision divergent apply for key {Key} at revision {Revision}: log entry {LogIndex} (transaction {TransactionId}) overwrites a different value already recorded at this revision",
+                keyValueMessage.Key, keyValueMessage.Revision, log.Id,
+                new HLCTimestamp(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter));
+        }
+
+        // Record before enqueueing so a read that misses the actor cache observes this
+        // committed write even before the background flush lands it in the backend.
+        unflushedWrites?.Record(
+            keyValueMessage.Key,
+            messageValue,
+            keyValueMessage.Revision,
+            expires,
+            lastUsed,
+            lastModified,
+            state,
+            keyValueMessage.NoRevision
+        );
+
+        backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
+            partitionId,
+            keyValueMessage.Key,
+            messageValue,
+            keyValueMessage.Revision,
+            expires,
+            lastUsed,
+            lastModified,
+            (int)state,
+            keyValueMessage.NoRevision,
+            logIndex: log.Id
+        ));
+
+        SendInvalidateOrApply(
+            partitionId,
+            keyValueMessage.Key,
+            messageValue,
+            keyValueMessage.Revision,
+            expires,
+            lastUsed,
+            lastModified,
+            state,
+            new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
+            keyValueMessage.NoRevision
+        );
+
+        RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
+
+        // Record the committed write into the local histogram.
+        // Running on every node (leader + followers) so the P0/meta leader — which
+        // runs the split trigger — always has warm data regardless of where the
+        // partition leader sits.
+        // Guard: only key-range spaces are load-split; skip hash-routed writes to
+        // avoid building 4096-entry trackers for partitions the trigger never reads.
+        if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
+            writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
+    }
+
+    /// <summary>
+    /// Applies a by-reference materialization record: the record names a prepared intent
+    /// <c>(TransactionId, Epoch, Key)</c> and carries no value, so the committed mutation is read from this
+    /// node's own prepared-intent store and applied through the same body the value-carrying arms use.
+    ///
+    /// <para><b>Why the intent is here.</b> The prepare delta and this record are proposed on the same
+    /// partition, and a replica applies that partition's log in order, so the prepare always applied first. The
+    /// settle that removes the intent is proposed only after this record replicated, so the removal always
+    /// applies later. A replica seeded by snapshot or state transfer receives the pending intents with the
+    /// seed. Deferred settlement only widens the window.</para>
+    ///
+    /// <para><b>The two kinds of miss.</b> Several producers may materialize the same intent (a deferred
+    /// settlement racing the recovery sweep), so a second record can legitimately arrive after the settle
+    /// removed the intent. That miss is redundant and silent, and this node proves it from state it can read
+    /// without I/O: the unflushed overlay or the committed-head memory already stands at or beyond the
+    /// record's revision. Anything else may be a replica missing a committed value, which is a correctness
+    /// alarm — but proving it needs the persisted row, and this apply path must never block on a backend read
+    /// (an awaited read here parks the whole message loop). So the verdict is reached off this path, by
+    /// <see cref="VerifyMaterializationMiss"/>, which owns the counter and the error log.</para>
+    /// </summary>
+    private void ApplyMaterializeIntent(int partitionId, RaftLog log, KeyValueMessage keyValueMessage)
+    {
+        HLCTimestamp transactionId = new(
+            keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+
+        PreparedIntent? intent = preparedIntentStore?.GetByIdentity(transactionId, keyValueMessage.Epoch, keyValueMessage.Key);
+
+        if (intent is null)
+        {
+            // Nothing durable will land for this entry, so it must not be registered pending: a registration
+            // whose artifacts never arrive parks the partition's durability floor below this index for good.
+            if (!MaterializationRedundant(keyValueMessage))
+                VerifyMaterializationMiss(partitionId, log.Id, transactionId, keyValueMessage.Epoch, keyValueMessage.Key, keyValueMessage.Revision);
+
+            return;
+        }
+
+        // A record whose revision disagrees with the intent it names cannot be applied from that intent:
+        // the pair identifies two different mutations. Refuse rather than apply the wrong revision.
+        if (intent.Revision != keyValueMessage.Revision)
+        {
+            Transactions.DurableTransactionMetrics.MaterializationIntentMissing.Add(1);
+            logger.LogError(
+                "By-reference materialization for key {Key} names transaction {TransactionId} epoch {Epoch} at revision {Revision}, but the local intent stands at revision {IntentRevision} (log entry {LogIndex})",
+                keyValueMessage.Key, transactionId, keyValueMessage.Epoch, keyValueMessage.Revision, intent.Revision, log.Id);
+            return;
+        }
+
+        // The intent is the authority for the mutation itself — the value and whether the key is set or
+        // deleted — exactly as it is for the leader's own ApplyDurableCommit. The record supplies the identity,
+        // the revision and the commit timestamps.
+        ApplyCommittedMutation(
+            partitionId,
+            log,
+            keyValueMessage,
+            intent.Value,
+            intent.State,
+            witnessBelowHead: true,
+            witnessCollision: intent.State != KeyValueState.Deleted);
+    }
+
+    /// <summary>
+    /// Whether a by-reference record with no matching intent is provably redundant, decided without any I/O.
+    /// The unflushed overlay is this node's record of committed writes queued but not yet flushed; the
+    /// committed-head memory is the staged-base fence's record of the last durable-transaction commit it
+    /// settled for the key. Either standing at or beyond the record's revision means the value this record
+    /// names is already this node's, so the record is a second producer's duplicate and applying it again
+    /// would change nothing.
+    /// </summary>
+    private bool MaterializationRedundant(KeyValueMessage keyValueMessage)
+    {
+        if (unflushedWrites is not null
+            && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite pending)
+            && pending.Revision >= keyValueMessage.Revision)
+            return true;
+
+        return committedHeadRevisionProbe is not null
+            && committedHeadRevisionProbe(keyValueMessage.Key) >= keyValueMessage.Revision;
+    }
+
+    /// <summary>
+    /// Settles a by-reference miss the synchronous proofs could not dismiss, off the apply path. Reads the
+    /// persisted row on the queued backend read scheduler: a row at or beyond the record's revision means the
+    /// value is already durable here (the flush landed and the overlay entry was pruned), which is the same
+    /// benign duplicate. A row below it — or no row at all — means this replica is missing a committed value,
+    /// so the counter and the error log fire with the full identity. Fire-and-forget on purpose; the caller
+    /// sits on the ordered apply path and must not block.
+    /// </summary>
+    private void VerifyMaterializationMiss(
+        int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, long revision)
+    {
+        Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
+
+        if (hydrate is null)
+        {
+            ReportMaterializationMiss(logIndex, transactionId, epoch, key, revision);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                KeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
+                if (row is not null && row.Revision >= revision)
+                    return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Could not verify the by-reference materialization miss for key {Key}; reporting it as missing",
+                    key);
+            }
+
+            ReportMaterializationMiss(logIndex, transactionId, epoch, key, revision);
+        });
+    }
+
+    private void ReportMaterializationMiss(
+        long logIndex, HLCTimestamp transactionId, long epoch, string key, long revision)
+    {
+        Transactions.DurableTransactionMetrics.MaterializationIntentMissing.Add(1);
+        logger.LogError(
+            "By-reference materialization for key {Key} at revision {Revision} found no prepared intent for transaction {TransactionId} epoch {Epoch}, and this node's durable state is below that revision (log entry {LogIndex})",
+            key, revision, transactionId, epoch, logIndex);
+    }
+
+    /// <summary>
     /// Replicates the specified log entry for the given partition.
     /// </summary>
     /// <param name="partitionId">The unique identifier of the partition where the log entry should be replicated.</param>
@@ -724,200 +971,29 @@ internal sealed class KeyValueReplicator
             switch ((KeyValueRequestType)keyValueMessage.Type)
             {
                 case KeyValueRequestType.TrySet:
-                {
-                    byte[]? messageValue;
-
-                    messageValue = ByteStringPayload.GetArray(keyValueMessage.Value);
-
-                    HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
-                    HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
-                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
-
-                    // Register before enqueueing: the partition's durability floor must not pass
-                    // this entry until every durable artifact of its apply lands (see
-                    // RegisterPendingApply). Applies arrive in log-id order (leaders deliver their
-                    // own committed proposals through this path too), so the registration always
-                    // precedes any watermark advance over this index.
-                    RegisterPendingApply(partitionId, log.Id, keyValueMessage);
-
-                    WitnessBelowHeadMaterialization(keyValueMessage, log.Id);
-
-                    // Collision witness: this apply is about to become durable unconditionally (the overlay
-                    // record and the queued flush below run for every committed entry; the actor's head
-                    // guards protect only the resident cache). A record whose revision equals the newest
-                    // recorded write for the key but whose value differs is therefore a correctness alarm,
-                    // not a replay: revisions identify a mutation, and the one legitimate producer of a
-                    // same-revision pair — an aborted attempt and its client replay, which both stage
-                    // base+1 — must never have BOTH records reach a log. Say it loudly with both sides'
-                    // identities, so a conserved-total drift attributes to its producer from the log alone.
-                    if (unflushedWrites is not null
-                        && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite newest)
-                        && newest.Revision == keyValueMessage.Revision
-                        && !keyValueMessage.NoRevision
-                        && !ValuesEqual(newest.Value, messageValue))
-                    {
-                        Transactions.DurableTransactionMetrics.SameRevisionDivergentApplies.Add(1);
-                        logger.LogError(
-                            "Same-revision divergent apply for key {Key} at revision {Revision}: log entry {LogIndex} (transaction {TransactionId}) overwrites a different value already recorded at this revision",
-                            keyValueMessage.Key, keyValueMessage.Revision, log.Id,
-                            new HLCTimestamp(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter));
-                    }
-
-                    // Record before enqueueing so a read that misses the actor cache observes this
-                    // committed write even before the background flush lands it in the backend.
-                    unflushedWrites?.Record(
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        expires,
-                        lastUsed,
-                        lastModified,
-                        KeyValueState.Set,
-                        keyValueMessage.NoRevision
-                    );
-
-                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        partitionId,
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        expires,
-                        lastUsed,
-                        lastModified,
-                        (int)KeyValueState.Set,
-                        keyValueMessage.NoRevision,
-                        logIndex: log.Id
-                    ));
-
-                    SendInvalidateOrApply(
-                        partitionId, 
-                        keyValueMessage.Key, 
-                        messageValue, 
-                        keyValueMessage.Revision,
-                        expires, 
-                        lastUsed, 
-                        lastModified, 
-                        KeyValueState.Set,
-                        new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-                        keyValueMessage.NoRevision
-                    );
-
-                    RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
-
-                    // Record the committed write into the local histogram.
-                    // Running on every node (leader + followers) so the P0/meta leader — which
-                    // runs the split trigger — always has warm data regardless of where the
-                    // partition leader sits.
-                    // Guard: only key-range spaces are load-split; skip hash-routed writes to
-                    // avoid building 4096-entry trackers for partitions the trigger never reads.
-                    if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
-                        writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
-
+                    ApplyCommittedMutation(
+                        partitionId, log, keyValueMessage,
+                        ByteStringPayload.GetArray(keyValueMessage.Value), KeyValueState.Set,
+                        witnessBelowHead: true, witnessCollision: true);
                     return true;
-                }
 
                 case KeyValueRequestType.TryDelete:
-                {
-                    byte[]? messageValue;
-
-                    messageValue = ByteStringPayload.GetArray(keyValueMessage.Value);
-
-                    HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
-                    HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
-                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
-
-                    RegisterPendingApply(partitionId, log.Id, keyValueMessage);
-
-                    WitnessBelowHeadMaterialization(keyValueMessage, log.Id);
-
-                    unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Deleted, keyValueMessage.NoRevision);
-
-                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        partitionId,
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        expires,
-                        lastUsed,
-                        lastModified,
-                        (int)KeyValueState.Deleted,
-                        keyValueMessage.NoRevision,
-                        logIndex: log.Id
-                    ));
-
-                    SendInvalidateOrApply(
-                        partitionId, 
-                        keyValueMessage.Key, 
-                        messageValue, 
-                        keyValueMessage.Revision,
-                        expires, 
-                        lastUsed, 
-                        lastModified, 
-                        KeyValueState.Deleted,
-                        new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-                        keyValueMessage.NoRevision
-                    );
-
-                    RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
-
-                    if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
-                        writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
-
+                    ApplyCommittedMutation(
+                        partitionId, log, keyValueMessage,
+                        ByteStringPayload.GetArray(keyValueMessage.Value), KeyValueState.Deleted,
+                        witnessBelowHead: true, witnessCollision: false);
                     return true;
-                }
 
                 case KeyValueRequestType.TryExtend:
-                {
-                    byte[]? messageValue;
-
-                    messageValue = ByteStringPayload.GetArray(keyValueMessage.Value);
-
-                    HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
-                    HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
-                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
-
-                    RegisterPendingApply(partitionId, log.Id, keyValueMessage);
-
-                    unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                        expires, lastUsed, lastModified, KeyValueState.Set, keyValueMessage.NoRevision);
-
-                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-                        BackgroundWriteType.QueueStoreKeyValue,
-                        partitionId,
-                        keyValueMessage.Key,
-                        messageValue,
-                        keyValueMessage.Revision,
-                        expires,
-                        lastUsed,
-                        lastModified,
-                        (int)KeyValueState.Set,
-                        keyValueMessage.NoRevision,
-                        logIndex: log.Id
-                    ));
-
-                    SendInvalidateOrApply(
-                        partitionId, 
-                        keyValueMessage.Key, 
-                        messageValue, 
-                        keyValueMessage.Revision,
-                        expires,
-                        lastUsed,
-                        lastModified,
-                        KeyValueState.Set,
-                        new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-                        keyValueMessage.NoRevision
-                    );
-
-                    RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
-
-                    if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
-                        writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
-
+                    ApplyCommittedMutation(
+                        partitionId, log, keyValueMessage,
+                        ByteStringPayload.GetArray(keyValueMessage.Value), KeyValueState.Set,
+                        witnessBelowHead: false, witnessCollision: false);
                     return true;
-                }
+
+                case KeyValueRequestType.MaterializeIntent:
+                    ApplyMaterializeIntent(partitionId, log, keyValueMessage);
+                    return true;
 
                 case KeyValueRequestType.TryGet:
                 case KeyValueRequestType.TryExists:

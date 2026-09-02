@@ -43,4 +43,15 @@ public enum KeyValueRequestType
     /// clients and never serialized into the Raft log.
     /// </summary>
     EvictPartition,
+
+    /// <summary>
+    /// A committed durable-transaction mutation replicated BY REFERENCE: the record names the prepared
+    /// intent (transaction id, epoch, key) whose value every replica already holds, and carries no value
+    /// bytes of its own. Consumers resolve the value from their own prepared-intent store and apply it
+    /// exactly as the value-carrying form would.
+    ///
+    /// <para>Never sent by clients. Appended last on purpose: the numeric value travels in Raft logs and
+    /// WAL segments, so no existing member may be renumbered.</para>
+    /// </summary>
+    MaterializeIntent,
 }

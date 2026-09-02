@@ -308,6 +308,18 @@ internal static class DurableTransactionMetrics
             "kahuna.kv.abort_fenced_commit_applies",
             description: "Durable commit applies refused because the transaction's record is a terminal Abort.");
 
+    /// <summary>
+    /// By-reference materialization records that found no matching prepared intent on this node AND could not
+    /// be proven redundant — the key's newest durable write is still below the record's revision. Every other
+    /// miss is the benign duplicate (a second producer's record arriving after the settle removed the intent)
+    /// and is not counted. A non-zero count means one replica is missing a committed value the rest of the
+    /// cluster has: the paired error log names the transaction, the epoch, the key and the log index.
+    /// </summary>
+    internal static readonly Counter<long> MaterializationIntentMissing =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.materialization_intent_missing",
+            description: "By-reference materialization records whose prepared intent was absent and whose value is not durable here.");
+
     internal static readonly Counter<long> SameRevisionDivergentApplies =
         Meter.CreateCounter<long>(
             "kahuna.kv.same_revision_divergent_applies",

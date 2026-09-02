@@ -58,6 +58,11 @@ internal sealed class DurableTransactionRecovery
 
     private readonly ILogger<IKahuna>? logger;
 
+    // Emits the value-free by-reference materialization record instead of copying the committed value into the
+    // log a second time. Off unless every node in the cluster applies that record (see the configuration flag's
+    // upgrade order); an older node skips an unknown message type, which loses the write on that node.
+    private readonly bool materializeByReference;
+
     public DurableTransactionRecovery(
         PreparedIntentStore intentStore,
         DurableTransactionFinalizer.ReplicateDelegate replicate,
@@ -66,8 +71,10 @@ internal sealed class DurableTransactionRecovery
         DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally = null,
         TimeSpan? recordRetentionTtl = null,
         ILogger<IKahuna>? logger = null,
-        Func<HLCTimestamp, long, bool>? locallyAborted = null)
+        Func<HLCTimestamp, long, bool>? locallyAborted = null,
+        bool materializeByReference = false)
     {
+        this.materializeByReference = materializeByReference;
         this.intentStore = intentStore;
         this.replicate = replicate;
         this.lookupRecord = lookupRecord;
@@ -352,7 +359,7 @@ internal sealed class DurableTransactionRecovery
                 bool materialized;
                 try
                 {
-                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent, scratch);
+                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent, scratch, materializeByReference);
                     materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
 
                     // Replication makes the value durable and converges followers, but the leader applies a key/value

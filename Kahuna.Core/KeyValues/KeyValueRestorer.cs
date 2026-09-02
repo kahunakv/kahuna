@@ -5,6 +5,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
@@ -32,8 +33,14 @@ internal sealed class KeyValueRestorer
 
     private readonly ILogger<IKahuna> logger;
 
-    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null, PartitionDurabilityTracker? durabilityTracker = null)
+    // The node's prepared-intent store, restored from its own snapshot and from the replayed prepare deltas
+    // that precede a by-reference materialization record in the same partition's log. Null (bare
+    // direct-construction tests) makes every by-reference record a reported miss.
+    private readonly PreparedIntentStore? preparedIntentStore;
+
+    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null, PartitionDurabilityTracker? durabilityTracker = null, PreparedIntentStore? preparedIntentStore = null)
     {
+        this.preparedIntentStore = preparedIntentStore;
         this.backgroundWriter = backgroundWriter;
         this.raft = raft;
         this.completionReceiptStore = completionReceiptStore;
@@ -61,12 +68,32 @@ internal sealed class KeyValueRestorer
         {
             KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
 
-            (KeyValueState state, byte[]? messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
+            KeyValueState state;
+            byte[]? messageValue;
 
-            if (state == KeyValueState.Undefined)
+            if ((KeyValueRequestType)keyValueMessage.Type == KeyValueRequestType.MaterializeIntent)
             {
-                logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
-                return true;
+                // A by-reference record carries no value: the mutation comes from the prepared intent it
+                // names. Replay reaches it in the same order a live replica does — the prepare delta applies
+                // first on this partition, and the settle that removes the intent applies later — and the
+                // checkpoint that bounds this replay is appended AFTER the intent snapshot is written, so an
+                // intent removed at or below the checkpoint had its materialization below the checkpoint too
+                // and is never replayed. That is why the intent is here.
+                if (!TryResolveIntentForRestore(keyValueMessage, log.Id, out PreparedIntent? intent))
+                    return true;
+
+                state = intent!.State;
+                messageValue = intent.Value;
+            }
+            else
+            {
+                (state, messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
+
+                if (state == KeyValueState.Undefined)
+                {
+                    logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
+                    return true;
+                }
             }
 
             HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
@@ -131,5 +158,53 @@ internal sealed class KeyValueRestorer
             logger.LogError(ex, "KeyValueRestorer: Error processing replication message");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Resolves the prepared intent a by-reference record names, and reports whether the replay may apply it.
+    /// False means the record contributes nothing here — either because the value is already durable (a second
+    /// producer's duplicate record, whose first copy this replay already recorded in the overlay) or because
+    /// the intent is genuinely absent, which is the correctness alarm.
+    ///
+    /// <para>The proof available during replay is the unflushed overlay alone. It covers every materialization
+    /// replayed so far, which is the whole duplicate case that arises inside one replay. The narrow case it
+    /// cannot dismiss is a duplicate whose first copy sits below the checkpoint: the row is durable, but this
+    /// path may not read the backend to prove it. Such a record is reported, so the alarm names it as
+    /// possibly-already-durable rather than claiming a lost write outright.</para>
+    /// </summary>
+    private bool TryResolveIntentForRestore(KeyValueMessage keyValueMessage, long logIndex, out PreparedIntent? intent)
+    {
+        HLCTimestamp transactionId = new(
+            keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+
+        intent = preparedIntentStore?.GetByIdentity(transactionId, keyValueMessage.Epoch, keyValueMessage.Key);
+
+        if (intent is not null && intent.Revision == keyValueMessage.Revision)
+            return true;
+
+        if (intent is not null)
+        {
+            // The record and the intent name two different mutations; applying the intent would restore the
+            // wrong revision.
+            Transactions.DurableTransactionMetrics.MaterializationIntentMissing.Add(1);
+            logger.LogError(
+                "KeyValueRestorer: by-reference record for key {Key} (transaction {TransactionId} epoch {Epoch}) names revision {Revision}, but the restored intent stands at revision {IntentRevision} (log entry {LogIndex})",
+                keyValueMessage.Key, transactionId, keyValueMessage.Epoch, keyValueMessage.Revision, intent.Revision, logIndex);
+
+            intent = null;
+            return false;
+        }
+
+        if (unflushedWrites is not null
+            && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite pending)
+            && pending.Revision >= keyValueMessage.Revision)
+            return false; // Already replayed by an earlier copy of the same materialization.
+
+        Transactions.DurableTransactionMetrics.MaterializationIntentMissing.Add(1);
+        logger.LogError(
+            "KeyValueRestorer: by-reference record for key {Key} at revision {Revision} found no restored intent for transaction {TransactionId} epoch {Epoch} (log entry {LogIndex}); the value is missing here unless an earlier copy of this materialization is already flushed",
+            keyValueMessage.Key, keyValueMessage.Revision, transactionId, keyValueMessage.Epoch, logIndex);
+
+        return false;
     }
 }

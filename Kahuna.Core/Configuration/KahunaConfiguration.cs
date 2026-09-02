@@ -377,6 +377,22 @@ public sealed class KahunaConfiguration
     public bool DurableDeferredSettlement { get; set; } = true;
 
     /// <summary>
+    /// When true (default), the post-decision materialization of a committed durable transaction is replicated
+    /// BY REFERENCE: the record names the prepared intent (transaction id, epoch, key) instead of carrying the
+    /// committed value again. Every replica already holds that value in its prepared-intent store from the
+    /// moment the prepare delta applied, so the second copy of every committed value — a second serialization,
+    /// a second write-ahead-log append, a second network send, and a second parse on every follower — is
+    /// removed from every commit.
+    /// <para><b>Rolling upgrade from a build that predates the record.</b> Every node in the cluster must run a
+    /// build that APPLIES the by-reference record before any node PRODUCES one: an older node treats the record
+    /// as an unknown message type and skips it, which is a silently lost write on that node. So set this to
+    /// false on the upgraded nodes for the duration of a mixed-version rollout, then remove the override once
+    /// every node runs the new build. Value-carrying records written while it is off apply forever, so nothing
+    /// has to be migrated in either direction.</para>
+    /// </summary>
+    public bool DurableMaterializeByReference { get; set; } = true;
+
+    /// <summary>
     /// Strict upper bound on the number of prepared intents resident across all partitions on this node. Checked
     /// at durable admission: a transaction whose prepares would push the resident count past this bound is
     /// refused with a retryable <c>MustRetry</c> before it prepares, so slow settlement cannot let resident

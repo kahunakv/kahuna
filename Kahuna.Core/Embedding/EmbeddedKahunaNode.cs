@@ -370,6 +370,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             CompletionReceiptRetentionTtl = options.CompletionReceiptRetentionTtl,
             DurableRecordGcMaxPerPass = options.DurableRecordGcMaxPerPass,
             DurableDeferredSettlement = options.DurableDeferredSettlement,
+            DurableMaterializeByReference = options.DurableMaterializeByReference,
             DurableDecisionOutstandingMax = options.DurableDecisionOutstandingMax, DurablePreparedIntentMaxCount = options.DurablePreparedIntentMaxCount, DurablePreparedIntentMaxBytes = options.DurablePreparedIntentMaxBytes,
             MaxEntriesPerActor = options.MaxEntriesPerActor,
             MaxBytesPerActor = options.MaxBytesPerActor,

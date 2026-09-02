@@ -691,7 +691,11 @@ internal sealed class DurableMaintenanceService
         // The abort fence: a locally visible terminal Abort is definitive, so a commit-direction settle
         // must never push that transaction's value into the log whatever decision its caller read.
         locallyAborted: (transactionId, epoch) =>
-            transactionRecordStore.Get(transactionId, epoch) is { Decision: TransactionDecision.Abort });
+            transactionRecordStore.Get(transactionId, epoch) is { Decision: TransactionDecision.Abort },
+        // The recovery sweep materializes through the same record shape the finalizer produces, so it follows
+        // the same by-reference setting; otherwise a sweep would keep copying values the finalizer stopped
+        // copying.
+        materializeByReference: runtime.Configuration.DurableMaterializeByReference);
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {

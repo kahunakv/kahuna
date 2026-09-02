@@ -1502,7 +1502,11 @@ internal sealed class TransactionCoordinator : IDisposable
         // the prepares the healthy replicas refuse. Reading the replicas' verdicts before the decision turns
         // the racing stale-base veto into an ordered, truthful conflict abort. A single-process group skips
         // it: every replica shares this process's stores, so there is no divergent memory to consult.
-        confirmReplicaFence: configuration.SingleProcessRaftGroup ? null : manager.ConfirmReplicaFenceForCommitAsync);
+        confirmReplicaFence: configuration.SingleProcessRaftGroup ? null : manager.ConfirmReplicaFenceForCommitAsync,
+        // Replicate the post-decision materialization by reference when the cluster is known to apply it: the
+        // record then names the prepared intent every replica already holds instead of copying the committed
+        // value through the log a second time.
+        materializeByReference: configuration.DurableMaterializeByReference);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task

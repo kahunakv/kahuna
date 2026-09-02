@@ -904,6 +904,23 @@ internal sealed class PreparedIntentStore
         return true;
     }
 
+    /// <summary>
+    /// Decodes a prepared-intent delta's transitions without applying them — the single codec any offline
+    /// reader of the write-ahead log must use, so a second decoder can never drift from the live apply path.
+    /// Point-in-time restore replays segments with it to rebuild the intents that by-reference materialization
+    /// records name.
+    /// </summary>
+    internal static IReadOnlyList<PreparedIntentCommand> DecodeDelta(ReadOnlySpan<byte> data)
+    {
+        PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(data);
+
+        List<PreparedIntentCommand> commands = new(delta.Commands.Count);
+        foreach (PreparedIntentCommandMessage message in delta.Commands)
+            commands.Add(ToCommand(message, delta.Header));
+
+        return commands;
+    }
+
     /// <summary>Serializes a batch of transitions for one atomic data-partition log entry. The produced bytes
     /// remember their decoded commands so the local apply of this same entry can skip re-parsing them.</summary>
     public static byte[] SerializeDelta(IEnumerable<PreparedIntentCommand> commands)

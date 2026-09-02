@@ -35,4 +35,8 @@ message KeyValueMessage {
   // separate Raft round trip, and no window where the anchor value is visible without the decision.
   // Serialized CoordinatorDecisionSnapshotMessage holding exactly one record. Absent on every other key.
   optional bytes embeddedDecision = 23;
+  // The transaction attempt number of the prepared intent this record names. Carried only by a
+  // MaterializeIntent (by-reference) record, whose intent identity is (transactionId, epoch, key);
+  // zero on every value-carrying record.
+  int64 epoch = 24;
 }

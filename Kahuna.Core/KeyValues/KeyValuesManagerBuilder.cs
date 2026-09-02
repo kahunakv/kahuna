@@ -343,7 +343,9 @@ internal sealed class KeyValuesManagerBuilder
         // becomes a no-op, restoring pre-overlay behavior.
         UnflushedKeyValueWritesIndex? unflushedWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
 
-        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker);
+        // The restorer resolves a by-reference materialization record against the same prepared-intent store the
+        // replay rebuilds from its snapshot and the replayed prepare deltas.
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker, preparedIntentStore);
         replicator = new(backgroundWriter, routers.Persistent, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker,
             // Off-actor hydration for the durable commit-apply's non-resident cold path: the point read runs
             // on the queued backend read scheduler HERE (the sender side), never inside the owning actor's
@@ -365,7 +367,10 @@ internal sealed class KeyValuesManagerBuilder
             // committed head is the permanent-overwrite shape of a lost update, and the witness line makes it
             // attributable from the node log. A lock-free dictionary probe per committed kv apply.
             committedHeadRevisionProbe: key =>
-                preparedIntentStore.TryGetCommittedHead(key, out long headRevision, out _) ? headRevision : -1);
+                preparedIntentStore.TryGetCommittedHead(key, out long headRevision, out _) ? headRevision : -1,
+            // The authority a by-reference materialization record resolves its value from: the record names an
+            // intent this store already holds, so the committed value never travels through the log twice.
+            preparedIntentStore: preparedIntentStore);
 
         // Commit-settlement convergence check: at the same apply position that advances the staged-base
         // fence's committed head, verify this node's replicator actually processed the commit's kv record —

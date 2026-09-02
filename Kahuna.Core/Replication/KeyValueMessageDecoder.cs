@@ -19,6 +19,10 @@ internal static class KeyValueMessageDecoder
     /// Classifies <paramref name="msg"/> as a persistent state mutation and extracts the value
     /// bytes. Returns <c>KeyValueState.Undefined</c> for read-only operations, lock operations,
     /// scan operations, and 2PC control messages — callers should skip those entries.
+    ///
+    /// <para><see cref="KeyValueRequestType.MaterializeIntent"/> is deliberately NOT classified here: it
+    /// carries no value, so its mutation cannot be read from the record at all. Every caller must resolve it
+    /// against a prepared intent before reaching this decode, and both do.</para>
     /// </summary>
     internal static (KeyValueState state, byte[]? value) Decode(KeyValueMessage msg)
     {

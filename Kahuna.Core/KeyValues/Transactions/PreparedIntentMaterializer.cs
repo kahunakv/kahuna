@@ -7,12 +7,22 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>
-/// Turns a committed prepared intent into the ordinary key/value log record that makes its value the visible KV
-/// revision. On commit resolution the durable intent's mutation is replayed as a normal
-/// <see cref="ReplicationTypes.KeyValues"/> record so the existing replicator/restorer applies it to MVCC and
-/// persistence exactly as a direct write would — no separate apply path. Every field is stamped with the
-/// transaction's one canonical <see cref="PreparedIntent.CommitTimestamp"/> (invariant: one commit timestamp per
-/// transaction), never a per-key staging time.
+/// Turns a committed prepared intent into the key/value log record that makes its value the visible KV
+/// revision. Two forms of the same record exist:
+///
+/// <para><b>By value</b> (<see cref="KeyValueRequestType.TrySet"/> / <see cref="KeyValueRequestType.TryDelete"/>):
+/// the mutation is replayed as a normal record, so the existing replicator/restorer applies it to MVCC and
+/// persistence exactly as a direct write would. This form copies the committed value into the log a second
+/// time — the prepare delta already carried it.</para>
+///
+/// <para><b>By reference</b> (<see cref="KeyValueRequestType.MaterializeIntent"/>): the record names the intent
+/// — <c>(TransactionId, Epoch, Key)</c> — and carries no value. Every replica already holds the value in its own
+/// prepared-intent store from the moment the prepare delta applied, so it resolves the value locally. The record
+/// still carries the revision, the state and the one commit timestamp, so the point-in-time-recovery as-of cut
+/// and the same-revision collision witness keep working from the record alone.</para>
+///
+/// <para>Every field is stamped with the transaction's one canonical <see cref="PreparedIntent.CommitTimestamp"/>
+/// (invariant: one commit timestamp per transaction), never a per-key staging time.</para>
 /// </summary>
 internal static class PreparedIntentMaterializer
 {
@@ -23,11 +33,21 @@ internal static class PreparedIntentMaterializer
     /// next record. The returned array is freshly allocated each call and safe to retain (the replication log keeps
     /// it); only the scratch message is reused, and it is fully consumed before this method returns.
     /// </summary>
-    public static byte[] ToKeyValueRecord(PreparedIntent intent, KeyValueMessage scratch)
+    /// <param name="byReference">
+    /// True writes the value-free <see cref="KeyValueRequestType.MaterializeIntent"/> form. Only enable it once
+    /// every node in the cluster runs a build that applies that record: an older node treats it as an unknown
+    /// message type and skips it, which is a silently lost write on that node.
+    /// </param>
+    public static byte[] ToKeyValueRecord(PreparedIntent intent, KeyValueMessage scratch, bool byReference = false)
     {
-        KeyValueRequestType type = intent.State == KeyValueState.Deleted
-            ? KeyValueRequestType.TryDelete
-            : KeyValueRequestType.TrySet;
+        KeyValueRequestType type;
+
+        if (byReference)
+            type = KeyValueRequestType.MaterializeIntent;
+        else if (intent.State == KeyValueState.Deleted)
+            type = KeyValueRequestType.TryDelete;
+        else
+            type = KeyValueRequestType.TrySet;
 
         scratch.Type = (int)type;
         scratch.Key = intent.Key;
@@ -42,7 +62,17 @@ internal static class PreparedIntentMaterializer
         scratch.TransactionIdPhysical = intent.TransactionId.L;
         scratch.TransactionIdCounter = intent.TransactionId.C;
         scratch.RecordAnchorKey = intent.RecordAnchorKey;
-        scratch.Value = intent.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(intent.Value);
+
+        // The epoch completes the intent identity a consumer resolves the value with. It is written on both
+        // forms so the scratch message never carries a previous intent's epoch into the next record.
+        scratch.Epoch = byReference ? intent.Epoch : 0;
+
+        // The by-reference form deliberately carries no value: the consumer reads it from its own intent. The
+        // state does travel, because a delete's record must stay distinguishable from a set's.
+        if (byReference)
+            scratch.Value = ByteString.Empty;
+        else
+            scratch.Value = intent.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(intent.Value);
 
         return ReplicationSerializer.Serialize(scratch);
     }

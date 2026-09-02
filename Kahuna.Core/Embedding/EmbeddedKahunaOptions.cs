@@ -249,6 +249,17 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool DurableDeferredSettlement { get; set; } = true;
 
+    /// <summary>
+    /// When true (default), a committed durable transaction's post-decision materialization is replicated by
+    /// reference — the record names the prepared intent whose value every replica already holds, instead of
+    /// copying the committed value through the log a second time.
+    /// <para><b>Rolling upgrade from a build that predates the record.</b> Every node must run a build that
+    /// applies the by-reference record before any node produces one; an older node skips it as an unknown
+    /// message type, losing that write locally. Set this to false for the duration of a mixed-version rollout,
+    /// then remove the override.</para>
+    /// </summary>
+    public bool DurableMaterializeByReference { get; set; } = true;
+
     public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
 
     public long DurablePreparedIntentMaxBytes { get; set; } = 1L * 1024 * 1024 * 1024;
