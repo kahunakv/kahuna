@@ -111,6 +111,13 @@ public interface IKahuna
     /// The page bytes are a serialized range-snapshot page frame. Returns whether the page committed.</summary>
     public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken);
 
+    /// <summary>Serves a range-copy page targeted at this node: applies it locally when this node leads the
+    /// destination partition, and otherwise resolves the group's leader from this node's own Raft state —
+    /// waiting out an in-flight election on a hosted partition — and passes the page along one budgeted hop.
+    /// The sender only guesses a replica from the committed map, so this relay is what lets a page land
+    /// through any reachable replica. Returns whether the page committed.</summary>
+    public Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken);
+
     /// <summary>Answers one page of the transaction state a moving key range carries — completion receipts
     /// plus the serialized canonical transaction records and prepared intents in <c>[startKey, endKey)</c> —
     /// routed here because this node leads the source partition. Ok is false when leadership could not be

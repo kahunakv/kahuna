@@ -1136,7 +1136,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
+            // The receiving node applies the page when it leads the destination group, and relays
+            // it to the leader it resolves otherwise — the sender only guessed a replica.
+            return await kahunaNode.ReplicateKeyValueRangePageOnLeader(partitionId, page, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");

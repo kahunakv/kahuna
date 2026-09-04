@@ -286,9 +286,11 @@ internal sealed class RangeMerger
 
         try
         {
+            // The quiesced deadline: this copy runs inside the bounded quiesce window, and the
+            // survivor partition is long-lived, so no first election needs to be waited out.
             if (!await manager.CopyRangeToPartitionAsync(
                     keySpace, right.StartKey, right.EndKey, snapshotTs, right.PartitionId, left.PartitionId,
-                    mergeTxId, ct))
+                    mergeTxId, ct, RangeStateTransferService.RangeCopyQuiescedDeadlineMs))
             {
                 logger.LogError(
                     "RangeMerger: bulk copy failed for {Space} [{Start},{End})",

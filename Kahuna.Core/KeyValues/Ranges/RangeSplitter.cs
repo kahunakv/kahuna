@@ -223,20 +223,23 @@ internal sealed class RangeSplitter
 
         try
         {
+            // The bulk copy runs before any quiesce, so it can afford the open deadline: the
+            // destination partition was created moments ago and its first leader election is
+            // still in flight for the first few seconds.
             if (!await manager.CopyRangeToPartitionAsync(
                     keySpace, splitKey, descriptor.EndKey, snapshotTs, descriptor.PartitionId, newPartitionId,
                     HLCTimestamp.Zero, ct))
             {
                 logger.LogError("RangeSplitter: bulk copy failed for {Space} [{Key},{End})",
                     keySpace, splitKey, descriptor.EndKey ?? "+inf");
-                return SplitOutcome.TransferFailed;
+                return SplitOutcome.TransferFailedAt("the bulk copy did not complete");
             }
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "RangeSplitter: bulk copy failed for {Space} [{Key},{End})",
                 keySpace, splitKey, descriptor.EndKey ?? "+inf");
-            return SplitOutcome.TransferFailed;
+            return SplitOutcome.TransferFailedAt("the bulk copy did not complete");
         }
 
         // ── 6. Quiesce: write-fence range lock on [K,E) ──────────────────────────
@@ -326,13 +329,15 @@ internal sealed class RangeSplitter
 
             try
             {
+                // The quiesced deadline: this copy runs inside the bounded quiesce window, and the
+                // destination's leader is established by now (it accepted the bulk copy).
                 if (!await manager.CopyRangeToPartitionAsync(
                         keySpace, splitKey, descriptor.EndKey, catchupTs, descriptor.PartitionId, newPartitionId,
-                        splitTxId, ct))
+                        splitTxId, ct, RangeStateTransferService.RangeCopyQuiescedDeadlineMs))
                 {
                     logger.LogError("RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
                         keySpace, splitKey, descriptor.EndKey ?? "+inf");
-                    return SplitOutcome.TransferFailed;
+                    return SplitOutcome.TransferFailedAt("the catch-up copy did not complete");
                 }
             }
             catch (Exception ex)
@@ -341,7 +346,7 @@ internal sealed class RangeSplitter
                 // retryable, exactly as a failed bulk copy.
                 logger.LogError(ex, "RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
                     keySpace, splitKey, descriptor.EndKey ?? "+inf");
-                return SplitOutcome.TransferFailed;
+                return SplitOutcome.TransferFailedAt("the catch-up copy did not complete");
             }
 
             // ── 7b. Transfer range locks: clamp P's live locks to [K,E), inject into P' ──
@@ -386,7 +391,7 @@ internal sealed class RangeSplitter
                     logger.LogError(
                         "RangeSplitter: could not gather the moving range's transaction state from P{Source}'s leader — aborting split before cutover",
                         descriptor.PartitionId);
-                    return SplitOutcome.TransferFailed;
+                    return SplitOutcome.TransferFailedAt("the moving range's transaction state could not be gathered from the source leader");
                 }
             }
             else
@@ -400,14 +405,14 @@ internal sealed class RangeSplitter
             {
                 logger.LogError(
                     "RangeSplitter: completion-receipt handoff to P{New} not durable — aborting split before cutover", newPartitionId);
-                return SplitOutcome.TransferFailed;
+                return SplitOutcome.TransferFailedAt("the completion-receipt handoff to the destination was not durable");
             }
 
             if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(newPartitionId, movedRecords, movedIntents, ct))
             {
                 logger.LogError(
                     "RangeSplitter: durable transaction-state handoff to P{New} not durable — aborting split before cutover", newPartitionId);
-                return SplitOutcome.TransferFailed;
+                return SplitOutcome.TransferFailedAt("the transaction-state handoff to the destination was not durable");
             }
 
             // Test seam: let the caller race an operation into the quiesce window.
@@ -647,11 +652,18 @@ internal readonly struct SplitOutcome
     public int NewPartitionId { get; }
     public long NewGeneration { get; }
 
-    public SplitOutcome(SplitStatus status, int newPartitionId = 0, long newGeneration = 0)
+    /// <summary>
+    /// For a failure status that several distinct steps can produce (<see cref="SplitStatus.TransferFailed"/>),
+    /// names the step that failed. Null when the status alone identifies the failure.
+    /// </summary>
+    public string? Detail { get; }
+
+    public SplitOutcome(SplitStatus status, int newPartitionId = 0, long newGeneration = 0, string? detail = null)
     {
         Status = status;
         NewPartitionId = newPartitionId;
         NewGeneration = newGeneration;
+        Detail = detail;
     }
 
     public bool IsSuccess => Status == SplitStatus.Succeeded;
@@ -666,4 +678,7 @@ internal readonly struct SplitOutcome
     public static SplitOutcome CutoverFailed => new(SplitStatus.CutoverFailed);
     public static SplitOutcome ConcurrentSplit => new(SplitStatus.ConcurrentSplit);
     public static SplitOutcome UnsettledMovingIntents => new(SplitStatus.UnsettledMovingIntents);
+
+    /// <summary>A <see cref="SplitStatus.TransferFailed"/> outcome naming the step that failed.</summary>
+    public static SplitOutcome TransferFailedAt(string detail) => new(SplitStatus.TransferFailed, detail: detail);
 }

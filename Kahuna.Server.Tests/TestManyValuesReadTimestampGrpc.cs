@@ -144,6 +144,8 @@ public class TestManyValuesReadTimestampGrpc
         public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();
+
+        public Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken) => throw new NotImplementedException();
 
         public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken) => throw new NotImplementedException();

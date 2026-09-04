@@ -19,6 +19,9 @@ public sealed partial class KahunaManager
     public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) =>
         keyValues.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
 
+    public Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) =>
+        keyValues.ReplicateKeyValueRangePageOnLeader(partitionId, page, cancellationToken);
+
     /// <summary>
     /// Removes all snapshot holds whose lease has expired. Exposed for tests so they can trigger
     /// a purge cycle without waiting for the periodic <see cref="SnapshotFloorReaperActor"/> timer.
@@ -388,7 +391,11 @@ public sealed partial class KahunaManager
         {
             Status = nameof(SplitStatus.TransferFailed),
             Determinate = false,
-            Reason = "Copying the upper half to the destination partition failed. Re-read GET /v1/ranges."
+            // The split fails as TransferFailed from several distinct steps; the outcome names the
+            // one that failed so a repeated failure is diagnosable from the response alone.
+            Reason = outcome.Detail is null
+                ? "Copying the upper half to the destination partition failed. Re-read GET /v1/ranges."
+                : $"Copying the upper half to the destination partition failed: {outcome.Detail}. Re-read GET /v1/ranges."
         },
 
         SplitStatus.QuiesceFailed => new()

@@ -3,6 +3,7 @@ using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
+using Kommander.System;
 using Kommander.Time;
 
 using Kahuna.Server.Communication.Internode;
@@ -286,9 +287,34 @@ internal sealed class RangeStateTransferService
     /// <summary>Entries per copied page — the same bound the range transfer's export uses.</summary>
     private const int RangeCopyPageSize = 256;
 
-    private const int RangeCopyMaxAttempts = 10;
+    /// <summary>
+    /// Wall-clock budget for one page (read or write) of a copy that runs outside any quiesce
+    /// window — the split's bulk copy, before the range is fenced. The budget must cover a full
+    /// Raft election plus leader-hint propagation: a freshly created destination partition elects
+    /// its first leader only after a randomized multi-second election delay, and a source leader
+    /// lost to a fault needs one election to be replaced. The flat 2-second budget this replaced
+    /// lost that race on nearly every attempt against a fresh destination group.
+    /// </summary>
+    internal const int RangeCopyOpenDeadlineMs = 15_000;
+
+    /// <summary>
+    /// Wall-clock budget for one page/step while the moving range is quiesced — the split's
+    /// catch-up copy and transaction-state handoff. Deliberately smaller than
+    /// <see cref="RangeCopyOpenDeadlineMs"/>: the quiesce window is bounded (30 s), and by the
+    /// time these steps run the destination has already accepted the bulk copy, so its leader
+    /// exists and only transient churn needs to be ridden out.
+    /// </summary>
+    internal const int RangeCopyQuiescedDeadlineMs = 5_000;
 
     private const int RangeCopyRetryDelayMs = 200;
+
+    /// <summary>
+    /// Test-only injection point: when set and it returns true for a target endpoint, the page
+    /// send to that endpoint throws as an unreachable node's transport would, so tests can prove
+    /// an unreachable target costs one attempt instead of the whole copy. Never wired in
+    /// production paths.
+    /// </summary>
+    internal Func<string, bool>? RangePageSendFault { get; set; }
 
     /// <summary>Whether the partition has a committed replica set (per-partition placement); an empty
     /// set is legacy full replication, where every node holds every partition's data locally.</summary>
@@ -322,7 +348,8 @@ internal sealed class RangeStateTransferService
         int sourcePartitionId,
         int destinationPartitionId,
         HLCTimestamp readerTransactionId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int pageDeadlineMs = RangeCopyOpenDeadlineMs)
     {
         if (!IsPlacedPartition(sourcePartitionId) && !IsPlacedPartition(destinationPartitionId))
         {
@@ -347,29 +374,45 @@ internal sealed class RangeStateTransferService
             KeyValueGetByRangeResult? page = null;
             KeyValueResponseType lastType = KeyValueResponseType.MustRetry;
 
-            for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
+            long readDeadline = Environment.TickCount64 + pageDeadlineMs;
+
+            while (true)
             {
-                KeyValueGetByRangeResult candidate = await LocateAndGetByRange(
-                    readerTransactionId, keySpace,
-                    cursorKey, cursorInclusive,
-                    endKey, false,
-                    RangeCopyPageSize, snapshotTs,
-                    KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
-
-                lastType = candidate.Type;
-
-                if (candidate.Type is KeyValueResponseType.Get)
+                try
                 {
-                    page = candidate;
-                    break;
+                    KeyValueGetByRangeResult candidate = await LocateAndGetByRange(
+                        readerTransactionId, keySpace,
+                        cursorKey, cursorInclusive,
+                        endKey, false,
+                        RangeCopyPageSize, snapshotTs,
+                        KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
+
+                    lastType = candidate.Type;
+
+                    if (candidate.Type is KeyValueResponseType.Get)
+                    {
+                        page = candidate;
+                        break;
+                    }
+
+                    if (candidate.Type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
+                    {
+                        logger.LogWarning(
+                            "Range copy read failed KeySpace={KeySpace} Type={Type}", keySpace, candidate.Type);
+                        return false;
+                    }
                 }
-
-                if (candidate.Type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    // A source leader lost to a fault answers with a transport error until its
+                    // group re-elects — the same retryable condition as MustRetry, so it must
+                    // cost one attempt, not the whole copy.
                     logger.LogWarning(
-                        "Range copy read failed KeySpace={KeySpace} Type={Type}", keySpace, candidate.Type);
-                    return false;
+                        "Range copy read attempt failed KeySpace={KeySpace}: {Message}", keySpace, ex.Message);
                 }
+
+                if (Environment.TickCount64 >= readDeadline)
+                    break;
 
                 await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
             }
@@ -377,7 +420,8 @@ internal sealed class RangeStateTransferService
             if (page is null)
             {
                 logger.LogWarning(
-                    "Range copy read did not settle KeySpace={KeySpace} LastType={Type}", keySpace, lastType);
+                    "Range copy read did not settle within {Deadline}ms KeySpace={KeySpace} LastType={Type}",
+                    pageDeadlineMs, keySpace, lastType);
                 return false;
             }
 
@@ -387,7 +431,7 @@ internal sealed class RangeStateTransferService
                 KvStateMachineTransfer.WritePage(frame, page.Items, hasMore: false);
 
                 if (!await ReplicateKeyValueRangePageToPartitionLeaderAsync(
-                        destinationPartitionId, frame.ToArray(), cancellationToken).ConfigureAwait(false))
+                        destinationPartitionId, frame.ToArray(), cancellationToken, pageDeadlineMs).ConfigureAwait(false))
                     return false;
             }
 
@@ -401,38 +445,171 @@ internal sealed class RangeStateTransferService
 
     /// <summary>
     /// Replicates one checksummed page of moved key-values onto <paramref name="partitionId"/>'s
-    /// Raft log via its leader, forwarding over IPC when the leader is remote. Bounded retries on
-    /// an unresolvable leader; false means the page is not durable and the caller must abort.
+    /// Raft log via its leader, forwarding over IPC when the leader is remote. Retries under a
+    /// wall-clock deadline sized to ride out a leader election on the destination — a freshly
+    /// created split destination has no leader for the first few seconds of its life. False means
+    /// the page is not durable and the caller must abort.
+    /// <para>
+    /// The resolved target is a local belief, not the confirmed leader: for a non-hosted
+    /// destination it is a gossiped hint or a blind pick from the committed replica set. Two
+    /// defenses make the send converge anyway. A send that throws (an unreachable target) or
+    /// answers not-durable costs one attempt and the next attempt rotates to a different committed
+    /// replica — any node that hosts the destination relays the page to its group's leader (see
+    /// <see cref="ReplicateKeyValueRangePageOnLeaderAsync"/>), so one reachable replica suffices.
+    /// </para>
     /// </summary>
     internal async Task<bool> ReplicateKeyValueRangePageToPartitionLeaderAsync(
-        int partitionId, byte[] page, CancellationToken cancellationToken)
+        int partitionId, byte[] page, CancellationToken cancellationToken, int deadlineMs = RangeCopyOpenDeadlineMs)
     {
-        for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
+        long deadline = Environment.TickCount64 + deadlineMs;
+        int rotation = 0;
+        string? lastFailedTarget = null;
+
+        while (true)
         {
-            if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
-            {
-                if (await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false))
-                    return true;
-            }
-            else
-            {
-                string? leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
 
-                if (leader is not null)
+            string? attemptedTarget = null;
+
+            try
+            {
+                if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
                 {
-                    bool replicated = leader == raft.GetLocalEndpoint()
-                        ? await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false)
-                        : await interNodeCommunication.ReplicateKeyValueRangePage(leader, partitionId, page, cancellationToken).ConfigureAwait(false);
-
-                    if (replicated)
+                    if (await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false))
                         return true;
                 }
+                else
+                {
+                    string? target = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+                    // A target that just failed is not worth re-sending to before anything else was
+                    // tried: rotate to another committed replica of the destination, which relays
+                    // the page to its own group's leader.
+                    if (target is null || string.Equals(target, lastFailedTarget, StringComparison.Ordinal))
+                        target = PickAlternateReplica(partitionId, lastFailedTarget, ref rotation) ?? target;
+
+                    if (target is not null)
+                    {
+                        attemptedTarget = target;
+
+                        bool replicated;
+                        if (string.Equals(target, raft.GetLocalEndpoint(), StringComparison.Ordinal))
+                            replicated = await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false);
+                        else
+                        {
+                            if (RangePageSendFault is not null && RangePageSendFault(target))
+                                throw new KahunaServerException($"Range-copy page target {target} is unreachable (test fault)");
+
+                            replicated = await interNodeCommunication.ReplicateKeyValueRangePage(target, partitionId, page, cancellationToken).ConfigureAwait(false);
+                        }
+
+                        if (replicated)
+                            return true;
+
+                        lastFailedTarget = target;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // An unreachable or mid-election target must cost one attempt, not the whole copy:
+                // before this catch, one dead guessed replica failed every split attempt outright.
+                lastFailedTarget = attemptedTarget ?? lastFailedTarget;
+                logger.LogWarning(
+                    "Range-copy page send failed Partition={Partition} Target={Target}: {Message}",
+                    partitionId, attemptedTarget ?? "(local)", ex.Message);
+            }
+
+            if (Environment.TickCount64 >= deadline)
+            {
+                logger.LogWarning(
+                    "Range-copy page could not be made durable within {Deadline}ms Partition={Partition} LastTarget={Target}",
+                    deadlineMs, partitionId, lastFailedTarget ?? "(unresolved)");
+                return false;
             }
 
             await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
         }
+    }
 
-        return false;
+    /// <summary>
+    /// Picks a remote voter replica of <paramref name="partitionId"/> other than
+    /// <paramref name="excluded"/>, rotating across attempts so successive picks spread over the
+    /// committed set instead of re-guessing one node. Null when no such replica exists.
+    /// </summary>
+    private string? PickAlternateReplica(int partitionId, string? excluded, ref int rotation)
+    {
+        IReadOnlyList<RaftReplica> replicas = raft.GetPartitionReplicas(partitionId);
+        if (replicas.Count == 0)
+            return null;
+
+        string localEndpoint = raft.GetLocalEndpoint();
+
+        for (int i = 0; i < replicas.Count; i++)
+        {
+            RaftReplica candidate = replicas[(rotation + i) % replicas.Count];
+
+            if (candidate.Role != RaftReplicaRole.Voter)
+                continue;
+            if (string.Equals(candidate.Endpoint, localEndpoint, StringComparison.Ordinal))
+                continue;
+            if (string.Equals(candidate.Endpoint, excluded, StringComparison.Ordinal))
+                continue;
+
+            rotation = (rotation + i + 1) % replicas.Count;
+            return candidate.Endpoint;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Serves a range-copy page that another node targeted at this one: applies it locally when
+    /// this node leads the destination group, and otherwise resolves the group's leader from this
+    /// node's own Raft state — for a hosted partition that resolution waits out an in-flight
+    /// election — and passes the page along. The sender only guesses a replica from the committed
+    /// map; this relay is what turns "any reachable replica" into a durable page. The forward-hop
+    /// budget keeps two nodes with disagreeing leader beliefs from bouncing a page between them.
+    /// </summary>
+    internal async Task<bool> ReplicateKeyValueRangePageOnLeaderAsync(
+        int partitionId, byte[] page, CancellationToken cancellationToken)
+    {
+        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            return await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false);
+
+        string? leader;
+
+        try
+        {
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (RaftException ex)
+        {
+            // The election did not settle within the resolver's own wait. Not durable; the sender
+            // retries under its deadline.
+            logger.LogWarning(
+                "Range-copy page relay could not resolve a leader Partition={Partition}: {Message}",
+                partitionId, ex.Message);
+            return false;
+        }
+
+        if (leader is null)
+            return false;
+
+        if (string.Equals(leader, raft.GetLocalEndpoint(), StringComparison.Ordinal))
+            return await ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            return await interNodeCommunication.ReplicateKeyValueRangePage(leader, partitionId, page, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Range-copy page relay to {Leader} failed Partition={Partition}: {Message}",
+                leader, partitionId, ex.Message);
+            return false;
+        }
     }
 
     /// <summary>
@@ -718,27 +895,41 @@ internal sealed class RangeStateTransferService
     private async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStatePageAsync(
         int sourcePartitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kind, string? cursor, CancellationToken cancellationToken)
     {
-        for (int attempt = 0; attempt < RangeCopyMaxAttempts; attempt++)
+        long deadline = Environment.TickCount64 + RangeCopyQuiescedDeadlineMs;
+
+        while (true)
         {
-            (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
-                await GetRangeTransactionStateLocal(sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
-
-            if (!ok)
+            try
             {
-                string? leader = await raft.TryResolveLeader(sourcePartitionId, cancellationToken).ConfigureAwait(false);
+                (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                    await GetRangeTransactionStateLocal(sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
 
-                if (leader is not null && leader != raft.GetLocalEndpoint())
-                    (ok, receipts, recordBytes, intentBytes, hasMore, nextCursor) = await interNodeCommunication.GetRangeTransactionState(
-                        leader, sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
+                if (!ok)
+                {
+                    string? leader = await raft.TryResolveLeader(sourcePartitionId, cancellationToken).ConfigureAwait(false);
+
+                    if (leader is not null && leader != raft.GetLocalEndpoint())
+                        (ok, receipts, recordBytes, intentBytes, hasMore, nextCursor) = await interNodeCommunication.GetRangeTransactionState(
+                            leader, sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (ok)
+                    return (true, receipts, recordBytes, intentBytes, hasMore, nextCursor);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A leader lost mid-gather answers with a transport error until its group
+                // re-elects — retryable exactly as a not-the-leader refusal.
+                logger.LogWarning(
+                    "Range transaction-state gather attempt failed Partition={Partition}: {Message}",
+                    sourcePartitionId, ex.Message);
             }
 
-            if (ok)
-                return (true, receipts, recordBytes, intentBytes, hasMore, nextCursor);
+            if (Environment.TickCount64 >= deadline)
+                return (false, [], [], [], false, null);
 
             await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
         }
-
-        return (false, [], [], [], false, null);
     }
 
     /// <summary>

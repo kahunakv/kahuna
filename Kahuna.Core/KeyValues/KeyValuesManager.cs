@@ -236,6 +236,17 @@ internal sealed partial class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Test-only injection point: when set and it returns true for a target endpoint, the
+    /// range-copy page send to that endpoint throws as an unreachable node's transport would.
+    /// Never wired in production paths.
+    /// </summary>
+    internal Func<string, bool>? RangePageSendFault
+    {
+        get => rangeStateTransfer.RangePageSendFault;
+        set => rangeStateTransfer.RangePageSendFault = value;
+    }
+
+    /// <summary>
     /// Test-only injection point: when set and it returns true for a participant partition,
     /// <see cref="ForgetCompletionReceiptsReplicated"/> reports failure without replicating, simulating a receipt
     /// forget that could not be made durable so the decision must keep the participant unreleased. Invoked exactly

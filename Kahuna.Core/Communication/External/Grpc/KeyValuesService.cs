@@ -2364,9 +2364,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     internal async Task<GrpcReplicateKeyValueRangePageResponse> ReplicateKeyValueRangePageInternal(GrpcReplicateKeyValueRangePageRequest request, ServerCallContext context)
     {
-        // The forwarding node routed here because this node leads the destination partition: replicate the
-        // moved page's entries onto that partition's Raft log so every replica applies them.
-        bool committed = await keyValues.ReplicateKeyValueRangePageLocal(
+        // The forwarding node only guessed a replica of the destination partition from its
+        // committed map: apply the page locally when this node leads the group, and otherwise
+        // relay it to the leader this node's own Raft state resolves — waiting out an in-flight
+        // election on the freshly created partition a split targets.
+        bool committed = await keyValues.ReplicateKeyValueRangePageOnLeader(
             request.PartitionId, request.Page.ToByteArray(), context.CancellationToken);
         return new GrpcReplicateKeyValueRangePageResponse { Success = committed };
     }

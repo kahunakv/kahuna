@@ -137,8 +137,9 @@ internal sealed partial class KeyValuesManager
         int sourcePartitionId,
         int destinationPartitionId,
         HLCTimestamp readerTransactionId,
-        CancellationToken cancellationToken) =>
-        rangeStateTransfer.CopyRangeToPartitionAsync(keySpace, startKey, endKey, snapshotTs, sourcePartitionId, destinationPartitionId, readerTransactionId, cancellationToken);
+        CancellationToken cancellationToken,
+        int pageDeadlineMs = RangeStateTransferService.RangeCopyOpenDeadlineMs) =>
+        rangeStateTransfer.CopyRangeToPartitionAsync(keySpace, startKey, endKey, snapshotTs, sourcePartitionId, destinationPartitionId, readerTransactionId, cancellationToken, pageDeadlineMs);
 
     internal Task<bool> ReplicateKeyValueRangePageToPartitionLeaderAsync(
         int partitionId, byte[] page, CancellationToken cancellationToken) =>
@@ -146,6 +147,9 @@ internal sealed partial class KeyValuesManager
 
     public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) =>
         rangeStateTransfer.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
+
+    public Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) =>
+        rangeStateTransfer.ReplicateKeyValueRangePageOnLeaderAsync(partitionId, page, cancellationToken);
 
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(
         int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken) =>
