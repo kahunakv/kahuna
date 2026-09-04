@@ -973,6 +973,99 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
     }
 
     /// <summary>
+    /// A store constructed over an existing on-disk registry must answer the loaded holds
+    /// immediately, before any mutation is applied. A restarted node whose WAL replay delivers no
+    /// floor delta (everything sits at or below the checkpoint) reads the registry from disk only.
+    /// An unprimed floor cache made that node answer zero live holds and a Zero floor — the value
+    /// that means "reclaim anything" — until the first post-restart mutation committed. A node
+    /// elected meta leader inside that window served the false zero as an authoritative,
+    /// read-index-confirmed answer.
+    /// </summary>
+    [Fact]
+    public void LoadFromDisk_NoMutationApplied_AnswersLoadedHolds()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "kahuna-floor-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            (RaftManager raft, _) = CreateSingleNodeStore();
+            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            HLCTimestamp t1 = new(1, 1000, 0);
+            HLCTimestamp t2 = new(1, 2000, 0);
+            HLCTimestamp farExpiry = new(1, now.L + 600_000, 0);
+
+            // First store instance persists the registry to disk through the apply path.
+            SnapshotFloorStore writer = new(raft, dir, "vtest", kahunaLogger);
+            InjectHolds(writer,
+            [
+                new SnapshotHold("h1", "c1", t1, farExpiry),
+                new SnapshotHold("h2", "c2", t2, farExpiry),
+            ]);
+            writer.Dispose();
+
+            // Second instance simulates the restarted node: registry comes from disk, and no
+            // restore or replicate delivery happens before the first read.
+            SnapshotFloorStore restarted = new(raft, dir, "vtest", kahunaLogger);
+            try
+            {
+                (HLCTimestamp floor, int live) = restarted.GetEffectiveFloorAndCount(now);
+                Assert.Equal(t1, floor);
+                Assert.Equal(2, live);
+            }
+            finally
+            {
+                restarted.Dispose();
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The prune-window floor sample must honor holds loaded from disk before any mutation is
+    /// applied. With an unprimed cache, <see cref="SnapshotFloorStore.BeginPrune"/> sampled a Zero
+    /// floor over a non-empty registry, so a revision prune inside the post-restart window ran as
+    /// though nothing were held anywhere in the cluster.
+    /// </summary>
+    [Fact]
+    public void BeginPrune_AfterLoadFromDisk_SamplesLoadedFloor()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "kahuna-floor-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            (RaftManager raft, _) = CreateSingleNodeStore();
+            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            HLCTimestamp t1 = new(1, 1000, 0);
+            HLCTimestamp farExpiry = new(1, now.L + 600_000, 0);
+
+            SnapshotFloorStore writer = new(raft, dir, "vtest", kahunaLogger);
+            InjectHolds(writer, [new SnapshotHold("h1", "c1", t1, farExpiry)]);
+            writer.Dispose();
+
+            SnapshotFloorStore restarted = new(raft, dir, "vtest", kahunaLogger);
+            try
+            {
+                (HLCTimestamp pruneFloor, long token) = restarted.BeginPrune(raft);
+                restarted.EndPrune(token);
+                Assert.Equal(t1, pruneFloor);
+            }
+            finally
+            {
+                restarted.Dispose();
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// AcquireAsync with leaseMs &lt;= 0 must return InvalidInput at the store level.
     /// </summary>
     [Theory]

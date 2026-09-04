@@ -92,11 +92,13 @@ internal sealed class SnapshotFloorStore : IDisposable
     private long pruneDeleteGen;
 
     /// <summary>
-    /// Cached result of the last O(N) floor scan. Updated on every mutation and valid until
-    /// <see cref="FloorCacheState.NextExpiry"/> is reached (at which point a hold may have
-    /// expired and the slow scan is needed again). Between mutations the cache is conservative:
-    /// it may report a floor lower than the true floor (if a hold expired but was not yet purged),
-    /// which is safe for reclamation decisions (keeps more revisions, never fewer).
+    /// Cached result of the last O(N) floor scan. Built when the registry loads from disk and
+    /// rebuilt on every mutation; valid until <see cref="FloorCacheState.NextExpiry"/> is reached
+    /// (at which point a hold may have expired and the slow scan is needed again). Between
+    /// mutations the cache is conservative: it may report a floor lower than the true floor (if a
+    /// hold expired but was not yet purged), which is safe for reclamation decisions (keeps more
+    /// revisions, never fewer). An empty cache is never authoritative while the registry is
+    /// non-empty — the read path re-scans instead (see <see cref="GetEffectiveFloorAndCount"/>).
     /// </summary>
     private volatile FloorCacheState _floorCache = FloorCacheState.Empty;
 
@@ -166,14 +168,23 @@ internal sealed class SnapshotFloorStore : IDisposable
     public (HLCTimestamp Floor, int LiveCount) GetEffectiveFloorAndCount(HLCTimestamp currentTime)
     {
         FloorCacheState cache = _floorCache;
+        IReadOnlyDictionary<string, SnapshotHold> snapshot = holds;
         if (cache.LiveCount == 0)
-            return (HLCTimestamp.Zero, 0);
+        {
+            // An empty cache proves nothing while the registry holds entries: a registry swap that
+            // did not rebuild the cache would otherwise read as "no live holds" — the value that
+            // licenses reclaiming everything. Answer an authoritative zero only for an empty
+            // registry; otherwise pay the O(N) scan (N is the hold count, tens at most).
+            return snapshot.Count == 0
+                ? (HLCTimestamp.Zero, 0)
+                : ScanFloorAndCount(snapshot, currentTime);
+        }
         // Fast path: no hold has expired since the cache was filled.
         if (currentTime.CompareTo(cache.NextExpiry) < 0)
             return (cache.Floor, cache.LiveCount);
         // Slow path: at least one hold may have expired; recompute without updating the cache
         // (the cache is authoritatively updated only by mutations so we avoid the race).
-        return ScanFloorAndCount(holds, currentTime);
+        return ScanFloorAndCount(snapshot, currentTime);
     }
 
     /// <summary>
@@ -630,9 +641,19 @@ internal sealed class SnapshotFloorStore : IDisposable
                 data = File.ReadAllBytes(snapshotPath);
 
             SnapshotFloorMessage message = ReplicationSerializer.UnserializeSnapshotFloorMessage(data);
-            holds = FromMessage(message);
+            Dictionary<string, SnapshotHold> loaded = FromMessage(message);
+            holds = loaded;
+            // Prime the floor cache from the loaded registry. Reads answer from the cache, and an
+            // unprimed (empty) cache reads as "no live holds" — the value that licenses reclaiming
+            // everything. A restarted node whose WAL replay delivers no floor delta (everything
+            // sits at or below the checkpoint) would otherwise keep the empty cache until the
+            // first post-restart mutation commits, and a node elected meta leader inside that
+            // window would serve a false zero floor as an authoritative, read-index-confirmed
+            // answer.
+            HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            _floorCache = BuildCache(loaded, now);
             if (logger.IsEnabled(LogLevel.Information))
-                logger.LogInformation("Loaded {Count} snapshot hold(s) from {Path}", holds.Count, snapshotPath);
+                logger.LogInformation("Loaded {Count} snapshot hold(s) from {Path}", loaded.Count, snapshotPath);
         }
         catch (Exception ex)
         {
