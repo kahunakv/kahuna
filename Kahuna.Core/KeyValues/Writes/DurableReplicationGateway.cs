@@ -326,15 +326,16 @@ internal sealed class DurableReplicationGateway
 
             // No recorded result — this completion overtook the consumer apply, so apply it here and leave the
             // outcome for the consumer to reuse when Raft delivers the same entry, mirroring the consumer-first
-            // direction. The store applies by record/intent identity; the partition argument is unused here.
+            // direction. The batch's partition is the log's partition: it selects the committed-head ledger
+            // slice a settlement feeds and a bundled commit is judged against, so it must be the real one.
             RaftLog log = new() { LogType = entry.Type, LogData = entry.Data };
 
             bool applied;
             if (entry.Type == ReplicationTypes.TransactionRecord)
-                applied = transactionRecordStore.Replicate(0, log);
+                applied = transactionRecordStore.Replicate(partitionId, log);
             else
             {
-                applied = preparedIntentStore.ApplyDeltaAckPrepares(log);
+                applied = preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log);
                 preparesAcknowledged &= applied;
             }
 

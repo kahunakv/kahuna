@@ -41,6 +41,16 @@ internal sealed record InitializeTransactionCommand(
 /// took the key (a stalled proposal surfacing after a partition heals, with the in-memory locks that justified
 /// deciding up front long gone) would durably record Commit for a mutation that was never durably prepared —
 /// reporting a lost update as committed.</para>
+///
+/// <para><see cref="ApplyTimeValidation"/> extends that gate to the bundle's read-set. When set, the transition
+/// additionally requires — at apply, in log order, against the partition's replicated committed-head ledger —
+/// that every co-bundled intent's validated base still holds and that every entry of
+/// <see cref="BundledReadDependencies"/> (the read-only point dependencies routed to the anchor partition)
+/// is neither held by a foreign undecided intent nor moved past by a settled commit. A stalled bundle that
+/// applies after a competitor committed the same base or read is then rejected instead of durably recording a
+/// lost update or a write skew. The flag travels with the command so every current applier runs the same
+/// checks whatever its local configuration; an applier that predates the field skips them, which is why the
+/// producer sets it only once every node in the group applies it.</para>
 /// </summary>
 internal sealed record CommitTransactionCommand(
     HLCTimestamp TransactionId,
@@ -48,7 +58,16 @@ internal sealed record CommitTransactionCommand(
     long ManifestHash,
     HLCTimestamp OpId,
     HLCTimestamp AttemptHlc,
-    IReadOnlyList<string>? BundledPrepareKeys = null) : TransactionRecordCommand;
+    IReadOnlyList<string>? BundledPrepareKeys = null,
+    bool ApplyTimeValidation = false,
+    IReadOnlyList<BundledReadDependency>? BundledReadDependencies = null) : TransactionRecordCommand;
+
+/// <summary>
+/// One read-only point dependency carried by a one-phase bundled commit: the key and the committed state the
+/// transaction observed when it read it (<paramref name="ObservedExists"/> false means the key was absent, and
+/// <paramref name="ObservedRevision"/> is then not compared). Judged at apply by the bundled commit gate.
+/// </summary>
+internal readonly record struct BundledReadDependency(string Key, long ObservedRevision, bool ObservedExists);
 
 /// <summary>
 /// Attempts the terminal <see cref="TransactionDecision.Abort"/> transition. Valid from

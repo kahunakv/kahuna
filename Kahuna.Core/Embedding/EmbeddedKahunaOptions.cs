@@ -570,10 +570,21 @@ public sealed class EmbeddedKahunaOptions
 
     /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
-    /// head. Must comfortably exceed the longest transaction lifetime the deployment allows. See
+    /// head. Must comfortably exceed the longest transaction lifetime the deployment allows, and must be
+    /// identical on every node while <see cref="OnePhaseApplyTimeValidation"/> is on. See
     /// <see cref="Server.Configuration.KahunaConfiguration.StagedBaseFenceRetentionMs"/>.
     /// </summary>
     public int StagedBaseFenceRetentionMs { get; set; } = 600_000;
+
+    /// <summary>
+    /// Lets read-modify-write and read-carrying durable transactions take the one-phase commit fast path in a
+    /// multi-process Raft group by validating the bundled commit at apply time, in log order, against the
+    /// partition's replicated committed-head ledger. Off by default. Turn it on only when every node in the
+    /// group runs a version that persists the ledger and applies the extended gate — an old node skips the
+    /// check and commits where a new node refuses, which forks the state machine. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.OnePhaseApplyTimeValidation"/>.
+    /// </summary>
+    public bool OnePhaseApplyTimeValidation { get; set; }
 
     // ── Leader-balancer knobs ────────────────────────────────────────────────
     // The Kommander leader balancer redistributes partition leadership across cluster nodes.

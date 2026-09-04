@@ -623,6 +623,32 @@ public sealed class KahunaConfiguration
     public bool SingleProcessRaftGroup { get; set; }
 
     /// <summary>
+    /// Lets a read-modify-write or read-carrying durable transaction take the one-phase commit fast path in a
+    /// multi-process Raft group by proving its read-set <em>at apply time</em>: the bundled commit carries its
+    /// on-partition read dependencies, and every replica judges them — and every co-bundled validated base —
+    /// in log order against the partition's replicated committed-head ledger before the record moves to
+    /// Commit. A stalled bundle that applies after a competitor committed the same base or read is then
+    /// rejected on every replica instead of durably recording a lost update or a write skew. Off, such
+    /// transactions run the standard two-phase flow in multi-process groups (one more Raft proposal and the
+    /// replica-fence exchange per commit). Dependencies no deterministic apply-time check exists for — prefix
+    /// and range locks, reads routed to another partition — keep the bundle closed either way.
+    ///
+    /// <para><b>Turn it on only when every node in the group runs a version that persists the ledger and
+    /// applies the extended gate.</b> The check is a property of the replicated command, so every current
+    /// node applies it whatever its own setting — but an old node applying a bundled commit that carries read
+    /// dependencies skips the checks it does not know and commits where a new node refuses, which forks the
+    /// state machine. The guarantee is per group, not per node: enable it on the upgraded nodes only after
+    /// the last old node is gone. A node that starts with it on over a prepared-intent snapshot written before
+    /// the ledger existed refuses to start (start once with it off; the next checkpoint rewrites the
+    /// snapshots), and refuses to install a partition snapshot exported without a ledger.</para>
+    ///
+    /// <para><see cref="StagedBaseFenceRetentionMs"/> must be identical on every node while this is on: the
+    /// ledger's retention window and staleness horizon are judged at apply, so nodes with different horizons
+    /// would judge the same bundle differently.</para>
+    /// </summary>
+    public bool OnePhaseApplyTimeValidation { get; set; }
+
+    /// <summary>
     /// Milliseconds a transactional staged write's in-memory write intent stays live before other
     /// transactions may treat it as abandoned and write past it. This lease is the window guard between a
     /// transaction staging a write and its durable prepare landing; once it lapses (a paused coordinator,
@@ -674,6 +700,9 @@ public sealed class KahunaConfiguration
     /// exceed the longest transaction lifetime the deployment allows (session timeouts, reaper idle
     /// horizons); a value below real lifetimes turns long transactions into spurious conflict aborts. Memory
     /// cost is one small entry per transactionally written key within the horizon.
+    /// <para>The same horizon bounds the committed-head ledger the one-phase bundled commit gate judges against
+    /// at apply time, so with <see cref="OnePhaseApplyTimeValidation"/> on it must be identical on every node
+    /// in the group.</para>
     /// </summary>
     public int StagedBaseFenceRetentionMs { get; set; } = 600_000;
 

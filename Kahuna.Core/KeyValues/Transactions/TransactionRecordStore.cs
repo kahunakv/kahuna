@@ -146,21 +146,52 @@ internal sealed class TransactionRecordStore
     // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
     private readonly record struct PersistedStamp(long Version, long RoutingVersion);
 
-    // Answers whether a live prepared intent owned by (TransactionId, Epoch) exists at a key, consulted by the
-    // bundled-prepare gate below. Reading the intent store here is deterministic: both stores apply on the same
-    // ordered per-partition path, so at the log position where a commit transition applies, the bundled prepare
-    // (earlier in the same atomic batch) has already been applied or rejected identically on every replica.
-    private Func<string, HLCTimestamp, long, bool>? bundledPrepareProbe;
+    /// <summary>The slice key used when an apply cannot be attributed to a partition's log (the in-memory
+    /// configuration of the unit tests); mirrors <see cref="PreparedIntentStore.UnattributedPartition"/> so the
+    /// gate and the ledger it judges against agree on the slice.</summary>
+    internal const int UnattributedPartition = PreparedIntentStore.UnattributedPartition;
 
-    /// <summary>Wires the prepared-intent lookup used to validate one-phase bundled commits (manager
-    /// construction). A gated commit applying without a probe attached is rejected — the store fails closed
+    /// <summary>Judges a one-phase bundled commit at its apply position on a partition's log: whether this
+    /// transaction's live intent holds every bundled key, and — when the command asks for apply-time
+    /// validation — whether every co-bundled validated base and carried read dependency still holds against the
+    /// partition's committed-head ledger. Wired to <see cref="PreparedIntentStore.JudgeBundledCommit"/>.</summary>
+    internal delegate BundledCommitJudgement BundledCommitJudge(int partitionId, CommitTransactionCommand commit);
+
+    // Consulted by the bundled commit gate below. Reading the intent store here is deterministic: both stores
+    // apply on the same ordered per-partition path, so at the log position where a commit transition applies,
+    // the bundled prepare (earlier in the same atomic batch) has already been applied or rejected identically
+    // on every replica, and the partition's ledger slice holds exactly the heads that log prefix fed.
+    private BundledCommitJudge? bundledCommitJudge;
+
+    /// <summary>Wires the prepared-intent judge used to validate one-phase bundled commits (manager
+    /// construction). A gated commit applying without a judge attached is rejected — the store fails closed
     /// rather than durably committing a mutation whose prepare it cannot verify.</summary>
-    public void AttachBundledPrepareProbe(Func<string, HLCTimestamp, long, bool> probe) =>
-        bundledPrepareProbe = probe;
+    public void AttachBundledCommitJudge(BundledCommitJudge judge) => bundledCommitJudge = judge;
 
-    /// <summary>Applies one transition to the record it targets and reflects the result in the map. This is the
-    /// single apply entry point shared by local proposal apply, follower replication, and restore.</summary>
-    public TransactionRecordApplyResult Apply(TransactionRecordCommand command)
+    // Leader-local, advisory: the verdict kind of each bundled commit this node's apply rejected, keyed by
+    // the attempt's operation id, for the finalizer that proposed it to classify its outcome (a stale base or
+    // read is a truthful conflict abort; a missing prepare is a retry through the two-phase path). Taken once
+    // by that finalizer; entries no finalizer ever takes (follower applies) are bounded by the cap.
+    private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch, HLCTimestamp OpId), BundledCommitVerdict> gatedRejectionVerdicts = new();
+
+    private const int GatedRejectionVerdictsMax = 4_096;
+
+    /// <summary>Takes (and forgets) the verdict kind under which this node's apply rejected the bundled commit
+    /// attempt <paramref name="opId"/> of the transaction, or false when this node recorded none — the deadline
+    /// gate, not the bundled commit gate, kept the record Undecided.</summary>
+    internal bool TryTakeGatedRejectionVerdict(HLCTimestamp transactionId, long epoch, HLCTimestamp opId, out BundledCommitVerdict verdict) =>
+        gatedRejectionVerdicts.TryRemove((transactionId, epoch, opId), out verdict);
+
+    /// <summary>Applies one transition to the record it targets and reflects the result in the map. This
+    /// overload cannot attribute the apply to a partition's log, so a bundled commit gate it runs judges against
+    /// the <see cref="UnattributedPartition"/> ledger slice; production applies go through
+    /// <see cref="Replicate"/>/<see cref="Restore"/>, which carry the log's partition.</summary>
+    public TransactionRecordApplyResult Apply(TransactionRecordCommand command) => Apply(command, UnattributedPartition);
+
+    /// <summary>Applies one transition that arrived through <paramref name="partitionId"/>'s log and reflects
+    /// the result in the map. This is the single apply entry point shared by local proposal apply, follower
+    /// replication, and restore.</summary>
+    public TransactionRecordApplyResult Apply(TransactionRecordCommand command, int partitionId)
     {
         (HLCTimestamp, long) key = KeyOf(command);
 
@@ -171,22 +202,59 @@ internal sealed class TransactionRecordStore
             // One-phase bundled commit: the decision shared an atomic batch with its own prepared-intent group
             // and could not be withheld when that prepare was rejected, so its legality is decided here instead —
             // the Undecided → Commit transition applies only if this transaction's live intent holds every bundled
-            // key. A bundle surfacing late (a stalled proposal committing after a partition heals) whose keys were
-            // meanwhile taken by another transaction is rejected: the record stays Undecided and yields to
-            // presumed-abort recovery, instead of durably reporting Commit for a mutation that was never durably
-            // prepared. Replays against an already-terminal record skip the gate (idempotence is the state
+            // key, and (when the command asks for apply-time validation) only if every co-bundled validated base
+            // and carried read dependency still holds against the partition's committed-head ledger. A bundle
+            // surfacing late (a stalled proposal committing after a partition heals) whose keys were meanwhile
+            // taken, or whose base or read a competitor's settled commit moved past, is rejected: the record stays
+            // Undecided and the proposing finalizer drives the truthful outcome, instead of durably reporting
+            // Commit for a mutation that was never durably prepared or that would discard another writer's
+            // commit. Replays against an already-terminal record skip the gate (idempotence is the state
             // machine's to judge; settlement may have removed the intent by then).
+            //
+            // A rejection is memoed on the record and persisted with it: a replay of the same attempt (WAL
+            // restore, or the entries after an installed snapshot's boundary) is rejected by the memo without
+            // re-judging, because the ledger it was judged against may since have moved past what the live
+            // apply saw, and a replay that re-judged could admit what the live apply refused — forking this
+            // replica's record from its peers'.
             if (command is CommitTransactionCommand { BundledPrepareKeys.Count: > 0 } bundledCommit &&
                 existing is { Decision: TransactionDecision.Undecided })
             {
-                foreach (string prepareKey in bundledCommit.BundledPrepareKeys)
+                if (existing.WasBundledCommitRejected(bundledCommit.OpId))
+                    return new(TransactionApplyOutcome.Rejected, existing, "bundled commit already rejected at its first apply");
+
+                BundledCommitJudgement judgement = bundledCommitJudge is null
+                    ? new(BundledCommitVerdict.PrepareMissing, "no bundled commit judge attached")
+                    : bundledCommitJudge(partitionId, bundledCommit);
+
+                if (!judgement.IsAdmit)
                 {
-                    if (bundledPrepareProbe is null ||
-                        !bundledPrepareProbe(prepareKey, bundledCommit.TransactionId, bundledCommit.Epoch))
+                    switch (judgement.Verdict)
                     {
-                        DurableTransactionMetrics.OnePhaseGatedCommitRejections.Add(1);
-                        return new(TransactionApplyOutcome.Rejected, existing, "bundled prepare not applied");
+                        case BundledCommitVerdict.StaleBase:
+                            DurableTransactionMetrics.OnePhaseGatedCommitStaleBaseRejected();
+                            break;
+                        case BundledCommitVerdict.StaleRead:
+                            DurableTransactionMetrics.OnePhaseGatedCommitStaleReadRejected();
+                            break;
+                        default:
+                            DurableTransactionMetrics.OnePhaseGatedCommitRejections.Add(1);
+                            break;
                     }
+
+                    List<HLCTimestamp> rejected = existing.RejectedBundledCommitOpIds is { } prior ? [.. prior] : [];
+                    rejected.Add(bundledCommit.OpId);
+                    TransactionRecord memoed = existing with { RejectedBundledCommitOpIds = rejected };
+                    records[key] = memoed;
+                    StampDirty(memoed.RecordAnchorKey);
+
+                    if (gatedRejectionVerdicts.Count < GatedRejectionVerdictsMax)
+                        gatedRejectionVerdicts[(bundledCommit.TransactionId, bundledCommit.Epoch, bundledCommit.OpId)] = judgement.Verdict;
+
+                    logger?.LogWarning(
+                        "Bundled commit of transaction {TransactionId} rejected at apply on partition {PartitionId}: {Reason}",
+                        bundledCommit.TransactionId, partitionId, judgement.Reason);
+
+                    return new(TransactionApplyOutcome.Rejected, memoed, judgement.Reason);
                 }
             }
 
@@ -216,16 +284,16 @@ internal sealed class TransactionRecordStore
 
     // ── replication ─────────────────────────────────────────────────────────────
 
-    public bool Restore(int partitionId, RaftLog log) => ApplyLog(log);
+    public bool Restore(int partitionId, RaftLog log) => ApplyLog(log, partitionId);
 
-    public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
+    public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log, partitionId);
 
     // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
     // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
     // producer's instances is safe only because commands, records, and the participant list are immutable.
     private static readonly ProposedDeltaCache<TransactionRecordCommand> locallyProposedDeltas = new();
 
-    private bool ApplyLog(RaftLog log)
+    private bool ApplyLog(RaftLog log, int partitionId)
     {
         if (log.LogType != ReplicationTypes.TransactionRecord || log.LogData is null)
             return true;
@@ -233,7 +301,7 @@ internal sealed class TransactionRecordStore
         if (locallyProposedDeltas.TryTake(log.LogData, out TransactionRecordCommand[]? proposed))
         {
             foreach (TransactionRecordCommand command in proposed)
-                Apply(command);
+                Apply(command, partitionId);
 
             return true;
         }
@@ -241,7 +309,7 @@ internal sealed class TransactionRecordStore
         TransactionRecordDeltaMessage delta = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(log.LogData);
 
         foreach (TransactionRecordCommandMessage message in delta.Commands)
-            Apply(ToCommand(message));
+            Apply(ToCommand(message), partitionId);
 
         return true;
     }
@@ -349,6 +417,17 @@ internal sealed class TransactionRecordStore
                     foreach (string bundledKey in c.BundledPrepareKeys)
                         m.BundledPrepareKeys.Add(bundledKey);
 
+                m.ApplyTimeValidation = c.ApplyTimeValidation;
+
+                if (c.BundledReadDependencies is not null)
+                    foreach (BundledReadDependency read in c.BundledReadDependencies)
+                        m.BundledReadDependencies.Add(new BundledReadDependencyMessage
+                        {
+                            Key = read.Key,
+                            ObservedRevision = read.ObservedRevision,
+                            ObservedExists = read.ObservedExists
+                        });
+
                 return m;
             }
 
@@ -401,9 +480,24 @@ internal sealed class TransactionRecordStore
             }
 
             case TransactionRecordCommandKindMessage.TransactionRecordCommit:
+            {
+                BundledReadDependency[]? reads = null;
+                if (m.BundledReadDependencies.Count > 0)
+                {
+                    reads = new BundledReadDependency[m.BundledReadDependencies.Count];
+                    for (int i = 0; i < reads.Length; i++)
+                    {
+                        BundledReadDependencyMessage read = m.BundledReadDependencies[i];
+                        reads[i] = new BundledReadDependency(read.Key, read.ObservedRevision, read.ObservedExists);
+                    }
+                }
+
                 return new CommitTransactionCommand(txId, m.Epoch, m.ManifestHash, opId,
                     new HLCTimestamp(m.AttemptNode, m.AttemptPhysical, m.AttemptCounter),
-                    m.BundledPrepareKeys.Count > 0 ? m.BundledPrepareKeys.ToArray() : null);
+                    m.BundledPrepareKeys.Count > 0 ? m.BundledPrepareKeys.ToArray() : null,
+                    m.ApplyTimeValidation,
+                    reads);
+            }
 
             case TransactionRecordCommandKindMessage.TransactionRecordAbort:
                 return new AbortTransactionCommand(txId, m.Epoch, m.ManifestHash, (TransactionAbortClass)m.AbortClass, opId,
@@ -550,6 +644,23 @@ internal sealed class TransactionRecordStore
         {
             records[key] = incoming;
             StampDirty(incoming.RecordAnchorKey);
+            return;
+        }
+
+        // Both Undecided: keep the union of their rejected-bundled-commit memos, so a rejection recorded in
+        // one overlapping per-partition file is not lost to the other file's older copy of the record.
+        if (!existing.IsTerminal && incoming.RejectedBundledCommitOpIds is { Count: > 0 } incomingRejected)
+        {
+            List<HLCTimestamp> merged = existing.RejectedBundledCommitOpIds is { } prior ? [.. prior] : [];
+            foreach (HLCTimestamp opId in incomingRejected)
+                if (!existing.WasBundledCommitRejected(opId))
+                    merged.Add(opId);
+
+            if (merged.Count != (existing.RejectedBundledCommitOpIds?.Count ?? 0))
+            {
+                records[key] = existing with { RejectedBundledCommitOpIds = merged };
+                StampDirty(existing.RecordAnchorKey);
+            }
         }
     }
 
@@ -674,6 +785,16 @@ internal sealed class TransactionRecordStore
             m.Durability = (int)p.Durability;
             entry.Participants.Add(m);
         }
+
+        entry.RejectedBundledCommits.Clear();
+        if (r.RejectedBundledCommitOpIds is { Count: > 0 } rejected)
+        {
+            foreach (HLCTimestamp opId in rejected)
+                entry.RejectedBundledCommits.Add(new TransactionRecordRejectedBundledCommitMessage
+                {
+                    OpIdNode = opId.N, OpIdPhysical = opId.L, OpIdCounter = opId.C
+                });
+        }
     }
 
     private static TransactionRecord FromSnapshotEntry(TransactionRecordSnapshotEntry e)
@@ -681,6 +802,14 @@ internal sealed class TransactionRecordStore
         List<TransactionParticipantRef> participants = new(e.Participants.Count);
         foreach (TransactionParticipantRefMessage p in e.Participants)
             participants.Add(new TransactionParticipantRef(p.Key, (KeyValueDurability)p.Durability));
+
+        List<HLCTimestamp>? rejected = null;
+        if (e.RejectedBundledCommits.Count > 0)
+        {
+            rejected = new(e.RejectedBundledCommits.Count);
+            foreach (TransactionRecordRejectedBundledCommitMessage r in e.RejectedBundledCommits)
+                rejected.Add(new HLCTimestamp(r.OpIdNode, r.OpIdPhysical, r.OpIdCounter));
+        }
 
         return new TransactionRecord(
             new HLCTimestamp(e.TransactionIdNode, e.TransactionIdPhysical, e.TransactionIdCounter),
@@ -697,6 +826,9 @@ internal sealed class TransactionRecordStore
             (TransactionAbortClass)e.AbortClass,
             new HLCTimestamp(e.WinningOpIdNode, e.WinningOpIdPhysical, e.WinningOpIdCounter),
             new HLCTimestamp(e.CreatedAtNode, e.CreatedAtPhysical, e.CreatedAtCounter),
-            new HLCTimestamp(e.DecidedAtNode, e.DecidedAtPhysical, e.DecidedAtCounter));
+            new HLCTimestamp(e.DecidedAtNode, e.DecidedAtPhysical, e.DecidedAtCounter))
+        {
+            RejectedBundledCommitOpIds = rejected
+        };
     }
 }

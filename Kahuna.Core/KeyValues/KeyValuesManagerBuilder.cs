@@ -166,12 +166,16 @@ internal sealed class KeyValuesManagerBuilder
         preparedIntentStore.ConfigureStagedBaseFence(configuration.StagedBaseFenceRetentionMs);
 
         // A one-phase bundled commit is legal only if its own prepare — earlier in the same atomic batch — took
-        // ownership of every written key; the record store validates that against the live intent set at apply
-        // time. Both stores apply on the same ordered per-partition path, so the lookup is deterministic at the
-        // commit transition's log position on every replica.
-        transactionRecordStore.AttachBundledPrepareProbe((intentKey, transactionId, epoch) =>
-            preparedIntentStore.Get(intentKey) is { } liveIntent &&
-            liveIntent.TransactionId == transactionId && liveIntent.Epoch == epoch);
+        // ownership of every written key, and (when the bundle asks for apply-time validation) only if every
+        // co-bundled validated base and carried read dependency still holds against the partition's
+        // committed-head ledger; the record store asks the intent store for that verdict at apply time. Both
+        // stores apply on the same ordered per-partition path, so the verdict is deterministic at the commit
+        // transition's log position on every replica.
+        transactionRecordStore.AttachBundledCommitJudge(preparedIntentStore.JudgeBundledCommit);
+
+        // Enabling the apply-time gate over a snapshot that predates the ledger fails closed here (see the
+        // store's contract), before the node serves anything.
+        preparedIntentStore.ConfigureOnePhaseApplyTimeValidation(configuration.OnePhaseApplyTimeValidation);
 
         // Whole-partition state transfer: seeds a replica whose needed log entries were compacted.
         // Drains the background writer before exporting so the physical-family scan reflects every
@@ -192,7 +196,11 @@ internal sealed class KeyValuesManagerBuilder
             },
             configuration.StoragePath,
             configuration.StorageRevision,
-            logger);
+            logger,
+            // A node that applies the extended bundled commit gate must not install a partition snapshot that
+            // lacks the committed-head ledger (an exporter that predates it): its gate would then judge with an
+            // empty slice where the exporter's peers hold heads.
+            requireLedgerOnInstall: configuration.OnePhaseApplyTimeValidation);
 
         // Mutations below a snapshot boundary reach this node only through the whole-partition
         // install — the replicators never see them, so no cache-coherence apply advances a resident
@@ -294,7 +302,8 @@ internal sealed class KeyValuesManagerBuilder
             () => completionReceiptStore.Count,
             () => preparedIntentStore.Count,
             () => preparedIntentStore.TotalBytes,
-            () => txCoordinator.OutstandingDurableCount);
+            () => txCoordinator.OutstandingDurableCount,
+            preparedIntentStore.SnapshotLedgerSizes);
 
         // Admission-gate gauges on their own instance-owned meter, for the same reason: a disposed node's
         // orderers must not stay reachable through gauge callbacks.

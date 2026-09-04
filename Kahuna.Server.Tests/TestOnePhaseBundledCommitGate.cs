@@ -111,7 +111,7 @@ public sealed class TestOnePhaseBundledCommitGate
                     if (entry.Type == ReplicationTypes.TransactionRecord)
                         Kahuna!.DurableTransactionRecordStore.Replicate(partition, log);
                     else if (entry.Type == ReplicationTypes.PreparedIntent)
-                        Kahuna!.DurablePreparedIntentStore.ApplyDeltaAckPrepares(log);
+                        Kahuna!.DurablePreparedIntentStore.ApplyDeltaAckPrepares(partition, log);
                 }
             }
         }

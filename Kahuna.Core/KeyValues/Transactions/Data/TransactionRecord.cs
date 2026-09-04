@@ -67,6 +67,28 @@ internal sealed record TransactionRecord(
     HLCTimestamp DecidedAt)
 {
     public bool IsTerminal => Decision is TransactionDecision.Commit or TransactionDecision.Abort;
+
+    /// <summary>
+    /// Operation ids of one-phase bundled commits that the bundled commit gate rejected while this record was
+    /// Undecided, in the order they were rejected. Written by the store at the rejection's own apply position
+    /// and persisted with the record, so a replay of the same bundled commit — WAL restore, or the entries
+    /// after an installed snapshot's boundary — is rejected again by lookup instead of being re-judged against
+    /// a ledger that may since have moved past what the live apply saw. Null while none was rejected.
+    /// </summary>
+    public IReadOnlyList<HLCTimestamp>? RejectedBundledCommitOpIds { get; init; }
+
+    /// <summary>Whether a bundled commit with <paramref name="opId"/> was already rejected against this record.</summary>
+    public bool WasBundledCommitRejected(HLCTimestamp opId)
+    {
+        if (RejectedBundledCommitOpIds is null)
+            return false;
+
+        foreach (HLCTimestamp rejected in RejectedBundledCommitOpIds)
+            if (rejected == opId)
+                return true;
+
+        return false;
+    }
 }
 
 /// <summary>

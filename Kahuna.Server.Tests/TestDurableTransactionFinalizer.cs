@@ -50,7 +50,7 @@ public sealed class TestDurableTransactionFinalizer
             if (logType == ReplicationTypes.TransactionRecord)
                 Records?.Replicate(partitionId, log);
             else if (logType == ReplicationTypes.PreparedIntent)
-                return Task.FromResult(Intents is null || Intents.ApplyDeltaAckPrepares(log));
+                return Task.FromResult(Intents is null || Intents.ApplyDeltaAckPrepares(partitionId, log));
 
             return Task.FromResult(true);
         }
@@ -69,7 +69,7 @@ public sealed class TestDurableTransactionFinalizer
             Records?.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = recordInitDelta });
 
             bool prepareAck = Intents is null
-                || Intents.ApplyDeltaAckPrepares(new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = anchorPrepareDelta });
+                || Intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = anchorPrepareDelta });
             return Task.FromResult((true, prepareAck));
         }
     }
@@ -1005,7 +1005,7 @@ public sealed class TestDurableTransactionFinalizer
             beforeApply?.Invoke();
 
             records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
-            bool prepareAck = intents.ApplyDeltaAckPrepares(new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
+            bool prepareAck = intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
             records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = decisionDelta });
 
             return Task.FromResult<(bool BatchCommitted, bool PrepareAcknowledged)?>((true, prepareAck));
@@ -1015,8 +1015,7 @@ public sealed class TestDurableTransactionFinalizer
     {
         TransactionRecordStore records = new();
         PreparedIntentStore intents = new();
-        records.AttachBundledPrepareProbe((key, txId, epoch) =>
-            intents.Get(key) is { } live && live.TransactionId == txId && live.Epoch == epoch);
+        records.AttachBundledCommitJudge(intents.JudgeBundledCommit);
         return (records, intents);
     }
 

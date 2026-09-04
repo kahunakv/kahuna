@@ -26,25 +26,75 @@ internal sealed class PreparedIntentStore
 {
     private readonly ConcurrentDictionary<string, PreparedIntent> intents = new();
 
-    /// <summary>One key's last committed durable-transaction write, as remembered by the staged-base fence:
+    /// <summary>One key's last committed durable-transaction write, as remembered by the committed-head ledger:
     /// the revision/state the committed head reached when that commit's settlement applied, and the commit
-    /// timestamp used for retention pruning.</summary>
+    /// timestamp the retention horizon is measured against.</summary>
     private readonly record struct CommittedHead(long Revision, KeyValueState State, HLCTimestamp CommittedAt);
 
-    // The staged-base fence's committed-head memory: for each key, the last durable-transaction commit whose
-    // settlement (or removal) this store applied, within the retention horizon. Fed by commit resolutions on
-    // the same per-key ordered apply path as prepares, so at the moment a prepare applies, any competitor
-    // commit of the same key that settled earlier in the log has already left its head here.
-    //
-    // ADVISORY, per-node, in-memory state: it shapes only the prepare ACKNOWLEDGEMENT returned to the local
-    // producer (see <see cref="ApplyDeltaAckPrepares"/>), never the replicated state-machine transition — so
-    // it needs no cross-replica determinism, no persistence, and no snapshot coupling. Bounded by
-    // size-triggered retention pruning; the staleness gate in the fence makes pruning safe.
-    private readonly ConcurrentDictionary<string, CommittedHead> committedHeads = new();
+    /// <summary>
+    /// One data partition's slice of the committed-head ledger: for each key, the last durable-transaction
+    /// commit whose settlement (or removal) applied THROUGH THIS PARTITION'S LOG, and the watermark — the
+    /// highest commit timestamp among them — that bounds the slice's retention window. Fed only by replicated
+    /// applies, on the same per-key ordered apply path as prepares, so at the moment a prepare or a bundled
+    /// commit applies, any competitor commit of the same key that settled earlier in the log has already left
+    /// its head here.
+    ///
+    /// <para>The slice is a pure function of the partition's applied log prefix: every replica of the
+    /// partition that applied the same entries holds the same heads and the same watermark, whether it applied
+    /// them live, replayed them from its WAL after a restart, or installed them from a partition snapshot.
+    /// That determinism is what lets the one-phase bundled commit gate judge a stalled bundle's validated base
+    /// and read-set against it at apply time and reach the same verdict everywhere. Keying by partition is
+    /// what makes it hold: a node's set of hosted partitions is node-local, so one node-global map fed by every
+    /// hosted partition would differ between replicas that host different partition sets.</para>
+    ///
+    /// <para>Retention is logical, not physical: an entry older than the retention horizon measured from the
+    /// slice's own watermark is treated as absent by the gate whether or not it has been physically dropped.
+    /// The watermark only advances, so an entry that fell outside the window never comes back into it, and the
+    /// physical prune (at retention-bucket transitions of the watermark) is unobservable to any verdict. The
+    /// staleness gate makes the window safe: a transaction that began before the horizon is refused rather
+    /// than judged against a possibly-pruned head.</para>
+    ///
+    /// <para>Heads are mutated only under <see cref="applyGate"/>; the concurrent map lets the advisory reads
+    /// (the two-phase fence's memory, the hydration fence, the convergence repair) probe it lock-free.</para>
+    /// </summary>
+    private sealed class PartitionLedger
+    {
+        public readonly ConcurrentDictionary<string, CommittedHead> Heads = new();
 
-    // Highest commit timestamp among recorded heads — the fence's notion of "now" for pruning and the
-    // staleness gate, always an HLC from replicated commits, never a local clock. Guarded by applyGate.
-    private HLCTimestamp committedHeadWatermark = HLCTimestamp.Zero;
+        // Highest commit timestamp among the heads this slice ever recorded. Mutated under applyGate.
+        public HLCTimestamp Watermark = HLCTimestamp.Zero;
+
+        // The retention bucket (Watermark.L / bucket size) the last physical prune ran in; derived from the
+        // watermark on load so a reloaded slice prunes on the same schedule as a live one.
+        public long PrunedBucket;
+
+        // Bumped by every physical prune, so a snapshot capture that raced a prune between its watermark read
+        // and its head scan can detect the tear and rescan instead of persisting a slice that lacks heads the
+        // captured watermark still retains.
+        public long PruneGeneration;
+
+        // Approximate retained bytes (keys plus entries), for the ledger gauge. Maintained under applyGate.
+        public long Bytes;
+    }
+
+    /// <summary>The slice key used when an apply cannot be attributed to a partition's log — the pure/in-memory
+    /// configuration of the unit tests, where commands are applied directly rather than through
+    /// <see cref="Replicate"/>/<see cref="Restore"/>. Production applies always carry their log's partition.</summary>
+    internal const int UnattributedPartition = -1;
+
+    // The committed-head ledger, one slice per partition whose log this node applies. See PartitionLedger.
+    private readonly ConcurrentDictionary<int, PartitionLedger> ledgers = new();
+
+    // Highest commit timestamp across every slice — the ADVISORY fence's notion of "now" for its staleness
+    // gate (the two-phase acknowledgement path judges by key across every slice, so it measures against the
+    // node-wide watermark). Always an HLC from replicated commits, never a local clock. Guarded by applyGate.
+    private HLCTimestamp ledgerWatermark = HLCTimestamp.Zero;
+
+    // Partitions whose on-disk snapshot predates the ledger section. Their slices start empty on load, which
+    // is exactly what an older build would hold, but a build that enables the apply-time bundled-commit gate
+    // would then judge differently from replicas that persisted the ledger — so enabling the gate over such a
+    // snapshot fails closed (see ConfigureOnePhaseApplyTimeValidation).
+    private readonly List<int> ledgerMissingPartitions = [];
 
     /// <summary>Default staged-base fence retention (ms). Must comfortably exceed the longest possible
     /// transaction lifetime (begin → prepare), because the staleness gate refuses to acknowledge a
@@ -52,10 +102,15 @@ internal sealed class PreparedIntentStore
     /// retained head. Ten minutes covers the decision-deadline ceiling and typical reaper horizons.</summary>
     internal const int DefaultStagedBaseFenceRetentionMs = 600_000;
 
-    // Committed-head entries are pruned only when the map crosses this size, so quiet stores never scan.
-    private const int CommittedHeadPruneTriggerCount = 32_768;
-
     private int stagedBaseFenceRetentionMs = DefaultStagedBaseFenceRetentionMs;
+
+    // Physical prunes run when the slice's watermark crosses into a new bucket of this many milliseconds:
+    // one scan per quarter retention per partition, instead of one per apply.
+    private int LedgerPruneBucketMs => Math.Max(1, stagedBaseFenceRetentionMs / 4);
+
+    /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct and
+    /// the dictionary slot around it.</summary>
+    private static long LedgerEntryBytes(string key) => 2L * key.Length + 64;
 
     // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
     // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
@@ -222,6 +277,32 @@ internal sealed class PreparedIntentStore
     public void ConfigureStagedBaseFence(int retentionMs) =>
         stagedBaseFenceRetentionMs = Math.Max(1, retentionMs);
 
+    /// <summary>
+    /// Declares whether this node produces and applies one-phase bundled commits that are validated against
+    /// the committed-head ledger at apply time. The ledger itself is always maintained and persisted; what
+    /// this guards is the load-time contract: a durable snapshot written by a build that predates the ledger
+    /// section leaves the partition's slice empty, and a node that then applied the extended gate would admit
+    /// bundles its peers refuse. Enabling the gate over such a snapshot therefore fails closed (throws) with
+    /// the remedy — start once with the option off so the next checkpoint rewrites every partition's snapshot
+    /// with its ledger, then enable it. Idempotent; safe to call on a shared store.
+    /// </summary>
+    public void ConfigureOnePhaseApplyTimeValidation(bool enabled)
+    {
+        if (!enabled)
+            return;
+
+        lock (applyGate)
+        {
+            if (ledgerMissingPartitions.Count == 0)
+                return;
+
+            throw new InvalidDataException(
+                $"Prepared-intent snapshot(s) for partition(s) {string.Join(", ", ledgerMissingPartitions)} were written before the committed-head ledger existed; " +
+                "refusing to enable OnePhaseApplyTimeValidation over them, because this node would judge bundled commits differently from its replicas. " +
+                "Start once with OnePhaseApplyTimeValidation off so the next checkpoint rewrites every partition's snapshot with its ledger, then enable it.");
+        }
+    }
+
     // ── Fence-verdict wait ───────────────────────────────────────────────────────
     //
     // A pre-decision fence verdict request routinely arrives before the transaction's prepare has applied on
@@ -256,8 +337,17 @@ internal sealed class PreparedIntentStore
 
     /// <summary>Applies one transition to the intent at the command's key and reflects the result in the map:
     /// install/update on <see cref="TransactionApplyOutcome.Applied"/> with a record, delete when the applied
-    /// record is null (removal), and leave the map unchanged on a no-op or rejection.</summary>
-    public PreparedIntentApplyResult Apply(PreparedIntentCommand command)
+    /// record is null (removal), and leave the map unchanged on a no-op or rejection. This overload cannot
+    /// attribute the apply to a partition's log, so any committed head it records lands in the
+    /// <see cref="UnattributedPartition"/> ledger slice; production applies go through
+    /// <see cref="Replicate"/>/<see cref="Restore"/>, which carry the log's partition.</summary>
+    public PreparedIntentApplyResult Apply(PreparedIntentCommand command) => Apply(command, UnattributedPartition);
+
+    /// <summary>Applies one transition that arrived through <paramref name="partitionId"/>'s log. The partition
+    /// selects the committed-head ledger slice a commit settlement feeds — the slice the one-phase bundled
+    /// commit gate later judges bundles of that partition against — so it must be the log's partition, never a
+    /// routing guess: routing changes with the range map while the log's partition is fixed.</summary>
+    public PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId)
     {
         string key = KeyOf(command);
 
@@ -303,7 +393,7 @@ internal sealed class PreparedIntentStore
 
                 if (committedNow || removedCommitted)
                 {
-                    RecordCommittedHead(existing);
+                    RecordCommittedHead(existing, partitionId);
                     settledCommit = existing;
                 }
             }
@@ -407,7 +497,7 @@ internal sealed class PreparedIntentStore
     /// Caller holds <see cref="applyGate"/>.</summary>
     private bool TrackFenceRefusal(PreparedIntent intent, out long headRevision)
     {
-        committedHeads.TryGetValue(intent.Key, out CommittedHead head);
+        TryFindHead(intent.Key, out CommittedHead head);
         headRevision = head.Revision;
 
         if (!fenceRefusalStreaks.TryGetValue(intent.Key, out FenceRefusalStreak streak)
@@ -445,8 +535,10 @@ internal sealed class PreparedIntentStore
     private string? EvaluateStagedBaseFence(PreparedIntent intent) =>
         JudgeStagedBase(intent, countAbsentHeadAdmission: true, out _);
 
-    /// <summary>The fence decision itself, shared by the apply-path acknowledgement and the replica verdict
-    /// read (<see cref="EvaluateReplicaFenceVerdicts"/>). Returns null to admit, or the conflict reason.
+    /// <summary>The ADVISORY fence decision, shared by the apply-path acknowledgement and the replica verdict
+    /// read (<see cref="EvaluateReplicaFenceVerdicts"/>). Judges by key across every ledger slice this node
+    /// holds — the two-phase acknowledgement is per-node advice, so the widest memory is the most useful —
+    /// against the node-wide watermark. Returns null to admit, or the conflict reason.
     /// <paramref name="headRevision"/> reports the remembered head the verdict was judged against (-1 when the
     /// memory held nothing). Only the apply path counts the absent-head admission; a verdict read must not
     /// inflate that counter. Caller holds <see cref="applyGate"/>.</summary>
@@ -459,11 +551,10 @@ internal sealed class PreparedIntentStore
         // and therefore its base, may predate every retained head) must not be acknowledged on absence of
         // evidence. The transaction id is the begin HLC, so it lower-bounds every read the base came from.
         // Measured against the head watermark — an HLC from replicated commits — never a local clock.
-        if (committedHeadWatermark != HLCTimestamp.Zero
-            && intent.TransactionId.L + stagedBaseFenceRetentionMs < committedHeadWatermark.L)
+        if (IsOlderThanRetention(intent.TransactionId, ledgerWatermark))
             return $"transaction began before the staged-base fence retention horizon; its validated base for key {intent.Key} cannot be verified";
 
-        if (!committedHeads.TryGetValue(intent.Key, out CommittedHead head))
+        if (!TryFindHead(intent.Key, out CommittedHead head))
         {
             // The only silent path around the fence: nothing to check is indistinguishable from "no commit
             // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
@@ -473,15 +564,21 @@ internal sealed class PreparedIntentStore
         }
 
         headRevision = head.Revision;
+        return JudgeBaseAgainstHead(intent.Key, intent.BaseRevision, intent.BaseState, head);
+    }
 
+    /// <summary>The base-versus-head rule shared by the advisory fence and the deterministic bundled commit
+    /// gate. Returns null to admit, or the conflict reason.</summary>
+    private static string? JudgeBaseAgainstHead(string key, long baseRevision, KeyValueState baseState, CommittedHead head)
+    {
         // BaseState says whether the validated base was an existing value (the finalize-input builder maps an
         // observed non-existent base to Undefined). PreparedIntent.UnknownBaseRevision (no base at all) never
         // reaches this method. A transactional delete recorded as the head keeps the key absent, so it is a
         // valid base for a validated-absent insert.
-        if (intent.BaseState != KeyValueState.Set)
+        if (baseState != KeyValueState.Set)
         {
             return head.State == KeyValueState.Set
-                ? $"committed base for key {intent.Key} changed after validation: validated absent, committed head is now revision {head.Revision}"
+                ? $"committed base for key {key} changed after validation: validated absent, committed head is now revision {head.Revision}"
                 : null;
         }
 
@@ -489,9 +586,118 @@ internal sealed class PreparedIntentStore
         // commit the read observed; a head behind the base means non-transactional writes advanced the key
         // after that commit — this memory can attest nothing newer there, and refusing would wedge every later
         // read-modify-write of the key until the entry ages out.
-        return head.Revision > intent.BaseRevision
-            ? $"committed base for key {intent.Key} changed after validation: validated revision {intent.BaseRevision}, committed head is now revision {head.Revision}"
+        return head.Revision > baseRevision
+            ? $"committed base for key {key} changed after validation: validated revision {baseRevision}, committed head is now revision {head.Revision}"
             : null;
+    }
+
+    /// <summary>Whether a transaction that began at <paramref name="transactionId"/> predates the retention
+    /// horizon measured from <paramref name="watermark"/>: its base or read may depend on a head the window no
+    /// longer retains, so nothing about it can be verified. Never true while the watermark is unset.</summary>
+    private bool IsOlderThanRetention(HLCTimestamp transactionId, HLCTimestamp watermark) =>
+        watermark != HLCTimestamp.Zero && transactionId.L + stagedBaseFenceRetentionMs < watermark.L;
+
+    /// <summary>Whether a head is inside the retention window measured from its slice's watermark — the
+    /// logical presence the bundled commit gate judges by, independent of physical pruning.</summary>
+    private bool IsWithinRetention(CommittedHead head, HLCTimestamp watermark) =>
+        head.CommittedAt.L >= watermark.L - stagedBaseFenceRetentionMs;
+
+    /// <summary>Finds a key's committed head across every ledger slice (the highest revision when several
+    /// slices remember the key — a range that moved between partitions leaves its history behind). Lock-free;
+    /// the advisory reads probe it per operation.</summary>
+    private bool TryFindHead(string key, out CommittedHead head)
+    {
+        head = default;
+        bool found = false;
+
+        foreach (PartitionLedger ledger in ledgers.Values)
+        {
+            if (ledger.Heads.TryGetValue(key, out CommittedHead candidate) && (!found || candidate.Revision > head.Revision))
+            {
+                head = candidate;
+                found = true;
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The deterministic verdict on a one-phase bundled commit at its apply position on
+    /// <paramref name="partitionId"/>'s log, consumed by the transaction-record store's bundled commit gate.
+    /// Every bundled key must be held by this transaction's live intent (the prepare applied earlier in the
+    /// same atomic batch). When the command asks for apply-time validation, each co-bundled intent's validated
+    /// base and each carried read-only dependency are additionally judged against the partition's ledger slice:
+    /// a foreign undecided or committed intent on a read key, a head above the validated base or the observed
+    /// revision, a value where absence was validated, or a transaction older than the slice's retention
+    /// horizon rejects. Only replicated state is consulted — the intent map, the slice's heads and its
+    /// watermark — so every replica of the partition reaches the same verdict for the same log entry.
+    /// Evaluated under the apply gate so the (intents, heads, watermark) read is one consistent state.
+    /// </summary>
+    internal BundledCommitJudgement JudgeBundledCommit(int partitionId, CommitTransactionCommand commit)
+    {
+        lock (applyGate)
+        {
+            ledgers.TryGetValue(partitionId, out PartitionLedger? ledger);
+            HLCTimestamp watermark = ledger?.Watermark ?? HLCTimestamp.Zero;
+
+            if (commit.BundledPrepareKeys is not null)
+            {
+                foreach (string bundledKey in commit.BundledPrepareKeys)
+                {
+                    if (!intents.TryGetValue(bundledKey, out PreparedIntent? intent)
+                        || intent.TransactionId != commit.TransactionId
+                        || intent.Epoch != commit.Epoch)
+                        return new(BundledCommitVerdict.PrepareMissing, $"bundled prepare for key {bundledKey} is not held by transaction {commit.TransactionId}");
+
+                    if (!commit.ApplyTimeValidation || !intent.HasValidatedBase)
+                        continue;
+
+                    if (IsOlderThanRetention(commit.TransactionId, watermark))
+                        return new(BundledCommitVerdict.StaleBase, $"transaction began before the ledger retention horizon; its validated base for key {bundledKey} cannot be verified");
+
+                    if (ledger is null
+                        || !ledger.Heads.TryGetValue(bundledKey, out CommittedHead head)
+                        || !IsWithinRetention(head, watermark))
+                        continue;
+
+                    string? conflict = JudgeBaseAgainstHead(bundledKey, intent.BaseRevision, intent.BaseState, head);
+                    if (conflict is not null)
+                        return new(BundledCommitVerdict.StaleBase, conflict);
+                }
+            }
+
+            if (!commit.ApplyTimeValidation || commit.BundledReadDependencies is not { Count: > 0 } reads)
+                return BundledCommitJudgement.Admitted;
+
+            if (IsOlderThanRetention(commit.TransactionId, watermark))
+                return new(BundledCommitVerdict.StaleRead, "transaction began before the ledger retention horizon; its read-set cannot be verified");
+
+            foreach (BundledReadDependency read in reads)
+            {
+                // A foreign intent on a read key is a competitor's write that this transaction's validation
+                // never saw: undecided, it may still commit over the read; committed, it already did. An
+                // aborted holder never materializes and is no objection.
+                if (intents.TryGetValue(read.Key, out PreparedIntent? holder)
+                    && (holder.TransactionId != commit.TransactionId || holder.Epoch != commit.Epoch)
+                    && holder.Resolution != PreparedIntentResolution.Aborted)
+                    return new(BundledCommitVerdict.StaleRead, $"read key {read.Key} is held by a live prepared intent of transaction {holder.TransactionId}");
+
+                if (ledger is null
+                    || !ledger.Heads.TryGetValue(read.Key, out CommittedHead head)
+                    || !IsWithinRetention(head, watermark))
+                    continue;
+
+                // The same rule as a validated base: an observed value is stale once a head moved past its
+                // revision; an observed absence is stale once a head made the key a value.
+                string? conflict = JudgeBaseAgainstHead(
+                    read.Key, read.ObservedRevision, read.ObservedExists ? KeyValueState.Set : KeyValueState.Undefined, head);
+                if (conflict is not null)
+                    return new(BundledCommitVerdict.StaleRead, conflict.Replace("committed base", "read dependency"));
+            }
+
+            return BundledCommitJudgement.Admitted;
+        }
     }
 
     /// <summary>
@@ -503,7 +709,7 @@ internal sealed class PreparedIntentStore
     /// </summary>
     internal bool TryGetCommittedHead(string key, out long revision, out KeyValueState state)
     {
-        if (committedHeads.TryGetValue(key, out CommittedHead head))
+        if (TryFindHead(key, out CommittedHead head))
         {
             revision = head.Revision;
             state = head.State;
@@ -515,9 +721,83 @@ internal sealed class PreparedIntentStore
         return false;
     }
 
-    /// <summary>Number of keys currently held in the committed-head memory. Observability only — logged in the
-    /// leadership-change fingerprint so a promotion with an empty memory is visible in the node log.</summary>
-    internal int CommittedHeadCount => committedHeads.Count;
+    /// <summary>Number of keys currently held across every committed-head ledger slice. Observability only —
+    /// logged in the leadership-change fingerprint so a promotion with an empty memory is visible in the node
+    /// log, and exported as a gauge.</summary>
+    internal int CommittedHeadCount
+    {
+        get
+        {
+            int count = 0;
+            foreach (PartitionLedger ledger in ledgers.Values)
+                count += ledger.Heads.Count;
+            return count;
+        }
+    }
+
+    /// <summary>Approximate bytes retained by every committed-head ledger slice (gauge).</summary>
+    internal long CommittedHeadLedgerBytes
+    {
+        get
+        {
+            long bytes = 0;
+            foreach (PartitionLedger ledger in ledgers.Values)
+                bytes += Volatile.Read(ref ledger.Bytes);
+            return bytes;
+        }
+    }
+
+    /// <summary>Per-partition (entries, bytes) of the committed-head ledger, for the tagged gauges. The
+    /// unattributed slice is reported under <see cref="UnattributedPartition"/>.</summary>
+    internal IReadOnlyList<(int PartitionId, long Entries, long Bytes)> SnapshotLedgerSizes()
+    {
+        List<(int, long, long)> sizes = new(ledgers.Count);
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
+            sizes.Add((slice.Key, slice.Value.Heads.Count, Volatile.Read(ref slice.Value.Bytes)));
+        return sizes;
+    }
+
+    /// <summary>The committed head a partition's ledger slice holds for <paramref name="key"/>, or false when
+    /// the slice holds none. Test/observability seam for the parity assertions: unlike
+    /// <see cref="TryGetCommittedHead"/> it reads exactly one slice, the state the bundled commit gate judges by.</summary>
+    internal bool TryGetLedgerHead(int partitionId, string key, out long revision, out KeyValueState state, out HLCTimestamp committedAt)
+    {
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) && ledger.Heads.TryGetValue(key, out CommittedHead head))
+        {
+            revision = head.Revision;
+            state = head.State;
+            committedAt = head.CommittedAt;
+            return true;
+        }
+
+        revision = -1;
+        state = KeyValueState.Undefined;
+        committedAt = HLCTimestamp.Zero;
+        return false;
+    }
+
+    /// <summary>A partition's ledger watermark (the highest commit timestamp its slice recorded), or Zero.</summary>
+    internal HLCTimestamp GetLedgerWatermark(int partitionId)
+    {
+        lock (applyGate)
+            return ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? ledger.Watermark : HLCTimestamp.Zero;
+    }
+
+    /// <summary>Every (key, revision, state, committedAt) a partition's ledger slice currently retains, sorted by
+    /// key. Test seam for cross-replica parity assertions.</summary>
+    internal IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> SnapshotLedger(int partitionId)
+    {
+        List<(string, long, KeyValueState, HLCTimestamp)> entries = [];
+
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
+        {
+            foreach (KeyValuePair<string, CommittedHead> kv in ledger.Heads)
+                entries.Add((kv.Key, kv.Value.Revision, kv.Value.State, kv.Value.CommittedAt));
+        }
+
+        entries.Sort(static (a, b) => string.CompareOrdinal(a.Item1, b.Item1));
+        return entries;
+    }
 
     /// <summary>Number of live prepared intents currently held. Observability only — logged in the
     /// leadership-change fingerprint alongside <see cref="CommittedHeadCount"/>.</summary>
@@ -532,7 +812,7 @@ internal sealed class PreparedIntentStore
     /// </summary>
     internal bool RequestConvergenceRepair(string key, long observedRevision)
     {
-        if (!committedHeads.TryGetValue(key, out CommittedHead head) || head.Revision <= observedRevision)
+        if (!TryFindHead(key, out CommittedHead head) || head.Revision <= observedRevision)
             return false;
 
         onFenceWedgeRepair?.Invoke(key, observedRevision, head.Revision);
@@ -564,7 +844,7 @@ internal sealed class PreparedIntentStore
                 {
                     verdicts[i] = new(
                         KeyValueStagedBaseVerdict.NotApplied,
-                        committedHeads.TryGetValue(keys[i], out CommittedHead head) ? head.Revision : -1);
+                        TryFindHead(keys[i], out CommittedHead head) ? head.Revision : -1);
                     continue;
                 }
 
@@ -652,49 +932,84 @@ internal sealed class PreparedIntentStore
         return false;
     }
 
-    /// <summary>Empties the committed-head memory, reproducing the state a process restart leaves: the memory
-    /// is in-memory only, so every restart opens a window where the fence has no head to judge against. Test
-    /// seam for driving that window deterministically; never called by production code.</summary>
+    /// <summary>Empties every committed-head ledger slice, reproducing the memory a node holds after it lost
+    /// its ledger (a snapshot written before the ledger existed, or an install from such a node): the fence
+    /// then has no head to judge against. Test seam for driving that window deterministically; never called by
+    /// production code.</summary>
     internal void ForgetCommittedHeadsForTesting()
     {
         lock (applyGate)
         {
-            committedHeads.Clear();
+            ledgers.Clear();
             fenceRefusalStreaks.Clear();
-            committedHeadWatermark = HLCTimestamp.Zero;
+            ledgerWatermark = HLCTimestamp.Zero;
         }
     }
 
-    /// <summary>Records a committed intent's mutation as its key's committed head and advances the pruning
-    /// watermark. Monotonic per key: an older revision never overwrites a newer one. Deliberately does not
-    /// touch the snapshot change stamp — the memory is advisory and never persisted. Caller holds
-    /// <see cref="applyGate"/>.</summary>
-    private void RecordCommittedHead(PreparedIntent intent)
+    /// <summary>Records a committed intent's mutation as its key's committed head in the slice of the
+    /// partition whose log delivered the settlement, and advances that slice's watermark. Monotonic per key:
+    /// an older revision never overwrites a newer one, so a replayed settlement is a no-op. Stamps the
+    /// partition dirty for the checkpoint guard, because the slice is persisted with the partition's intent
+    /// snapshot. Caller holds <see cref="applyGate"/>.</summary>
+    private void RecordCommittedHead(PreparedIntent intent, int partitionId)
     {
-        if (committedHeads.TryGetValue(intent.Key, out CommittedHead current) && current.Revision >= intent.Revision)
+        PartitionLedger ledger = ledgers.GetOrAdd(partitionId, static _ => new PartitionLedger());
+
+        bool existed = ledger.Heads.TryGetValue(intent.Key, out CommittedHead current);
+        if (existed && current.Revision >= intent.Revision)
             return;
 
-        committedHeads[intent.Key] = new(intent.Revision, intent.State, intent.CommitTimestamp);
+        ledger.Heads[intent.Key] = new(intent.Revision, intent.State, intent.CommitTimestamp);
+        if (!existed)
+            ledger.Bytes += LedgerEntryBytes(intent.Key);
 
         // The head moved: whatever refusal streak the key held was measured against the old pair.
         fenceRefusalStreaks.TryRemove(intent.Key, out _);
 
-        if (intent.CommitTimestamp > committedHeadWatermark)
-            committedHeadWatermark = intent.CommitTimestamp;
+        if (intent.CommitTimestamp > ledger.Watermark)
+            ledger.Watermark = intent.CommitTimestamp;
 
-        if (committedHeads.Count > CommittedHeadPruneTriggerCount)
-            PruneCommittedHeads();
+        if (intent.CommitTimestamp > ledgerWatermark)
+            ledgerWatermark = intent.CommitTimestamp;
+
+        StampPartitionDirty(partitionId);
+
+        // Physical prune once per retention bucket of commit time. Its timing is unobservable to any verdict
+        // (the gate judges by logical retention; see PartitionLedger), so it need not — and does not — line
+        // up with a log position.
+        long bucket = ledger.Watermark.L / LedgerPruneBucketMs;
+        if (bucket != ledger.PrunedBucket)
+        {
+            ledger.PrunedBucket = bucket;
+            PruneLedger(ledger);
+        }
     }
 
-    /// <summary>Drops committed-head entries older than the retention horizon. Size-triggered rather than
-    /// timer-driven, so quiet stores never scan. Safe because the staleness gate refuses any prepare whose
-    /// transaction is old enough to have depended on a pruned entry. Caller holds <see cref="applyGate"/>.</summary>
-    private void PruneCommittedHeads()
+    /// <summary>Marks one partition dirty for the checkpoint guard without consulting the routing resolver —
+    /// the ledger slice belongs to the partition whose log fed it, whatever the key currently routes to. An
+    /// unattributed slice (no log partition) dirties every partition; over-dirty is safe.</summary>
+    private void StampPartitionDirty(int partitionId)
     {
-        long cutoff = committedHeadWatermark.L - stagedBaseFenceRetentionMs;
+        long tick = Interlocked.Increment(ref version);
+
+        if (partitionId == UnattributedPartition)
+        {
+            StampMax(ref allPartitionsVersion, tick);
+            return;
+        }
+
+        partitionVersion.AddOrUpdate(partitionId, static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
+    }
+
+    /// <summary>Physically drops a slice's entries that fell outside its retention window. Removes only what
+    /// the window already treats as absent, so a verdict never depends on whether this ran. Bumps the prune
+    /// generation so a concurrent snapshot capture can detect the tear. Caller holds <see cref="applyGate"/>.</summary>
+    private void PruneLedger(PartitionLedger ledger)
+    {
+        long cutoff = ledger.Watermark.L - stagedBaseFenceRetentionMs;
 
         List<string>? expired = null;
-        foreach (KeyValuePair<string, CommittedHead> entry in committedHeads)
+        foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
         {
             if (entry.Value.CommittedAt.L < cutoff)
                 (expired ??= []).Add(entry.Key);
@@ -704,7 +1019,93 @@ internal sealed class PreparedIntentStore
             return;
 
         foreach (string key in expired)
-            committedHeads.TryRemove(key, out _);
+        {
+            if (ledger.Heads.TryRemove(key, out _))
+                ledger.Bytes -= LedgerEntryBytes(key);
+        }
+
+        ledger.PruneGeneration++;
+    }
+
+    /// <summary>Replaces one partition's ledger slice with an installed one (whole-partition state transfer):
+    /// the installed slice is the exporter's state at the snapshot boundary, which the entries that follow the
+    /// boundary then advance exactly as they did on the exporter. Under the apply gate so an apply cannot
+    /// interleave with the swap.</summary>
+    private void InstallLedger(int partitionId, IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads, HLCTimestamp watermark)
+    {
+        PartitionLedger ledger = new() { Watermark = watermark, PrunedBucket = watermark.L / LedgerPruneBucketMs };
+
+        foreach ((string key, long revision, KeyValueState state, HLCTimestamp committedAt) in heads)
+        {
+            if (ledger.Heads.TryAdd(key, new CommittedHead(revision, state, committedAt)))
+                ledger.Bytes += LedgerEntryBytes(key);
+        }
+
+        lock (applyGate)
+        {
+            ledgers[partitionId] = ledger;
+
+            if (watermark > ledgerWatermark)
+                ledgerWatermark = watermark;
+
+            StampPartitionDirty(partitionId);
+        }
+    }
+
+    /// <summary>Drops one partition's ledger slice — the un-host purge: when this node stops replicating the
+    /// partition its slice is dead retention (a re-gain installs the current one with the seeding snapshot).</summary>
+    internal void PurgePartitionLedger(int partitionId)
+    {
+        lock (applyGate)
+        {
+            if (ledgers.TryRemove(partitionId, out _))
+                StampPartitionDirty(partitionId);
+        }
+    }
+
+    /// <summary>
+    /// Captures one slice consistently for persistence: the watermark is read under the gate, the heads are
+    /// scanned lock-free, and the scan is repeated if a physical prune ran in between — a prune under a newer
+    /// watermark may drop a head the captured watermark still retains, and a snapshot that paired the two would
+    /// judge differently on reload than a replica that never restarted. Heads recorded after the watermark read
+    /// are harmless in the capture: the log entries that recorded them are replayed on top of it. Null when the
+    /// partition has no slice.
+    /// </summary>
+    private (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? CaptureLedger(int partitionId)
+    {
+        if (!ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
+            return null;
+
+        for (int attempt = 0; ; attempt++)
+        {
+            HLCTimestamp watermark;
+            long generation;
+            lock (applyGate)
+            {
+                watermark = ledger.Watermark;
+                generation = ledger.PruneGeneration;
+            }
+
+            List<KeyValuePair<string, CommittedHead>> heads = new(ledger.Heads.Count);
+            foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
+                heads.Add(entry);
+
+            lock (applyGate)
+            {
+                if (generation == ledger.PruneGeneration)
+                    return (watermark, heads);
+
+                // A prune tore the capture. Prunes are rare (once per retention bucket), so a rescan almost
+                // always succeeds; past a few attempts take the gate for the scan itself.
+                if (attempt >= 3)
+                {
+                    heads.Clear();
+                    foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
+                        heads.Add(entry);
+                    return (ledger.Watermark, heads);
+                }
+            }
+        }
     }
 
     /// <summary>The current intent at <paramref name="key"/>, or null. The emptiness pre-check is
@@ -783,9 +1184,9 @@ internal sealed class PreparedIntentStore
 
     // ── replication ─────────────────────────────────────────────────────────────
 
-    public bool Restore(int partitionId, RaftLog log) => ApplyLog(log);
+    public bool Restore(int partitionId, RaftLog log) => ApplyLog(log, partitionId);
 
-    public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log);
+    public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log, partitionId);
 
     // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
     // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
@@ -807,7 +1208,12 @@ internal sealed class PreparedIntentStore
     /// restore path (<see cref="Restore"/>) deliberately bypasses this method, so replayed history never
     /// vetoes; ordered live catch-up cannot produce a false flag, because heads advance in the same log order
     /// the prepares apply in.</para></summary>
-    public bool ApplyDeltaAckPrepares(RaftLog log)
+    public bool ApplyDeltaAckPrepares(RaftLog log) => ApplyDeltaAckPrepares(UnattributedPartition, log);
+
+    /// <inheritdoc cref="ApplyDeltaAckPrepares(RaftLog)"/>
+    /// <param name="partitionId">The partition whose log carries the delta; selects the committed-head ledger
+    /// slice its settlements feed (see <see cref="Apply(PreparedIntentCommand, int)"/>).</param>
+    public bool ApplyDeltaAckPrepares(int partitionId, RaftLog log)
     {
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
@@ -820,7 +1226,7 @@ internal sealed class PreparedIntentStore
 
         foreach (PreparedIntentCommand command in commands)
         {
-            PreparedIntentApplyResult result = Apply(command);
+            PreparedIntentApplyResult result = Apply(command, partitionId);
             if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
             {
                 allPreparesAccepted = false;
@@ -843,12 +1249,12 @@ internal sealed class PreparedIntentStore
 
         foreach (PreparedIntent intent in staleFlagged)
         {
-            committedHeads.TryGetValue(intent.Key, out CommittedHead head);
+            TryFindHead(intent.Key, out CommittedHead head);
             onStaleBaseVeto(intent, head.Revision);
         }
     }
 
-    private bool ApplyLog(RaftLog log)
+    private bool ApplyLog(RaftLog log, int partitionId)
     {
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
@@ -857,7 +1263,7 @@ internal sealed class PreparedIntentStore
             commands = DecodeDelta(log.LogData);
 
         foreach (PreparedIntentCommand command in commands)
-            Apply(command);
+            Apply(command, partitionId);
 
         return true;
     }
@@ -1471,9 +1877,17 @@ internal sealed class PreparedIntentStore
             // length-delimited under the repeated field's tag. Materializing one protobuf object per retained
             // intent plus one byte[] for the whole set made every checkpoint's allocation proportional to the
             // store size, which dominated the node's allocation profile whenever the retained set was large.
+            //
+            // The partition's committed-head ledger slice rides in the same file, captured BEFORE the intent
+            // scan: a bundled commit replayed from the WAL after a restart is judged against the reloaded
+            // ledger, and it is exact only if the ledger's position is no later than the intent set's (and
+            // the record store's, which the checkpoint captures after this file) — every entry between the
+            // ledger's position and the replayed commit is then re-applied on top of it in order.
             lock (fileLock)
             {
                 string tmp = path + ".tmp";
+
+                (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger = CaptureLedger(partitionId);
 
                 using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
                 using (CodedOutputStream output = new(file))
@@ -1489,6 +1903,8 @@ internal sealed class PreparedIntentStore
                         output.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
                         output.WriteMessage(entry);
                     }
+
+                    WriteLedgerSection(output, partitionId, ledger);
                 }
 
                 File.Move(tmp, path, overwrite: true);
@@ -1539,8 +1955,77 @@ internal sealed class PreparedIntentStore
 
             foreach (PreparedIntentCommandMessage entry in message.Intents)
                 MergeLoad(IntentOf(entry));
+
+            if (message.LedgerPresent)
+                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message));
+            else if (TryParsePartitionFromSnapshotPath(path, out int partitionId))
+                ledgerMissingPartitions.Add(partitionId);
         }
     }
+
+    // A per-partition snapshot file is named "{prefix}_p{partitionId}.snapshot".
+    private static bool TryParsePartitionFromSnapshotPath(string path, out int partitionId)
+    {
+        partitionId = 0;
+        string name = Path.GetFileNameWithoutExtension(path);
+        int marker = name.LastIndexOf("_p", StringComparison.Ordinal);
+        return marker >= 0 && int.TryParse(name.AsSpan(marker + 2), out partitionId);
+    }
+
+    /// <summary>Streams a partition's ledger slice (or an explicitly empty one) after the intents: each head
+    /// under the repeated field's tag, then the scalar trailer. The writer always marks the ledger present so a
+    /// reader can tell "empty ledger" from "written before the ledger existed".</summary>
+    private static void WriteLedgerSection(
+        CodedOutputStream output, int partitionId, (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger)
+    {
+        HLCTimestamp watermark = HLCTimestamp.Zero;
+
+        if (ledger is { } captured)
+        {
+            watermark = captured.Watermark;
+
+            CommittedHeadLedgerEntryMessage head = new();
+            foreach (KeyValuePair<string, CommittedHead> entry in captured.Heads)
+            {
+                FillLedgerEntry(head, entry.Key, entry.Value);
+                output.WriteTag(PreparedIntentSnapshotMessage.CommittedHeadsFieldNumber, WireFormat.WireType.LengthDelimited);
+                output.WriteMessage(head);
+            }
+        }
+
+        PreparedIntentSnapshotMessage trailer = new()
+        {
+            LedgerPresent = true,
+            LedgerPartitionId = partitionId,
+            LedgerWatermarkNode = watermark.N,
+            LedgerWatermarkPhysical = watermark.L,
+            LedgerWatermarkCounter = watermark.C
+        };
+
+        trailer.WriteTo(output);
+    }
+
+    private static void FillLedgerEntry(CommittedHeadLedgerEntryMessage m, string key, CommittedHead head)
+    {
+        m.Key = key;
+        m.Revision = head.Revision;
+        m.State = (int)head.State;
+        m.CommittedAtNode = head.CommittedAt.N;
+        m.CommittedAtPhysical = head.CommittedAt.L;
+        m.CommittedAtCounter = head.CommittedAt.C;
+    }
+
+    private static List<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> LedgerEntriesOf(PreparedIntentSnapshotMessage message)
+    {
+        List<(string, long, KeyValueState, HLCTimestamp)> entries = new(message.CommittedHeads.Count);
+        foreach (CommittedHeadLedgerEntryMessage head in message.CommittedHeads)
+            entries.Add((head.Key, head.Revision, (KeyValueState)head.State,
+                new HLCTimestamp(head.CommittedAtNode, head.CommittedAtPhysical, head.CommittedAtCounter)));
+        return entries;
+    }
+
+    private static HLCTimestamp LedgerWatermarkOf(PreparedIntentSnapshotMessage message) =>
+        new(message.LedgerWatermarkNode, message.LedgerWatermarkPhysical, message.LedgerWatermarkCounter);
 
     // Load-time merge across (possibly overlapping) per-partition files: at most one live intent per key. A more
     // resolved intent for the same identity is authoritative; a different transaction on the same key is a
@@ -1686,6 +2171,92 @@ internal sealed class PreparedIntentStore
             MergeLoad(intent);
 
         SignalFenceWaiters();
+    }
+
+    /// <summary>
+    /// The intents and the committed-head ledger slice of one partition as a whole-partition snapshot carries
+    /// them, decoded by <see cref="DeserializePartitionIntents"/>. The ledger is captured before the intents
+    /// so its position is no later than theirs (see <see cref="PersistSnapshot"/>). A section written by a
+    /// build that predates the ledger decodes with a null ledger.
+    /// </summary>
+    internal sealed record PartitionIntentSection(
+        IReadOnlyList<PreparedIntent> Intents,
+        IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)>? Ledger,
+        HLCTimestamp LedgerWatermark);
+
+    /// <summary>Serializes one partition's intents together with its committed-head ledger slice, for
+    /// whole-partition state transfer. The ledger is captured first so its position is no later than the
+    /// intents' — a seeded replica then re-applies every entry after the snapshot boundary on top of a ledger
+    /// that is exact at or before each of them.</summary>
+    public byte[] SerializePartitionIntents(int partitionId, IReadOnlyList<PreparedIntent> partitionIntents)
+    {
+        (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger = CaptureLedger(partitionId);
+
+        PreparedIntentSnapshotMessage message = new()
+        {
+            LedgerPresent = true,
+            LedgerPartitionId = partitionId
+        };
+
+        foreach (PreparedIntent intent in partitionIntents)
+            message.Intents.Add(PrepareProtoOf(intent));
+
+        if (ledger is { } captured)
+        {
+            message.LedgerWatermarkNode = captured.Watermark.N;
+            message.LedgerWatermarkPhysical = captured.Watermark.L;
+            message.LedgerWatermarkCounter = captured.Watermark.C;
+
+            foreach (KeyValuePair<string, CommittedHead> entry in captured.Heads)
+            {
+                CommittedHeadLedgerEntryMessage head = new();
+                FillLedgerEntry(head, entry.Key, entry.Value);
+                message.CommittedHeads.Add(head);
+            }
+        }
+
+        return ReplicationSerializer.Serialize(message);
+    }
+
+    /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> (or, with a null ledger,
+    /// by the ledgerless <see cref="SerializeIntents"/> of an older build).</summary>
+    public static PartitionIntentSection DeserializePartitionIntents(byte[] data)
+    {
+        PreparedIntentSnapshotMessage message = ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data);
+
+        List<PreparedIntent> result = new(message.Intents.Count);
+        foreach (PreparedIntentCommandMessage entry in message.Intents)
+            result.Add(IntentOf(entry));
+
+        return new PartitionIntentSection(
+            result,
+            message.LedgerPresent ? LedgerEntriesOf(message) : null,
+            message.LedgerPresent ? LedgerWatermarkOf(message) : HLCTimestamp.Zero);
+    }
+
+    /// <summary>
+    /// Installs a whole-partition snapshot's intents and ledger slice (idempotent for the intents; the slice
+    /// replaces this node's slice for the partition, which a seeding install has made dead retention). A
+    /// section without a ledger — written by a build that predates it — leaves the slice empty exactly as
+    /// that build would hold it; a node that applies the extended bundled commit gate must refuse such a
+    /// section (<paramref name="requireLedger"/>), because judging with an empty slice where the exporter's
+    /// peers hold heads would fork the record state machine.
+    /// </summary>
+    public void ImportPartitionIntents(int partitionId, PartitionIntentSection section, bool requireLedger)
+    {
+        if (section.Ledger is null)
+        {
+            if (requireLedger)
+                throw new InvalidDataException(
+                    $"Partition {partitionId} snapshot carries no committed-head ledger (written by a build that predates it); " +
+                    "refusing to install it while OnePhaseApplyTimeValidation is enabled, because this node would judge bundled commits differently from its replicas.");
+
+            PurgePartitionLedger(partitionId);
+        }
+        else
+            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark);
+
+        ImportIntents(section.Intents);
     }
 
     public static byte[] SerializeIntents(IEnumerable<PreparedIntent> intents)

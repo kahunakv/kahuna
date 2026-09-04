@@ -61,6 +61,27 @@ message TransactionRecordCommandMessage {
   // replica. A rejected prepare (another transaction owns a key) must reject the bundled decision with it;
   // otherwise the record would durably say Commit for a mutation that was never durably prepared.
   repeated string bundledPrepareKeys = 26;
+
+  // commit only, with bundledPrepareKeys: when true, the bundled commit additionally proves its read-set at
+  // apply time, in log order, against the partition's replicated committed-head ledger — every co-bundled
+  // intent's validated base, and every read-only dependency listed below, must still hold. A base or read
+  // that a competitor's settled commit moved past rejects the transition exactly as a rejected prepare does.
+  // An applier that predates this field ignores it and commits where a current one refuses, which is why
+  // the producer only sets it once every node in the group applies it.
+  bool applyTimeValidation = 27;
+
+  // commit only, with applyTimeValidation: the transaction's read-only point dependencies whose key routes to
+  // the anchor partition, each with the committed state the transaction observed. Judged at apply against the
+  // live intent set (a foreign undecided intent on the key rejects) and the committed-head ledger (a head
+  // above the observed revision, or a value where absence was observed, rejects).
+  repeated BundledReadDependencyMessage bundledReadDependencies = 28;
+}
+
+// One read-only dependency carried by a one-phase bundled commit (see bundledReadDependencies).
+message BundledReadDependencyMessage {
+  string key = 1;
+  int64  observedRevision = 2;
+  bool   observedExists = 3;
 }
 
 // A batch of transitions committing as a single atomic data-partition log entry. Applied in order; each
@@ -105,6 +126,18 @@ message TransactionRecordSnapshotEntry {
   int32  decidedAtNode     = 24;
   int64  decidedAtPhysical = 25;
   uint32 decidedAtCounter  = 26;
+
+  // Operation ids of one-phase bundled commits the bundled commit gate rejected while the record was
+  // Undecided. A rejected bundled commit replayed from the log (WAL restore, or the entries after a
+  // snapshot boundary) is rejected again by this memo without re-judging it: the ledger it was judged
+  // against may since have moved, and a replay that re-judged could admit what the live apply refused.
+  repeated TransactionRecordRejectedBundledCommitMessage rejectedBundledCommits = 27;
+}
+
+message TransactionRecordRejectedBundledCommitMessage {
+  int32  opIdNode     = 1;
+  int64  opIdPhysical = 2;
+  uint32 opIdCounter  = 3;
 }
 
 message TransactionRecordSnapshotMessage {

@@ -236,7 +236,26 @@ public sealed class TestDurableIntentPersistence : IDisposable
         store.Apply(new PrepareIntentCommand(Intent(1000, 1, "row/1")));
         Assert.True(store.PersistSnapshot(PartitionId));
 
-        byte[] expected = PreparedIntentStore.SerializeIntents([store.Get("row/1")!]);
+        // The streamed file carries the partition's committed-head ledger section after the intents, exactly
+        // as the whole-partition serializer writes it (here an explicitly present, empty ledger).
+        byte[] expected = store.SerializePartitionIntents(PartitionId, [store.Get("row/1")!]);
+        Assert.Equal(expected, File.ReadAllBytes(Path.Combine(dir, $"preparedintent_rev_p{PartitionId}.snapshot")));
+    }
+
+    [Fact]
+    public void IntentStore_StreamedSnapshot_WithLedger_ByteIdenticalToMessageSerialization()
+    {
+        PreparedIntentStore store = new(dir, "rev", null);
+        store.AttachPartitionResolver(_ => PartitionId);
+
+        // A settled commit through the partition's log leaves a head in its ledger slice; a live intent stays.
+        store.Apply(new PrepareIntentCommand(Intent(1000, 1, "row/1")), PartitionId);
+        store.Apply(new ResolveIntentCommand(Ts(1000), 1, "row/1", Commit: true), PartitionId);
+        store.Apply(new RemoveIntentCommand(Ts(1000), 1, "row/1"), PartitionId);
+        store.Apply(new PrepareIntentCommand(Intent(2000, 1, "row/2")), PartitionId);
+        Assert.True(store.PersistSnapshot(PartitionId));
+
+        byte[] expected = store.SerializePartitionIntents(PartitionId, [store.Get("row/2")!]);
         Assert.Equal(expected, File.ReadAllBytes(Path.Combine(dir, $"preparedintent_rev_p{PartitionId}.snapshot")));
     }
 

@@ -23,7 +23,7 @@ public abstract class BaseCluster
     /// </summary>
     private const int ElectionTimeoutSeedBase = 91000;
 
-    private static (IRaft, IKahuna) GetNode1(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
+    private static (IRaft, IKahuna) GetNode1(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null, Func<Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor, Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
 
@@ -87,7 +87,9 @@ public abstract class BaseCluster
         configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
-        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
+        KahunaManager kahuna = writeBatchExecutorDecorator is null
+            ? new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger)
+            : new(actorSystem, raft, configuration, interNodeCommmunication, (Kommander.WAL.RocksDbSharedResources?)null, kahunaLogger, raftLogger, writeBatchExecutorDecorator);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -99,7 +101,7 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    private static (IRaft, IKahuna) GetNode2(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
+    private static (IRaft, IKahuna) GetNode2(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null, Func<Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor, Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
 
@@ -159,7 +161,9 @@ public abstract class BaseCluster
         configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
-        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
+        KahunaManager kahuna = writeBatchExecutorDecorator is null
+            ? new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger)
+            : new(actorSystem, raft, configuration, interNodeCommmunication, (Kommander.WAL.RocksDbSharedResources?)null, kahunaLogger, raftLogger, writeBatchExecutorDecorator);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -171,7 +175,7 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    private static (IRaft, IKahuna) GetNode3(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
+    private static (IRaft, IKahuna) GetNode3(MemoryInterNodeCommmunication interNodeCommmunication, InMemoryCommunication communication, string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null, Func<Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor, Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
 
@@ -231,7 +235,9 @@ public abstract class BaseCluster
         configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
-        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger);
+        KahunaManager kahuna = writeBatchExecutorDecorator is null
+            ? new(actorSystem, raft, configuration, interNodeCommmunication, kahunaLogger)
+            : new(actorSystem, raft, configuration, interNodeCommmunication, (Kommander.WAL.RocksDbSharedResources?)null, kahunaLogger, raftLogger, writeBatchExecutorDecorator);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -243,14 +249,17 @@ public abstract class BaseCluster
         return (raft, kahuna);
     }
     
-    protected static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null)
+    /// <param name="decorateWriteBatchExecutor">Optional per-node decorator over the key/value write aggregator's
+    /// Raft batch executor, keyed by node id (1..3), so a test can capture, stall or replay a node's batches
+    /// while driving the real public entry points. Null for a node keeps the real executor.</param>
+    internal static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null, Func<int, Func<Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor, Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor>?>? decorateWriteBatchExecutor = null)
     {
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNodeCommmunication = new();
 
-        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
-        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
-        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure);
+        (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure, decorateWriteBatchExecutor?.Invoke(1));
+        (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure, decorateWriteBatchExecutor?.Invoke(2));
+        (IRaft raft3, IKahuna kahuna3) = GetNode3(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure, decorateWriteBatchExecutor?.Invoke(3));
 
         await WaitForClusterToAssemble(interNodeCommmunication, raftCommunication, partitions, raft1, raft2, raft3, kahuna1, kahuna2, kahuna3);
 

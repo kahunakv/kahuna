@@ -1713,6 +1713,8 @@ internal sealed class TransactionCoordinator : IDisposable
         // before reporting a definite abort. Cleared below only on a record-backed terminal outcome.
         context.UnresolvedDurableFinalize = input;
 
+        OnePhaseEligibility eligibility = ComputeOnePhaseEligibility(context, input);
+
         DurableFinalizeOutcome outcome;
         try
         {
@@ -1726,27 +1728,9 @@ internal sealed class TransactionCoordinator : IDisposable
                 },
                 opId,
                 cancellationToken,
-                // A read set reaching beyond the written keys disqualifies the one-phase bundle because
-                // apply-time re-checks cover only written keys — a stalled bundle surfacing after a
-                // leader change would decide on a long-stale read validation. In a single-process Raft
-                // group that stall cannot exist (no remote replica can resurrect an in-flight proposal;
-                // a committed bundle replays during restore ahead of any later conflicting write), so
-                // read-carrying transactions stay one-phase eligible there. See
-                // <see cref="KahunaConfiguration.SingleProcessRaftGroup"/> for the full argument.
-                //
-                // A validated base (a read-then-written key) disqualifies the bundle for the same shape of
-                // reason: on the 2PC path a competitor that commits the same base between the pre-propose
-                // probe and this transaction's prepare landing (the bank-soak lost update) is caught by the
-                // intent store's staged-base fence at prepare apply, but the bundle's decision shares the
-                // prepare's atomic batch, so a refused acknowledgement cannot withhold it — the bundle's only
-                // guard is its pre-propose re-validation, whose unguarded tail is the validate→apply gap of
-                // the proposal. Multi-process only, matching the read-set rule: a multi-process stalled bundle
-                // can apply arbitrarily late, making that tail unbounded; in a single-process group it is a
-                // sub-millisecond in-process window behind a lease lapse, accepted as a residual in exchange
-                // for the embedded fast path.
-                readSetExtendsBeyondWrites: !configuration.SingleProcessRaftGroup
-                    && (HasReadDependenciesBeyondWrites(context)
-                        || context.WrittenBaseObservations is { Count: > 0 })).ConfigureAwait(false);
+                readSetExtendsBeyondWrites: eligibility.ReadSetExtendsBeyondWrites,
+                applyTimeValidation: eligibility.ApplyTimeValidation,
+                bundledReadDependencies: eligibility.OnPartitionReadDependencies).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -1889,15 +1873,103 @@ internal sealed class TransactionCoordinator : IDisposable
             || context.Locking == KeyValueTransactionLocking.Optimistic;
     }
 
+    /// <summary>The one-phase bundle's eligibility inputs for one finalize, computed by
+    /// <see cref="ComputeOnePhaseEligibility"/>.</summary>
+    /// <param name="ReadSetExtendsBeyondWrites">A validated dependency exists that the bundle cannot re-check at
+    /// apply time; keeps the bundle closed (the standard 2PC flow runs).</param>
+    /// <param name="ApplyTimeValidation">The bundled commit must be validated at apply time against the
+    /// partition's replicated committed-head ledger.</param>
+    /// <param name="OnPartitionReadDependencies">The read-only point dependencies routed to the anchor
+    /// partition, carried into the bundled commit for that apply-time check; null when none or when the check
+    /// is off.</param>
+    private readonly record struct OnePhaseEligibility(
+        bool ReadSetExtendsBeyondWrites,
+        bool ApplyTimeValidation,
+        IReadOnlyList<BundledReadDependency>? OnPartitionReadDependencies);
+
+    /// <summary>
+    /// Decides which of the transaction's validated dependencies keep the one-phase bundle closed and which
+    /// ride into the bundled commit for its apply-time check.
+    ///
+    /// <para><b>Without apply-time validation</b> (<see cref="KahunaConfiguration.OnePhaseApplyTimeValidation"/>
+    /// off), any read set reaching beyond the written keys disqualifies the bundle, because its apply-time
+    /// re-checks then cover only written keys — a stalled bundle surfacing after a leader change would decide
+    /// on a long-stale read validation. A validated base (a read-then-written key) disqualifies it for the same
+    /// shape of reason: on the 2PC path a competitor that commits the same base between the pre-propose probe
+    /// and this transaction's prepare landing (the bank-soak lost update) is caught by the intent store's
+    /// staged-base fence at prepare apply, but the bundle's decision shares the prepare's atomic batch, so a
+    /// refused acknowledgement cannot withhold it — the bundle's only guard is its pre-propose re-validation,
+    /// whose unguarded tail is the validate→apply gap of the proposal. Both rules apply in multi-process groups
+    /// only: a multi-process stalled bundle can apply arbitrarily late, making that tail unbounded; in a
+    /// single-process group (<see cref="KahunaConfiguration.SingleProcessRaftGroup"/>) no remote replica can
+    /// resurrect an in-flight proposal and a committed bundle replays during restore ahead of any later
+    /// conflicting write, so the tail is a sub-millisecond in-process window accepted as a residual in exchange
+    /// for the embedded fast path.</para>
+    ///
+    /// <para><b>With apply-time validation</b>, the bundled commit proves its read-set at apply, in log order,
+    /// against the partition's replicated committed-head ledger: every co-bundled validated base, and every
+    /// read-only point dependency whose key routes to the anchor partition (carried in the command). Validated
+    /// bases therefore no longer close the bundle, and neither do on-partition point reads. What still closes it
+    /// is a dependency no deterministic apply-time check exists for: a prefix or range lock (a predicate, not a
+    /// key), a read-only key routed to another partition (no cross-partition state at apply), or a read-only
+    /// key of a non-persistent durability (its writes never feed the ledger). Routing uses the same locate the
+    /// finalize-input builder froze the intents with, so a read and a write of one key agree on the partition.</para>
+    /// </summary>
+    private OnePhaseEligibility ComputeOnePhaseEligibility(TransactionContext context, DurableFinalizeInput input)
+    {
+        if (!configuration.OnePhaseApplyTimeValidation)
+        {
+            bool closed = !configuration.SingleProcessRaftGroup
+                && (HasReadDependenciesBeyondWrites(context)
+                    || context.WrittenBaseObservations is { Count: > 0 });
+
+            return new OnePhaseEligibility(closed, ApplyTimeValidation: false, OnPartitionReadDependencies: null);
+        }
+
+        List<BundledReadDependency>? onPartitionReads = null;
+        bool hasPredicateOrOffPartitionReads = false;
+
+        if (RequiresReadSetValidation(context))
+        {
+            if (context.PrefixLocksAcquired is { Count: > 0 } || context.RangeLocksAcquired is { Count: > 0 })
+                hasPredicateOrOffPartitionReads = true;
+
+            if (context.ReadKeys is { Count: > 0 })
+            {
+                foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+                {
+                    if (string.IsNullOrEmpty(readKey.Key))
+                        continue;
+
+                    if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
+                        continue;
+
+                    if (readKey.Durability != KeyValueDurability.Persistent
+                        || manager.LocateDurablePartition(readKey.Key).PartitionId != input.AnchorPartitionId)
+                    {
+                        hasPredicateOrOffPartitionReads = true;
+                        continue;
+                    }
+
+                    (onPartitionReads ??= []).Add(new BundledReadDependency(readKey.Key, readKey.Revision, readKey.Exists));
+                }
+            }
+        }
+
+        return new OnePhaseEligibility(
+            ReadSetExtendsBeyondWrites: !configuration.SingleProcessRaftGroup && hasPredicateOrOffPartitionReads,
+            ApplyTimeValidation: true,
+            OnPartitionReadDependencies: onPartitionReads);
+    }
+
     /// <summary>
     /// Whether the transaction's validated read footprint reaches beyond the keys it writes: a point read of a
     /// key it never modifies, or any prefix/range lock (a scan's footprint). Written keys carrying a validated
     /// base are re-fenced at prepare apply (the intent store's staged-base fence refuses the prepare
     /// acknowledgement when the base moved), but a read-only dependency is protected solely by commit-time
-    /// validation — so the finalize path must not choose a protocol that lets the decision apply after that
-    /// validation can no longer be trusted. The bundled-prepare gate verifies intent presence only, and
-    /// decision-apply gates only on the frozen deadline. Always false when the read set is not validated at
-    /// all, since no read-stability promise exists to protect.
+    /// validation — so, without apply-time validation of the bundle, the finalize path must not choose a
+    /// protocol that lets the decision apply after that validation can no longer be trusted. Always false when
+    /// the read set is not validated at all, since no read-stability promise exists to protect.
     /// </summary>
     private static bool HasReadDependenciesBeyondWrites(TransactionContext context)
     {

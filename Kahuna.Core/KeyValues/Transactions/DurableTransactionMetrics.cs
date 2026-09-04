@@ -440,6 +440,51 @@ internal static class DurableTransactionMetrics
             description: "One-phase bundled commits rejected because their bundled prepare did not take ownership of every key.");
 
     /// <summary>
+    /// One-phase bundled commits rejected at apply because a co-bundled intent's validated base had been moved
+    /// past by a settled commit before the bundle applied (or the transaction outlived the ledger's retention
+    /// horizon) — the lost-update shape of a stalled bundle, caught in log order against the partition's
+    /// replicated committed-head ledger. Each occurrence is a prevented lost update; the proposing finalizer
+    /// drives a truthful conflict abort from it. Counted on every replica that applies the rejection.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseGatedCommitStaleBaseRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_gated_commit_stale_base_rejections",
+            description: "One-phase bundled commits rejected at apply because a validated base moved before the bundle applied.");
+
+    /// <summary>
+    /// One-phase bundled commits rejected at apply because a carried read-only dependency no longer held: a
+    /// foreign undecided or committed intent held the read key, or the ledger's head had moved past the observed
+    /// state — the write-skew shape of a stalled bundle, caught in log order. Each occurrence is a prevented
+    /// write skew; the proposing finalizer drives a truthful conflict abort from it.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseGatedCommitStaleReadRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_gated_commit_stale_read_rejections",
+            description: "One-phase bundled commits rejected at apply because a read-only dependency moved before the bundle applied.");
+
+    private static long onePhaseGatedCommitStaleBaseRejections;
+
+    private static long onePhaseGatedCommitStaleReadRejections;
+
+    /// <summary>Process-wide count behind <see cref="OnePhaseGatedCommitStaleBaseRejections"/>, readable for tests.</summary>
+    internal static long OnePhaseGatedCommitStaleBaseRejectionsCount => Interlocked.Read(ref onePhaseGatedCommitStaleBaseRejections);
+
+    /// <summary>Process-wide count behind <see cref="OnePhaseGatedCommitStaleReadRejections"/>, readable for tests.</summary>
+    internal static long OnePhaseGatedCommitStaleReadRejectionsCount => Interlocked.Read(ref onePhaseGatedCommitStaleReadRejections);
+
+    internal static void OnePhaseGatedCommitStaleBaseRejected()
+    {
+        Interlocked.Increment(ref onePhaseGatedCommitStaleBaseRejections);
+        OnePhaseGatedCommitStaleBaseRejections.Add(1);
+    }
+
+    internal static void OnePhaseGatedCommitStaleReadRejected()
+    {
+        Interlocked.Increment(ref onePhaseGatedCommitStaleReadRejections);
+        OnePhaseGatedCommitStaleReadRejections.Add(1);
+    }
+
+    /// <summary>
     /// Wall time of the finalize's prepare stage: record init + every participant prepare (anchor-bundled when
     /// available), including the bounded conflict-retry loop. Ends when the prepare barrier resolves, before
     /// read-set validation. Compare against <see cref="FinalizeValidateMs"/>/<see cref="FinalizeDecisionMs"/> to
@@ -613,9 +658,21 @@ internal static class DurableTransactionMetrics
         Func<long> receiptCount,
         Func<long> preparedIntentCount,
         Func<long> preparedIntentBytes,
-        Func<long> outstandingDurable)
+        Func<long> outstandingDurable,
+        Func<IReadOnlyList<(int PartitionId, long Entries, long Bytes)>>? committedHeadLedgerSizes = null)
     {
         Meter gaugeMeter = new("Kahuna", "1.0");
+
+        if (committedHeadLedgerSizes is not null)
+        {
+            // Tagged by partition: cardinality is the node's hosted partition count, which is small and bounded.
+            gaugeMeter.CreateObservableGauge("kahuna.durable_tx.committed_head_ledger_entries",
+                () => LedgerMeasurements(committedHeadLedgerSizes(), static size => size.Entries),
+                description: "Keys retained by the committed-head ledger, per partition (bounded by the staged-base fence retention).");
+            gaugeMeter.CreateObservableGauge("kahuna.durable_tx.committed_head_ledger_bytes",
+                () => LedgerMeasurements(committedHeadLedgerSizes(), static size => size.Bytes),
+                unit: "By", description: "Approximate bytes retained by the committed-head ledger, per partition.");
+        }
         gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_records", recordCount,
             description: "Canonical transaction records resident on this node (awaiting retention GC).");
         gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_receipts", receiptCount,
@@ -627,5 +684,15 @@ internal static class DurableTransactionMetrics
         gaugeMeter.CreateObservableGauge("kahuna.durable_tx.outstanding", outstandingDurable,
             description: "Durable transactions currently being driven through finalize (admission-gated).");
         return gaugeMeter;
+    }
+
+    private static IEnumerable<Measurement<long>> LedgerMeasurements(
+        IReadOnlyList<(int PartitionId, long Entries, long Bytes)> sizes,
+        Func<(int PartitionId, long Entries, long Bytes), long> select)
+    {
+        List<Measurement<long>> measurements = new(sizes.Count);
+        foreach ((int PartitionId, long Entries, long Bytes) size in sizes)
+            measurements.Add(new Measurement<long>(select(size), new KeyValuePair<string, object?>("partition", size.PartitionId)));
+        return measurements;
     }
 }

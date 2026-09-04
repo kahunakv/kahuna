@@ -77,9 +77,35 @@ message PreparedIntentDeltaMessage {
   PreparedIntentDeltaHeaderMessage header = 2;
 }
 
+// One key's last transactionally committed head as remembered by the committed-head ledger: the revision
+// and state the key reached when that commit's settlement applied, and the commit timestamp the ledger's
+// retention horizon is measured against.
+message CommittedHeadLedgerEntryMessage {
+  string key = 1;
+  int64  revision = 2;
+  int32  state = 3; // KeyValueState
+  int32  committedAtNode     = 4;
+  int64  committedAtPhysical = 5;
+  uint32 committedAtCounter  = 6;
+}
+
 // The full materialized intent set of a data partition, for the durable on-disk snapshot and whole-partition
 // state transfer. Each entry is a PREPARE-kind command message, which already carries every intent field
 // including its current resolution, so no separate entry shape is needed.
+//
+// Fields 2-7 carry the partition's committed-head ledger: the per-key heads fed by this partition's commit
+// settlements and the watermark (the highest commit timestamp among them) that bounds the ledger's
+// retention window. A reader that installs the intents must install the ledger with them, because the
+// one-phase bundled commit gate judges a stalled bundle's validated base against exactly this state at
+// apply time — a replica whose ledger differs from its peers' would decide a commit differently.
+// ledgerPresent distinguishes a writer that persisted the ledger (possibly empty) from a snapshot written
+// before the ledger existed; a reader that requires the ledger fails closed on the latter.
 message PreparedIntentSnapshotMessage {
   repeated PreparedIntentCommandMessage intents = 1;
+  repeated CommittedHeadLedgerEntryMessage committedHeads = 2;
+  bool   ledgerPresent = 3;
+  int32  ledgerPartitionId = 4;
+  int32  ledgerWatermarkNode     = 5;
+  int64  ledgerWatermarkPhysical = 6;
+  uint32 ledgerWatermarkCounter  = 7;
 }

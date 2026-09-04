@@ -421,6 +421,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             ScanPageRetryBudgetMs = options.ScanPageRetryBudgetMs,
             SessionOwnedIntentCeilingMs = options.SessionOwnedIntentCeilingMs,
             StagedBaseFenceRetentionMs = options.StagedBaseFenceRetentionMs,
+            OnePhaseApplyTimeValidation = options.OnePhaseApplyTimeValidation,
             SingleProcessRaftGroup = singleProcessRaftGroup
         }, options.WalPath);
     }

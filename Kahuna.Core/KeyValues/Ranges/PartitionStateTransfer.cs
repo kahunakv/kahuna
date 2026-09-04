@@ -2,6 +2,7 @@
 using Google.Protobuf;
 using Kommander;
 using Kommander.Data;
+using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions;
@@ -110,6 +111,9 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     private readonly ILogger<IKahuna> logger;
 
+    // Whether an installed partition snapshot must carry the committed-head ledger (see ImportPartitionState).
+    private readonly bool requireLedgerOnInstall;
+
     public PartitionStateTransfer(
         PartitionDataEnumerator enumerator,
         IPersistenceBackend persistenceBackend,
@@ -121,8 +125,10 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         Func<Task> drainPersistence,
         string? storagePath,
         string storageRevision,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        bool requireLedgerOnInstall = false)
     {
+        this.requireLedgerOnInstall = requireLedgerOnInstall;
         this.enumerator = enumerator;
         this.persistenceBackend = persistenceBackend;
         this.completionReceiptStore = completionReceiptStore;
@@ -172,12 +178,20 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     private void WriteStoreSection(Stream stream, int partitionId, RangeMap map)
     {
-        List<CompletionReceiptRecord> receipts = [];
-        foreach (CompletionReceiptRecord record in completionReceiptStore.SnapshotRange(null, null))
+        // The intent side (intents plus the partition's committed-head ledger) is captured BEFORE the record
+        // side, and the order is load-bearing: the installing replica re-judges every bundled commit delivered
+        // after the boundary against the installed intent set and ledger, unless the installed record already
+        // carries the outcome. Capturing the intent side first puts its position at or before the record
+        // side's, so each such commit is either already decided in the records or judged against intent/ledger
+        // state that is exact at its position once the entries between them are applied.
+        List<PreparedIntent> intents = [];
+        foreach (PreparedIntent intent in preparedIntentStore.SnapshotRange(null, null))
         {
-            if (PartitionDataEnumerator.OwnerOfKey(map, record.Key, hashPoolSize) == partitionId)
-                receipts.Add(record);
+            if (PartitionDataEnumerator.OwnerOfKey(map, intent.Key, hashPoolSize) == partitionId)
+                intents.Add(intent);
         }
+
+        byte[] intentSection = preparedIntentStore.SerializePartitionIntents(partitionId, intents);
 
         List<TransactionRecord> records = [];
         foreach (TransactionRecord record in transactionRecordStore.SnapshotRange(null, null))
@@ -186,11 +200,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 records.Add(record);
         }
 
-        List<PreparedIntent> intents = [];
-        foreach (PreparedIntent intent in preparedIntentStore.SnapshotRange(null, null))
+        List<CompletionReceiptRecord> receipts = [];
+        foreach (CompletionReceiptRecord record in completionReceiptStore.SnapshotRange(null, null))
         {
-            if (PartitionDataEnumerator.OwnerOfKey(map, intent.Key, hashPoolSize) == partitionId)
-                intents.Add(intent);
+            if (PartitionDataEnumerator.OwnerOfKey(map, record.Key, hashPoolSize) == partitionId)
+                receipts.Add(record);
         }
 
         PartitionStateStoreSection section = new()
@@ -201,9 +215,9 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             TransactionRecords = records.Count > 0
                 ? UnsafeByteOperations.UnsafeWrap(TransactionRecordStore.SerializeRecords(records))
                 : ByteString.Empty,
-            PreparedIntents = intents.Count > 0
-                ? UnsafeByteOperations.UnsafeWrap(PreparedIntentStore.SerializeIntents(intents))
-                : ByteString.Empty
+            // Always written, even with no intents: the section carries the ledger (possibly empty) and the
+            // marker that tells the importer it was written by a build that has one.
+            PreparedIntents = UnsafeByteOperations.UnsafeWrap(intentSection)
         };
 
         section.Checksum = StoreChecksumOf(section);
@@ -272,10 +286,17 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         IReadOnlyList<TransactionRecord> records = section.TransactionRecords.Length > 0
             ? TransactionRecordStore.DeserializeRecords(section.TransactionRecords.ToByteArray())
             : [];
-        IReadOnlyList<PreparedIntent> intents = section.PreparedIntents.Length > 0
-            ? PreparedIntentStore.DeserializeIntents(section.PreparedIntents.ToByteArray())
-            : [];
+        // An empty section is an exporter that predates the ledger (it wrote nothing when it had no intents);
+        // it decodes as no intents and no ledger, which the install below refuses when the ledger is required.
+        PreparedIntentStore.PartitionIntentSection intentSection = section.PreparedIntents.Length > 0
+            ? PreparedIntentStore.DeserializePartitionIntents(section.PreparedIntents.ToByteArray())
+            : new PreparedIntentStore.PartitionIntentSection([], null, HLCTimestamp.Zero);
         byte[] receiptBytes = section.CompletionReceipts.Length > 0 ? section.CompletionReceipts.ToByteArray() : [];
+
+        if (requireLedgerOnInstall && intentSection.Ledger is null)
+            throw new KahunaServerException(
+                $"ImportPartitionState: the snapshot for partition {partitionId} carries no committed-head ledger (exported by a build that predates it); " +
+                "refusing to install it while OnePhaseApplyTimeValidation is enabled.");
 
         ct.ThrowIfCancellationRequested();
 
@@ -315,7 +336,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 throw new KahunaServerException("ImportPartitionState: completion-receipt apply failed.");
 
             transactionRecordStore.ImportRecords(records);
-            preparedIntentStore.ImportIntents(intents);
+            preparedIntentStore.ImportPartitionIntents(partitionId, intentSection, requireLedgerOnInstall);
 
             // The WAL boundary installed right after this import compacts the log entries the imported
             // receipts/records/intents were originally replicated through — a cold restart could never
@@ -342,7 +363,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             installGate.Release();
         }
 
-        logger.LogImportedPartitionState(partitionId, kvItems.Count, lockItems.Count, records.Count, intents.Count);
+        logger.LogImportedPartitionState(partitionId, kvItems.Count, lockItems.Count, records.Count, intentSection.Intents.Count);
     }
 
     /// <summary>
@@ -381,6 +402,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             completionReceiptStore.PurgeWhere(key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId);
             transactionRecordStore.PurgeWhere(anchor => PartitionDataEnumerator.OwnerOfKey(map, anchor, hashPoolSize) == partitionId);
             preparedIntentStore.PurgeWhere(key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId);
+            preparedIntentStore.PurgePartitionLedger(partitionId);
 
             // Re-persist the emptied slices: without this, a cold restart would reload the purged
             // receipts/records/intents from the stale per-partition snapshot files.

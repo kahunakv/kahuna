@@ -658,8 +658,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         long intentCeiling = durabilityTracker?.GetHighestApplied(partitionId, DurabilityChannel.PreparedIntents) ?? -1;
 
         bool receipts = completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
-        bool records = transactionRecordStore?.PersistSnapshot(partitionId) ?? true;
+
+        // Intents (with the partition's committed-head ledger) BEFORE records, and the order is load-bearing:
+        // a bundled commit replayed after a restart is judged again against the intent set and ledger the
+        // snapshot restored, unless the restored record already holds its outcome. Capturing the intent side
+        // first puts its position at or before the record side's, so for every replayed bundled commit either
+        // the record snapshot already carries the outcome (commit, or the rejection memo) or the intent/ledger
+        // state is exact at the commit's position once the entries between them are re-applied. The reverse
+        // order could restore an intent set from after a later competitor took the key — a replay would then
+        // refuse a commit the live apply admitted.
         bool intents = preparedIntentStore?.PersistSnapshot(partitionId) ?? true;
+        bool records = transactionRecordStore?.PersistSnapshot(partitionId) ?? true;
 
         if (receipts)
             durabilityTracker?.ResolveUpTo(partitionId, DurabilityChannel.Receipts, receiptCeiling);

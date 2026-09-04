@@ -292,12 +292,23 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
     /// deadline check and the recorded winner). Must be less than or equal to the frozen decision deadline for a
     /// commit to be authorized.</param>
+    /// <param name="readSetExtendsBeyondWrites">Whether the validated read set carries a dependency the one-phase
+    /// bundle cannot re-check at apply time (see the call site in TransactionCoordinator); true keeps the
+    /// bundle closed and runs the standard 2PC flow.</param>
+    /// <param name="applyTimeValidation">Whether a one-phase bundled commit must be validated at apply time, in log
+    /// order, against the partition's replicated committed-head ledger — every co-bundled validated base and every
+    /// entry of <paramref name="bundledReadDependencies"/>. Set only when every node in the group applies that
+    /// check (<see cref="Configuration.KahunaConfiguration.OnePhaseApplyTimeValidation"/>).</param>
+    /// <param name="bundledReadDependencies">The read-only point dependencies routed to the anchor partition, with
+    /// the committed state the transaction observed, carried into the bundled commit for its apply-time check.</param>
     public async Task<DurableFinalizeOutcome> FinalizeAsync(
         DurableFinalizeInput input,
         Func<CancellationToken, Task<bool>> validateReadSet,
         HLCTimestamp opId,
         CancellationToken cancellationToken,
-        bool readSetExtendsBeyondWrites = false)
+        bool readSetExtendsBeyondWrites = false,
+        bool applyTimeValidation = false,
+        IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null)
     {
         long startTicks = Stopwatch.GetTimestamp();
 
@@ -377,25 +388,35 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // probe-visible prepared intent on every written key from prepare until the decision, so concurrent
         // validators abort instead of committing around it.
         //
-        // Validated-base (read-modify-write) transactions are also routed away from the bundle in multi-process
-        // clusters — the caller folds that condition into readSetExtendsBeyondWrites (see the call site in
-        // TransactionCoordinator). On the 2PC path a moved base is caught at prepare-apply time by the intent
-        // store's staged-base fence (the acknowledgement is refused and the coordinator aborts truthfully), but
-        // the bundle's decision shares the prepare's atomic batch, so a refused acknowledgement arrives with the
-        // decision already durable — the fence cannot withhold it. The bundle's guard is instead the late
-        // staged-base re-validation inside TryOnePhaseFinalizeAsync, immediately before the propose. In a
-        // single-process Raft group the caller keeps the bundle eligible: a competitor's whole finalize
-        // (including settlement and intent removal) interleaving into the sub-millisecond validate→propose gap
-        // after an in-process write-intent lease lapse is accepted as a residual in exchange for the embedded
-        // fast path; in multi-process a stalled bundle proposal can apply arbitrarily late, so the residual is
-        // unbounded there and the routing above closes it.
+        // Without apply-time validation, validated-base (read-modify-write) transactions are also routed away
+        // from the bundle in multi-process clusters — the caller folds that condition into
+        // readSetExtendsBeyondWrites (see the call site in TransactionCoordinator). On the 2PC path a moved base
+        // is caught at prepare-apply time by the intent store's staged-base fence (the acknowledgement is
+        // refused and the coordinator aborts truthfully), but the bundle's decision shares the prepare's atomic
+        // batch, so a refused acknowledgement arrives with the decision already durable — the fence cannot
+        // withhold it. The bundle's guard is then the late staged-base re-validation inside
+        // TryOnePhaseFinalizeAsync, immediately before the propose. In a single-process Raft group the caller
+        // keeps the bundle eligible: a competitor's whole finalize (including settlement and intent removal)
+        // interleaving into the sub-millisecond validate→propose gap after an in-process write-intent lease
+        // lapse is accepted as a residual in exchange for the embedded fast path; in multi-process a stalled
+        // bundle proposal can apply arbitrarily late, so the residual is unbounded there and the routing above
+        // closes it.
+        //
+        // With apply-time validation the bundled commit carries the check itself: at apply, in log order, the
+        // record store judges every co-bundled validated base and every carried on-partition read dependency
+        // against the partition's replicated committed-head ledger, and a base or read a competitor moved past
+        // before the bundle applied rejects the commit on every replica. The caller then keeps the bundle open
+        // for read-modify-write and on-partition-read transactions in multi-process groups too, and closes it
+        // only for the dependencies no deterministic apply-time check exists for (predicates, off-partition
+        // reads). The pre-propose validations below stay: they avoid proposing bundles that will be rejected;
+        // the apply-time check is the backstop for the stall window, not their replacement.
         if (replicateOnePhaseBundle is not null &&
             !readSetExtendsBeyondWrites &&
             input.Partitions.Count == 1 &&
             input.Partitions[0].PartitionId == input.AnchorPartitionId)
         {
             DurableFinalizeOutcome? onePhase = await TryOnePhaseFinalizeAsync(
-                input, initDelta, prepareDeltas[0], validateReadSet, opId, cancellationToken).ConfigureAwait(false);
+                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, cancellationToken).ConfigureAwait(false);
 
             if (onePhase is { } fastOutcome)
             {
@@ -609,6 +630,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         byte[] anchorPrepareDelta,
         Func<CancellationToken, Task<bool>> validateReadSet,
         HLCTimestamp opId,
+        bool applyTimeValidation,
+        IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
         CancellationToken cancellationToken)
     {
         DurablePartitionPrepare partition = input.Partitions[0];
@@ -640,12 +663,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         // Late staged-base re-validation, as close to the propose as the bundle allows. The bundle decides in
         // the same atomic batch as its prepare, so the prepare-apply staged-base fence cannot withhold its
-        // decision (the acknowledgement arrives with the decision already durable) — the bundle's only guard
-        // against a competitor that committed the same base after FinalizeAsync's entry validation is this
-        // re-check. Re-running it here shrinks the unguarded window to the validate→apply gap of a single
-        // local proposal; a competitor's whole finalize interleaving into that sub-millisecond gap after an
-        // in-process lease lapse is the accepted residual of the embedded fast path. Conflict decides a
-        // record-backed abort (the caller finishes its resolution); Unknown yields a clean retry.
+        // decision (the acknowledgement arrives with the decision already durable) — without apply-time
+        // validation the bundle's only guard against a competitor that committed the same base after
+        // FinalizeAsync's entry validation is this re-check. Re-running it here shrinks the unguarded window to
+        // the validate→apply gap of a single local proposal; a competitor's whole finalize interleaving into
+        // that sub-millisecond gap after an in-process lease lapse is the accepted residual of the embedded
+        // fast path, and with apply-time validation the bundled commit gate closes even that gap in log order.
+        // Conflict decides a record-backed abort (the caller finishes its resolution); Unknown yields a clean
+        // retry.
         if (validateStagedBases is not null)
         {
             switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
@@ -665,6 +690,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // that this transaction's intent actually took every key. A bundle applying after the in-memory write
         // intents were lost (killed node, expired lease, a stall outliving the locks) whose keys were meanwhile
         // taken by another transaction keeps the record Undecided instead of committing a never-prepared mutation.
+        //
+        // With apply-time validation the decision additionally carries the on-partition read dependencies and
+        // asks the gate to judge them, and every co-bundled validated base, against the partition's replicated
+        // committed-head ledger at the same apply position — the deterministic backstop for the stall window
+        // the late re-validation above cannot cover.
         HLCTimestamp attemptHlc = attemptClock?.Invoke() ?? opId;
 
         string[] bundledPrepareKeys = new string[partition.Intents.Count];
@@ -672,7 +702,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             bundledPrepareKeys[i] = partition.Intents[i].Key;
 
         byte[] decisionDelta = TransactionRecordStore.SerializeDelta([
-            new CommitTransactionCommand(input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc, bundledPrepareKeys)]);
+            new CommitTransactionCommand(
+                input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc, bundledPrepareKeys,
+                ApplyTimeValidation: applyTimeValidation,
+                BundledReadDependencies: applyTimeValidation && bundledReadDependencies is { Count: > 0 } ? bundledReadDependencies : null)]);
 
         (bool BatchCommitted, bool PrepareAcknowledged)? proposed = await replicateOnePhaseBundle!(
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
@@ -702,9 +735,24 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         if (record.Decision == TransactionDecision.Undecided)
         {
-            // With the prepare acknowledged, the only transition that keeps an initialized record Undecided is
-            // the deadline gate; with it rejected, the bundled-prepare gate withheld the commit and the retry
-            // will fall back to 2PC, whose own prepare rejection drives a truthful abort.
+            // The bundled commit gate withheld the commit, or the deadline gate did. This node applied the batch
+            // (it led the partition when it proposed), so the gate's verdict for this attempt is on the record
+            // store. A stale base or read is deterministic and final — heads only advance, and the transaction
+            // only grows older against the retention horizon — so a retry of the bundle would be rejected again
+            // (its own intent still holds the keys, and the pre-propose checks read that intent as valid by
+            // construction): drive the truthful conflict abort through the record CAS now, exactly as a failed
+            // pre-propose validation does, and roll the installed intent back everywhere. A missing prepare
+            // means another transaction took a key: the retry's pre-flight sees that foreign holder and falls
+            // back to 2PC, whose own prepare rejection drives the truthful outcome. No recorded verdict leaves
+            // only the deadline gate, which yields to presumed-abort recovery.
+            if (recordStore.TryTakeGatedRejectionVerdict(input.TransactionId, input.Epoch, opId, out BundledCommitVerdict verdict))
+            {
+                if (verdict is BundledCommitVerdict.StaleBase or BundledCommitVerdict.StaleRead)
+                    return await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false);
+
+                return Retry();
+            }
+
             if (proposed.Value.PrepareAcknowledged)
                 DurableTransactionMetrics.LateCommitRejections.Add(1);
             return Retry();

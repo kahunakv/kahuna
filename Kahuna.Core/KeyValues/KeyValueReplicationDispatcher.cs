@@ -225,7 +225,7 @@ internal sealed class KeyValueReplicationDispatcher
             // The prepare acknowledgement is what a local producer needs from this apply; a prepare rejected on its
             // merits is still a successfully applied log entry, so it never fails replication.
             if (!durableApplyResults.TryConsume(partitionId, log.Id, out _))
-                durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(log));
+                durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log));
 
             // A rejected prepare is still an applied entry (the store recorded the rejection), so the
             // snapshot that covers this apply certifies it either way.

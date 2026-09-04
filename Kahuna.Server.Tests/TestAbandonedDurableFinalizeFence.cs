@@ -92,7 +92,7 @@ public sealed class TestAbandonedDurableFinalizeFence
                     if (entry.Type == ReplicationTypes.TransactionRecord)
                         kahuna.DurableTransactionRecordStore.Replicate(partition, log);
                     else if (entry.Type == ReplicationTypes.PreparedIntent)
-                        kahuna.DurablePreparedIntentStore.ApplyDeltaAckPrepares(log);
+                        kahuna.DurablePreparedIntentStore.ApplyDeltaAckPrepares(partition, log);
                 }
             }
         }
