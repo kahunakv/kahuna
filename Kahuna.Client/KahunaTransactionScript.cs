@@ -52,9 +52,15 @@ public class KahunaTransactionScript
     /// <param name="parameters">A list of key-value parameters for the transaction script. This parameter is optional.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>A task representing the asynchronous operation. The task result contains the result of the Kahuna key-value transaction.</returns>
-    public async Task<KahunaKeyValueTransactionResult> Run(List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// The client's task is handed back directly rather than awaited: nothing happens here after the
+    /// call, so an <c>async</c> wrapper would add a second task and state machine for no work. No
+    /// guard is needed either, because the method being called reports a synchronous failure through
+    /// its returned task already.
+    /// </remarks>
+    public Task<KahunaKeyValueTransactionResult> Run(List<KeyValueParameter>? parameters = null, CancellationToken cancellationToken = default)
     {
-        return await kahunaClient.ExecuteKeyValueTransactionScript(script, hash, parameters, cancellationToken).ConfigureAwait(false);
+        return kahunaClient.ExecuteKeyValueTransactionScript(script, hash, parameters, cancellationToken);
     }
 
     /// <summary>
@@ -65,12 +71,12 @@ public class KahunaTransactionScript
     /// <param name="parameters">A list of key-value parameters for the transaction script. This parameter is optional.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>A task representing the asynchronous operation. The task result contains the result of the Kahuna key-value transaction.</returns>
-    public async Task<KahunaKeyValueTransactionResult> Run(
+    public Task<KahunaKeyValueTransactionResult> Run(
         TransactionPriority priority,
         List<KeyValueParameter>? parameters = null,
         CancellationToken cancellationToken = default
     )
     {
-        return await kahunaClient.ExecuteKeyValueTransactionScript(script, hash, parameters, priority, cancellationToken).ConfigureAwait(false);
+        return kahunaClient.ExecuteKeyValueTransactionScript(script, hash, parameters, priority, cancellationToken);
     }
 }

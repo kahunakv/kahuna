@@ -41,11 +41,41 @@ public class RestCommunication : IKahunaCommunication
     /// </summary>
     private static int flurlConfigured;
 
+    /// <summary>
+    /// A JSON request body that is already encoded as UTF-8. Posting a string would build a full UTF-16
+    /// copy between the JSON writer and the socket, and HTTP carries bytes, so that copy is pure waste.
+    /// It derives from <see cref="ByteArrayContent"/>, so the body stays readable more than once and a
+    /// redirect or a retry can replay it. The caller owns the array and must not mutate it after the
+    /// send, because every attempt reads the same buffer.
+    /// </summary>
+    internal sealed class Utf8JsonContent : ByteArrayContent
+    {
+        public Utf8JsonContent(byte[] utf8Json) : base(utf8Json)
+        {
+            Headers.TryAddWithoutValidation("Content-Type", "application/json");
+        }
+    }
+
+    /// <summary>
+    /// Retry policy for the calls that do not log a retry. A Polly policy holds no state across
+    /// executions: each execution asks the jitter sequence for its own enumerator, so concurrent
+    /// callers keep independent delays and independent attempt counts. One instance therefore serves
+    /// the whole process, instead of a fresh policy, builder, jitter sequence and callback per call.
+    /// </summary>
+    private static readonly AsyncRetryPolicy SharedRetryPolicy = BuildRetryPolicy(null);
+
     private readonly ILogger? logger;
+
+    /// <summary>
+    /// Retry policy for the calls that log a retry. The logger belongs to this instance, so this
+    /// policy cannot be shared across the process the way <see cref="SharedRetryPolicy"/> is.
+    /// </summary>
+    private readonly AsyncRetryPolicy loggingRetryPolicy;
 
     public RestCommunication(ILogger? logger, KahunaOptions? options = null)
     {
         this.logger = logger;
+        loggingRetryPolicy = BuildRetryPolicy(logger);
         ConfigureFlurl(options);
     }
 
@@ -167,58 +197,69 @@ public class RestCommunication : IKahunaCommunication
             Durability = durability
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaLockRequest);
 
         // MustRetry is unbounded — same policy as the gRPC transport.  Termination is driven by
         // the caller's CancellationToken (the CT3 default deadline only bounds a single
         // unresponsive call inside the batcher, not this retry loop).  The backoff grows from
         // ~1ms to ~10ms over the first 10 steps then caps, so a stuck server is not busy-polled.
-        using IEnumerator<TimeSpan> mustRetryBackoff = Backoff
-            .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
-            .GetEnumerator();
+        // The sequence is built on the first refusal, not before the first attempt: an acquisition that
+        // succeeds outright is the common case, and it needs no backoff state at all. The gRPC
+        // transport initializes the equivalent state the same way.
+        IEnumerator<TimeSpan>? mustRetryBackoff = null;
         TimeSpan mustRetryDelay = TimeSpan.FromMilliseconds(1);
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
 
-        while (true)
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", LockResponseType.Errored);
-
-            KahunaLockResponse? response;
-
-            try
+            while (true)
             {
-                response = await retryPolicy.ExecuteAsync(() =>
-                    url
-                    .WithOAuthBearerToken("xxx")
-                    .AppendPathSegments("v1/locks/try-lock")
-                    .WithHeader("Accept", "application/json")
-                    .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
-                    .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", LockResponseType.Errored);
+
+                KahunaLockResponse? response;
+
+                try
+                {
+                    response = await SharedRetryPolicy.ExecuteAsync(() =>
+                        url
+                        .WithOAuthBearerToken("xxx")
+                        .AppendPathSegments("v1/locks/try-lock")
+                        .WithHeader("Accept", "application/json")
+                        .WithHeader("Content-Type", "application/json")
+                        .WithSettings(o => o.HttpVersion = "2.0")
+                        .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
+                        .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
+                }
+                catch (FlurlHttpException ex) when (cancellationToken.IsCancellationRequested && IsCancellationException(ex))
+                {
+                    throw new OperationCanceledException("Operation cancelled", ex, cancellationToken);
+                }
+
+                if (response is null)
+                    throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                if (response.Type == LockResponseType.Locked)
+                    return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
+
+                if (response.Type == LockResponseType.Busy)
+                    return (KahunaLockAcquireResult.Conflicted, response.FencingToken, response.ServedFrom);
+
+                if (response.Type != LockResponseType.MustRetry)
+                    throw new KahunaException("Failed to lock", response.Type);
+
+                mustRetryBackoff ??= Backoff
+                    .DecorrelatedJitterBackoffV2(medianFirstRetryDelay: TimeSpan.FromMilliseconds(1), retryCount: 10)
+                    .GetEnumerator();
+
+                if (mustRetryBackoff.MoveNext())
+                    mustRetryDelay = mustRetryBackoff.Current;
+
+                await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
             }
-            catch (FlurlHttpException ex) when (cancellationToken.IsCancellationRequested && IsCancellationException(ex))
-            {
-                throw new OperationCanceledException("Operation cancelled", ex, cancellationToken);
-            }
-
-            if (response is null)
-                throw new KahunaException("Response is null", LockResponseType.Errored);
-
-            if (response.Type == LockResponseType.Locked)
-                return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
-
-            if (response.Type == LockResponseType.Busy)
-                return (KahunaLockAcquireResult.Conflicted, response.FencingToken, response.ServedFrom);
-
-            if (response.Type != LockResponseType.MustRetry)
-                throw new KahunaException("Failed to lock", response.Type);
-
-            if (mustRetryBackoff.MoveNext())
-                mustRetryDelay = mustRetryBackoff.Current;
-
-            await Task.Delay(mustRetryDelay, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mustRetryBackoff?.Dispose();
         }
     }
 
@@ -245,7 +286,7 @@ public class RestCommunication : IKahunaCommunication
             Durability = durability
         };
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaLockRequest);
         
         // The server maps every transient failure of a release — a leader flip, an unresolved leader,
         // a storage stall — to MustRetry, so MustRetry is the normal shape of a release that has not
@@ -260,16 +301,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
+            KahunaLockResponse? response = await SharedRetryPolicy.ExecuteAsync(() => 
                 url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/locks/try-unlock")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaLockResponse>())
                 .ConfigureAwait(false);
 
@@ -323,7 +362,7 @@ public class RestCommunication : IKahunaCommunication
             Durability = durability
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaLockRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaLockRequest);
 
         // See TryUnlock: MustRetry is a transient server condition, so the loop is bounded by a
         // deadline instead of a fixed count of attempts that all fall inside the same few milliseconds.
@@ -335,16 +374,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-            
-            KahunaLockResponse? response = await retryPolicy.ExecuteAsync(() => 
+            KahunaLockResponse? response = await SharedRetryPolicy.ExecuteAsync(() => 
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/locks/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>())
                     .ConfigureAwait(false);
             
@@ -391,7 +428,7 @@ public class RestCommunication : IKahunaCommunication
             Durability = durability
         };
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetLockRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaGetLockRequest);
 
         // See TryUnlock: MustRetry is a transient server condition, so the loop is bounded by a
         // deadline instead of a fixed count of attempts that all fall inside the same few milliseconds.
@@ -403,16 +440,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-
-            KahunaGetLockResponse? response = await retryPolicy.ExecuteAsync(() =>
+            KahunaGetLockResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
                     url
                         .WithOAuthBearerToken("xxx")
                         .AppendPathSegments("v1/locks/get-info")
                         .WithHeader("Accept", "application/json")
                         .WithHeader("Content-Type", "application/json")
                         .WithSettings(o => o.HttpVersion = "2.0")
-                        .PostStringAsync(payload, cancellationToken: cancellationToken)
+                        .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                         .ReceiveJson<KahunaGetLockResponse>())
                         .ConfigureAwait(false);
 
@@ -481,7 +516,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
 
         int retries = 0;
         KahunaSetKeyValueResponse? response;
@@ -491,16 +526,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaSetKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -535,21 +568,19 @@ public class RestCommunication : IKahunaCommunication
             Items = [.. requestItems]
         };
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetManyKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaSetManyKeyValueRequest);
 
         if (cancellationToken.IsCancellationRequested)
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-
-        KahunaSetManyKeyValueResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaSetManyKeyValueResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kv/try-set-many")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaSetManyKeyValueResponse>())
                 .ConfigureAwait(false);
 
@@ -587,21 +618,19 @@ public class RestCommunication : IKahunaCommunication
             request.OperationIdLow = operationId.Low;
         }
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteManyKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaDeleteManyKeyValueRequest);
 
         if (cancellationToken.IsCancellationRequested)
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-
-        KahunaDeleteManyKeyValueResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaDeleteManyKeyValueResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kv/try-delete-many")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaDeleteManyKeyValueResponse>())
                 .ConfigureAwait(false);
 
@@ -697,7 +726,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
         
         int retries = 0;
         KahunaSetKeyValueResponse? response;
@@ -707,16 +736,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaSetKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -785,7 +812,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaSetKeyValueRequest);
         
         int retries = 0;
         KahunaSetKeyValueResponse? response;
@@ -795,16 +822,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaSetKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -868,7 +893,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaGetKeyValueRequest);
         
         int retries = 0;
         KahunaGetKeyValueResponse? response;
@@ -878,16 +903,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-get")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaGetKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -953,7 +976,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExistsKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaExistsKeyValueRequest);
         
         KahunaExistsKeyValueResponse? response;
         
@@ -963,16 +986,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-exists")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaExistsKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -1031,7 +1052,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaDeleteKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaDeleteKeyValueRequest);
         
         KahunaDeleteKeyValueResponse? response;
         
@@ -1041,16 +1062,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-delete")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaDeleteKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -1111,7 +1130,7 @@ public class RestCommunication : IKahunaCommunication
             OperationIdLow = operationId.Low
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaExtendKeyValueRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaExtendKeyValueRequest);
         
         KahunaDeleteKeyValueResponse? response;
         
@@ -1121,16 +1140,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaDeleteKeyValueResponse>())
                     .ConfigureAwait(false);
 
@@ -1178,7 +1195,7 @@ public class RestCommunication : IKahunaCommunication
             Priority = priority
         };
         
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KeyValueTransactionRequest);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KeyValueTransactionRequest);
 
         int retries = 0;
         KeyValueTransactionResponse? response;
@@ -1188,16 +1205,14 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-        
-            response = await retryPolicy.ExecuteAsync(() =>
+            response = await SharedRetryPolicy.ExecuteAsync(() =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-execute-tx-script")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
                     .WithSettings(o => o.HttpVersion = "2.0")
-                    .PostStringAsync(payload, cancellationToken: cancellationToken)
+                    .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KeyValueTransactionResponse>())
                     .ConfigureAwait(false);
 
@@ -1610,17 +1625,15 @@ public class RestCommunication : IKahunaCommunication
 
     private static async Task<KahunaSequenceResponse> PostSequenceRequest<T>(string url, string action, T request, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken)
     {
-        string payload = JsonSerializer.Serialize(request, jsonTypeInfo);
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-
-        KahunaSequenceResponse? response = await retryPolicy.ExecuteAsync(() =>
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, jsonTypeInfo);
+        KahunaSequenceResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/sequences/" + action)
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaSequenceResponse>()).ConfigureAwait(false);
 
         if (response is null)
@@ -1672,9 +1685,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaRangeMapResponse> GetRanges(string url, string? keySpace, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaRangeMapResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaRangeMapResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
         {
             IFlurlRequest request = url
                 .WithOAuthBearerToken("xxx")
@@ -1797,17 +1808,15 @@ public class RestCommunication : IKahunaCommunication
         if (cancellationToken.IsCancellationRequested)
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-        string payload = JsonSerializer.Serialize(request, jsonTypeInfo);
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(null);
-
-        TResponse? response = await retryPolicy.ExecuteAsync(() =>
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, jsonTypeInfo);
+        TResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kv/" + verb)
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
                 .WithSettings(o => o.HttpVersion = "2.0")
-                .PostStringAsync(payload, cancellationToken: cancellationToken)
+                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<TResponse>()).ConfigureAwait(false);
 
         if (response is null)
@@ -1859,9 +1868,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaClusterMembershipResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaClusterMembershipResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/cluster/membership")
@@ -1878,9 +1885,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaClusterPlacementResponse> GetClusterPlacement(string url, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaClusterPlacementResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaClusterPlacementResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/cluster/placement")
@@ -1944,8 +1949,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupInfo? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/full")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -1956,8 +1960,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupInfo? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/incremental")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -1968,8 +1971,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupInfo? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/coordinated")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -1988,16 +1990,14 @@ public class RestCommunication : IKahunaCommunication
             LeaseMs   = leaseMs
         };
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaAcquireSnapshotHoldRequest);
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaAcquireSnapshotHoldResponse? response = await retryPolicy.ExecuteAsync(() =>
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaAcquireSnapshotHoldRequest);
+        KahunaAcquireSnapshotHoldResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/kv/snapshot-hold/acquire")
                .WithHeader("Accept", "application/json")
                .WithHeader("Content-Type", "application/json")
                .WithSettings(o => o.HttpVersion = "2.0")
-               .PostStringAsync(payload, cancellationToken: cancellationToken)
+               .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                .ReceiveJson<KahunaAcquireSnapshotHoldResponse>()).ConfigureAwait(false);
 
         if (response is null)
@@ -2011,16 +2011,14 @@ public class RestCommunication : IKahunaCommunication
     {
         KahunaRenewSnapshotHoldRequest request = new() { HoldId = holdId, LeaseMs = leaseMs };
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaRenewSnapshotHoldRequest);
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaRenewSnapshotHoldResponse? response = await retryPolicy.ExecuteAsync(() =>
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaRenewSnapshotHoldRequest);
+        KahunaRenewSnapshotHoldResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/kv/snapshot-hold/renew")
                .WithHeader("Accept", "application/json")
                .WithHeader("Content-Type", "application/json")
                .WithSettings(o => o.HttpVersion = "2.0")
-               .PostStringAsync(payload, cancellationToken: cancellationToken)
+               .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                .ReceiveJson<KahunaRenewSnapshotHoldResponse>()).ConfigureAwait(false);
 
         if (response is null)
@@ -2034,16 +2032,14 @@ public class RestCommunication : IKahunaCommunication
     {
         KahunaReleaseSnapshotHoldRequest request = new() { HoldId = holdId };
 
-        string payload = JsonSerializer.Serialize(request, KahunaJsonContext.Default.KahunaReleaseSnapshotHoldRequest);
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaReleaseSnapshotHoldResponse? response = await retryPolicy.ExecuteAsync(() =>
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, KahunaJsonContext.Default.KahunaReleaseSnapshotHoldRequest);
+        KahunaReleaseSnapshotHoldResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/kv/snapshot-hold/release")
                .WithHeader("Accept", "application/json")
                .WithHeader("Content-Type", "application/json")
                .WithSettings(o => o.HttpVersion = "2.0")
-               .PostStringAsync(payload, cancellationToken: cancellationToken)
+               .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                .ReceiveJson<KahunaReleaseSnapshotHoldResponse>()).ConfigureAwait(false);
 
         if (response is null)
@@ -2055,9 +2051,7 @@ public class RestCommunication : IKahunaCommunication
     public async Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
         string url, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-
-        KahunaGetSnapshotFloorResponse? response = await retryPolicy.ExecuteAsync(() =>
+        KahunaGetSnapshotFloorResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/kv/snapshot-floor")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -2079,8 +2073,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<List<KahunaBackupInfo>> ListBackups(string url, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        List<KahunaBackupInfo>? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        List<KahunaBackupInfo>? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -2091,8 +2084,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<List<KahunaBackupInfo>> GetBackupChain(string url, Guid leafBackupId, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        List<KahunaBackupInfo>? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        List<KahunaBackupInfo>? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups", leafBackupId.ToString(), "chain")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -2103,8 +2095,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaRestoreResponse? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        KahunaRestoreResponse? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/restore")
                .WithSettings(o => o.HttpVersion = "2.0")
@@ -2120,8 +2111,7 @@ public class RestCommunication : IKahunaCommunication
 
     public async Task<KahunaBackupGcResult> RunBackupGarbageCollection(string url, bool dryRun, CancellationToken cancellationToken)
     {
-        AsyncRetryPolicy retryPolicy = BuildRetryPolicy(logger);
-        KahunaBackupGcResult? response = await InvokeBackupRest(() => retryPolicy.ExecuteAsync(() =>
+        KahunaBackupGcResult? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/gc")
                .SetQueryParam("dryRun", dryRun)

@@ -8,6 +8,7 @@
 
 using System.Collections.Concurrent;
 using System.Net.Security;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
@@ -49,6 +50,88 @@ internal sealed class GrpcBatcher
     private static readonly ConcurrentDictionary<int, long> requestStreamRefs = new();
 
     /// <summary>
+    /// Caches the options-derived half of each channel cache key. Keyed by the options instance so an
+    /// entry dies with it, but a hit is only accepted after the cached option values are compared with
+    /// the live ones: <see cref="KahunaOptions"/> is mutable, and its thumbprint list can wrap a list
+    /// the caller still holds, so trusting the instance alone could keep serving a key derived from a
+    /// trust policy that has since been replaced.
+    /// </summary>
+    private static readonly ConditionalWeakTable<KahunaOptions, CachedKeySuffix> keySuffixes = new();
+
+    /// <summary>
+    /// The part of a channel cache key contributed by the options, together with the option values it
+    /// was derived from. The URL is deliberately not part of it: one client rotates over several URLs,
+    /// so a suffix keyed by URL as well would miss on every round-robin step.
+    /// </summary>
+    private sealed class CachedKeySuffix
+    {
+        private readonly int poolSize;
+        private readonly bool allowInsecure;
+        private readonly string[] thumbprints;
+
+        public readonly string Suffix;
+
+        private CachedKeySuffix(int poolSize, bool allowInsecure, string[] thumbprints, string suffix)
+        {
+            this.poolSize = poolSize;
+            this.allowInsecure = allowInsecure;
+            this.thumbprints = thumbprints;
+            Suffix = suffix;
+        }
+
+        public bool Matches(int currentPoolSize, bool currentAllowInsecure, IReadOnlyList<string> currentThumbprints)
+        {
+            if (currentPoolSize != poolSize || currentAllowInsecure != allowInsecure || currentThumbprints.Count != thumbprints.Length)
+                return false;
+
+            // Ordinal throughout: a thumbprint is a hex identifier, never linguistic text.
+            for (int i = 0; i < thumbprints.Length; i++)
+            {
+                if (!string.Equals(thumbprints[i], currentThumbprints[i], StringComparison.Ordinal))
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static CachedKeySuffix Build(int poolSize, bool allowInsecure, IReadOnlyList<string> currentThumbprints)
+        {
+            // The pin strings are immutable, so holding the references is enough to detect a later
+            // change: only the list around them can be edited.
+            string[] snapshot = new string[currentThumbprints.Count];
+            for (int i = 0; i < snapshot.Length; i++)
+                snapshot[i] = currentThumbprints[i];
+
+            int effectivePoolSize = Math.Max(1, poolSize);
+
+            if (effectivePoolSize == 2 && !allowInsecure && snapshot.Length == 0)
+                return new(poolSize, allowInsecure, snapshot, "");
+
+            string poolSuffix = effectivePoolSize != 2 ? $"\0pool:{effectivePoolSize}" : "";
+
+            string tlsSuffix;
+
+            if (allowInsecure)
+                tlsSuffix = "\0insecure";
+            else if (snapshot.Length > 0)
+            {
+                // Upper-cased and ordinal-sorted so that the same pin set written in any order or case
+                // maps onto one pool.
+                string[] normalized = new string[snapshot.Length];
+                for (int i = 0; i < normalized.Length; i++)
+                    normalized[i] = snapshot[i].ToUpperInvariant();
+
+                Array.Sort(normalized, StringComparer.Ordinal);
+                tlsSuffix = "\0pin:" + string.Join(",", normalized);
+            }
+            else
+                tlsSuffix = "";
+
+            return new(poolSize, allowInsecure, snapshot, poolSuffix + tlsSuffix);
+        }
+    }
+
+    /// <summary>
     /// Represents a static counter used to generate unique request identifiers in a thread-safe manner.
     /// Each request processed by the GrpcBatcher is assigned an incrementing value from this counter
     /// to ensure consistent tracking of individual operations.
@@ -85,6 +168,21 @@ internal sealed class GrpcBatcher
     /// handling and processing by maintaining the order of incoming items and supporting concurrent operations.
     /// </summary>
     private readonly ConcurrentQueue<GrpcBatcherItem> inbox = new();
+
+    /// <summary>
+    /// Largest backing array the dispatch buffer may keep between drains. Above it the buffer is
+    /// dropped instead of retained: a rare burst should not cost this batcher a permanently oversized
+    /// array. The trade is deliberate — a little more allocation after a burst, far less retention.
+    /// </summary>
+    private const int MaxRetainedBatchCapacity = 1024;
+
+    /// <summary>
+    /// The list the dispatch loop drains into, reused across drains. It is instance state rather than
+    /// a pooled object because only that loop ever uses it, and at most one runs per batcher: a pool
+    /// would hand lists between thread-pool threads for no gain, and could return a list smaller than
+    /// the caller asked for.
+    /// </summary>
+    private List<GrpcBatcherItem>? dispatchBuffer;
 
     /// <summary>
     /// Indicates whether the batching process is active or idle.
@@ -409,16 +507,34 @@ internal sealed class GrpcBatcher
             {
                 do
                 {
-                    List<GrpcBatcherItem> messages = GrpcBatcherPool.Rent(2);
-                    
-                    while (inbox.TryDequeue(out GrpcBatcherItem message))
-                        messages.Add(message);
+                    // One buffer owned by this loop, reused for every drain. At most one dispatch
+                    // loop runs per batcher, and RunBatch is awaited to completion before the next
+                    // drain begins, so no reader can still hold the list when it is cleared.
+                    List<GrpcBatcherItem> messages = dispatchBuffer ??= new(2);
 
-                    if (messages.Count > 0)
-                        await Receive(messages);
+                    try
+                    {
+                        while (inbox.TryDequeue(out GrpcBatcherItem message))
+                            messages.Add(message);
+
+                        if (messages.Count > 0)
+                            await Receive(messages);
+                    }
+                    finally
+                    {
+                        // Drop the drained items now rather than at the next drain: they hold request
+                        // payloads and promises, and an idle batcher must not pin them.
+                        messages.Clear();
+
+                        // Clear() keeps the backing array, so one burst would otherwise leave a
+                        // burst-sized array attached to this batcher for its whole life. Past the
+                        // threshold, hand it to the collector and start again small.
+                        if (messages.Capacity > MaxRetainedBatchCapacity)
+                            dispatchBuffer = null;
+                    }
 
                 } while (!inbox.IsEmpty);
-                
+
             } while (Interlocked.CompareExchange(ref processing, 1, 0) != 0);
         }
         catch (Exception ex)
@@ -429,8 +545,8 @@ internal sealed class GrpcBatcher
 
     private async Task Receive(List<GrpcBatcherItem> requests)
     {
-        // Capture the size before RunBatch: its finally returns the list to the pool, so the
-        // list must not be read afterwards.
+        // Capture the size before RunBatch: the dispatch loop clears the list once RunBatch returns,
+        // so the count must be read while it still means something.
         int batchCount = requests.Count;
 
         await RunBatch(requests);
@@ -492,94 +608,91 @@ internal sealed class GrpcBatcher
     /// <summary>
     /// Processes a batch of requests, delegating them to specific handling mechanisms based on their type.
     /// </summary>
-    /// <param name="requests">The list of batcher items to be processed.</param>
+    /// <param name="requests">
+    /// The batcher items to process. The caller keeps ownership: this method reads the list and never
+    /// clears, reuses or releases it. The dispatch loop relies on that, because the list it passes is
+    /// the buffer it reuses for the next drain.
+    /// </param>
     /// <returns>A task that represents the asynchronous batch processing operation.</returns>
     internal async Task RunBatch(List<GrpcBatcherItem> requests)
     {
-        try
+        // Skip the entire network path when every item was cancelled before dispatch
+        // (e.g. a synchronously pre-cancelled token fires the callback in TryProcessQueue
+        // before DeliverMessages picks the item up).
+        bool anyPending = false;
+        foreach (GrpcBatcherItem r in requests)
         {
-            // Skip the entire network path when every item was cancelled before dispatch
-            // (e.g. a synchronously pre-cancelled token fires the callback in TryProcessQueue
-            // before DeliverMessages picks the item up).
-            bool anyPending = false;
-            foreach (GrpcBatcherItem r in requests)
+            if (!r.Promise.Task.IsCompleted) { anyPending = true; break; }
+        }
+        if (!anyPending)
+            return;
+
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            try
             {
-                if (!r.Promise.Task.IsCompleted) { anyPending = true; break; }
-            }
-            if (!anyPending)
-                return;
+                GrpcSharedStreaming sharedStreaming = GetSharedStreaming();
 
-            for (int attempt = 0; attempt < 2; attempt++)
-            {
-                try
+                foreach (GrpcBatcherItem request in requests)
                 {
-                    GrpcSharedStreaming sharedStreaming = GetSharedStreaming();
-
-                    foreach (GrpcBatcherItem request in requests)
-                    {
-                        // Skip items whose promise was completed between inbox drain and now
-                        // (cancelled mid-flight or synchronously pre-cancelled).
-                        if (request.Promise.Task.IsCompleted)
-                            continue;
-
-                        requestRefs.TryAdd(request.RequestId, request);
-                        requestStreamRefs[request.RequestId] = sharedStreaming.Id;
-
-                        try
-                        {
-                            switch (request.Type)
-                            {
-                                case GrpcBatcherItemType.Locks:
-                                    await RunLocksBatch(sharedStreaming, request);
-                                    break;
-
-                                case GrpcBatcherItemType.KeyValues:
-                                    await RunKeyValueBatch(sharedStreaming, request);
-                                    break;
-
-                                case GrpcBatcherItemType.Sequences:
-                                default:
-                                    throw new KahunaException("Unknown batch type", LockResponseType.Errored);
-                            }
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            // This request's token fired during its own semaphore wait. CT1's
-                            // callback already cancelled its promise and removed its refs; the
-                            // TrySetCanceled/TryRemove calls below are no-ops in that case.
-                            // When RunBatch is called directly (e.g. in tests) without going
-                            // through TryProcessQueue the CT1 registration is absent, so we must
-                            // set the promise here to avoid leaving it permanently pending.
-                            requestRefs.TryRemove(request.RequestId, out _);
-                            requestStreamRefs.TryRemove(request.RequestId, out _);
-                            request.Promise.TrySetCanceled(request.CancellationToken);
-                        }
-                    }
-
-                    return;
-                }
-                catch (RpcException ex) when (RetryableTransportFailure.IsRetryable(ex))
-                {
-                    InvalidateSharedConnections(MakeCacheKey(url, securityOptions));
-                    RemoveRequestRefs(requests);
-
-                    if (attempt == 0 && requests.Count == 1)
+                    // Skip items whose promise was completed between inbox drain and now
+                    // (cancelled mid-flight or synchronously pre-cancelled).
+                    if (request.Promise.Task.IsCompleted)
                         continue;
 
-                    FailRequests(requests, ex);
-                    return;
+                    requestRefs.TryAdd(request.RequestId, request);
+                    requestStreamRefs[request.RequestId] = sharedStreaming.Id;
+
+                    try
+                    {
+                        switch (request.Type)
+                        {
+                            case GrpcBatcherItemType.Locks:
+                                await RunLocksBatch(sharedStreaming, request);
+                                break;
+
+                            case GrpcBatcherItemType.KeyValues:
+                                await RunKeyValueBatch(sharedStreaming, request);
+                                break;
+
+                            case GrpcBatcherItemType.Sequences:
+                            default:
+                                throw new KahunaException("Unknown batch type", LockResponseType.Errored);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // This request's token fired during its own semaphore wait. CT1's
+                        // callback already cancelled its promise and removed its refs; the
+                        // TrySetCanceled/TryRemove calls below are no-ops in that case.
+                        // When RunBatch is called directly (e.g. in tests) without going
+                        // through TryProcessQueue the CT1 registration is absent, so we must
+                        // set the promise here to avoid leaving it permanently pending.
+                        requestRefs.TryRemove(request.RequestId, out _);
+                        requestStreamRefs.TryRemove(request.RequestId, out _);
+                        request.Promise.TrySetCanceled(request.CancellationToken);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    RemoveRequestRefs(requests);
-                    FailRequests(requests, ex);
-                    return;
-                }
+
+                return;
             }
-        }
-        finally
-        {
-            GrpcBatcherPool.Return(requests);
+            catch (RpcException ex) when (RetryableTransportFailure.IsRetryable(ex))
+            {
+                InvalidateSharedConnections(MakeCacheKey(url, securityOptions));
+                RemoveRequestRefs(requests);
+
+                if (attempt == 0 && requests.Count == 1)
+                    continue;
+
+                FailRequests(requests, ex);
+                return;
+            }
+            catch (Exception ex)
+            {
+                RemoveRequestRefs(requests);
+                FailRequests(requests, ex);
+                return;
+            }
         }
     }
 
@@ -914,29 +1027,35 @@ internal sealed class GrpcBatcher
     {
         if (opts is null) return url;
 
-        int poolSize = Math.Max(1, opts.GrpcChannelPoolSize);
-        bool isDefault = poolSize == 2
-            && !opts.AllowInsecureCertificateValidation
-            && opts.TrustedServerCertificateThumbprints.Count == 0;
+        string suffix = GetKeySuffix(opts);
 
-        if (isDefault) return url;
+        // Default options still return the URL itself, with nothing allocated.
+        return suffix.Length == 0 ? url : string.Concat(url, suffix);
+    }
 
-        string poolSuffix = poolSize != 2 ? $"\0pool:{poolSize}" : "";
+    /// <summary>
+    /// Returns the options-derived key suffix, rebuilding it only when an option that feeds it has
+    /// changed. A channel lookup runs on every unary call and a stream lookup on every batch, so with
+    /// certificate pins this ran an upper-case pass, a sort and a join per request even though the
+    /// channel already existed.
+    /// </summary>
+    private static string GetKeySuffix(KahunaOptions opts)
+    {
+        // Read each option once: they are mutable, and the cached copy must be compared against the
+        // same values the suffix would be built from.
+        int poolSize = opts.GrpcChannelPoolSize;
+        bool allowInsecure = opts.AllowInsecureCertificateValidation;
+        IReadOnlyList<string> thumbprints = opts.TrustedServerCertificateThumbprints;
 
-        string tlsSuffix;
-        if (opts.AllowInsecureCertificateValidation)
-            tlsSuffix = "\0insecure";
-        else if (opts.TrustedServerCertificateThumbprints.Count > 0)
-        {
-            string pins = string.Join(",", opts.TrustedServerCertificateThumbprints
-                .Select(t => t.ToUpperInvariant())
-                .OrderBy(t => t, StringComparer.Ordinal));
-            tlsSuffix = $"\0pin:{pins}";
-        }
-        else
-            tlsSuffix = "";
+        if (keySuffixes.TryGetValue(opts, out CachedKeySuffix? cached) && cached.Matches(poolSize, allowInsecure, thumbprints))
+            return cached.Suffix;
 
-        return $"{url}{poolSuffix}{tlsSuffix}";
+        // Two threads racing here both build the same suffix from the values they read, so the loser
+        // of AddOrUpdate loses nothing.
+        CachedKeySuffix built = CachedKeySuffix.Build(poolSize, allowInsecure, thumbprints);
+        keySuffixes.AddOrUpdate(opts, built);
+
+        return built.Suffix;
     }
 
     public static GrpcChannel GetSharedChannel(string url, KahunaOptions? opts = null)

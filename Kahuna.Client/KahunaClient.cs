@@ -292,9 +292,16 @@ public class KahunaClient
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtendLock(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<(bool, long)> TryExtendLock(string resource, byte[] owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<(bool, long)>(exception);
+        }
     }
     
     /// <summary>
@@ -306,9 +313,16 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtendLock(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<(bool, long)> TryExtendLock(string resource, byte[] owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, durationMs, durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, durationMs, durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<(bool, long)>(exception);
+        }
     }
     
     /// <summary>
@@ -320,9 +334,16 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtendLock(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<(bool, long)> TryExtendLock(string resource, string owner, int durationMs, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<(bool, long)>(exception);
+        }
     }
     
     /// <summary>
@@ -334,9 +355,16 @@ public class KahunaClient
     /// <param name="durationMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(bool, long)> TryExtendLock(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<(bool, long)> TryExtendLock(string resource, string owner, TimeSpan duration, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<(bool, long)>(exception);
+        }
     }
     
     /// <summary>
@@ -346,9 +374,16 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, byte[] owner, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<bool> Unlock(string resource, byte[] owner, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryUnlock(GetRoundRobinUrl(), resource, owner, durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryUnlock(GetRoundRobinUrl(), resource, owner, durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<bool>(exception);
+        }
     }
     
     /// <summary>
@@ -358,9 +393,16 @@ public class KahunaClient
     /// <param name="owner"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<bool> Unlock(string resource, string owner, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<bool> Unlock(string resource, string owner, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<bool>(exception);
+        }
     }
     
     /// <summary>
@@ -369,9 +411,16 @@ public class KahunaClient
     /// <param name="resource"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KahunaLockInfo?> GetLockInfo(string resource, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<KahunaLockInfo?> GetLockInfo(string resource, LockDurability durability = LockDurability.Persistent, CancellationToken cancellationToken = default)
     {
-        return await communication.GetLock(GetRoundRobinUrl(), resource, durability, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.GetLock(GetRoundRobinUrl(), resource, durability, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<KahunaLockInfo?>(exception);
+        }
     }
     
     /// <summary>
@@ -1197,20 +1246,27 @@ public class KahunaClient
     /// <param name="parameters"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+    public Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
         string script,
         string? hash = null,
         List<KeyValueParameter>? parameters = null,
         CancellationToken cancellationToken = default
     )
     {
-        return await communication.TryExecuteKeyValueTransactionScript(
-            GetRoundRobinUrl(),
-            Encoding.UTF8.GetBytes(script),
-            hash,
-            parameters,
-            cancellationToken
-        ).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExecuteKeyValueTransactionScript(
+                GetRoundRobinUrl(),
+                Encoding.UTF8.GetBytes(script),
+                hash,
+                parameters,
+                cancellationToken
+            );
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<KahunaKeyValueTransactionResult>(exception);
+        }
     }
 
     /// <summary>
@@ -1222,7 +1278,7 @@ public class KahunaClient
     /// passes the token positionally. <paramref name="priority"/> intentionally has no default, which is what
     /// keeps the two overloads unambiguous for existing calls.
     /// </remarks>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+    public Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
         string script,
         string? hash,
         List<KeyValueParameter>? parameters,
@@ -1230,14 +1286,21 @@ public class KahunaClient
         CancellationToken cancellationToken = default
     )
     {
-        return await communication.TryExecuteKeyValueTransactionScript(
-            GetRoundRobinUrl(),
-            Encoding.UTF8.GetBytes(script),
-            hash,
-            parameters,
-            cancellationToken,
-            priority
-        ).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExecuteKeyValueTransactionScript(
+                GetRoundRobinUrl(),
+                Encoding.UTF8.GetBytes(script),
+                hash,
+                parameters,
+                cancellationToken,
+                priority
+            );
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<KahunaKeyValueTransactionResult>(exception);
+        }
     }
     
     /// <summary>
@@ -1250,21 +1313,28 @@ public class KahunaClient
     /// <param name="parameters"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+    public Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
         byte[] script,
         string? hash = null,
         List<KeyValueParameter>? parameters = null,
         CancellationToken cancellationToken = default
     )
     {
-        return await communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<KahunaKeyValueTransactionResult>(exception);
+        }
     }
 
     /// <summary>
     /// Executes a pre-encoded script on the key-value store at the given admission priority. Kept as a
     /// separate overload for the same source-compatibility reason as the string form above.
     /// </summary>
-    public async Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
+    public Task<KahunaKeyValueTransactionResult> ExecuteKeyValueTransactionScript(
         byte[] script,
         string? hash,
         List<KeyValueParameter>? parameters,
@@ -1272,7 +1342,14 @@ public class KahunaClient
         CancellationToken cancellationToken = default
     )
     {
-        return await communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken, priority).ConfigureAwait(false);
+        try
+        {
+            return communication.TryExecuteKeyValueTransactionScript(GetRoundRobinUrl(), script, hash, parameters, cancellationToken, priority);
+        }
+        catch (Exception exception)
+        {
+            return FromSynchronousFailure<KahunaKeyValueTransactionResult>(exception);
+        }
     }
 
     /// <summary>
@@ -1406,8 +1483,34 @@ public class KahunaClient
         CancellationToken cancellationToken = default
     )
     {
-        KahunaSequenceRange range = await ReserveSequenceRange(name, 1, idempotencyKey, durability, cancellationToken).ConfigureAwait(false);
-        return range.Start;
+        // Reserves through the transport directly rather than through ReserveSequenceRange: that
+        // method exists to build a KahunaSequenceRange, and this one reads a single field off it and
+        // drops it. Calling it would cost both the range object and a second state machine. A shared
+        // async helper would not help either — it would move the extra state machine onto the range
+        // method instead. Only the failure check is shared, and it needs no task of its own.
+        (SequenceResponseType response, SequenceAllocation allocation, _) = await communication.ReserveSequenceRange(
+            GetRoundRobinUrl(),
+            name,
+            1,
+            idempotencyKey,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        ThrowIfReservationFailed(response);
+
+        return allocation.Start;
+    }
+
+    /// <summary>
+    /// Maps a non-success reservation onto the exception both sequence entry points raise, so the two
+    /// of them cannot drift apart. It is deliberately synchronous and static: an async helper would
+    /// add a state machine to every reservation.
+    /// </summary>
+    private static void ThrowIfReservationFailed(SequenceResponseType response)
+    {
+        if (response != SequenceResponseType.Success)
+            throw new KahunaException("Failed to reserve sequence range: " + response, response);
     }
 
     public async Task<KahunaSequenceRange> ReserveSequenceRange(
@@ -1427,8 +1530,7 @@ public class KahunaClient
             cancellationToken
         ).ConfigureAwait(false);
 
-        if (response != SequenceResponseType.Success)
-            throw new KahunaException("Failed to reserve sequence range: " + response, response);
+        ThrowIfReservationFailed(response);
 
         return new(allocation.Name, allocation.Start, allocation.End, allocation.Count, allocation.Revision);
     }
@@ -1528,6 +1630,35 @@ public class KahunaClient
     /// Chooses the next server in the list of servers in a round-robin fashion
     /// </summary>
     /// <returns></returns>
+    /// <summary>
+    /// Rebuilds, for a method that hands back its transport task directly, the task an <c>async</c>
+    /// wrapper would have returned had the work ahead of that transport call thrown. Without it,
+    /// dropping the wrapper would move the throw from the returned task to the call itself, which a
+    /// caller that starts an operation and awaits it later would observe.
+    /// <para>
+    /// The work that can throw is real: encoding a caller's owner or script string rejects null, and
+    /// <see cref="IKahunaCommunication"/> is public, so an injected transport may throw before it ever
+    /// returns a task.
+    /// </para>
+    /// <para>
+    /// One residual difference: awaiting a cancelled task built here surfaces a
+    /// <see cref="TaskCanceledException"/> rather than the original <see cref="OperationCanceledException"/>.
+    /// The former derives from the latter and carries the same token, so a catch of the latter is
+    /// unaffected. No public API can attach the original instance to a cancelled task.
+    /// </para>
+    /// </summary>
+    private static Task<T> FromSynchronousFailure<T>(Exception exception)
+    {
+        TaskCompletionSource<T> promise = new();
+
+        if (exception is OperationCanceledException canceled)
+            promise.TrySetCanceled(canceled.CancellationToken);
+        else
+            promise.TrySetException(exception);
+
+        return promise.Task;
+    }
+
     private string GetRoundRobinUrl()
     {
         // Single-endpoint clients skip the interlocked counter: it would only add cross-core

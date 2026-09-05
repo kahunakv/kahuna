@@ -616,10 +616,31 @@ public class GrpcCommunication : IKahunaCommunication
         return (GetExistsManyKeyValuesResponseItems(response.Items), 0);
     }
 
-    private static void AddManyKeyValuesRequestItems(
+    /// <summary>
+    /// Reserves room for the whole source in a repeated field when the source can report its size
+    /// without being walked. Adding item by item reallocates the backing array several times per batch.
+    /// A source of unknown size keeps that incremental growth on purpose: counting it would need a
+    /// second enumeration, and a one-shot sequence does not survive one.
+    /// </summary>
+    private static void ReserveItemCapacity<TTarget, TSource>(RepeatedField<TTarget> target, IEnumerable<TSource> source)
+    {
+        if (!source.TryGetNonEnumeratedCount(out int count) || count == 0)
+            return;
+
+        // The field is empty at every current call site, but a later caller may append to a populated
+        // one, so the existing items are part of the requirement.
+        int required = checked(target.Count + count);
+
+        if (required > target.Capacity)
+            target.Capacity = required;
+    }
+
+    internal static void AddManyKeyValuesRequestItems(
         RepeatedField<GrpcTryManyValuesRequestItem> target,
         IEnumerable<KahunaGetManyKeyValuesRequestItem> requestItems)
     {
+        ReserveItemCapacity(target, requestItems);
+
         foreach (KahunaGetManyKeyValuesRequestItem item in requestItems)
         {
             target.Add(new GrpcTryManyValuesRequestItem
@@ -668,10 +689,12 @@ public class GrpcCommunication : IKahunaCommunication
         return result;
     }
 
-    private static void AddSetManyKeyValueRequestItems(
+    internal static void AddSetManyKeyValueRequestItems(
         RepeatedField<GrpcTrySetManyKeyValueRequestItem> target,
         IEnumerable<KahunaSetKeyValueRequestItem> requestItems)
     {
+        ReserveItemCapacity(target, requestItems);
+
         foreach (KahunaSetKeyValueRequestItem item in requestItems)
         {
             target.Add(new GrpcTrySetManyKeyValueRequestItem
@@ -703,10 +726,12 @@ public class GrpcCommunication : IKahunaCommunication
         return responseItems;
     }
 
-    private static void AddDeleteManyKeyValueRequestItems(
+    internal static void AddDeleteManyKeyValueRequestItems(
         RepeatedField<GrpcTryDeleteManyKeyValueRequestItem> target,
         IEnumerable<KahunaDeleteKeyValueRequestItem> requestItems)
     {
+        ReserveItemCapacity(target, requestItems);
+
         foreach (KahunaDeleteKeyValueRequestItem item in requestItems)
         {
             target.Add(new GrpcTryDeleteManyKeyValueRequestItem
@@ -2137,8 +2162,14 @@ public class GrpcCommunication : IKahunaCommunication
         );
     }
     
-    private static void AddTransactionParameters(RepeatedField<GrpcKeyValueParameter> target, List<KeyValueParameter> parameters)
+    internal static void AddTransactionParameters(RepeatedField<GrpcKeyValueParameter> target, List<KeyValueParameter> parameters)
     {
+        // The source is a list, so its size is always known here.
+        int required = checked(target.Count + parameters.Count);
+
+        if (required > target.Capacity)
+            target.Capacity = required;
+
         foreach (KeyValueParameter parameter in parameters)
         {
             GrpcKeyValueParameter grpcParameter = new()
@@ -2155,7 +2186,15 @@ public class GrpcCommunication : IKahunaCommunication
 
     private GrpcBatcher GetSharedBatcher(string url)
     {
-        Lazy<GrpcBatcher> lazyBatchers = batchers.GetOrAdd(url, CreateSharedBatcher);
+        // Static factory plus explicit state: a method group over an instance method carries the
+        // receiver, so it would allocate a fresh delegate on every lookup, dictionary hits included.
+        // The Lazy stays because GetOrAdd may run the factory more than once under contention — a
+        // spare wrapper is cheap, a second live batcher and its stream are not.
+        Lazy<GrpcBatcher> lazyBatchers = batchers.GetOrAdd(
+            url,
+            static (key, communication) => communication.CreateSharedBatcher(key),
+            this);
+
         return lazyBatchers.Value;
     }
 
