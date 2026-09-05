@@ -453,7 +453,6 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             Flags = (GrpcKeyValueFlags)flags,
             ExpiresMs = expiryTime,
             Durability = (GrpcKeyValueDurability)durability,
@@ -461,6 +460,12 @@ public class GrpcCommunication : IKahunaCommunication
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low
         };
+
+        // A null payload must leave the field unset, so the setter is skipped rather than handed a null.
+        // The generated setter rejects null whatever branch produces it, and writing ByteString.Empty
+        // instead would report zero bytes to the server where the caller sent no value at all.
+        if (value is not null)
+            request.Value = UnsafeByteOperations.UnsafeWrap(value);
         
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
@@ -697,14 +702,21 @@ public class GrpcCommunication : IKahunaCommunication
 
         foreach (KahunaSetKeyValueRequestItem item in requestItems)
         {
-            target.Add(new GrpcTrySetManyKeyValueRequestItem
+            GrpcTrySetManyKeyValueRequestItem grpcItem = new()
             {
-                Key = item.Key,
-                Value = item.Value is not null ? UnsafeByteOperations.UnsafeWrap(item.Value) : null,
+                // A null key is a caller error, not a transport error: an empty key reaches the server and
+                // comes back as one InvalidInput item, which is what the REST transport already does with it.
+                Key = item.Key ?? "",
                 ExpiresMs = item.ExpiresMs,
                 Flags = (GrpcKeyValueFlags)item.Flags,
                 Durability = (GrpcKeyValueDurability)item.Durability
-            });
+            };
+
+            // Absent, not empty: see TrySetKeyValue.
+            if (item.Value is not null)
+                grpcItem.Value = UnsafeByteOperations.UnsafeWrap(item.Value);
+
+            target.Add(grpcItem);
         }
     }
     
@@ -739,7 +751,9 @@ public class GrpcCommunication : IKahunaCommunication
                 TransactionIdNode = item.TransactionId.N,
                 TransactionIdPhysical = item.TransactionId.L,
                 TransactionIdCounter = item.TransactionId.C,
-                Key = item.Key,
+                // An empty key reaches the server and comes back as one InvalidInput item; the generated
+                // setter would reject a null outright.
+                Key = item.Key ?? "",
                 Durability = (GrpcKeyValueDurability)item.Durability
             });
         }
@@ -801,8 +815,6 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
-            CompareValue = compareValue is not null ? UnsafeByteOperations.UnsafeWrap(compareValue) : null,
             Flags = GrpcKeyValueFlags.SetIfEqualToValue,
             ExpiresMs = expiryTime,
             Durability = (GrpcKeyValueDurability)durability,
@@ -810,6 +822,13 @@ public class GrpcCommunication : IKahunaCommunication
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low
         };
+
+        // Absent, not empty: see TrySetKeyValue.
+        if (value is not null)
+            request.Value = UnsafeByteOperations.UnsafeWrap(value);
+
+        if (compareValue is not null)
+            request.CompareValue = UnsafeByteOperations.UnsafeWrap(compareValue);
         
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
@@ -879,7 +898,6 @@ public class GrpcCommunication : IKahunaCommunication
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Key = key,
-            Value = value is not null ? UnsafeByteOperations.UnsafeWrap(value) : null,
             CompareRevision = compareRevision,
             Flags = GrpcKeyValueFlags.SetIfEqualToRevision,
             ExpiresMs = expiryTime,
@@ -888,6 +906,10 @@ public class GrpcCommunication : IKahunaCommunication
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low
         };
+
+        // Absent, not empty: see TrySetKeyValue.
+        if (value is not null)
+            request.Value = UnsafeByteOperations.UnsafeWrap(value);
 
         int retries = 0;
         GrpcTrySetKeyValueResponse? response;
@@ -937,7 +959,8 @@ public class GrpcCommunication : IKahunaCommunication
     /// <returns>
     /// A tuple where:
     /// - The first item indicates whether the operation succeeded.
-    /// - The second item is the value associated with the key, if found, represented as a byte array. Null if the key is not found.
+    /// - The second item is the value associated with the key, represented as a byte array. Null when the key
+    ///   is not found, and also when the key exists but holds no value — the first item separates the two.
     /// - The third item is the last revision number of the key retrieved.
     /// - The fourth item represents the time taken for the operation in milliseconds.
     /// </returns>
@@ -997,7 +1020,10 @@ public class GrpcCommunication : IKahunaCommunication
                     {
                         case GrpcKeyValueResponseType.TypeGot:
                         {
-                            byte[] value = GetResponseBytes(response.Value);
+                            // The server leaves the field unset for a key that holds no value, so presence is
+                            // what separates "no value" from "zero bytes". Reading the field alone would report
+                            // an empty array for both, which is not what the REST transport returns.
+                            byte[]? value = response.HasValue ? GetResponseBytes(response.Value) : null;
 
                             HLCTimestamp lastModified = new(response.LastModifiedNode, response.LastModifiedPhysical, response.LastModifiedCounter);
                             return (true, value, response.Revision, lastModified, response.TimeElapsedMs);

@@ -68,11 +68,14 @@ internal static class PreparedIntentMaterializer
         scratch.Epoch = byReference ? intent.Epoch : 0;
 
         // The by-reference form deliberately carries no value: the consumer reads it from its own intent. The
-        // state does travel, because a delete's record must stay distinguishable from a set's.
-        if (byReference)
-            scratch.Value = ByteString.Empty;
+        // state does travel, because a delete's record must stay distinguishable from a set's. On the by-value
+        // form the value field is presence-tracked, exactly as on a direct write's record: a null value clears
+        // the field (the reused scratch would otherwise leak the previous intent's presence bit), so a committed
+        // set with no value replays as a valueless key rather than an empty one.
+        if (byReference || intent.Value is null)
+            scratch.ClearValue();
         else
-            scratch.Value = intent.Value is null ? ByteString.Empty : UnsafeByteOperations.UnsafeWrap(intent.Value);
+            scratch.Value = UnsafeByteOperations.UnsafeWrap(intent.Value);
 
         return ReplicationSerializer.Serialize(scratch);
     }

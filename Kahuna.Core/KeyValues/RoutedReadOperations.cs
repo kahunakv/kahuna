@@ -40,9 +40,9 @@ internal sealed class RoutedReadOperations
     private static RegistrationRouting ClassifyRegistration(HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId) =>
         OperationRegistrar.ClassifyRegistration(transactionId, coordinatorKey, operationId);
 
-    private Task<bool> CompleteRegisteredOperation(
+    private Task<bool> CompleteRegisteredOperation<TResponse>(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId,
-        object response, OperationCompletionPayload payload) =>
+        TResponse response, OperationCompletionPayload payload) where TResponse : notnull =>
         registrar.CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload);
 
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>

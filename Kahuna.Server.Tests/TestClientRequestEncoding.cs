@@ -271,20 +271,21 @@ public sealed class TestClientRequestEncoding
     [Fact]
     public void AddSetManyKeyValueRequestItems_ReservesExactly_AndPreservesEveryField()
     {
-        // A null value is deliberately absent from this source: the gRPC many-set path cannot carry
-        // one today, which is a separate defect and not something this reservation change touches.
+        // This case is about the reservation and field mapping only. What an absent value means on the
+        // wire is pinned separately, in TestKeyValuePayloadPresence.
         List<KahunaSetKeyValueRequestItem> source =
         [
             new() { Key = "a", Value = [1, 2], ExpiresMs = 10, Durability = KeyValueDurability.Ephemeral },
             new() { Key = "b", Value = [3], Durability = KeyValueDurability.Persistent },
-            new() { Key = "a", Value = [], Flags = KeyValueFlags.SetIfNotExists }   // duplicate key, empty value
+            new() { Key = "a", Value = [], Flags = KeyValueFlags.SetIfNotExists },  // duplicate key, empty value
+            new() { Key = "c", Value = null }
         ];
 
         RepeatedField<GrpcTrySetManyKeyValueRequestItem> target = [];
         GrpcCommunication.AddSetManyKeyValueRequestItems(target, source);
 
-        Assert.Equal(3, target.Count);
-        Assert.Equal(3, target.Capacity);
+        Assert.Equal(4, target.Count);
+        Assert.Equal(4, target.Capacity);
 
         Assert.Equal("a", target[0].Key);
         Assert.Equal(10, target[0].ExpiresMs);
@@ -295,6 +296,10 @@ public sealed class TestClientRequestEncoding
         Assert.Equal("a", target[2].Key);
         Assert.True(target[2].HasValue);
         Assert.Empty(target[2].Value.ToByteArray());
+
+        // A null value must reserve room and encode as an absent field, not throw and not become empty.
+        Assert.Equal("c", target[3].Key);
+        Assert.False(target[3].HasValue);
     }
 
     [Fact]

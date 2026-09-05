@@ -841,8 +841,11 @@ message GrpcTransactionReadKey
 
 // The actor-confirmed committed value of one persistent modified key, echoed from the participant to the
 // coordinator so it can stage the mutation losslessly and finalize through the durable-intent path (not the
-// manual ticket path). An absent Value is a deletion (distinct from an empty value); ExpiresMs is the relative
-// TTL in ms (0 = none); NoRevision carries whether the write suppressed history retention.
+// manual ticket path). State carries whether the operation was a set or a delete, so a set with an absent
+// value (a key that exists and holds no value) stays distinct from a deletion; value presence alone cannot
+// tell them apart. An absent Value is distinct from an empty value. ExpiresMs is the relative TTL in ms
+// (0 = none); NoRevision carries whether the write suppressed history retention. A reader receiving
+// STATE_UNDEFINED (an older sender) falls back to value presence: absent = deleted, present = set.
 message GrpcStagedMutationEffect
 {
   string Key = 1;
@@ -850,6 +853,7 @@ message GrpcStagedMutationEffect
   int64 Revision = 3;
   int64 ExpiresMs = 4;
   bool NoRevision = 5;
+  GrpcKeyValueState State = 6;
 }
 
 message GrpcCommitTransactionResponse

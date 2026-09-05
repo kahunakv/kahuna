@@ -173,16 +173,23 @@ public sealed class LocksService : Locker.LockerBase
                 Type = (GrpcLockResponseType)type
             };
 
-        return new()
+        GrpcGetLockResponse response = new()
         {
             Type = (GrpcLockResponseType)type,
-            Owner = lockContext?.Owner is not null ? UnsafeByteOperations.UnsafeWrap(lockContext.Owner) : null,
             FencingToken = lockContext?.FencingToken ?? 0,
             ExpiresNode = lockContext?.Expires.N ?? 0,
             ExpiresPhysical = lockContext?.Expires.L ?? 0,
             ExpiresCounter = lockContext?.Expires.C ?? 0,
             ServedFrom = ""
         };
+
+        // An ownerless lock leaves the field unset: the generated setter rejects null, so a conditional that
+        // still runs it would throw instead of guarding. A held lock always names an owner, which is why this
+        // has never fired, but the shape must not survive as an example to copy.
+        if (lockContext?.Owner is not null)
+            response.Owner = UnsafeByteOperations.UnsafeWrap(lockContext.Owner);
+
+        return response;
     }
     
     public override async Task BatchClientLockRequests(

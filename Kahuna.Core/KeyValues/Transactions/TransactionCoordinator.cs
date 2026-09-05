@@ -1118,57 +1118,65 @@ internal sealed class TransactionCoordinator : IDisposable
         bool committed = context.State == KeyValueTransactionState.Committed;
         bool allMandatoryAcked = true;
 
-        // Intent-bearing per-key cleanup: point locks and, when not committed, staged (un-prepared) writes.
-        HashSet<(string, KeyValueDurability)> mandatoryKeys = [];
-
-        if (context.LocksAcquired is not null)
-        {
-            foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
-            {
-                // A committed modified key was already unlocked by the commit phase; don't release it twice.
-                if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(lockKey))
-                    continue;
-
-                mandatoryKeys.Add(lockKey);
-            }
-        }
-
+        int lockCount = context.LocksAcquired?.Count ?? 0;
         // Clean staged (un-prepared) writes only when no prepare ran on this transaction. When the state is
         // still Pending, every modified key holds only the write intent placed at write time — no proposal
         // ticket exists, so the ticket-free release is the correct and only cleanup. Once a prepare has run
         // (Preparing/Prepared/Committing/RollingBack/RolledBack) two-phase commit owns those keys' proposals
         // and cleans them via their tickets; re-releasing them here could clear an intent out from under an
         // in-flight rollback, so leave them to 2PC.
-        if (context.State == KeyValueTransactionState.Pending && context.ModifiedKeys is not null)
-        {
-            foreach ((string, KeyValueDurability) modified in context.ModifiedKeys)
-                mandatoryKeys.Add(modified);
-        }
+        int pendingModifiedCount = context.State == KeyValueTransactionState.Pending ? (context.ModifiedKeys?.Count ?? 0) : 0;
+        int readCount = context.ReadKeys?.Count ?? 0;
 
-        // Best-effort read MVCC cleanup for keys not already covered by a mandatory release or a committed
-        // mutation (which the commit phase already cleaned).
-        HashSet<(string, KeyValueDurability)> readKeys = [];
-
-        if (context.ReadKeys is not null)
+        // A transaction with no per-key footprint skips straight to the prefix/range releases below.
+        if (lockCount > 0 || pendingModifiedCount > 0 || readCount > 0)
         {
-            foreach ((string, KeyValueDurability) readKey in context.ReadKeys.Keys)
+            // Intent-bearing per-key cleanup: point locks and, when not committed, staged (un-prepared) writes.
+            // The set stays authoritative for the acknowledgement checks below; eligible read keys append to
+            // the batch list directly (their source dictionary already guarantees uniqueness) instead of
+            // passing through a second scratch set.
+            HashSet<(string, KeyValueDurability)> mandatoryKeys = new(lockCount + pendingModifiedCount);
+
+            if (context.LocksAcquired is not null)
             {
-                if (mandatoryKeys.Contains(readKey))
-                    continue;
+                foreach ((string, KeyValueDurability) lockKey in context.LocksAcquired)
+                {
+                    // A committed modified key was already unlocked by the commit phase; don't release it twice.
+                    if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(lockKey))
+                        continue;
 
-                if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(readKey))
-                    continue;
-
-                readKeys.Add(readKey);
+                    mandatoryKeys.Add(lockKey);
+                }
             }
-        }
 
-        // One batched round-trip cleans every per-key entry; the release handler is idempotent, so a key
-        // already cleaned is a harmless no-op.
-        List<(string, KeyValueDurability)> perKey = [.. mandatoryKeys, .. readKeys];
+            if (pendingModifiedCount > 0 && context.ModifiedKeys is not null)
+            {
+                foreach ((string, KeyValueDurability) modified in context.ModifiedKeys)
+                    mandatoryKeys.Add(modified);
+            }
 
-        if (perKey.Count > 0)
-        {
+            // One batched round-trip cleans every per-key entry; the release handler is idempotent, so a key
+            // already cleaned is a harmless no-op.
+            List<(string, KeyValueDurability)> perKey = new(mandatoryKeys.Count + readCount);
+            foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
+                perKey.Add(mandatory);
+
+            // Best-effort read MVCC cleanup for keys not already covered by a mandatory release or a committed
+            // mutation (which the commit phase already cleaned).
+            if (context.ReadKeys is not null)
+            {
+                foreach ((string, KeyValueDurability) readKey in context.ReadKeys.Keys)
+                {
+                    if (mandatoryKeys.Contains(readKey))
+                        continue;
+
+                    if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(readKey))
+                        continue;
+
+                    perKey.Add(readKey);
+                }
+            }
+
             try
             {
                 if (perKey.Count == 1)
@@ -1180,7 +1188,7 @@ internal sealed class TransactionCoordinator : IDisposable
                     if (mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
                         allMandatoryAcked = false;
                 }
-                else
+                else if (perKey.Count > 1)
                 {
                     List<(KeyValueResponseType, string, KeyValueDurability)> results =
                         await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, perKey, CancellationToken.None);
@@ -1632,25 +1640,15 @@ internal sealed class TransactionCoordinator : IDisposable
         HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(), commitTimestamp.C);
 
-        Dictionary<string, StagedMutation> stagedByKey = new(staged.Count);
-        foreach ((string key, StagedValue value) in staged)
-            stagedByKey[key] = new StagedMutation(value.Value, value.Revision, value.ExpiresMs, value.NoRevision);
-
-        // Each read-then-written key's pre-write observation is the exact committed base its mutation is
-        // conditioned on; frozen into the intents so the staged-base compare-and-set can enforce it.
-        Dictionary<string, KeyValueTransactionReadKey>? writtenBases = null;
-        if (context.WrittenBaseObservations is { Count: > 0 } observations)
-        {
-            writtenBases = new Dictionary<string, KeyValueTransactionReadKey>(observations.Count);
-            foreach (((string key, KeyValueDurability durability), KeyValueTransactionReadKey observed) in observations)
-                if (durability == KeyValueDurability.Persistent)
-                    writtenBases[key] = observed;
-        }
-
+        // The builder reads the session's staged values and written-base observations in place: this freeze runs
+        // synchronously after accepted operations drained and under the finalize owner, so neither dictionary can
+        // mutate during the call, and the built input owns every collection it carries. Each read-then-written
+        // key's pre-write observation is the exact committed base its mutation is conditioned on; frozen into the
+        // intents so the staged-base compare-and-set can enforce it.
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
-                commitTimestamp, decisionDeadline, persistentKeys, stagedByKey,
-                manager.LocateDurablePartition, out input, writtenBases))
+                commitTimestamp, decisionDeadline, persistentKeys, staged,
+                manager.LocateDurablePartition, out input, context.WrittenBaseObservations))
             return false;
 
         opId = commitTimestamp;

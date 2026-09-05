@@ -120,16 +120,26 @@ internal static class TransactionManifest
         h = FoldHlc(h, commitTimestamp, prime);
 
         // Order-independent: sort participants by ordinal key (then durability) so the hash does not depend on
-        // the order the caller enumerated the modified keys.
-        List<TransactionParticipantRef> ordered = new(participants);
-        ordered.Sort(static (a, b) =>
+        // the order the caller enumerated the modified keys. Zero or one participant has exactly one order, so
+        // those fold directly without copying the list; the multi-key fold is unchanged.
+        if (participants.Count > 1)
         {
-            int byKey = string.CompareOrdinal(a.Key, b.Key);
-            return byKey != 0 ? byKey : ((int)a.Durability).CompareTo((int)b.Durability);
-        });
+            List<TransactionParticipantRef> ordered = new(participants);
+            ordered.Sort(static (a, b) =>
+            {
+                int byKey = string.CompareOrdinal(a.Key, b.Key);
+                return byKey != 0 ? byKey : ((int)a.Durability).CompareTo((int)b.Durability);
+            });
 
-        foreach (TransactionParticipantRef p in ordered)
+            foreach (TransactionParticipantRef p in ordered)
+            {
+                h = FoldString(h, p.Key, prime);
+                h = FoldLong(h, (long)p.Durability, prime);
+            }
+        }
+        else if (participants.Count == 1)
         {
+            TransactionParticipantRef p = participants[0];
             h = FoldString(h, p.Key, prime);
             h = FoldLong(h, (long)p.Durability, prime);
         }

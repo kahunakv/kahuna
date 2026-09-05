@@ -89,11 +89,13 @@ internal sealed class OperationRegistrar
     /// cancellation token: once the actor has mutated, abandoning the completion because the caller
     /// went away would strand the effect with the coordinator record stuck pending. Returns true when
     /// the coordinator acknowledged the fold; false means the caller must surface
-    /// <see cref="KeyValueResponseType.MustRetry"/>.
+    /// <see cref="KeyValueResponseType.MustRetry"/>. Generic in the response type so an acknowledged
+    /// value-type response (the common case) is never boxed; boxing happens only when the response
+    /// enters the retry cache on a lost completion.
     /// </summary>
-    internal async Task<bool> CompleteRegisteredOperation(
+    internal async Task<bool> CompleteRegisteredOperation<TResponse>(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId,
-        object response, OperationCompletionPayload payload)
+        TResponse response, OperationCompletionPayload payload) where TResponse : notnull
     {
         try
         {

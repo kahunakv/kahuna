@@ -2,6 +2,7 @@ using Google.Protobuf;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -66,8 +67,8 @@ public sealed class TestCompleteOperationGrpcWire
             ],
             StagedMutations =
             [
-                new("batch-a", "v"u8.ToArray(), 6, 30_000, false),
-                new("batch-b", null, 7, 0, true)
+                new("batch-a", "v"u8.ToArray(), KeyValueState.Set, 6, 30_000, false),
+                new("batch-b", null, KeyValueState.Deleted, 7, 0, true)
             ],
             Durability = KeyValueDurability.Persistent,
             CachedType = KeyValueResponseType.Set,
@@ -109,7 +110,7 @@ public sealed class TestCompleteOperationGrpcWire
         OperationCompletionPayload payload = new()
         {
             ModifiedKeys = [("k1", KeyValueDurability.Persistent)],
-            StagedMutations = [new("k1", "v1"u8.ToArray(), 1, 0, false)],
+            StagedMutations = [new("k1", "v1"u8.ToArray(), KeyValueState.Set, 1, 0, false)],
             AcquiredPointLocks = [("k1", KeyValueDurability.Persistent)],
             Durability = KeyValueDurability.Persistent,
             CachedType = KeyValueResponseType.Set

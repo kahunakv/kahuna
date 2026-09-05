@@ -1049,6 +1049,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // intent overwrites it.
         KeyValueMessage scratch = new();
 
+        // The record that overflowed the previous window's byte limit. It belongs to the intent at `next`
+        // (the cursor did not advance on overflow), so the next window consumes it as its first entry
+        // instead of serializing the same intent a second time.
+        byte[]? carriedRecord = null;
+
         while (next < partition.Intents.Count)
         {
             List<(int Index, byte[] Record)> window = new(Math.Min(maxMaterializationBatchItems, partition.Intents.Count - next));
@@ -1056,10 +1061,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             while (next < partition.Intents.Count && window.Count < maxMaterializationBatchItems)
             {
-                byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next], scratch, materializeByReference);
+                byte[] record = carriedRecord ?? PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next], scratch, materializeByReference);
                 if (window.Count > 0 && windowBytes + record.Length > maxMaterializationBatchBytes)
+                {
+                    carriedRecord = record;
                     break;
+                }
 
+                carriedRecord = null;
                 window.Add((next, record));
                 windowBytes += record.Length;
                 next++;

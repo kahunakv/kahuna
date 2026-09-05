@@ -5,23 +5,21 @@ using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
-/// <summary>The committed value staged for one modified key, the accurate part of the freeze available to the
-/// coordinator (the mutation's value, revision, <b>relative</b> TTL in ms; 0 = no expiry, and the <c>NoRevision</c>
-/// history-suppression flag). A null <see cref="Value"/> is a deletion. The relative TTL is resolved to an absolute
-/// expiry HLC at freeze.</summary>
-internal readonly record struct StagedMutation(byte[]? Value, long Revision, long ExpiresMs, bool NoRevision);
-
 /// <summary>
 /// Builds the frozen <see cref="DurableFinalizeInput"/> for the durable-intent path from a transaction's modified
 /// keys and their staged committed values, grouping the prepared intents by their current data partition. Pure
-/// and deterministic behind a <c>locate</c> seam so the freeze is unit-testable in isolation. Returns null — so
-/// the caller falls back to the ticket path — when the transaction cannot be represented losslessly (not
-/// all-persistent, no anchor, or a modified key with no staged value).
+/// and deterministic behind a <c>locate</c> seam so the freeze is unit-testable in isolation. Reads the session's
+/// own staged-value and written-base dictionaries directly — the caller guarantees they cannot mutate during this
+/// synchronous call (accepted operations have drained and the finalize owner fences new ones) and the returned
+/// input owns every collection it carries, never a live view. Returns null — so the caller falls back to the
+/// ticket path — when the transaction cannot be represented losslessly (not all-persistent, no anchor, or a
+/// modified key with no staged value).
 ///
-/// <para>Fidelity note: value/revision/expiry/<c>NoRevision</c> are exact — a <c>SET NOREV</c> materializes
+/// <para>Fidelity note: value/state/revision/expiry/<c>NoRevision</c> are exact — a <c>SET NOREV</c> materializes
 /// revision-free on the durable path exactly as a direct write would. The mutation <see cref="KeyValueState"/> is
-/// derived from value presence (a null value is a delete), and the bucket is derived from the key (its parent
-/// prefix) so it matches what the apply path recomputes. The validated base (<c>BaseRevision</c>/<c>BaseState</c>)
+/// the state staged from the operation the caller issued — never derived from value presence, because a set may
+/// carry a null value (the key exists and holds nothing) and must not finalize as a delete. The bucket is derived
+/// from the key (its parent prefix) so it matches what the apply path recomputes. The validated base (<c>BaseRevision</c>/<c>BaseState</c>)
 /// is the transaction's own pre-write read observation when one exists — exact, and enforced by the commit-time
 /// staged-base compare-and-set — or the unknown-base sentinel for a blind write; it is never consulted for the
 /// committed value (the materializer replays only value/revision/expiry/NoRevision).</para>
@@ -36,10 +34,10 @@ internal static class DurableFinalizeInputBuilder
         HLCTimestamp commitTimestamp,
         HLCTimestamp decisionDeadline,
         IReadOnlyCollection<(string Key, KeyValueDurability Durability)> modifiedKeys,
-        IReadOnlyDictionary<string, StagedMutation> stagedByKey,
+        IReadOnlyDictionary<string, StagedValue> stagedByKey,
         Func<string, (int PartitionId, long Generation)> locate,
         out DurableFinalizeInput? input,
-        IReadOnlyDictionary<string, KeyValueTransactionReadKey>? writtenBases = null)
+        IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? writtenBases = null)
     {
         input = null;
 
@@ -63,8 +61,15 @@ internal static class DurableFinalizeInputBuilder
 
         foreach ((string key, KeyValueDurability _) in modifiedKeys)
         {
-            if (!stagedByKey.TryGetValue(key, out StagedMutation staged))
+            if (!stagedByKey.TryGetValue(key, out StagedValue staged))
                 return false; // a modified key with no staged value cannot be prepared losslessly — fall back.
+
+            // The staged state is the operation the caller issued: a set with a null value (the key exists and
+            // holds nothing) must not finalize as a delete, so value presence never decides it. Every staging
+            // site records Set or Deleted; an Undefined state means the entry is not lossless, so fall back to
+            // the ticket path, which commits the staged MVCC entries as the actors hold them.
+            if (staged.State is not (KeyValueState.Set or KeyValueState.Deleted))
+                return false;
 
             // Resolve the relative TTL to an absolute expiry anchored to the one canonical commit timestamp, so a
             // TTL write's expiry is deterministic across replicas and independent of any actor's wall clock.
@@ -80,7 +85,9 @@ internal static class DurableFinalizeInputBuilder
             // all, relative to the committed head).
             long baseRevision = PreparedIntent.UnknownBaseRevision;
             KeyValueState baseState = KeyValueState.Undefined;
-            if (writtenBases is not null && writtenBases.TryGetValue(key, out KeyValueTransactionReadKey? observedBase))
+            // Every key on this path is persistent (checked above), so the persistent-durability entry is the
+            // only observation that can bind to it.
+            if (writtenBases is not null && writtenBases.TryGetValue((key, KeyValueDurability.Persistent), out KeyValueTransactionReadKey? observedBase))
             {
                 baseRevision = observedBase.Revision;
                 baseState = observedBase.Exists ? KeyValueState.Set : KeyValueState.Undefined;
@@ -88,7 +95,7 @@ internal static class DurableFinalizeInputBuilder
 
             PreparedIntent intent = new(
                 transactionId, epoch, key, manifestHash, anchorKey, commitTimestamp,
-                State: staged.Value is not null ? KeyValueState.Set : KeyValueState.Deleted,
+                State: staged.State,
                 Value: staged.Value,
                 Bucket: GetBucket(key),
                 Revision: staged.Revision,

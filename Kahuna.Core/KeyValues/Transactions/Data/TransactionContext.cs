@@ -6,12 +6,14 @@ using Kahuna.Server.KeyValues.Transactions;
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>The committed value staged for one modified key on the durable-intent finalize path: the mutation's
-/// value (null = delete tombstone), its revision, its <b>relative</b> TTL in milliseconds (0 = no expiry), and
-/// whether the write suppressed history retention (<c>NoRevision</c>). The relative TTL is resolved to an absolute
+/// value, its set-or-deleted <see cref="State"/>, its revision, its <b>relative</b> TTL in milliseconds (0 = no
+/// expiry), and whether the write suppressed history retention (<c>NoRevision</c>). The state comes from the
+/// operation the caller issued, never from value presence: a set may carry a null value (the key exists and holds
+/// nothing) and must stay distinct from a delete's null tombstone. The relative TTL is resolved to an absolute
 /// expiry HLC of <c>commitTimestamp + ExpiresMs</c> at freeze, so a TTL write's expiry is anchored to the one
 /// canonical commit timestamp rather than an actor-local wall clock. <c>NoRevision</c> is carried so a
 /// <c>SET NOREV</c> materializes revision-free on the durable path exactly as a direct write would.</summary>
-public readonly record struct StagedValue(byte[]? Value, long Revision, long ExpiresMs, bool NoRevision);
+public readonly record struct StagedValue(byte[]? Value, KeyValueState State, long Revision, long ExpiresMs, bool NoRevision);
 
 /// <summary>
 /// Generic transaction context holding identity, policy, lifecycle state, and confirmed working-set
@@ -126,20 +128,22 @@ internal class TransactionContext
     /// Per-key staged committed value for the durable-intent finalize path, accumulated across every mutation
     /// command (unlike <see cref="ModifiedResult"/>, which only reflects the last command's result). A key present
     /// in <see cref="ModifiedKeys"/> but absent here has no losslessly-stageable value (e.g. an extend), so the
-    /// transaction falls back to the ticket path. A null <see cref="StagedValue.Value"/> is a delete tombstone.
+    /// transaction falls back to the ticket path. Set-versus-delete is carried by <see cref="StagedValue.State"/>,
+    /// not by value presence: a set staged with a null value is a key that exists and holds nothing.
     /// </summary>
     public Dictionary<string, StagedValue>? StagedMutations { get; private set; }
 
-    /// <summary>Records the staged committed value of one modified key for the durable-intent path. The expiry is
-    /// the write's <b>relative</b> TTL in milliseconds (0 = none); it is resolved to an absolute HLC at freeze.
-    /// <paramref name="noRevision"/> carries whether the write suppressed history retention so the materialized
-    /// durable write matches a direct <c>SET NOREV</c>.</summary>
-    public void StageMutation(string key, byte[]? value, long revision, long expiresMs, bool noRevision)
+    /// <summary>Records the staged committed value of one modified key for the durable-intent path. The state is
+    /// the operation the caller issued (set or delete) — it decides how the mutation materializes, so it must never
+    /// be inferred from value presence. The expiry is the write's <b>relative</b> TTL in milliseconds (0 = none);
+    /// it is resolved to an absolute HLC at freeze. <paramref name="noRevision"/> carries whether the write
+    /// suppressed history retention so the materialized durable write matches a direct <c>SET NOREV</c>.</summary>
+    public void StageMutation(string key, byte[]? value, KeyValueState state, long revision, long expiresMs, bool noRevision)
     {
         lock (registryLock)
         {
             StagedMutations ??= [];
-            StagedMutations[key] = new StagedValue(value, revision, expiresMs, noRevision);
+            StagedMutations[key] = new StagedValue(value, state, revision, expiresMs, noRevision);
         }
     }
 
@@ -408,7 +412,7 @@ internal class TransactionContext
         if (payload.StagedMutations is { } stagedMutations)
         {
             foreach (StagedMutationEffect staged in stagedMutations)
-                StageMutation(staged.Key, staged.Value, staged.Revision, staged.ExpiresMs, staged.NoRevision);
+                StageMutation(staged.Key, staged.Value, staged.State, staged.Revision, staged.ExpiresMs, staged.NoRevision);
         }
 
         if (!string.IsNullOrEmpty(payload.AcquiredPointLock))

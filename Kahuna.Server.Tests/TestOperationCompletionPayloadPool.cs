@@ -42,7 +42,7 @@ public class TestOperationCompletionPayloadPool
             ReleasedRangeLock = range,
             Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 1 },
             ReadObservations = [new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 1 }],
-            StagedMutations = [new StagedMutationEffect("k", [1], 1, 1, true)],
+            StagedMutations = [new StagedMutationEffect("k", [1], KeyValueState.Set, 1, 1, true)],
             Durability = KeyValueDurability.Ephemeral,
             CachedType = KeyValueResponseType.Locked,
             CachedRevision = 7,

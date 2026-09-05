@@ -7,7 +7,6 @@
  */
 
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using Kommander.Time;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
@@ -83,13 +82,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
-        byte[]? value;
-        
-        value = ByteStringPayload.GetArray(request.Value);
-        
-        byte[]? compareValue;
-        
-        compareValue = ByteStringPayload.GetArray(request.CompareValue);
+        // Presence, not content: the client leaves the field unset for a null payload, so decoding the field
+        // alone would store zero bytes for a key the caller set to no value. The REST transport carries the
+        // same call as an explicit null, and the two must reach the store as the same write.
+        byte[]? value = ByteStringPayload.GetArrayOrNull(request.HasValue, request.Value);
+
+        byte[]? compareValue = ByteStringPayload.GetArrayOrNull(request.HasCompareValue, request.CompareValue);
         
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
@@ -235,13 +233,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         foreach (GrpcTrySetManyKeyValueRequestItem item in items)
         {
-            byte[]? value;
-        
-            value = ByteStringPayload.GetArray(item.Value);
-            
-            byte[]? compareValue;
-            
-            compareValue = ByteStringPayload.GetArray(item.CompareValue);
+            // An absent value is a null payload, not an empty one — see TrySetKeyValueCore.
+            byte[]? value = ByteStringPayload.GetArrayOrNull(item.HasValue, item.Value);
+
+            byte[]? compareValue = ByteStringPayload.GetArrayOrNull(item.HasCompareValue, item.CompareValue);
             
             requestItems.Add(new()
             {
@@ -2098,9 +2093,16 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private static KeyValueTransactionReadKey ToReadKey(GrpcTransactionReadKey g) =>
         new() { Key = g.Key, Durability = (KeyValueDurability)g.Durability, Exists = g.Exists, Revision = g.Revision };
 
-    // An absent Value is a deletion (null); a present one — even empty — is a real value.
+    // Set-versus-delete comes from the explicit State field; an absent Value stays distinct from an empty one.
+    // A sender from a build without the field sends STATE_UNDEFINED, so fall back to the old presence-derived
+    // rule for exactly that case: absent value = deletion, present value — even empty — = set.
     internal static StagedMutationEffect FromGrpcStagedMutation(GrpcStagedMutationEffect g) =>
-        new(g.Key, g.HasValue ? g.Value.ToByteArray() : null, g.Revision, g.ExpiresMs, g.NoRevision);
+        new(g.Key,
+            g.HasValue ? g.Value.ToByteArray() : null,
+            g.State != GrpcKeyValueState.StateUndefined
+                ? (KeyValueState)g.State
+                : g.HasValue ? KeyValueState.Set : KeyValueState.Deleted,
+            g.Revision, g.ExpiresMs, g.NoRevision);
 
     private static GrpcTransactionWorkingSet ToGrpcWorkingSet(TransactionWorkingSet ws)
     {

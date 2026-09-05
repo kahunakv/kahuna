@@ -6,7 +6,6 @@ using Microsoft.Extensions.Logging;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
-using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
 using Google.Protobuf.Collections;
 
@@ -488,9 +487,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcTryGetKeyValueResponse remoteResponse = response.TryGetKeyValue!;
         
         
-        byte[]? value;
-            
-        value = ByteStringPayload.GetArray(remoteResponse.Value);
+        // The remote leader leaves the field unset for a key that holds no value; decoding the field alone
+        // would make a routed read report zero bytes where a local read of the same key reports null.
+        byte[]? value = ByteStringPayload.GetArrayOrNull(remoteResponse.HasValue, remoteResponse.Value);
         
         return ((KeyValueResponseType)remoteResponse.Type, new(
             value,
@@ -1681,8 +1680,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         Revision = read.Revision
     };
 
-    // A null Value means a deletion; leave the optional proto field absent so the receiver can distinguish it from
-    // an empty value. The staged value is a committed, immutable snapshot, so wrapping it without a copy is safe.
+    // Set-versus-delete travels in the explicit State field — a set may carry a null value (the key exists and
+    // holds nothing), so value presence cannot stand in for it. A null Value leaves the optional proto field
+    // absent so the receiver can distinguish it from an empty value. The staged value is a committed, immutable
+    // snapshot, so wrapping it without a copy is safe.
     internal static GrpcStagedMutationEffect ToGrpcStagedMutation(StagedMutationEffect effect)
     {
         GrpcStagedMutationEffect grpc = new()
@@ -1690,7 +1691,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Key = effect.Key,
             Revision = effect.Revision,
             ExpiresMs = effect.ExpiresMs,
-            NoRevision = effect.NoRevision
+            NoRevision = effect.NoRevision,
+            State = (GrpcKeyValueState)effect.State
         };
 
         if (effect.Value is not null)
@@ -1737,9 +1739,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         foreach (GrpcKeyValueByPrefixItemResponse? kv in remoteResponseItems)
         {
-            byte[]? value;
-            
-            value = ByteStringPayload.GetArray(kv.Value);
+            byte[]? value = ByteStringPayload.GetArrayOrNull(kv.HasValue, kv.Value);
             
             responses.Add((kv.Key, new(
                 value, 

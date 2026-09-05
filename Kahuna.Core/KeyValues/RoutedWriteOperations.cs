@@ -43,9 +43,9 @@ internal sealed class RoutedWriteOperations
     private static RegistrationRouting ClassifyRegistration(HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId) =>
         OperationRegistrar.ClassifyRegistration(transactionId, coordinatorKey, operationId);
 
-    private Task<bool> CompleteRegisteredOperation(
+    private Task<bool> CompleteRegisteredOperation<TResponse>(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId,
-        object response, OperationCompletionPayload payload) =>
+        TResponse response, OperationCompletionPayload payload) where TResponse : notnull =>
         registrar.CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload);
 
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
@@ -151,7 +151,7 @@ internal sealed class RoutedWriteOperations
         // Stage the confirmed value for a persistent write so the coordinator finalizes durably,
         // carrying the NoRevision flag so a registered SET NOREV materializes revision-free.
         payload.StagedMutations = applied && durability == KeyValueDurability.Persistent
-            ? [new StagedMutationEffect(key, value, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0)]
+            ? [new StagedMutationEffect(key, value, KeyValueState.Set, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0)]
             : null;
         payload.Durability = durability;
         payload.CachedType = type;
@@ -263,7 +263,7 @@ internal sealed class RoutedWriteOperations
                 // Stage the confirmed value + new revision for each persistent write so the coordinator finalizes
                 // the batch through the durable-intent path instead of the manual ticket path.
                 if (item.Durability == KeyValueDurability.Persistent)
-                    stagedMutations.Add(new StagedMutationEffect(item.Key ?? "", item.Value, result.Revision, item.ExpiresMs, (item.Flags & KeyValueFlags.SetNoRevision) != 0));
+                    stagedMutations.Add(new StagedMutationEffect(item.Key ?? "", item.Value, KeyValueState.Set, result.Revision, item.ExpiresMs, (item.Flags & KeyValueFlags.SetNoRevision) != 0));
             }
         }
 
@@ -391,7 +391,7 @@ internal sealed class RoutedWriteOperations
                 // Stage the tombstone (null value) + new revision for each persistent delete so the coordinator
                 // finalizes the batch through the durable-intent path.
                 if (item.Durability == KeyValueDurability.Persistent)
-                    stagedMutations.Add(new StagedMutationEffect(item.Key, null, result.Revision, 0, NoRevision: false));
+                    stagedMutations.Add(new StagedMutationEffect(item.Key, null, KeyValueState.Deleted, result.Revision, 0, NoRevision: false));
             }
         }
 
@@ -518,9 +518,9 @@ internal sealed class RoutedWriteOperations
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ModifiedKey = applied ? key : null;
         payload.AcquiredPointLock = applied ? key : null;
-        // Stage the tombstone (null value) for a persistent delete so the coordinator finalizes durably.
+        // Stage the tombstone for a persistent delete so the coordinator finalizes durably.
         payload.StagedMutations = applied && durability == KeyValueDurability.Persistent
-            ? [new StagedMutationEffect(key, null, revision, 0, NoRevision: false)]
+            ? [new StagedMutationEffect(key, null, KeyValueState.Deleted, revision, 0, NoRevision: false)]
             : null;
         payload.Durability = durability;
         payload.CachedType = type;
@@ -598,7 +598,7 @@ internal sealed class RoutedWriteOperations
             (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) =
                 await locator.LocateAndTryGetValue(transactionId, key, -1, HLCTimestamp.Zero, durability, cancellationToken);
             if (readType == KeyValueResponseType.Get && entry is not null)
-                stagedMutations = [new StagedMutationEffect(key, entry.Value, entry.Revision, expiresMs, NoRevision: false)];
+                stagedMutations = [new StagedMutationEffect(key, entry.Value, KeyValueState.Set, entry.Revision, expiresMs, NoRevision: false)];
         }
 
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);

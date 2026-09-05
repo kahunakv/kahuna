@@ -13,6 +13,9 @@ namespace Kahuna.Server.KeyValues.Transactions;
 internal sealed class FinalizeLatencyEstimator
 {
     private readonly double[] samples;
+    // Scratch for percentile recomputation, owned by the instance and only touched under the gate, so a
+    // recompute sorts in place without allocating a copy of the window each time.
+    private readonly double[] sortScratch;
     private readonly int recomputeEvery;
     private readonly object gate = new();
 
@@ -26,6 +29,7 @@ internal sealed class FinalizeLatencyEstimator
         if (window < 1) window = 1;
         if (recomputeEvery < 1) recomputeEvery = 1;
         samples = new double[window];
+        sortScratch = new double[window];
         this.recomputeEvery = recomputeEvery;
     }
 
@@ -62,14 +66,14 @@ internal sealed class FinalizeLatencyEstimator
             return;
         }
 
-        double[] copy = new double[filled];
-        Array.Copy(samples, copy, filled);
-        Array.Sort(copy);
+        // Sort only the filled prefix; the ring itself must keep its insertion order for overwrites.
+        Array.Copy(samples, sortScratch, filled);
+        Array.Sort(sortScratch, 0, filled);
 
         int idx = (int)Math.Ceiling(0.99 * filled) - 1;
         if (idx < 0) idx = 0;
         if (idx >= filled) idx = filled - 1;
 
-        cachedP99Ms = (long)Math.Ceiling(copy[idx]);
+        cachedP99Ms = (long)Math.Ceiling(sortScratch[idx]);
     }
 }

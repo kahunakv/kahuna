@@ -1,5 +1,4 @@
 
-using System.Runtime.InteropServices;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.Communication.Grpc;
@@ -37,8 +36,11 @@ internal static class KeyValueMessageDecoder
         if (state == KeyValueState.Undefined)
             return (KeyValueState.Undefined, null);
 
-        byte[]? value;
-        value = ByteStringPayload.GetArray(msg.Value);
+        // The proposal encoder clears the value field for a value-less write, so presence is the only
+        // thing separating "set to no value" from "set to zero bytes". Reading the field alone would give
+        // a follower an empty array where the leader holds null, and that divergence outlives the apply:
+        // it becomes what the next read of this key returns once the follower is elected.
+        byte[]? value = ByteStringPayload.GetArrayOrNull(msg.HasValue, msg.Value);
 
         return (state, value);
     }

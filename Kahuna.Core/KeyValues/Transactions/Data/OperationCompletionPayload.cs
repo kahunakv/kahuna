@@ -6,10 +6,12 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>The actor-confirmed committed value of one modified key, echoed from the participant to the coordinator
 /// so the coordinator can stage it losslessly and finalize the transaction through the durable-intent path (rather
-/// than the manual ticket path). A null <see cref="Value"/> is a deletion. The TTL is relative in ms (0 = none),
-/// resolved to an absolute expiry at freeze. <see cref="NoRevision"/> carries whether the write suppressed history
-/// retention so the durable materialization matches a direct <c>SET NOREV</c>.</summary>
-public readonly record struct StagedMutationEffect(string Key, byte[]? Value, long Revision, long ExpiresMs, bool NoRevision);
+/// than the manual ticket path). <see cref="State"/> records whether the operation was a set or a delete, taken from
+/// the operation the caller issued — value presence cannot stand in for it, because a set may legitimately carry a
+/// null value (the key exists and holds nothing) and must not finalize as a deletion. The TTL is relative in ms
+/// (0 = none), resolved to an absolute expiry at freeze. <see cref="NoRevision"/> carries whether the write
+/// suppressed history retention so the durable materialization matches a direct <c>SET NOREV</c>.</summary>
+public readonly record struct StagedMutationEffect(string Key, byte[]? Value, KeyValueState State, long Revision, long ExpiresMs, bool NoRevision);
 
 /// <summary>
 /// The confirmed outcome of a transaction-scoped operation, carried from the partition leader that

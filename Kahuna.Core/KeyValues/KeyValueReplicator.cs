@@ -973,21 +973,21 @@ internal sealed class KeyValueReplicator
                 case KeyValueRequestType.TrySet:
                     ApplyCommittedMutation(
                         partitionId, log, keyValueMessage,
-                        ByteStringPayload.GetArray(keyValueMessage.Value), KeyValueState.Set,
+                        ByteStringPayload.GetArrayOrNull(keyValueMessage.HasValue, keyValueMessage.Value), KeyValueState.Set,
                         witnessBelowHead: true, witnessCollision: true);
                     return true;
 
                 case KeyValueRequestType.TryDelete:
                     ApplyCommittedMutation(
                         partitionId, log, keyValueMessage,
-                        ByteStringPayload.GetArray(keyValueMessage.Value), KeyValueState.Deleted,
+                        ByteStringPayload.GetArrayOrNull(keyValueMessage.HasValue, keyValueMessage.Value), KeyValueState.Deleted,
                         witnessBelowHead: true, witnessCollision: false);
                     return true;
 
                 case KeyValueRequestType.TryExtend:
                     ApplyCommittedMutation(
                         partitionId, log, keyValueMessage,
-                        ByteStringPayload.GetArray(keyValueMessage.Value), KeyValueState.Set,
+                        ByteStringPayload.GetArrayOrNull(keyValueMessage.HasValue, keyValueMessage.Value), KeyValueState.Set,
                         witnessBelowHead: false, witnessCollision: false);
                     return true;
 

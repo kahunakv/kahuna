@@ -15,6 +15,7 @@ using RocksDbSharp;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Shared.Communication.Grpc;
 
 namespace Kahuna.Server.Persistence.Backend;
 
@@ -1290,12 +1291,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         RocksDbKeyValueMessage message = UnserializeKeyValueMessageThreadCached(value);
 
-        byte[]? messageValue;
-
-        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
-            messageValue = segment.Array;
-        else
-            messageValue = message.Value.ToByteArray();
+        // The writer leaves the value field unset for a key that holds no value, so presence is what
+        // separates that from a key holding zero bytes. The SQLite backend keeps the two apart (it stores
+        // NULL), and a reopen must not be the step that quietly merges them.
+        byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
         return new()
         {
@@ -1407,12 +1406,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             RocksDbKeyValueMessage message = UnserializeKeyValueMessageThreadCached(value);
 
-            byte[]? messageValue;
-
-            if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
-                messageValue = segment.Array;
-            else
-                messageValue = message.Value.ToByteArray();
+            byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
             return new()
             {
@@ -1510,11 +1504,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                     if (lastModified.CompareTo(readTimestamp) <= 0 && revision > bestRevision)
                     {
-                        byte[]? messageValue;
-                        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
-                            messageValue = segment.Array;
-                        else
-                            messageValue = message.Value.ToByteArray();
+                        byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
                         best = new()
                         {
@@ -1858,11 +1848,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     private static ReadOnlyKeyValueEntry DecodeReadOnlyKeyValue(RocksDbKeyValueMessage message)
     {
-        byte[]? messageValue;
-        if (MemoryMarshal.TryGetArray(message.Value.Memory, out ArraySegment<byte> segment))
-            messageValue = segment.Array;
-        else
-            messageValue = message.Value.ToByteArray();
+        byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
         return new(
             messageValue,

@@ -25,15 +25,15 @@ public sealed class TestDurableFinalizeInputBuilder
 
     private static bool Build(
         (string, KeyValueDurability)[] modifiedKeys,
-        Dictionary<string, StagedMutation> staged,
+        Dictionary<string, StagedValue> staged,
         string anchor,
         out DurableFinalizeInput? input) =>
         DurableFinalizeInputBuilder.TryBuild(TxId, Epoch, "coord", anchor, CommitTs, Deadline, modifiedKeys, staged, Locate, out input);
 
-    private static StagedMutation Set(long revision, byte[] value) => new(value, revision, ExpiresMs: 0, NoRevision: false);
+    private static StagedValue Set(long revision, byte[] value) => new(value, KeyValueState.Set, revision, ExpiresMs: 0, NoRevision: false);
 
-    private static StagedMutation SetNoRev(long revision, byte[] value) => new(value, revision, ExpiresMs: 0, NoRevision: true);
-    private static StagedMutation Delete(long revision) => new(null, revision, ExpiresMs: 0, NoRevision: false);
+    private static StagedValue SetNoRev(long revision, byte[] value) => new(value, KeyValueState.Set, revision, ExpiresMs: 0, NoRevision: true);
+    private static StagedValue Delete(long revision) => new(null, KeyValueState.Deleted, revision, ExpiresMs: 0, NoRevision: false);
 
     [Fact]
     public void SinglePersistentKey_Builds()
@@ -127,13 +127,43 @@ public sealed class TestDurableFinalizeInputBuilder
     }
 
     [Fact]
+    public void ValuelessSet_StaysSetState_NotDelete()
+    {
+        // A set staged with a null value is a key that exists and holds nothing. The staged state — not value
+        // presence — decides the intent, so the transaction commits the key as Set, exactly as a direct
+        // null-value set and the ticket path do.
+        bool ok = Build(
+            [("acct/1", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = new StagedValue(null, KeyValueState.Set, 3, ExpiresMs: 0, NoRevision: false) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        Assert.True(ok);
+        Assert.Equal(KeyValueState.Set, input!.Partitions[0].Intents[0].State);
+        Assert.Null(input.Partitions[0].Intents[0].Value);
+    }
+
+    [Fact]
+    public void UndefinedStagedState_FallsBack()
+    {
+        // Every staging site records Set or Deleted; an Undefined state means the entry is not lossless, so
+        // the freeze refuses it and the transaction takes the ticket path.
+        bool ok = Build(
+            [("acct/1", KeyValueDurability.Persistent)],
+            new() { ["acct/1"] = new StagedValue([9], KeyValueState.Undefined, 3, ExpiresMs: 0, NoRevision: false) },
+            "acct/1", out DurableFinalizeInput? input);
+
+        Assert.False(ok);
+        Assert.Null(input);
+    }
+
+    [Fact]
     public void TtlSet_ResolvesRelativeExpiryToCommitTimestampPlusMs()
     {
         // A staged relative TTL of 5000ms freezes to an absolute expiry anchored to the commit timestamp, not a
         // wall clock — so a TTL write is now durable-atomic instead of falling back to the ticket path.
         bool ok = Build(
             [("acct/1", KeyValueDurability.Persistent)],
-            new() { ["acct/1"] = new StagedMutation([9], 3, ExpiresMs: 5000, NoRevision: false) },
+            new() { ["acct/1"] = new StagedValue([9], KeyValueState.Set, 3, ExpiresMs: 5000, NoRevision: false) },
             "acct/1", out DurableFinalizeInput? input);
 
         Assert.True(ok);
