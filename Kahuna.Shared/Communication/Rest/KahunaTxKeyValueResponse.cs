@@ -15,6 +15,7 @@ public sealed class KahunaTxKeyValueResponseItem
     public string? Key { get; set; }
 
     [JsonPropertyName("value")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? Value { get; set; }
 
     [JsonPropertyName("revision")]
@@ -33,6 +34,7 @@ public sealed class KahunaTxKeyValueResponse
 
     public KeyValueResponseType Type { get; set; }
 
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? Value { get; set; }
 
     public long Revision { get; set; }

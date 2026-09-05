@@ -23,7 +23,11 @@ public static class KeyValuesHandlers
     {
         app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key) || request.Value is null || request.ExpiresMs < 0)
+            // A null value is a payload the caller left absent, not a malformed request: it sets the key
+            // to no value, which the store keeps apart from a key that holds zero bytes. The gRPC service
+            // accepts the same call through the presence flag of its optional field, so rejecting it here
+            // would make one transport unable to write a value the other one writes and reads back.
+            if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
 
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(

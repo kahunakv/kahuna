@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Kahuna.Shared.Communication.Rest;
 using Kommander.Time;
 
 namespace Kahuna.Shared.KeyValue;
@@ -12,9 +13,11 @@ public sealed class KahunaSetKeyValueRequestItem
     public string? Key { get; set; }
     
     [JsonPropertyName("value")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? Value { get; set; }
-    
+
     [JsonPropertyName("compareValue")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? CompareValue { get; set; }
     
     [JsonPropertyName("compareRevision")]

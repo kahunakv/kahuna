@@ -71,8 +71,8 @@ public sealed class TestClientRequestEncoding
     [Fact]
     public void SetKeyValueRequest_DirectUtf8_MatchesStringEncoding_ForNullEmptyAndBinaryValues()
     {
-        // null, empty and populated must stay distinguishable, and a byte array still travels as
-        // base64 on both paths.
+        // This case compares the two encode paths against each other only. What a null payload has to
+        // look like on the wire is pinned separately, in TestKeyValuePayloadPresence.
         AssertSameBytes(
             new KahunaSetKeyValueRequest { Key = "k", Value = null },
             KahunaJsonContext.Default.KahunaSetKeyValueRequest);

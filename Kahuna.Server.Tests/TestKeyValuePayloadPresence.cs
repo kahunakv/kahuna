@@ -5,6 +5,9 @@
  * file that was distributed with this source code.
  */
 
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Core;
@@ -18,6 +21,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.Tests;
@@ -31,12 +35,19 @@ namespace Kahuna.Server.Tests;
 /// while REST accepted the same call. The decoders on the other side had the mirror-image fault: they read
 /// the field without its presence flag, which promotes an absent value to an empty one.
 ///
+/// The JSON transport had the same fault on the write side, from a different cause. The source generator
+/// writes a byte array through <c>WriteBase64String</c>, which takes a span, and a null array converts to
+/// an empty span there. So the generated fast path emitted <c>""</c> for an absent payload, and every REST
+/// write flattened the distinction the gRPC transport keeps.
+///
 /// These tests pin the whole contract in both directions:
 ///   • the client encodes a null payload as an absent field and an empty payload as a present, empty one;
 ///   • the gRPC service decodes those back to null and empty respectively, after a real protobuf round trip;
 ///   • the committed Raft log record survives the same round trip, so a follower applies what the leader
 ///     holds rather than an empty array in its place;
-///   • a read of a value-less key answers with an absent field, which is what makes the client return null.
+///   • a read of a value-less key answers with an absent field, which is what makes the client return null;
+///   • the JSON wire writes an absent payload as null and an empty one as an empty string, in requests and
+///     in responses, and every payload property on that wire carries the converter that guarantees it.
 /// </summary>
 public sealed class TestKeyValuePayloadPresence
 {
@@ -220,6 +231,197 @@ public sealed class TestKeyValuePayloadPresence
             new GrpcTryGetKeyValueRequest { Key = "k", Revision = -1 }, Context());
 
         return GrpcTryGetKeyValueResponse.Parser.ParseFrom(response.ToByteArray());
+    }
+
+    // ── The JSON wire ───────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void SetRequest_WritesAnAbsentPayloadAsNullAndAnEmptyPayloadAsAnEmptyString()
+    {
+        string absent = JsonSerializer.Serialize(
+            new KahunaSetKeyValueRequest { Key = "k" },
+            KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+
+        Assert.Contains("\"value\":null", absent);
+        Assert.Contains("\"compareValue\":null", absent);
+
+        string empty = JsonSerializer.Serialize(
+            new KahunaSetKeyValueRequest { Key = "k", Value = [], CompareValue = [] },
+            KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+
+        Assert.Contains("\"value\":\"\"", empty);
+        Assert.Contains("\"compareValue\":\"\"", empty);
+
+        // The two bodies carry different writes. The generated fast path made them identical, which is
+        // what left a REST caller unable to set a key to no value.
+        Assert.NotEqual(absent, empty);
+
+        string bytes = JsonSerializer.Serialize(
+            new KahunaSetKeyValueRequest { Key = "k", Value = [1, 2, 3] },
+            KahunaJsonContext.Default.KahunaSetKeyValueRequest);
+
+        Assert.Contains("\"value\":\"AQID\"", bytes);
+    }
+
+    [Fact]
+    public void SetManyRequest_WritesEachItemPayloadWithTheSameDistinction()
+    {
+        string body = JsonSerializer.Serialize(
+            new KahunaSetManyKeyValueRequest
+            {
+                Items =
+                [
+                    new KahunaSetKeyValueRequestItem { Key = "null-value", Value = null },
+                    new KahunaSetKeyValueRequestItem { Key = "empty-value", Value = [] },
+                    new KahunaSetKeyValueRequestItem { Key = "bytes", Value = [9] }
+                ]
+            },
+            KahunaJsonContext.Default.KahunaSetManyKeyValueRequest);
+
+        Assert.Contains("\"value\":null", body);
+        Assert.Contains("\"value\":\"\"", body);
+        Assert.Contains("\"value\":\"CQ==\"", body);
+    }
+
+    [Fact]
+    public void SetRequest_DecodesNullAsAnAbsentPayloadAndAnEmptyStringAsZeroBytes()
+    {
+        // A body the server binds. An omitted field means the same as an explicit null, which is how the
+        // gRPC service reads an unset optional field.
+        AssertSetRequestDecodesTo("""{"key":"k","value":null,"compareValue":null}""", expectAbsent: true);
+        AssertSetRequestDecodesTo("""{"key":"k"}""", expectAbsent: true);
+        AssertSetRequestDecodesTo("""{"key":"k","value":"","compareValue":""}""", expectAbsent: false);
+    }
+
+    /// <summary>
+    /// Checks both decoders that see this body: the server binds it with the reflection-based serializer,
+    /// and a client that re-reads a request uses the generated context. The two must agree.
+    /// </summary>
+    private static void AssertSetRequestDecodesTo(string body, bool expectAbsent)
+    {
+        KahunaSetKeyValueRequest?[] decoded =
+        [
+            JsonSerializer.Deserialize(body, KahunaJsonContext.Default.KahunaSetKeyValueRequest),
+            JsonSerializer.Deserialize<KahunaSetKeyValueRequest>(body, JsonSerializerOptions.Web)
+        ];
+
+        foreach (KahunaSetKeyValueRequest? request in decoded)
+        {
+            Assert.NotNull(request);
+
+            if (expectAbsent)
+            {
+                Assert.Null(request!.Value);
+                Assert.Null(request.CompareValue);
+                continue;
+            }
+
+            Assert.NotNull(request!.Value);
+            Assert.Empty(request.Value!);
+            Assert.NotNull(request.CompareValue);
+            Assert.Empty(request.CompareValue!);
+        }
+    }
+
+    [Fact]
+    public void ReadResponses_KeepAValuelessEntryApartFromAnEmptyOneAcrossAJsonRoundTrip()
+    {
+        // The server writes these with the reflection-based serializer the host configures, and the client
+        // reads them back the same way. A key holding no value must not arrive as zero bytes.
+        AssertPayloadSurvivesARoundTrip(
+            new KahunaGetKeyValueResponse { Value = null },
+            new KahunaGetKeyValueResponse { Value = [] },
+            static r => r.Value);
+
+        AssertPayloadSurvivesARoundTrip(
+            new KahunaGetManyKeyValuesResponseItem { Key = "k", Value = null },
+            new KahunaGetManyKeyValuesResponseItem { Key = "k", Value = [] },
+            static r => r.Value);
+
+        AssertPayloadSurvivesARoundTrip(
+            new KeyValueGetByBucketItem { Key = "k", Value = null },
+            new KeyValueGetByBucketItem { Key = "k", Value = [] },
+            static r => r.Value);
+
+        AssertPayloadSurvivesARoundTrip(
+            new KeyValueTransactionResponse { Value = null },
+            new KeyValueTransactionResponse { Value = [] },
+            static r => r.Value);
+
+        AssertPayloadSurvivesARoundTrip(
+            new KahunaTxKeyValueResponse { Value = null },
+            new KahunaTxKeyValueResponse { Value = [] },
+            static r => r.Value);
+
+        AssertPayloadSurvivesARoundTrip(
+            new KahunaTxKeyValueResponseItem { Key = "k", Value = null },
+            new KahunaTxKeyValueResponseItem { Key = "k", Value = [] },
+            static r => r.Value);
+    }
+
+    private static void AssertPayloadSurvivesARoundTrip<T>(T withNoValue, T withZeroBytes, Func<T, byte[]?> payload)
+    {
+        T? absent = JsonSerializer.Deserialize<T>(
+            JsonSerializer.Serialize(withNoValue, JsonSerializerOptions.Web), JsonSerializerOptions.Web);
+
+        Assert.NotNull(absent);
+        Assert.Null(payload(absent!));
+
+        T? empty = JsonSerializer.Deserialize<T>(
+            JsonSerializer.Serialize(withZeroBytes, JsonSerializerOptions.Web), JsonSerializerOptions.Web);
+
+        Assert.NotNull(empty);
+        Assert.NotNull(payload(empty!));
+        Assert.Empty(payload(empty!)!);
+    }
+
+    /// <summary>
+    /// A structural guard. A payload property added to the JSON wire without the converter would flatten a
+    /// null payload to an empty one again, silently and only on that one field, so this fails the moment
+    /// such a property appears.
+    /// </summary>
+    [Fact]
+    public void EveryPayloadOnTheJsonWire_CarriesTheConverterThatPreservesAnAbsentValue()
+    {
+        // These byte arrays are not payloads. A lock owner has no presence flag on either transport, and
+        // both coerce a null owner to an empty one, so writing null there would fail server validation
+        // instead. A script is a required input rather than stored bytes: null and empty both mean that
+        // the caller sent no script, and the server answers InvalidInput either way.
+        HashSet<string> notPayloads =
+        [
+            "KahunaLockRequest.Owner",
+            "KahunaGetLockResponse.Owner",
+            "KeyValueTransactionRequest.Script",
+            "KahunaTxKeyValueRequest.Script"
+        ];
+
+        List<string> unprotected = [];
+
+        foreach (Type type in typeof(KahunaSetKeyValueRequest).Assembly.GetTypes())
+        {
+            if (!type.IsClass)
+                continue;
+
+            foreach (PropertyInfo property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (property.PropertyType != typeof(byte[]))
+                    continue;
+
+                string name = type.Name + "." + property.Name;
+
+                if (notPayloads.Contains(name))
+                    continue;
+
+                JsonConverterAttribute? converter = property.GetCustomAttribute<JsonConverterAttribute>();
+
+                if (converter?.ConverterType != typeof(KeyValuePayloadJsonConverter))
+                    unprotected.Add(name);
+            }
+        }
+
+        Assert.True(
+            unprotected.Count == 0,
+            "These payload properties would flatten a null value to an empty one: " + string.Join(", ", unprotected));
     }
 
     /// <summary>Records the decoded set-many items instead of writing them.</summary>

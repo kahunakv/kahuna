@@ -14,9 +14,11 @@ public sealed class KahunaSetKeyValueRequest
     public string? Key { get; set; }
     
     [JsonPropertyName("value")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? Value { get; set; }
-    
+
     [JsonPropertyName("compareValue")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? CompareValue { get; set; }
     
     [JsonPropertyName("compareRevision")]

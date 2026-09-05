@@ -1,4 +1,5 @@
 
+using Kahuna.Shared.Communication.Rest;
 using Kommander.Time;
 using System.Text.Json.Serialization;
 
@@ -10,6 +11,7 @@ public class KeyValueGetByBucketItem
     public string? Key { get; set; }
     
     [JsonPropertyName("value")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? Value { get; set; }
     
     [JsonPropertyName("revision")]

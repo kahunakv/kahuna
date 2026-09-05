@@ -16,6 +16,7 @@ public sealed class KeyValueTransactionResponse
     public string? Reason { get; set; }
 
     [JsonPropertyName("value")]
+    [JsonConverter(typeof(KeyValuePayloadJsonConverter))]
     public byte[]? Value { get; set; }
 
     [JsonPropertyName("revision")]

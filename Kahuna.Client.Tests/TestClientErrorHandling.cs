@@ -68,20 +68,43 @@ public class TestClientErrorHandling
 
         Assert.True(getResult.Success);
 
-        if (communicationType == KahunaCommunicationType.Grpc)
-        {
-            // gRPC preserves the absent payload: it reads back as null, not as an empty array
-            Assert.Null(getResult.Value);
-            Assert.Null(getResult.ValueAsString());
-        }
-        else
-        {
-            // The REST wire cannot carry an absent payload: the JSON serializer writes a null
-            // byte array as an empty base64 string, so the server stores an empty value
-            Assert.NotNull(getResult.Value);
-            Assert.Empty(getResult.Value);
-            Assert.Equal("", getResult.ValueAsString());
-        }
+        // Both transports preserve the absent payload: the key reads back with no value rather than
+        // with an empty array. gRPC carries it as an unset optional field, REST as an explicit JSON
+        // null. A key that holds zero bytes is a different key, covered by TestSetKeyValueWithEmptyValue.
+        Assert.Null(getResult.Value);
+        Assert.Null(getResult.ValueAsString());
+    }
+
+    [Theory, CombinatorialData]
+    public async Task TestSetKeyValueWithEmptyValue(
+        [CombinatorialValues(KahunaCommunicationType.Grpc, KahunaCommunicationType.Rest)] KahunaCommunicationType communicationType,
+        [CombinatorialValues(KahunaClientType.SingleEndpoint, KahunaClientType.PoolOfEndpoints)] KahunaClientType clientType
+    )
+    {
+        KahunaClient client = GetClientByType(communicationType, clientType);
+
+        string keyName = GetRandomKeyName();
+
+        // The counterpart of a null payload: the key holds a value, and that value is zero bytes long.
+        KahunaKeyValue result = await client.SetKeyValue(
+            keyName,
+            Array.Empty<byte>(),
+            10000,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+
+        Assert.True(result.Success);
+
+        KahunaKeyValue getResult = await client.GetKeyValue(
+            keyName,
+            cancellationToken: TestContext.Current.CancellationToken
+        );
+
+        Assert.True(getResult.Success);
+
+        Assert.NotNull(getResult.Value);
+        Assert.Empty(getResult.Value);
+        Assert.Equal("", getResult.ValueAsString());
     }
 
     [Theory, CombinatorialData]
