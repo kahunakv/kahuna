@@ -140,6 +140,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // key and is inert to the ~CURRENT / numeric-revision scans (which never see a '\0' prefix).
     private static ReadOnlySpan<byte> PrunedFloorKeyUtf8 => "\0pitr_pruned_history_floor"u8;
 
+    // The floor's key before the '\0' prefix: a leading space. A store that pruned under an older
+    // build holds its floor only here, and an absent floor reads as "never pruned" — the value that
+    // licenses a backup to trust already-deleted history. So when the current key is absent, the
+    // load falls back to this key and copies the value forward. The legacy key is left in place so
+    // a rollback to an older build still reads a valid floor.
+    private static ReadOnlySpan<byte> LegacyPrunedFloorKeyUtf8 => " pitr_pruned_history_floor"u8;
+
     // A floor that refuses every real cut: returned when the durable floor is unreadable/corrupt for a
     // store that may have pruned, so backups fail closed until integrity is re-established.
     private static readonly HLCTimestamp FailClosedFloor = new(int.MaxValue, long.MaxValue, uint.MaxValue);
@@ -446,7 +453,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             try
             {
                 byte[]? data = db.Get(PrunedFloorKeyUtf8, cf: columnFamilyKeys);
-                
+
+                // Absent under the current key: consult the legacy key before concluding "never
+                // pruned" (see LegacyPrunedFloorKeyUtf8). A valid legacy floor is adopted and
+                // copied to the current key; a wrong-length legacy value fails closed below, the
+                // same as a wrong-length current one.
+                if (data is null)
+                {
+                    data = db.Get(LegacyPrunedFloorKeyUtf8, cf: columnFamilyKeys);
+
+                    if (data is not null && data.Length == PrunedFloorSize)
+                    {
+                        // Best-effort migration: a lost write only means the next load falls back
+                        // to the legacy key again, so a Put failure is not a floor failure.
+                        try { db.Put(PrunedFloorKeyUtf8, data, cf: columnFamilyKeys); }
+                        catch { /* re-migrated on the next load */ }
+                    }
+                }
+
                 if (data is null)
                     _prunedFloorCache = HLCTimestamp.Zero; // never pruned
                 else if (data.Length == PrunedFloorSize)
@@ -504,8 +528,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     /// <summary>
     /// Metadata-key prefix for per-partition application-durability floors. The leading space sorts
-    /// the rows before every real key (same idiom as the PITR pruned-history floor), keeping them
-    /// out of prefix/range scans.
+    /// the rows before every real key, keeping them out of prefix/range scans. (The PITR
+    /// pruned-history floor used this idiom too before it moved to a '\0' prefix; these rows keep
+    /// the space so existing stores read their floors unchanged.)
     /// </summary>
     private const string DurabilityFloorKeyPrefix = " durability_floor_";
 

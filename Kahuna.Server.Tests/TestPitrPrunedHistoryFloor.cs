@@ -232,6 +232,58 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
     }
 
     [Fact]
+    public void RocksDb_LegacySpacePrefixedFloor_IsAdoptedOnReopen_AndMigrated()
+    {
+        const string key = "acct/legacyfloor";
+        string dir = Path.Combine(_tempRoot, "rocks_legacy_" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(dir);
+
+        // A store with data but no prune under the current build: no floor under the current key.
+        using (RocksDbPersistenceBackend backend = new(dir, "pf"))
+        {
+            backend.StoreKeyValues([ItemAt(key, 1, TS(1000))]);
+            Assert.Equal(HLCTimestamp.Zero, ((IPersistenceBackend)backend).GetPrunedHistoryFloor());
+        }
+
+        // Simulate a store that pruned under a pre-rename build: its floor sits under the legacy
+        // space-prefixed key only. The payload layout matches the backend's packed floor: N, L, C
+        // as little-endian Int64s.
+        byte[] legacyKey = " pitr_pruned_history_floor"u8.ToArray();
+        byte[] packed = new byte[24];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(packed.AsSpan(0, 8), 0);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(packed.AsSpan(8, 8), 5000L);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(packed.AsSpan(16, 8), 0);
+        byte[] currentKey = new byte[] { 0 }
+            .Concat(System.Text.Encoding.UTF8.GetBytes("pitr_pruned_history_floor")).ToArray();
+        RocksDbSharp.ColumnFamilies cfs = new()
+        {
+            { "kv", new RocksDbSharp.ColumnFamilyOptions() },
+            { "locks", new RocksDbSharp.ColumnFamilyOptions() },
+        };
+        using (RocksDbSharp.RocksDb raw = RocksDbSharp.RocksDb.Open(
+            new RocksDbSharp.DbOptions().SetCreateIfMissing(false), Path.Combine(dir, "pf"), cfs))
+        {
+            raw.Put(legacyKey, packed, cf: raw.GetColumnFamily("kv"));
+            raw.Remove(currentKey, cf: raw.GetColumnFamily("kv"));
+        }
+
+        // Reopen with the current build: the legacy floor must be adopted, not read as "never
+        // pruned" — a zero floor would let a backup trust already-deleted history.
+        using (RocksDbPersistenceBackend reopened = new(dir, "pf"))
+        {
+            Assert.Equal(new HLCTimestamp(0, 5000L, 0), ((IPersistenceBackend)reopened).GetPrunedHistoryFloor());
+        }
+
+        // The read migrated the value to the current key, and the legacy key stays for rollback.
+        using (RocksDbSharp.RocksDb raw = RocksDbSharp.RocksDb.Open(
+            new RocksDbSharp.DbOptions().SetCreateIfMissing(false), Path.Combine(dir, "pf"), cfs))
+        {
+            Assert.Equal(packed, raw.Get(currentKey, cf: raw.GetColumnFamily("kv")));
+            Assert.Equal(packed, raw.Get(legacyKey, cf: raw.GetColumnFamily("kv")));
+        }
+    }
+
+    [Fact]
     public async Task RocksDb_CorruptFloorWatermark_FailsClosed()
     {
         const string key = "acct/corrupt";
