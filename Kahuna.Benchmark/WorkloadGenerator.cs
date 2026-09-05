@@ -52,6 +52,32 @@ internal static class WorkloadGenerator
             }
         }
 
+        // bank needs every account to exist with a numeric balance before transfers start.
+        if (opts.Workload.Equals("bank", StringComparison.OrdinalIgnoreCase))
+        {
+            KeyValueDurability dur = ParseKvDurability(opts.Durability);
+            int accounts = Math.Min(opts.KeySpace, 100_000);
+            int parallelism = Math.Min(opts.Concurrency, 64);
+            byte[] initialBalance = "1000000"u8.ToArray();
+
+            (diag ?? Console.Out).WriteLine($"  Seeding {accounts:N0} bank accounts (parallelism={parallelism})…");
+
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, accounts),
+                new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = ct },
+                async (idx, innerCt) =>
+                {
+                    try
+                    {
+                        await client.SetKeyValue($"{opts.KeyPrefix}{idx}", initialBalance,
+                            (int)TimeSpan.FromHours(5).TotalMilliseconds,
+                            KeyValueFlags.Set, dur, innerCt);
+                    }
+                    catch { }
+                });
+            return;
+        }
+
         // get/mixed need existing keys to read; delete/delete-many need existing keys to remove
         // (otherwise every op is a miss). set-many/txn write their own keys, so no seeding.
         if (opts.Workload.Equals("get", StringComparison.OrdinalIgnoreCase) ||
@@ -122,9 +148,12 @@ internal static class WorkloadGenerator
             int keyIndex = (Interlocked.Increment(ref _keyCounter) & 0x7FFFFFFF) % keySpace;
             string key = $"{keyPrefix}{keyIndex}";
 
-            string resolved = workloadNorm == "mixed"
-                ? (rng.Next(100) < readPct ? "get" : "set")
-                : workloadNorm;
+            string resolved = workloadNorm switch
+            {
+                "mixed" => rng.Next(100) < readPct ? "get" : "set",
+                "bank"  => rng.Next(100) < readPct ? "get" : "bank-transfer",
+                _       => workloadNorm
+            };
 
             OperationType opType = resolved switch
             {
@@ -133,7 +162,8 @@ internal static class WorkloadGenerator
                 "delete"      => OperationType.Delete,
                 "set-many"    => OperationType.SetMany,
                 "delete-many" => OperationType.DeleteMany,
-                "txn"         => OperationType.Transaction,
+                "txn"           => OperationType.Transaction,
+                "bank-transfer" => OperationType.Transaction,
                 "lock"        => OperationType.Lock,
                 "sequence"    => OperationType.Sequence,
                 "script"      => OperationType.Script,
@@ -254,6 +284,58 @@ internal static class WorkloadGenerator
 
                         if (!await session.Commit(ct))
                             return (opType, OpOutcome.Error, ElapsedMicros(startTs));
+                        break;
+                    }
+
+                    case "bank-transfer":
+                    {
+                        // Contended read-modify-write: read two random accounts inside one
+                        // transaction, move one unit between them, commit. Under optimistic
+                        // locking the commit validates the read revisions, so concurrent
+                        // transfers of the same account conflict at commit — the workload the
+                        // bank soak runs.
+                        int fromIdx = keyIndex;
+                        int toIdx = rng.Next(keySpace);
+                        if (toIdx == fromIdx)
+                            toIdx = (toIdx + 1) % keySpace;
+
+                        string fromKey = $"{keyPrefix}{fromIdx}";
+                        string toKey = $"{keyPrefix}{toIdx}";
+
+                        KahunaTransactionOptions bankOpts = new()
+                        {
+                            Timeout = txnTimeoutMs,
+                            Locking = txnLocking,
+                            AutoCommit = false
+                        };
+                        await using KahunaTransactionSession bankSession =
+                            await client.StartTransactionSession(bankOpts, ct);
+
+                        KahunaKeyValue fromVal = await bankSession.GetKeyValue(fromKey, kvDur, ct);
+                        KahunaKeyValue toVal = await bankSession.GetKeyValue(toKey, kvDur, ct);
+                        if (!fromVal.Success || !toVal.Success)
+                        {
+                            await bankSession.Rollback(ct);
+                            return (opType, OpOutcome.Miss, ElapsedMicros(startTs));
+                        }
+
+                        long fromBalance = long.Parse(fromVal.ValueAsString() ?? "0");
+                        long toBalance = long.Parse(toVal.ValueAsString() ?? "0");
+
+                        await bankSession.SetKeyValue(fromKey,
+                            System.Text.Encoding.UTF8.GetBytes((fromBalance - 1).ToString()),
+                            (int)TimeSpan.FromHours(5).TotalMilliseconds,
+                            KeyValueFlags.Set, kvDur, ct);
+                        await bankSession.SetKeyValue(toKey,
+                            System.Text.Encoding.UTF8.GetBytes((toBalance + 1).ToString()),
+                            (int)TimeSpan.FromHours(5).TotalMilliseconds,
+                            KeyValueFlags.Set, kvDur, ct);
+
+                        if (!await bankSession.Commit(ct))
+                        {
+                            RecordErrorCategory("Bank:commit-refused");
+                            return (opType, OpOutcome.Error, ElapsedMicros(startTs));
+                        }
                         break;
                     }
 

@@ -17,7 +17,7 @@ internal sealed class BenchmarkOptions
     public string ConnectionSource { get; set; } = "";
 
     [Option("workload", Default = "mixed",
-        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | lock | sequence | script")]
+        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | bank | lock | sequence | script")]
     public string Workload { get; set; } = "mixed";
 
     [Option("duration", Default = 30,
