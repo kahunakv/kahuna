@@ -37,9 +37,10 @@ public sealed class TestTransactionConcurrencyPolicy
 
     /// <summary>
     /// A pessimistic transaction takes an exclusive write intent on the key it touches. A second
-    /// pessimistic transaction that tries to touch the same key is refused (an aborting conflict),
-    /// and the intent is released when the first transaction finalizes, so a later transaction can
-    /// take the key again.
+    /// pessimistic transaction that tries to touch the same key waits out its lock-wait budget and
+    /// is then refused with the retryable MustRetry outcome — contention is transient, not a genuine
+    /// conflict, so it must never surface as Aborted. The intent is released when the first
+    /// transaction finalizes, so a later transaction can take the key again.
     /// </summary>
     [Fact]
     public async Task PessimisticLock_BlocksCompetingTransaction_ReleasedOnFinalize()
@@ -57,12 +58,13 @@ public sealed class TestTransactionConcurrencyPolicy
             await holder.SetKeyValue(key, "holder", durability: KeyValueDurability.Persistent, cancellationToken: ct);
 
             // A competing pessimistic transaction cannot take the same key while the holder is live.
+            // The refusal is MustRetry (retryable contention), never Aborted (a genuine conflict).
             await using (KahunaTransactionSession competitor = await client.StartTransactionSession(
                              new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct))
             {
                 KahunaException blocked = await Assert.ThrowsAsync<KahunaException>(async () =>
                     await competitor.SetKeyValue(key, "competitor", durability: KeyValueDurability.Persistent, cancellationToken: ct));
-                Assert.Equal(KeyValueResponseType.Aborted, blocked.KeyValueErrorCode);
+                Assert.Equal(KeyValueResponseType.MustRetry, blocked.KeyValueErrorCode);
 
                 await competitor.Rollback(ct);
             }
@@ -82,6 +84,44 @@ public sealed class TestTransactionConcurrencyPolicy
         KahunaKeyValue after = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: ct);
         Assert.True(after.Success);
         Assert.Equal("next", after.ValueAsString());
+    }
+
+    /// <summary>
+    /// A pessimistic acquire that meets a live holder waits for it instead of failing: when the holder
+    /// finalizes within the waiter's lock-wait budget, the waiter acquires the key and commits without
+    /// any error surfacing to the caller. This is the behavior a contended read-modify-write workload
+    /// (two-account transfers over a shared key space) depends on.
+    /// </summary>
+    [Fact]
+    public async Task PessimisticLock_WaiterAcquires_AfterHolderFinalizes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = CreateNode(loggerFactory);
+        await node.StartAsync(ct);
+        KahunaClient client = Connect(node);
+
+        string key = "cp/pessimistic-wait/" + Guid.NewGuid().ToString("N")[..8];
+
+        await using KahunaTransactionSession holder = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+        await holder.SetKeyValue(key, "holder", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+
+        await using KahunaTransactionSession waiter = await client.StartTransactionSession(
+            new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+
+        // The waiter's acquire starts while the holder is live; the holder finalizes shortly after,
+        // well inside the waiter's lock-wait budget, so the acquire completes instead of failing.
+        Task waiterSet = waiter.SetKeyValue(key, "waiter", durability: KeyValueDurability.Persistent, cancellationToken: ct);
+
+        await Task.Delay(200, ct);
+        Assert.True(await holder.Commit(ct));
+
+        await waiterSet;
+        Assert.True(await waiter.Commit(ct));
+
+        KahunaKeyValue after = await client.GetKeyValue(key, KeyValueDurability.Persistent, cancellationToken: ct);
+        Assert.True(after.Success);
+        Assert.Equal("waiter", after.ValueAsString());
     }
 
     /// <summary>

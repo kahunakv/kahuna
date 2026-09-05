@@ -19,6 +19,16 @@ public class KahunaTransactionSession : IAsyncDisposable
     private const int DefaultTransactionTimeoutMs = 5000;
 
     /// <summary>
+    /// Upper bound on how long a single point-lock acquire waits out a live holder before it reports
+    /// MustRetry. Kept below the transaction timeout so two sessions that each hold a key the other
+    /// wants release their locks and retry instead of stalling for the whole transaction window.
+    /// </summary>
+    private const int MaxLockWaitMs = 3_000;
+
+    /// <summary>Cap for the exponential back-off between lock-acquire attempts.</summary>
+    private const int MaxLockWaitBackoffMs = 50;
+
+    /// <summary>
     /// Gets the instance of the KahunaClient used by the current KahunaTransactionSession.
     /// This property encapsulates the client responsible for handling communication and operations within the transaction context.
     /// </summary>
@@ -124,30 +134,51 @@ public class KahunaTransactionSession : IAsyncDisposable
         if (acquiredLocks.Contains((key, durability)))
             return;
 
-        bool successLock;
+        // The server answers a live-holder conflict immediately (there is no server-side lock queue), so
+        // the wait lives here: re-issue the acquire under exponential back-off until the holder releases
+        // or the budget runs out. Contention is transient, so exhausting the budget surfaces MustRetry —
+        // the caller may retry the transaction — never Aborted, which is reserved for genuine read-set or
+        // write-intent conflicts. Each attempt sends a fresh operation id: the server replays the cached
+        // outcome for a repeated id, so a reused id would replay the first denial forever.
+        long deadline = Environment.TickCount64 + Math.Min(TransactionTimeout, MaxLockWaitMs);
+        int backoffMs = 1;
 
-        try
+        while (true)
         {
-            successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(
-                Url,
-                TransactionId,
-                key,
-                TransactionTimeout,
-                durability,
-                cancellationToken,
-                CoordinatorKey,
-                TransactionOperationId.NewRandom()
-            ).ConfigureAwait(false);
-        }
-        catch (KahunaException ex) when (ex.KeyValueErrorCode is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
-        {
-            throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}': {ex.KeyValueErrorCode}.", KeyValueResponseType.Aborted);
-        }
+            bool successLock;
+            KeyValueResponseType denial = KeyValueResponseType.AlreadyLocked;
 
-        if (!successLock)
-            throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}'.", KeyValueResponseType.Aborted);
+            try
+            {
+                successLock = await Client.Communication.TryAcquireExclusiveKeyValueLock(
+                    Url,
+                    TransactionId,
+                    key,
+                    TransactionTimeout,
+                    durability,
+                    cancellationToken,
+                    CoordinatorKey,
+                    TransactionOperationId.NewRandom()
+                ).ConfigureAwait(false);
+            }
+            catch (KahunaException ex) when (ex.KeyValueErrorCode is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
+            {
+                successLock = false;
+                denial = ex.KeyValueErrorCode;
+            }
 
-        acquiredLocks.Add((key, durability));
+            if (successLock)
+            {
+                acquiredLocks.Add((key, durability));
+                return;
+            }
+
+            if (Environment.TickCount64 >= deadline)
+                throw new KahunaException($"Failed to acquire exclusive key/value lock for '{key}': {denial}.", KeyValueResponseType.MustRetry);
+
+            await Task.Delay(backoffMs, cancellationToken).ConfigureAwait(false);
+            backoffMs = Math.Min(backoffMs * 2, MaxLockWaitBackoffMs);
+        }
     }
 
     private async Task AcquireExclusivePrefixLock(string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)

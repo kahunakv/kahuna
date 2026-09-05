@@ -1,9 +1,11 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Data;
@@ -22,9 +24,11 @@ namespace Kahuna.Server.Tests;
 /// over the write aggregator's batch executor captures-and-fails the record-carrying batches while armed (a
 /// proposal whose acknowledgement was lost), then replays them through the real executor immediately ahead of
 /// the next record-carrying batch (the healed partition delivering the stalled entry in log order). The tap
-/// also counts the shapes of the batches it sees, which is how a test tells a one-phase bundle
+/// also counts the bundle shapes it sees, which is how a test tells a one-phase bundle
 /// ([record init, prepare, decision]) from a two-phase anchor bundle ([record init, prepare]) without reading
-/// process-global counters that concurrent test classes also move.</para>
+/// process-global counters that concurrent test classes also move. A bundle is recognized as a contiguous
+/// one-transaction entry run inside a batch — never as the whole batch — because the aggregator coalesces a
+/// bundle with unrelated same-partition submissions, such as a predecessor's deferred settlement.</para>
 /// </summary>
 public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
 {
@@ -83,11 +87,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
             foreach (RaftProposalEntry entry in entries)
                 carriesRecord |= entry.Type == ReplicationTypes.TransactionRecord;
 
-            if (entries.Count == 3 && entries[0].Type == ReplicationTypes.TransactionRecord
-                && entries[1].Type == ReplicationTypes.PreparedIntent && entries[2].Type == ReplicationTypes.TransactionRecord)
-                Interlocked.Increment(ref onePhaseBundles);
-            else if (entries.Count == 2 && entries[0].Type == ReplicationTypes.TransactionRecord && entries[1].Type == ReplicationTypes.PreparedIntent)
-                Interlocked.Increment(ref twoPhaseAnchorBundles);
+            CountBundleShapes(entries);
 
             if (armed && carriesRecord)
             {
@@ -108,6 +108,101 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
             }
 
             return await inner.ReplicateAsync(partitionId, entries, cancellationToken);
+        }
+
+        /// <summary>
+        /// Counts the commit-protocol bundles inside one batch. The write aggregator legitimately coalesces a
+        /// bundle with unrelated same-partition submissions — most often a predecessor's deferred settlement
+        /// (a key/value materialization and an intent settle delta) — into one heterogeneous batch, so a bundle
+        /// must be recognized as a contiguous entry run tied to one transaction, never as the whole batch. A
+        /// submission's entries are contiguous within its batch and are never split across batches, which makes
+        /// the runs well defined: a one-phase bundle is [record initialize, prepare, record commit] of one
+        /// transaction; a two-phase anchor bundle is [record initialize, prepare] of one transaction with no
+        /// same-transaction commit entry directly behind it.
+        /// </summary>
+        private void CountBundleShapes(IReadOnlyList<RaftProposalEntry> entries)
+        {
+            int i = 0;
+            while (i < entries.Count)
+            {
+                if (!TryReadSingleRecordCommand(entries[i], out TransactionRecordCommandMessage? init)
+                    || init.Kind != TransactionRecordCommandKindMessage.TransactionRecordInitialize
+                    || i + 1 >= entries.Count
+                    || !IsPrepareOf(entries[i + 1], init))
+                {
+                    i++;
+                    continue;
+                }
+
+                if (i + 2 < entries.Count
+                    && TryReadSingleRecordCommand(entries[i + 2], out TransactionRecordCommandMessage? decision)
+                    && decision.Kind == TransactionRecordCommandKindMessage.TransactionRecordCommit
+                    && decision.TransactionIdNode == init.TransactionIdNode
+                    && decision.TransactionIdPhysical == init.TransactionIdPhysical
+                    && decision.TransactionIdCounter == init.TransactionIdCounter)
+                {
+                    Interlocked.Increment(ref onePhaseBundles);
+                    i += 3;
+                }
+                else
+                {
+                    Interlocked.Increment(ref twoPhaseAnchorBundles);
+                    i += 2;
+                }
+            }
+        }
+
+        /// <summary>Reads a transaction-record entry that carries exactly one command — the shape of a bundle's
+        /// record-initialize and record-commit deltas. A multi-command record delta (a split/merge
+        /// reconstruction) is never part of a bundle.</summary>
+        private static bool TryReadSingleRecordCommand(RaftProposalEntry entry, [NotNullWhen(true)] out TransactionRecordCommandMessage? command)
+        {
+            command = null;
+            if (entry.Type != ReplicationTypes.TransactionRecord || entry.Data is null)
+                return false;
+
+            TransactionRecordDeltaMessage delta = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(entry.Data);
+            if (delta.Commands.Count != 1)
+                return false;
+
+            command = delta.Commands[0];
+            return true;
+        }
+
+        /// <summary>Whether the entry is a prepared-intent delta whose every command prepares a key for the
+        /// initialized transaction — a settle delta (resolve/remove) or a foreign transaction's re-prepare that
+        /// happens to sit behind an initialize in the same batch is not this bundle's second entry. A multi-key
+        /// prepare hoists the shared identity into the delta header and zeroes it on the commands, so the
+        /// identity reads from the command with the header as the fallback.</summary>
+        private static bool IsPrepareOf(RaftProposalEntry entry, TransactionRecordCommandMessage init)
+        {
+            if (entry.Type != ReplicationTypes.PreparedIntent || entry.Data is null)
+                return false;
+
+            PreparedIntentDeltaMessage delta = ReplicationSerializer.UnserializePreparedIntentDeltaMessage(entry.Data);
+            if (delta.Commands.Count == 0)
+                return false;
+
+            foreach (PreparedIntentCommandMessage command in delta.Commands)
+            {
+                if (command.Kind != PreparedIntentCommandKindMessage.PreparedIntentPrepare)
+                    return false;
+
+                long node = command.TransactionIdNode;
+                long physical = command.TransactionIdPhysical;
+                long counter = command.TransactionIdCounter;
+                if (node == 0 && physical == 0 && counter == 0 && delta.Header is { } header)
+                {
+                    node = header.TransactionIdNode;
+                    physical = header.TransactionIdPhysical;
+                    counter = header.TransactionIdCounter;
+                }
+
+                if (node != init.TransactionIdNode || physical != init.TransactionIdPhysical || counter != init.TransactionIdCounter)
+                    return false;
+            }
+
+            return true;
         }
 
         private async Task ReplayStalledAsync(CancellationToken ct)
@@ -298,6 +393,95 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
 
             Assert.NotEqual(TransactionDecision.Commit, manager.DurableTransactionRecordStore.Get(handle.TransactionId, 1)!.Decision);
         }
+    }
+
+    // ── bundle recognition inside coalesced batches ───────────────────────────────
+
+    /// <summary>Executor stub for driving the tap's counting directly: reports every entry committed.</summary>
+    private sealed class SucceedingExecutor : IPartitionBatchExecutor
+    {
+        public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken)
+        {
+            List<RaftEntryResult> results = new(entries.Count);
+            for (int i = 0; i < entries.Count; i++)
+                results.Add(new RaftEntryResult(RaftOperationStatus.Success, i + 1, HLCTimestamp.Zero));
+
+            return Task.FromResult(new RaftBatchReplicationResult(true, RaftOperationStatus.Success, HLCTimestamp.Zero, results));
+        }
+    }
+
+    private static RaftProposalEntry RecordInit(HLCTimestamp txId) => new(
+        ReplicationTypes.TransactionRecord,
+        TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
+            txId, 1, "coord", "coord", new HLCTimestamp(0, txId.L + 1, 0), new HLCTimestamp(0, txId.L + 60_000, 0),
+            ManifestHash: 42, Participants: [], OpId: HLCTimestamp.Zero, CreatedAt: txId)]),
+        AutoCommit: true, ExpectedGeneration: 0);
+
+    private static RaftProposalEntry RecordCommit(HLCTimestamp txId) => new(
+        ReplicationTypes.TransactionRecord,
+        TransactionRecordStore.SerializeDelta([new CommitTransactionCommand(
+            txId, 1, ManifestHash: 42, OpId: HLCTimestamp.Zero, AttemptHlc: new HLCTimestamp(0, txId.L + 2, 0))]),
+        AutoCommit: true, ExpectedGeneration: 0);
+
+    private static PreparedIntent IntentOf(HLCTimestamp txId, string key) => new(
+        txId, 1, key, ManifestHash: 42, RecordAnchorKey: key, CommitTimestamp: new HLCTimestamp(0, txId.L + 1, 0),
+        State: KeyValueState.Set, Value: "1"u8.ToArray(), Bucket: null, Revision: 1, Expires: HLCTimestamp.Zero,
+        NoRevision: false, BaseRevision: PreparedIntent.UnknownBaseRevision, BaseState: KeyValueState.Undefined,
+        RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending);
+
+    private static RaftProposalEntry Prepare(HLCTimestamp txId, params string[] keys) => new(
+        ReplicationTypes.PreparedIntent,
+        PreparedIntentStore.SerializeDelta([.. keys.Select(key => new PrepareIntentCommand(IntentOf(txId, key)))]),
+        AutoCommit: true, ExpectedGeneration: 0);
+
+    private static RaftProposalEntry Settle(HLCTimestamp txId, string key) => new(
+        ReplicationTypes.PreparedIntent,
+        PreparedIntentStore.SerializeDelta([
+            new ResolveIntentCommand(txId, 1, key, Commit: true),
+            new RemoveIntentCommand(txId, 1, key)]),
+        AutoCommit: true, ExpectedGeneration: 0);
+
+    private static RaftProposalEntry Materialization() => new(
+        ReplicationTypes.KeyValues, [], AutoCommit: true, ExpectedGeneration: 0);
+
+    private static async Task<(int OnePhase, int TwoPhase)> CountsOf(params RaftProposalEntry[] entries)
+    {
+        BatchTap tap = new(new SucceedingExecutor());
+        await tap.ReplicateAsync(1, entries, CancellationToken.None);
+        return (tap.OnePhaseBundles, tap.TwoPhaseAnchorBundles);
+    }
+
+    /// <summary>
+    /// The aggregator coalesces a bundle with unrelated same-partition submissions into one heterogeneous
+    /// batch — most often a predecessor's deferred settlement (its intent settle delta and its key/value
+    /// materialization). The tap must recognize the bundle inside such a batch, and must not mistake a
+    /// neighboring entry of another transaction for a part of the bundle.
+    /// </summary>
+    [Fact]
+    public async Task BundleCounting_RecognizesBundles_InsideCoalescedBatches()
+    {
+        HLCTimestamp predecessor = new(0, 100, 0);
+        HLCTimestamp txId = new(0, 200, 0);
+        HLCTimestamp other = new(0, 300, 0);
+
+        // A bundle riding alone in its batch still counts.
+        Assert.Equal((0, 1), await CountsOf(RecordInit(txId), Prepare(txId, "k")));
+        Assert.Equal((1, 0), await CountsOf(RecordInit(txId), Prepare(txId, "k"), RecordCommit(txId)));
+
+        // A predecessor's settlement coalesced around the bundle must not hide it.
+        Assert.Equal((0, 1), await CountsOf(Settle(predecessor, "p"), RecordInit(txId), Prepare(txId, "k"), Materialization()));
+        Assert.Equal((1, 0), await CountsOf(Settle(predecessor, "p"), RecordInit(txId), Prepare(txId, "k"), RecordCommit(txId), Materialization()));
+
+        // A multi-key prepare hoists the transaction identity into the delta header; the bundle still counts.
+        Assert.Equal((1, 0), await CountsOf(RecordInit(txId), Prepare(txId, "k1", "k2"), RecordCommit(txId)));
+
+        // Another transaction's commit entry directly behind an anchor bundle does not turn it one-phase.
+        Assert.Equal((0, 1), await CountsOf(RecordInit(txId), Prepare(txId, "k"), RecordCommit(other)));
+
+        // A neighbor that is not this transaction's prepare never completes a bundle.
+        Assert.Equal((0, 0), await CountsOf(RecordInit(txId), Settle(predecessor, "p")));
+        Assert.Equal((0, 0), await CountsOf(RecordInit(txId), Prepare(other, "k")));
+        Assert.Equal((0, 0), await CountsOf(Settle(predecessor, "p"), Materialization()));
     }
 
     // ── eligibility ───────────────────────────────────────────────────────────────
