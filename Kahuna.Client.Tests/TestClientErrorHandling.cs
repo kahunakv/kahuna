@@ -51,41 +51,37 @@ public class TestClientErrorHandling
         
         string keyName = GetRandomKeyName();
 
-        if (communicationType == KahunaCommunicationType.Grpc)
-        {
-            await Assert.ThrowsAsync<ArgumentNullException>(async () =>
-            {
-                await client.SetKeyValue(
-                    keyName,
-                    null as byte[],
-                    10000,
-                    cancellationToken: TestContext.Current.CancellationToken
-                );
-            });
-            
-            return;
-        }
-
-        // Test with null value (byte[] overload)
+        // A null value is accepted on both transports: the key exists but holds no value
         KahunaKeyValue result = await client.SetKeyValue(
-            keyName, 
-            null as byte[], 
-            10000, 
+            keyName,
+            null as byte[],
+            10000,
             cancellationToken: TestContext.Current.CancellationToken
         );
-        
+
         Assert.True(result.Success);
-        
-        // Verify the value is null
+
         KahunaKeyValue getResult = await client.GetKeyValue(
             keyName,
             cancellationToken: TestContext.Current.CancellationToken
         );
-        
+
         Assert.True(getResult.Success);
-        Assert.NotNull(getResult.Value);
-        Assert.Empty(getResult.Value);
-        Assert.Equal("", getResult.ValueAsString());
+
+        if (communicationType == KahunaCommunicationType.Grpc)
+        {
+            // gRPC preserves the absent payload: it reads back as null, not as an empty array
+            Assert.Null(getResult.Value);
+            Assert.Null(getResult.ValueAsString());
+        }
+        else
+        {
+            // The REST wire cannot carry an absent payload: the JSON serializer writes a null
+            // byte array as an empty base64 string, so the server stores an empty value
+            Assert.NotNull(getResult.Value);
+            Assert.Empty(getResult.Value);
+            Assert.Equal("", getResult.ValueAsString());
+        }
     }
 
     [Theory, CombinatorialData]

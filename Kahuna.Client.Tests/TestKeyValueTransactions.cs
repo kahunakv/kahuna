@@ -589,52 +589,71 @@ public class TestKeyValueTransactions
         KahunaClient client = GetClientByType(communicationType, clientType);
 
         int oneFailed = 0;
-        
+
         string keyNameA = GetRandomKeyName();
-                
+
+        // Signaled once session 1 holds the exclusive lock, so session 2 always plays the waiter
+        TaskCompletionSource lockHeld = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         try
         {
             await Task.WhenAll(
-                SerializableConflictInteractiveOne(client, keyNameA), 
-                SerializableConflictInteractiveTwo(client, keyNameA)
+                SerializableConflictInteractiveOne(client, keyNameA, lockHeld),
+                SerializableConflictInteractiveTwo(client, keyNameA, lockHeld)
             );
-            
+
             Assert.False(true);
         }
         catch (KahunaException e)
         {
             oneFailed++;
-            
+
             Assert.True(e.KeyValueErrorCode is KeyValueResponseType.Aborted or KeyValueResponseType.MustRetry);
         }
-        
-        Assert.Equal(1, oneFailed);        
+
+        Assert.Equal(1, oneFailed);
     }
 
-    private static async Task SerializableConflictInteractiveOne(KahunaClient client, string keyName)
+    private static async Task SerializableConflictInteractiveOne(KahunaClient client, string keyName, TaskCompletionSource lockHeld)
     {
+        // The 10 s timeout keeps the transaction and its lock alive across the deliberate hold below
         KahunaTransactionSession session1 = await client.StartTransactionSession(
-            new() { Locking = KeyValueTransactionLocking.Pessimistic }, 
+            new() { Locking = KeyValueTransactionLocking.Pessimistic, Timeout = 10000 },
             cancellationToken: TestContext.Current.CancellationToken
         );
-        
-        KahunaKeyValue result = await session1.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+
+        KahunaKeyValue result;
+
+        try
+        {
+            result = await session1.GetKeyValue(keyName, cancellationToken: TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            // Release session 2 even on failure, so Task.WhenAll surfaces the real error instead of deadlocking
+            lockHeld.TrySetResult();
+        }
+
         Assert.False(result.Success);
-        
-        await Task.Delay(500, TestContext.Current.CancellationToken);
-        
+
+        // Hold the exclusive lock past the client's 3 s lock-wait budget, so session 2
+        // exhausts its acquire retries and fails with MustRetry instead of serializing cleanly
+        await Task.Delay(4000, TestContext.Current.CancellationToken);
+
         await session1.SetKeyValue(keyName, "30", cancellationToken: TestContext.Current.CancellationToken);
 
         await session1.Commit(TestContext.Current.CancellationToken);
     }
-    
-     private static async Task SerializableConflictInteractiveTwo(KahunaClient client, string keyName)
+
+     private static async Task SerializableConflictInteractiveTwo(KahunaClient client, string keyName, TaskCompletionSource lockHeld)
     {
+        await lockHeld.Task.WaitAsync(TestContext.Current.CancellationToken);
+
         KahunaTransactionSession session2 = await client.StartTransactionSession(
-            new() { Locking = KeyValueTransactionLocking.Pessimistic }, 
+            new() { Locking = KeyValueTransactionLocking.Pessimistic },
             cancellationToken: TestContext.Current.CancellationToken
         );
-        
+
         await session2.SetKeyValue(keyName, "30", cancellationToken: TestContext.Current.CancellationToken);
 
         await session2.Commit(TestContext.Current.CancellationToken);
