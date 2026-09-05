@@ -610,9 +610,12 @@ internal sealed class PreparedIntentStore
         head = default;
         bool found = false;
 
-        foreach (PartitionLedger ledger in ledgers.Values)
+        // Enumerated directly: ConcurrentDictionary.Values takes every bucket lock and copies a
+        // snapshot list per call, while the enumerator is lock-free — this probe runs per prepare
+        // apply under the apply gate.
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
         {
-            if (ledger.Heads.TryGetValue(key, out CommittedHead candidate) && (!found || candidate.Revision > head.Revision))
+            if (slice.Value.Heads.TryGetValue(key, out CommittedHead candidate) && (!found || candidate.Revision > head.Revision))
             {
                 head = candidate;
                 found = true;
@@ -1132,8 +1135,9 @@ internal sealed class PreparedIntentStore
     public IReadOnlyList<PreparedIntent> DueForRecovery(HLCTimestamp now)
     {
         List<PreparedIntent> due = [];
-        foreach (PreparedIntent intent in intents.Values)
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
+            PreparedIntent intent = kv.Value;
             if (intent.IsPending && intent.RecoveryDeadline != HLCTimestamp.Zero && intent.RecoveryDeadline <= now)
                 due.Add(intent);
         }
@@ -1149,8 +1153,9 @@ internal sealed class PreparedIntentStore
 
         List<PreparedIntent> due = [];
 
-        foreach (PreparedIntent intent in intents.Values)
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
+            PreparedIntent intent = kv.Value;
             if (!intent.IsPending || intent.RecoveryDeadline == HLCTimestamp.Zero || intent.RecoveryDeadline > now)
                 continue;
 
