@@ -356,6 +356,19 @@ internal static class DurableTransactionMetrics
             description: "Range scans failed loudly after one page answered transient for the whole retry budget.");
 
     /// <summary>
+    /// Scans that failed loudly because a page answered a non-retryable, non-Get response type
+    /// (for example Errored, Aborted, or InvalidInput), or returned a continuation cursor that
+    /// could not be decoded. An empty range still answers Get with zero items, so every firing is
+    /// a genuine page failure, never emptiness. Before the loud failure existed the scan ended the
+    /// stream silently here, and the caller received a truncated result indistinguishable from a
+    /// completed scan. The paired error log names the range, the cursor, and the response type.
+    /// </summary>
+    internal static readonly Counter<long> ScanPageFailed =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.scan_page_failed",
+            description: "Range scans failed loudly after one page answered a non-retryable failure type.");
+
+    /// <summary>
     /// Session-owned locks dropped because they outlived the liveness ceiling: a write intent or range lock
     /// requested with no deadline whose owning session never released it. Past the ceiling the session is
     /// provably finalized or reaped, so the lock is orphaned and the key would otherwise stay unservable to

@@ -49,6 +49,13 @@ internal sealed class RoutedScanOperations
     /// <summary>Overrides the per-page scan retry budget for tests. Zero or negative restores the default.</summary>
     internal int TestScanPageRetryBudgetMs { private get; set; }
 
+    /// <summary>
+    /// Intercepts every fetched scan page for tests, keyed by page index; the returned page replaces the
+    /// fetched one. This is the seam that lets a test drive the scan loop through a failed page — a state
+    /// a healthy embedded node cannot be asked to produce on demand. Null (the default) is a no-op.
+    /// </summary>
+    internal Func<int, KeyValueGetByRangeResult, KeyValueGetByRangeResult>? TestScanPageInterceptor { private get; set; }
+
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
     private IRaft raft => runtime.Raft;
 
@@ -362,6 +369,9 @@ internal sealed class RoutedScanOperations
     /// is carried in every cursor and reused on each subsequent page for consistent reads.
     /// Transient <see cref="KeyValueResponseType.MustRetry"/> / <see cref="KeyValueResponseType.WaitingForReplication"/>
     /// responses cause the current page to be retried from the same cursor with exponential back-off.
+    /// Any other non-<see cref="KeyValueResponseType.Get"/> page fails the scan with a
+    /// <see cref="KahunaServerException"/> carrying the response type: the stream never ends early on a
+    /// failure, so an exhausted enumeration always means the range was scanned completely.
     /// </summary>
     public async IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
@@ -416,6 +426,9 @@ internal sealed class RoutedScanOperations
                     endKey, endInclusive,
                     pageSize, snapshotTs, durability, ct);
 
+            if (TestScanPageInterceptor is not null)
+                page = TestScanPageInterceptor(pageIndex, page);
+
             if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 // On a transient failure at page 0, snapshotTs is still Zero, so the handler
@@ -438,7 +451,8 @@ internal sealed class RoutedScanOperations
                         prefix, cursorKey ?? "-inf", endKey ?? "+inf", page.Type, ScanPageRetryBudgetMs);
                     throw new KahunaServerException(
                         $"Range scan page over '{prefix}' did not settle within {ScanPageRetryBudgetMs} ms " +
-                        $"(last response: {page.Type}); a key in the page may hold an unresolved write intent. Retry the scan.");
+                        $"(last response: {page.Type}); a key in the page may hold an unresolved write intent. Retry the scan.",
+                        page.Type);
                 }
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("LocateAndScanRange_3201");
@@ -451,7 +465,21 @@ internal sealed class RoutedScanOperations
             pageRetryDeadline = Environment.TickCount64 + ScanPageRetryBudgetMs;
 
             if (page.Type != KeyValueResponseType.Get)
-                yield break;
+            {
+                // A non-Get page is a failed page, never an empty range: an empty range still answers
+                // Get with zero items. Failing loudly is mandatory here for the same reason the retry
+                // budget above throws — ending the stream would hand the caller a TRUNCATED result
+                // indistinguishable from a completed scan, and every consumer that treats an empty
+                // enumerable as "this range holds nothing" would act on it and report success.
+                Transactions.DurableTransactionMetrics.ScanPageFailed.Add(1);
+                logger.LogError(
+                    "Range scan page {PageIndex} over {Prefix} [{Cursor},{EndKey}) failed with {Type}; failing the scan",
+                    pageIndex, prefix, cursorKey ?? "-inf", endKey ?? "+inf", page.Type);
+                throw new KahunaServerException(
+                    $"Range scan page {pageIndex} over '{prefix}' [{cursorKey ?? "-inf"},{endKey ?? "+inf"}) " +
+                    $"failed with {page.Type}; the scan was aborted instead of returning a truncated result.",
+                    page.Type);
+            }
 
             foreach ((string key, ReadOnlyKeyValueEntry entry) in page.Items)
                 yield return (key, entry);
@@ -461,7 +489,18 @@ internal sealed class RoutedScanOperations
 
             // Decode cursor: advance past last key and latch the snapshot timestamp.
             if (!KeyValueRangeCursor.TryDecode(page.NextCursor, out string lastKey, out _, out _, out HLCTimestamp cursorTs))
-                yield break;
+            {
+                // The page says more items remain but its continuation cursor cannot be decoded, so the
+                // scan cannot advance. The cursor is produced by this server, so this is a broken
+                // invariant, not caller input; ending the stream here would silently truncate the range.
+                Transactions.DurableTransactionMetrics.ScanPageFailed.Add(1);
+                logger.LogError(
+                    "Range scan page {PageIndex} over {Prefix} [{Cursor},{EndKey}) returned an undecodable continuation cursor; failing the scan",
+                    pageIndex, prefix, cursorKey ?? "-inf", endKey ?? "+inf");
+                throw new KahunaServerException(
+                    $"Range scan page {pageIndex} over '{prefix}' [{cursorKey ?? "-inf"},{endKey ?? "+inf"}) " +
+                    "returned an undecodable continuation cursor with more items pending; the scan was aborted instead of returning a truncated result.");
+            }
 
             // If the caller supplied a readTimestamp it's already non-Null, so this
             // no-ops and preserves the caller's T across all pages.
