@@ -1167,6 +1167,8 @@ message GrpcBatchServerKeyValueRequest {
     GrpcReplicateKeyValueRangePageRequest ReplicateKeyValueRangePage = 52;
     GrpcGetRangeTransactionStateRequest GetRangeTransactionState = 53;
     GrpcGetStagedBaseVerdictsRequest GetStagedBaseVerdicts = 54;
+    GrpcDurableBundleRequest DurableBundle = 55;
+    GrpcDurableDecisionRequest DurableDecision = 56;
   }
 }
 
@@ -1226,6 +1228,8 @@ message GrpcBatchServerKeyValueResponse
     GrpcReplicateKeyValueRangePageResponse ReplicateKeyValueRangePage = 51;
     GrpcGetRangeTransactionStateResponse GetRangeTransactionState = 52;
     GrpcGetStagedBaseVerdictsResponse GetStagedBaseVerdicts = 53;
+    GrpcDurableBundleResponse DurableBundle = 54;
+    GrpcDurableDecisionResponse DurableDecision = 55;
   }
 }
 
@@ -1436,6 +1440,57 @@ message GrpcGetStagedBaseVerdictsResponse {
 
 // A linearizable lookup of a transaction's canonical record, routed from a consult site to the partition leader
 // that owns the record's anchor key so the answer is authoritative rather than a node-local projection.
+// One ordered entry of a durable bundle: the Raft log type and the serialized delta.
+message GrpcDurableBundleEntry {
+  string LogType = 1;
+  bytes Payload = 2;
+}
+
+// Forwards an ordered group of durable-2PC deltas to a partition leader as ONE atomic scheduler submission
+// (record init + prepare for an anchor, or a single prepare), carrying the origin's admission class and the
+// range fence it froze the partition against, so the receiver admits and re-fences exactly as the origin's
+// own scheduler would have. Independent per-entry forwards are not an atomic bundle; this is.
+message GrpcDurableBundleRequest {
+  int32 PartitionId = 1;
+  repeated GrpcDurableBundleEntry Entries = 2;
+  int32 AdmissionClass = 3;   // 0 ordinary, 1 terminal (Kahuna's WriteAdmissionClass)
+  string FenceKey = 4;        // empty = unfenced
+  int64 FenceGeneration = 5;
+}
+
+// The two signals of a bundle stay separate: BatchCommitted (the proposal reached Raft; the record is durable)
+// and PrepareAcknowledged (every prepare in it took ownership of its key). PrepareRejection names why an
+// acknowledgement was refused: 0 none, 1 a foreign intent holds the key, 2 the validated base moved.
+message GrpcDurableBundleResponse {
+  bool BatchCommitted = 1;
+  bool PrepareAcknowledged = 2;
+  int32 PrepareRejection = 3;
+}
+
+// Replicates a transaction's terminal decision on its anchor partition and answers with the CANONICAL outcome
+// read from the leader's record store after the ordered apply — a competing decision that won in log order is
+// what the sender sees — so the sender needs no second lookup call.
+message GrpcDurableDecisionRequest {
+  int32 PartitionId = 1;
+  bytes DecisionDelta = 2;
+  string FenceKey = 3;        // empty = unfenced
+  int64 FenceGeneration = 4;
+  int32 TransactionIdNode = 5;
+  int64 TransactionIdPhysical = 6;
+  uint32 TransactionIdCounter = 7;
+  int64 Epoch = 8;
+}
+
+// Replicated: the batch carrying the decision committed. Known: the record was read after the apply, and
+// Decision / AbortClass carry it (Kahuna's TransactionDecision and TransactionAbortClass values); when false,
+// the sender must look the record up itself.
+message GrpcDurableDecisionResponse {
+  bool Replicated = 1;
+  bool Known = 2;
+  int32 Decision = 3;
+  int32 AbortClass = 4;
+}
+
 message GrpcLookupTransactionRecordRequest {
   int32 PartitionId = 1;
   int32 TransactionIdNode = 2;
@@ -1521,6 +1576,8 @@ enum GrpcServerBatchType {
   SERVER_REPLICATE_KEY_VALUE_RANGE_PAGE = 50;
   SERVER_GET_RANGE_TRANSACTION_STATE = 51;
   SERVER_GET_STAGED_BASE_VERDICTS = 52;
+  SERVER_DURABLE_BUNDLE = 53;
+  SERVER_DURABLE_DECISION = 54;
 }
 
 enum GrpcRangeLockMode {

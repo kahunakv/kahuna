@@ -12,6 +12,59 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// <para>Instrument naming follows the OpenTelemetry semantic conventions (dot-separated lowercase); Prometheus
 /// exporters typically translate dots to underscores automatically. Counters are cumulative and thread-safe.</para>
 /// </summary>
+/// <summary>How a finalize's prepare retry loop ended; the tag of <see cref="DurableTransactionMetrics.PrepareRetryLoops"/>.</summary>
+internal enum PrepareRetryLoopOutcome
+{
+    Prepared,
+    Exhausted,
+    Cancelled,
+    StaleBase,
+    RangeMoved
+}
+
+/// <summary>What the one-phase eligibility gate decided for a finalize; the tag of
+/// <see cref="DurableTransactionMetrics.OnePhaseGateDecisions"/>. Only <see cref="Entered"/> attempts can
+/// later count as a commit or a fallback.</summary>
+internal enum OnePhaseGateOutcome
+{
+    Entered,
+    Disabled,
+    ReadSetBeyondWrites,
+    MultiPartition,
+    AnchorOffPartition
+}
+
+/// <summary>Why an entered one-phase attempt fell back to the two-phase flow; the tag of
+/// <see cref="DurableTransactionMetrics.OnePhaseFallbacks"/>.</summary>
+internal enum OnePhaseFallbackReason
+{
+    None,
+    ForeignIntent,
+    ValidationFailed,
+    RemoteLeader
+}
+
+/// <summary>Which resolution path materialized or settled an intent; the tag of
+/// <see cref="DurableTransactionMetrics.Materializations"/> and <see cref="DurableTransactionMetrics.SettledIntents"/>.</summary>
+internal enum ResolutionSource
+{
+    Finalize,
+    Recovery,
+    Helping,
+    RangeMove
+}
+
+/// <summary>Why a resolution pass over one transaction's intents settled nothing; the tag of
+/// <see cref="DurableTransactionMetrics.HelpingSettledNothing"/>. <see cref="None"/> means something was settled.</summary>
+internal enum ResolveFailureCause
+{
+    None,
+    Fenced,
+    MaterializeFailed,
+    ApplyFailed,
+    SettleFailed
+}
+
 internal static class DurableTransactionMetrics
 {
     internal static readonly Meter Meter = new("Kahuna", "1.0");
@@ -418,15 +471,104 @@ internal static class DurableTransactionMetrics
             description: "Intents a commit resolution could not materialize/apply; recovery completes them.");
 
     /// <summary>
-    /// One-phase-eligible transactions that fell back to the standard 2PC flow (remote anchor leader, a
-    /// foreign durable intent on a written key, failed up-front validation, or a scheduler rejection).
-    /// A high rate relative to <see cref="OnePhaseCommits"/> means the fast path's gate rarely opens and
-    /// the workload still pays both barriers.
+    /// One-phase-eligible transactions that fell back to the standard 2PC flow, tagged by <c>reason</c>: a
+    /// foreign durable intent on a written key, failed up-front validation, or a remote anchor leader. Counts
+    /// only attempts the gate admitted (see <see cref="OnePhaseGateDecisions"/> for the ones it excluded). A
+    /// high rate relative to <see cref="OnePhaseCommits"/> means the fast path rarely completes and the
+    /// workload still pays both barriers.
     /// </summary>
     internal static readonly Counter<long> OnePhaseFallbacks =
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.one_phase_fallbacks",
-            description: "One-phase-eligible finalizes that fell back to the standard 2PC flow.");
+            description: "One-phase-eligible finalizes that fell back to the standard 2PC flow, tagged by reason.");
+
+    /// <summary>
+    /// Every finalize's one-phase eligibility verdict, tagged by <c>outcome</c>: <c>entered</c>, or the reason
+    /// the gate kept it on the two-phase path (<c>disabled</c>, <c>read_set_beyond_writes</c>,
+    /// <c>multi_partition</c>, <c>anchor_off_partition</c>). Together with <see cref="OnePhaseCommits"/> and
+    /// <see cref="OnePhaseFallbacks"/> this closes the accounting: every finalize is exactly one of excluded,
+    /// fell back, or committed one-phase.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseGateDecisions =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_gate",
+            description: "One-phase eligibility verdicts per finalize, tagged by outcome.");
+
+    private static readonly KeyValuePair<string, object?> GateEntered = new("outcome", "entered");
+    private static readonly KeyValuePair<string, object?> GateDisabled = new("outcome", "disabled");
+    private static readonly KeyValuePair<string, object?> GateReadSet = new("outcome", "read_set_beyond_writes");
+    private static readonly KeyValuePair<string, object?> GateMultiPartition = new("outcome", "multi_partition");
+    private static readonly KeyValuePair<string, object?> GateAnchorOff = new("outcome", "anchor_off_partition");
+    private static readonly KeyValuePair<string, object?> FallbackForeignIntent = new("reason", "foreign_intent");
+    private static readonly KeyValuePair<string, object?> FallbackValidationFailed = new("reason", "validation_failed");
+    private static readonly KeyValuePair<string, object?> FallbackRemoteLeader = new("reason", "remote_leader");
+    private static readonly KeyValuePair<string, object?> FallbackOther = new("reason", "other");
+
+    internal static void OnePhaseGateDecided(OnePhaseGateOutcome outcome) =>
+        OnePhaseGateDecisions.Add(1, outcome switch
+        {
+            OnePhaseGateOutcome.Entered => GateEntered,
+            OnePhaseGateOutcome.Disabled => GateDisabled,
+            OnePhaseGateOutcome.ReadSetBeyondWrites => GateReadSet,
+            OnePhaseGateOutcome.MultiPartition => GateMultiPartition,
+            _ => GateAnchorOff
+        });
+
+    internal static void OnePhaseFellBack(OnePhaseFallbackReason reason) =>
+        OnePhaseFallbacks.Add(1, reason switch
+        {
+            OnePhaseFallbackReason.ForeignIntent => FallbackForeignIntent,
+            OnePhaseFallbackReason.ValidationFailed => FallbackValidationFailed,
+            OnePhaseFallbackReason.RemoteLeader => FallbackRemoteLeader,
+            _ => FallbackOther
+        });
+
+    /// <summary>
+    /// Committed intents whose value was materialized (its key/value record replicated), tagged by
+    /// <c>source</c>: the finalize's own resolution, the recovery sweep, the prepare-conflict helping pass, or a
+    /// range move's pre-cutover settle. The finalize share is the healthy rate; every other share is settlement
+    /// the deferred path did not finish on its own, and the helping share in particular is work paid inside a
+    /// successor's prepare stage.
+    /// </summary>
+    internal static readonly Counter<long> Materializations =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.materializations",
+            description: "Committed intents materialized, tagged by the resolution path that did it.");
+
+    /// <summary>
+    /// Prepared intents settled (resolved and removed by a committed settle delta), tagged by <c>source</c> as
+    /// <see cref="Materializations"/> is. Its rate against admitted durable transactions shows whether
+    /// settlement keeps pace with commits; a widening gap is the backlog that turns into helping and retries.
+    /// </summary>
+    internal static readonly Counter<long> SettledIntents =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.settled_intents",
+            description: "Prepared intents settled, tagged by the resolution path that did it.");
+
+    private static readonly KeyValuePair<string, object?> SourceFinalize = new("source", "finalize");
+    private static readonly KeyValuePair<string, object?> SourceRecovery = new("source", "recovery");
+    private static readonly KeyValuePair<string, object?> SourceHelping = new("source", "helping");
+    private static readonly KeyValuePair<string, object?> SourceRangeMove = new("source", "range_move");
+
+    private static KeyValuePair<string, object?> SourceTag(ResolutionSource source) => source switch
+    {
+        ResolutionSource.Recovery => SourceRecovery,
+        ResolutionSource.Helping => SourceHelping,
+        ResolutionSource.RangeMove => SourceRangeMove,
+        _ => SourceFinalize
+    };
+
+    internal static void Materialized(ResolutionSource source, int count)
+    {
+        if (count > 0)
+            Materializations.Add(count, SourceTag(source));
+    }
+
+    internal static void Settled(ResolutionSource source, int count)
+    {
+        if (count > 0)
+            SettledIntents.Add(count, SourceTag(source));
+    }
 
     /// <summary>
     /// A one-phase bundle whose prepare was rejected even though the pre-flight foreign-intent check passed —
@@ -535,12 +677,243 @@ internal static class DurableTransactionMetrics
 
     /// <summary>
     /// Wall time of the finalize's decision stage: replicating the terminal commit/abort transition at the anchor
-    /// and reading back the winner. One durable round trip plus the record read.
+    /// and reading back the winner. One durable round trip plus the record read. The two halves are recorded
+    /// separately as <see cref="FinalizeDecisionReplicateMs"/> and <see cref="FinalizeDecisionLookupMs"/>.
     /// </summary>
     internal static readonly Histogram<double> FinalizeDecisionMs =
         Meter.CreateHistogram<double>(
             "kahuna.durable_tx.finalize_decision_ms", unit: "ms",
             description: "Finalize decision-stage wall time (terminal transition + winner read-back).");
+
+    /// <summary>
+    /// The decision stage's replication half alone: from proposing the terminal transition (locally through the
+    /// scheduler, or forwarded to a remote anchor leader) to its committed acknowledgement.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeDecisionReplicateMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_decision_replicate_ms", unit: "ms",
+            description: "Decision-stage replication wall time (terminal transition proposal to acknowledgement).");
+
+    /// <summary>
+    /// The decision stage's read-back half alone: the canonical record lookup that names the winner. Local when
+    /// this node leads the anchor partition; one inter-node call otherwise, always a cache miss for the record
+    /// being decided.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeDecisionLookupMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_decision_lookup_ms", unit: "ms",
+            description: "Decision-stage canonical record read-back wall time.");
+
+    /// <summary>
+    /// Wall time of the pre-propose staged-base validation (the write-side compare-and-set that runs before
+    /// anything durable is proposed). The first slice of <see cref="FinalizePrepareMs"/>; recorded only when the
+    /// check is wired.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizePreflightMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_preflight_ms", unit: "ms",
+            description: "Pre-propose staged-base validation wall time.");
+
+    /// <summary>
+    /// Wall time of the first prepare barrier alone: the anchor bundle (or record init then prepare) and every
+    /// other participant's prepare, awaited together, before any conflict retry. Subtracting this and
+    /// <see cref="FinalizePreflightMs"/> from <see cref="FinalizePrepareMs"/> leaves the retry loop's cost
+    /// (helping plus backoff plus re-prepares). Recorded only when the barrier resolved (not on a failed init).
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeFirstPrepareMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_first_prepare_ms", unit: "ms",
+            description: "First prepare barrier wall time, before any conflict retry.");
+
+    /// <summary>
+    /// Prepare re-proposal rounds a finalize ran after its first barrier left a participant unprepared. Zero for
+    /// the uncontended path; bounded by the finalizer's retry budget. Every re-proposal round re-submits every
+    /// participant, so this multiplies directly into proposals per commit under contention.
+    /// </summary>
+    internal static readonly Histogram<int> FinalizePrepareRetries =
+        Meter.CreateHistogram<int>(
+            "kahuna.durable_tx.finalize_prepare_retries", unit: "{round}",
+            description: "Prepare re-proposal rounds per finalize.");
+
+    /// <summary>
+    /// Helping-pass invocations per finalize that entered the prepare retry loop (one per participant partition
+    /// per round). Recorded only for finalizes that retried, so the distribution is not diluted by the
+    /// uncontended majority.
+    /// </summary>
+    internal static readonly Histogram<int> FinalizeHelperCalls =
+        Meter.CreateHistogram<int>(
+            "kahuna.durable_tx.finalize_helper_calls", unit: "{call}",
+            description: "Prepare-conflict helping invocations per retrying finalize.");
+
+    /// <summary>
+    /// Total wall time a retrying finalize spent inside the helping pass (materializing and settling
+    /// decided-but-unsettled blockers inline). Recorded only for finalizes that entered the retry loop.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeHelperMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_helper_ms", unit: "ms",
+            description: "Total helping-pass wall time per retrying finalize.");
+
+    /// <summary>
+    /// Total wall time a retrying finalize slept in prepare-retry backoff (the rounds where helping made no
+    /// progress). Recorded only for finalizes that entered the retry loop.
+    /// </summary>
+    internal static readonly Histogram<double> FinalizeBackoffMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.finalize_backoff_ms", unit: "ms",
+            description: "Total prepare-retry backoff wall time per retrying finalize.");
+
+    /// <summary>
+    /// Prepare retry loops entered (the first barrier left a participant unprepared), tagged by how the loop
+    /// ended: <c>prepared</c> (a later round acknowledged every participant), <c>exhausted</c> (the budget ran
+    /// out and the finalize aborts as a retryable failure), <c>stale_base</c> (a refusal named a moved base and
+    /// the finalize aborted as a conflict at once), <c>range_moved</c> (a refused participant's range moved since
+    /// freeze; a clean retry), or <c>cancelled</c>. The exhausted share is the fraction of contended finalizes
+    /// whose retry work bought nothing.
+    /// </summary>
+    internal static readonly Counter<long> PrepareRetryLoops =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.prepare_retry_loops",
+            description: "Prepare retry loops entered, tagged by how they ended.");
+
+    private static readonly KeyValuePair<string, object?> LoopOutcomePrepared = new("outcome", "prepared");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeExhausted = new("outcome", "exhausted");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeCancelled = new("outcome", "cancelled");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeStaleBase = new("outcome", "stale_base");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeRangeMoved = new("outcome", "range_moved");
+
+    internal static void PrepareRetryLoopEnded(PrepareRetryLoopOutcome outcome) =>
+        PrepareRetryLoops.Add(1, outcome switch
+        {
+            PrepareRetryLoopOutcome.Prepared => LoopOutcomePrepared,
+            PrepareRetryLoopOutcome.Cancelled => LoopOutcomeCancelled,
+            PrepareRetryLoopOutcome.StaleBase => LoopOutcomeStaleBase,
+            PrepareRetryLoopOutcome.RangeMoved => LoopOutcomeRangeMoved,
+            _ => LoopOutcomeExhausted
+        });
+
+    /// <summary>
+    /// Transactions that saw at least one late-commit rejection, counted once per transaction on the first
+    /// rejection. <see cref="LateCommitRejections"/> counts rejection events, and one transaction whose client
+    /// retries the commit can produce several; the ratio of the two is the retry amplification of the deadline
+    /// gate, and this counter is the number of transactions whose committed work was actually lost to it.
+    /// </summary>
+    internal static readonly Counter<long> LateCommitRejectedTransactions =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.late_commit_rejected_transactions",
+            description: "Distinct transactions that saw at least one late-commit rejection.");
+
+    private static long lateCommitRejectedTransactions;
+
+    /// <summary>Process-wide count behind <see cref="LateCommitRejectedTransactions"/>, readable for tests.</summary>
+    internal static long LateCommitRejectedTransactionsCount => Interlocked.Read(ref lateCommitRejectedTransactions);
+
+    internal static void LateCommitRejectedTransaction()
+    {
+        Interlocked.Increment(ref lateCommitRejectedTransactions);
+        LateCommitRejectedTransactions.Add(1);
+    }
+
+    /// <summary>
+    /// Durable operations this node forwarded to a remote partition leader (a 2PC leg whose partition it does
+    /// not lead), tagged by <c>kind</c> (<c>replicate</c> for a record/intent/value delta, <c>commit</c> and
+    /// <c>rollback</c> for a leader-state apply) and <c>result</c> (<c>ok</c>, <c>refused</c> for a false
+    /// reply, <c>threw</c>). A remote-anchor commit costs several of these per transaction; the count per
+    /// committed transaction is the transport cost the local-leader path never pays.
+    /// </summary>
+    internal static readonly Counter<long> DurableOperationForwards =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.durable_operation_forwards",
+            description: "Durable operations forwarded to a remote partition leader, tagged by kind and result.");
+
+    /// <summary>
+    /// Canonical transaction-record lookups this node sent to a remote anchor leader, tagged by <c>result</c>
+    /// (<c>found</c>, <c>absent</c>, <c>threw</c>). Terminal answers are cached, so a steady rate under a
+    /// steady commit rate measures the lookups the cache cannot serve: the decision read-back, which is always
+    /// cold for the record being decided.
+    /// </summary>
+    internal static readonly Counter<long> RecordLookupForwards =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.record_lookup_forwards",
+            description: "Canonical record lookups sent to a remote anchor leader, tagged by result.");
+
+    /// <summary>
+    /// Pre-decision replica fence requests sent to other replicas, tagged by <c>result</c> (<c>ok</c>,
+    /// <c>unserviced</c> for a reply that carried no verdicts, <c>threw</c>). Roughly participant partitions
+    /// times replicas-minus-one per validated-base commit; the exact count per commit is what this measures.
+    /// </summary>
+    internal static readonly Counter<long> ReplicaFenceRequests =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.replica_fence_requests",
+            description: "Replica fence verdict requests sent to other replicas, tagged by result.");
+
+    /// <summary>
+    /// Forwarded durable operations and record lookups that reached a node which had to redirect them to the
+    /// actual leader (the sender routed on a stale or guessed leader), tagged by <c>op</c>. Each redirect is a
+    /// second hop the sender's routing did not predict.
+    /// </summary>
+    internal static readonly Counter<long> ForwardRedirects =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.forward_redirects",
+            description: "Forwarded durable operations and lookups redirected by the receiver to the actual leader.");
+
+    private static readonly KeyValuePair<string, object?> KindReplicate = new("kind", "replicate");
+    private static readonly KeyValuePair<string, object?> KindCommit = new("kind", "commit");
+    private static readonly KeyValuePair<string, object?> KindRollback = new("kind", "rollback");
+    private static readonly KeyValuePair<string, object?> KindBundle = new("kind", "bundle");
+    private static readonly KeyValuePair<string, object?> KindDecision = new("kind", "decision");
+    private static readonly KeyValuePair<string, object?> KindOther = new("kind", "other");
+
+    /// <summary>A typed multi-entry bundle forward (one call carrying an anchor's record init and prepare).</summary>
+    internal static void DurableBundleForwarded(bool ok) =>
+        DurableOperationForwards.Add(1, KindBundle, ok ? ResultOk : ResultRefused);
+
+    internal static void DurableBundleForwardThrew() =>
+        DurableOperationForwards.Add(1, KindBundle, ResultThrew);
+
+    /// <summary>A typed decision forward that returns the canonical outcome with the replication result.</summary>
+    internal static void DurableDecisionForwarded(bool ok) =>
+        DurableOperationForwards.Add(1, KindDecision, ok ? ResultOk : ResultRefused);
+
+    internal static void DurableDecisionForwardThrew() =>
+        DurableOperationForwards.Add(1, KindDecision, ResultThrew);
+    private static readonly KeyValuePair<string, object?> ResultOk = new("result", "ok");
+    private static readonly KeyValuePair<string, object?> ResultRefused = new("result", "refused");
+    private static readonly KeyValuePair<string, object?> ResultThrew = new("result", "threw");
+    private static readonly KeyValuePair<string, object?> ResultFound = new("result", "found");
+    private static readonly KeyValuePair<string, object?> ResultAbsent = new("result", "absent");
+    private static readonly KeyValuePair<string, object?> ResultUnserviced = new("result", "unserviced");
+    private static readonly KeyValuePair<string, object?> OpDurableOperation = new("op", "durable_operation");
+    private static readonly KeyValuePair<string, object?> OpRecordLookup = new("op", "record_lookup");
+
+    private static KeyValuePair<string, object?> KindTag(int kind) => kind switch
+    {
+        0 => KindReplicate,
+        1 => KindCommit,
+        2 => KindRollback,
+        _ => KindOther
+    };
+
+    /// <summary><paramref name="kind"/> is the durable-operation wire kind (0 replicate, 1 commit, 2 rollback).</summary>
+    internal static void DurableOperationForwarded(int kind, bool ok) =>
+        DurableOperationForwards.Add(1, KindTag(kind), ok ? ResultOk : ResultRefused);
+
+    internal static void DurableOperationForwardThrew(int kind) =>
+        DurableOperationForwards.Add(1, KindTag(kind), ResultThrew);
+
+    internal static void RecordLookupForwarded(bool found) =>
+        RecordLookupForwards.Add(1, found ? ResultFound : ResultAbsent);
+
+    internal static void RecordLookupForwardThrew() => RecordLookupForwards.Add(1, ResultThrew);
+
+    internal static void ReplicaFenceRequested(bool serviced) =>
+        ReplicaFenceRequests.Add(1, serviced ? ResultOk : ResultUnserviced);
+
+    internal static void ReplicaFenceRequestThrew() => ReplicaFenceRequests.Add(1, ResultThrew);
+
+    internal static void DurableOperationRedirected() => ForwardRedirects.Add(1, OpDurableOperation);
+
+    internal static void RecordLookupRedirected() => ForwardRedirects.Add(1, OpRecordLookup);
 
     /// <summary>
     /// Number of tracked read-set keys a finalize validated. Interpreted together with
@@ -563,6 +936,35 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.prepare_conflict_blockers_settled",
             description: "Decided-but-unsettled blocking intents settled inline by a blocked finalize's helping pass.");
+
+    /// <summary>
+    /// Helping passes that found a decided-but-unsettled blocker and settled none of its intents, tagged by
+    /// <c>cause</c>: the abort fence refused the group, no materialization committed, the leader-local apply
+    /// did not confirm, or the settle delta did not replicate. Each is a retry round the blocked finalize spent
+    /// on work that bought no progress; the finalize then backs off exactly as if helping were disabled. A
+    /// sustained <c>settle_failed</c> or <c>materialize_failed</c> rate points at scheduler backpressure, a
+    /// quiesced range, or a forwarding failure on the blocker's partition.
+    /// </summary>
+    internal static readonly Counter<long> HelpingSettledNothing =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.helping_settled_nothing",
+            description: "Helping passes over a decided blocker that settled none of its intents, tagged by cause.");
+
+    private static readonly KeyValuePair<string, object?> CauseFenced = new("cause", "fenced");
+    private static readonly KeyValuePair<string, object?> CauseMaterializeFailed = new("cause", "materialize_failed");
+    private static readonly KeyValuePair<string, object?> CauseApplyFailed = new("cause", "apply_failed");
+    private static readonly KeyValuePair<string, object?> CauseSettleFailed = new("cause", "settle_failed");
+    private static readonly KeyValuePair<string, object?> CauseOther = new("cause", "other");
+
+    internal static void HelpingSettledNone(ResolveFailureCause cause) =>
+        HelpingSettledNothing.Add(1, cause switch
+        {
+            ResolveFailureCause.Fenced => CauseFenced,
+            ResolveFailureCause.MaterializeFailed => CauseMaterializeFailed,
+            ResolveFailureCause.ApplyFailed => CauseApplyFailed,
+            ResolveFailureCause.SettleFailed => CauseSettleFailed,
+            _ => CauseOther
+        });
 
     /// <summary>
     /// Recovery aborts attributed to decision-deadline expiry: a canonical record still <c>Undecided</c> past its

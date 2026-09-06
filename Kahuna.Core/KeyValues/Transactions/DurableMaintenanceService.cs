@@ -695,7 +695,16 @@ internal sealed class DurableMaintenanceService
         // The recovery sweep materializes through the same record shape the finalizer produces, so it follows
         // the same by-reference setting; otherwise a sweep would keep copying values the finalizer stopped
         // copying.
-        materializeByReference: runtime.Configuration.DurableMaterializeByReference);
+        materializeByReference: runtime.Configuration.DurableMaterializeByReference,
+        // The same materialization window caps and local-apply bound the finalizer's resolution honors, so a
+        // recovery or helping pass coalesces like a finalize and cannot out-fan it.
+        maxMaterializationBatchItems: Math.Min(
+            runtime.Configuration.KeyValueWriteMaxBatchItems,
+            runtime.Configuration.KeyValueWriteMaxQueuedItemsPerPartition),
+        maxMaterializationBatchBytes: Math.Min(
+            runtime.Configuration.KeyValueWriteMaxBatchBytes,
+            runtime.Configuration.KeyValueWriteMaxQueuedBytesPerPartition),
+        localApplyGate: runtime.DurableLocalApplyGate);
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {
@@ -1025,10 +1034,23 @@ internal sealed class DurableMaintenanceService
         string endpoint, int partitionId, DurableFinalizeInput input,
         List<string> fencedKeys, List<PreparedIntent> fencedIntents, CancellationToken cancellationToken)
     {
-        (bool serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts) = await interNodeCommunication.GetStagedBaseVerdicts(
-            endpoint, partitionId, input.TransactionId, input.Epoch, fencedKeys, ReplicaFenceApplyWaitMs, cancellationToken).ConfigureAwait(false);
+        bool serviced;
+        IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts;
+        try
+        {
+            (serviced, verdicts) = await interNodeCommunication.GetStagedBaseVerdicts(
+                endpoint, partitionId, input.TransactionId, input.Epoch, fencedKeys, ReplicaFenceApplyWaitMs, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            DurableTransactionMetrics.ReplicaFenceRequestThrew();
+            throw;
+        }
 
-        if (!serviced || verdicts.Count != fencedKeys.Count)
+        bool answered = serviced && verdicts.Count == fencedKeys.Count;
+        DurableTransactionMetrics.ReplicaFenceRequested(answered);
+
+        if (!answered)
             throw new KahunaServerException($"Node {endpoint} did not answer the staged-base verdict request.");
 
         return AnyStaleBaseVerdict(input, endpoint, fencedIntents, verdicts);

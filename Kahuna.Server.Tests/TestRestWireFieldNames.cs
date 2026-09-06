@@ -184,7 +184,7 @@ public sealed class TestRestWireFieldNames
     /// lock owner or a backup id and hand the far side an object of nulls and zeroes.
     /// </summary>
     [Theory]
-    [InlineData(typeof(KahunaGetLockResponse), "servedFrom,type,owner,expires,fencingToken")]
+    [InlineData(typeof(KahunaGetLockResponse), "servedFrom,type,owner,expires,fencingToken,route")]
     [InlineData(typeof(KahunaRestoreResponse), "targetDir,partitionsRestored,entriesApplied,lastAppliedPhysicalMs,"
         + "chain,outcome,minRecoverablePhysicalMs,maxRecoverablePhysicalMs")]
     [InlineData(typeof(KahunaBackupInfo), "backupId,formatVersion,type,createdAtUtc,parentBackupId,partitionCount,"

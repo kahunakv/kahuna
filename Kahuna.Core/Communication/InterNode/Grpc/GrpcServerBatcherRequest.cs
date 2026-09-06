@@ -112,6 +112,10 @@ internal readonly struct GrpcServerBatcherRequest
 
     public GrpcServerBatcherRequest(GrpcDurableOperationRequest durableOperation) => payload = durableOperation;
 
+    public GrpcServerBatcherRequest(GrpcDurableBundleRequest durableBundle) => payload = durableBundle;
+
+    public GrpcServerBatcherRequest(GrpcDurableDecisionRequest durableDecision) => payload = durableDecision;
+
     public GrpcServerBatcherRequest(GrpcReplicateKeyValueRangePageRequest replicateKeyValueRangePage) => payload = replicateKeyValueRangePage;
 
     public GrpcServerBatcherRequest(GrpcGetRangeTransactionStateRequest getRangeTransactionState) => payload = getRangeTransactionState;
@@ -220,6 +224,10 @@ internal readonly struct GrpcServerBatcherRequest
 
 
     public GrpcDurableOperationRequest? DurableOperation => payload as GrpcDurableOperationRequest;
+
+    public GrpcDurableBundleRequest? DurableBundle => payload as GrpcDurableBundleRequest;
+
+    public GrpcDurableDecisionRequest? DurableDecision => payload as GrpcDurableDecisionRequest;
 
     public GrpcReplicateKeyValueRangePageRequest? ReplicateKeyValueRangePage => payload as GrpcReplicateKeyValueRangePageRequest;
 

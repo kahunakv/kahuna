@@ -2,6 +2,7 @@
 using Kommander.Time;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna;
@@ -14,6 +15,16 @@ public sealed partial class KahunaManager
 {
     public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>
         keyValues.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
+
+    public Task<DurableBundleWireReply?> DurableBundleLocal(
+        int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        keyValues.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+
+    public Task<DurableDecisionWireReply?> DurableDecisionLocal(
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        keyValues.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
 
     public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         keyValues.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);

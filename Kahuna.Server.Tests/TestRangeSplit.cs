@@ -343,6 +343,14 @@ public sealed class TestRangeSplit : BaseCluster
                 coordinatorKey: writer.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
             Assert.Equal(KeyValueResponseType.Set, writeType);
 
+            // The probe scan refuses only a writer that may still commit at or before the probe's snapshot.
+            // The writer's begin HLC comes from the session node's clock and the probe timestamp from the meta
+            // leader's; within one millisecond the two are not causally ordered, so a writer that began in the
+            // same millisecond can read as "after the snapshot" and the probe answers HasKeys, which is a valid
+            // outcome (the later settle barrier handles the live intent). Let the wall clock advance so the
+            // writer provably began before the snapshot and the probe must wait on it.
+            await Task.Delay(5, ct);
+
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(
                 Space, Space + "/m", RangeMapStore.FirstDataPartitionId + 10, ct);
 

@@ -308,6 +308,11 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     /// <summary>Replicates an anchor's init+prepare as one atomic batch. Reports batch commit and prepare
     /// acknowledgement independently.</summary>
+    /// <summary>Replicates a terminal decision on the anchor partition and answers the canonical outcome.</summary>
+    internal Task<Writes.DurableDecisionReply> ReplicateDurableDecisionThroughSchedulerFenced(
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        durableReplication.ReplicateDurableDecisionThroughSchedulerFenced(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
+
     internal Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleThroughSchedulerFenced(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableBundleThroughSchedulerFenced(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken);
@@ -321,6 +326,18 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>
         durableReplication.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
 
+    /// <summary>Runs a forwarded durable bundle on this node as one atomic scheduler submission.</summary>
+    internal Task<Writes.DurableBundleWireReply?> DurableBundleLocal(
+        int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        durableReplication.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+
+    /// <summary>Replicates a forwarded terminal decision on this node and answers the canonical outcome.</summary>
+    internal Task<Writes.DurableDecisionWireReply?> DurableDecisionLocal(
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        durableReplication.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
+
     /// <summary>Looks a transaction record up on this node.</summary>
     internal Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         durableReplication.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
@@ -328,6 +345,12 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Looks a transaction record up on the partition that anchors it.</summary>
     internal Task<TransactionRecord?> LookupDurableRecordRouted(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         durableReplication.LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken);
+
+    /// <summary>The inter-node calls this node's durable path has made so far (per node, for tests and diagnostics).</summary>
+    internal Writes.DurableTransportCounts DurableTransportCounts => durableReplication.TransportCounts;
+
+    /// <summary>The node's shared bound on concurrent leader-local applies of committed intents.</summary>
+    internal SemaphoreSlim DurableLocalApplyGate => runtime.DurableLocalApplyGate;
 
     /// <summary>Applies a prepared intent's commit on its partition.</summary>
     internal Task<bool> ApplyDurableCommit(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken) =>

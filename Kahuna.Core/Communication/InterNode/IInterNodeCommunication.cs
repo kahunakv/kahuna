@@ -1,6 +1,7 @@
 
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
@@ -92,6 +93,21 @@ public interface IInterNodeCommunication
     /// <summary>Forwards a durable-intent 2PC operation to the partition leader node (kind 0 replicate delta, 1
     /// commit-apply, 2 rollback-apply) and returns whether it committed/applied.</summary>
     public Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
+
+    /// <summary>Forwards an ordered group of durable-2PC deltas to the partition leader as ONE atomic scheduler
+    /// submission (an anchor's record init + prepare, or a single prepare), carrying the origin's admission class
+    /// and range fence. Answers null when the receiver does not implement the operation (an older node), so the
+    /// caller can fall back to per-entry forwards.</summary>
+    public Task<DurableBundleWireReply?> DurableBundle(
+        string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
+    /// <summary>Replicates a transaction's terminal decision on its anchor partition's leader and answers with
+    /// the canonical outcome read after the ordered apply. Answers null when the receiver does not implement the
+    /// operation, so the caller can fall back to a plain forward plus a record lookup.</summary>
+    public Task<DurableDecisionWireReply?> DurableDecision(
+        string node, int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
     /// <summary>Routes a linearizable canonical transaction-record lookup to the partition leader that owns the
     /// record's anchor key, returning the serialized record (null when absent). Used by the consult sites so a

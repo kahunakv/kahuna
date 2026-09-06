@@ -5,6 +5,7 @@ using Kommander.WAL;
 
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
@@ -101,6 +102,19 @@ public interface IKahuna
     /// leader: kind 0 replicates a delta through the local scheduler, kind 1/2 applies a committed/aborted intent's
     /// resolution on the local KV state. Returns whether it committed/applied.</summary>
     public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
+
+    /// <summary>Runs a forwarded durable bundle on this node because it leads the partition: the ordered entries
+    /// enter the local scheduler as one atomic submission under the origin's admission class and range fence.
+    /// Redirects once to the actual leader when routed here on a stale guess.</summary>
+    public Task<DurableBundleWireReply?> DurableBundleLocal(
+        int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
+    /// <summary>Replicates a forwarded terminal decision on this node because it leads the anchor partition and
+    /// answers the canonical outcome read from its record store after the ordered apply.</summary>
+    public Task<DurableDecisionWireReply?> DurableDecisionLocal(
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
     /// <summary>Serves a canonical transaction-record lookup routed here because this node is the record's anchor
     /// partition leader. Returns the serialized record, or null when no record exists locally.</summary>

@@ -1213,6 +1213,65 @@ internal sealed class PreparedIntentStore
     /// restore path (<see cref="Restore"/>) deliberately bypasses this method, so replayed history never
     /// vetoes; ordered live catch-up cannot produce a false flag, because heads advance in the same log order
     /// the prepares apply in.</para></summary>
+    // Leader-local, advisory: why this node's apply refused a prepare's acknowledgement, keyed by the prepare's
+    // identity and key, for the finalizer that proposed it to classify its retry — a stale base is final (heads
+    // only advance, so every re-ask answers the same), a held key is settlement lag or a live conflict. Taken
+    // once by that finalizer; entries no finalizer takes (an abandoned attempt) are bounded by the cap.
+    private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch, string Key), Writes.PrepareRejectionKind> prepareRejections = new();
+
+    private const int PrepareRejectionsMax = 4_096;
+
+    /// <summary>Remembers why the prepare of <paramref name="transactionId"/> on <paramref name="key"/> was refused.
+    /// Also fed by a remote leader's typed answer, so the origin classifies remote and local refusals alike.</summary>
+    internal void RecordPrepareRejection(HLCTimestamp transactionId, long epoch, string key, Writes.PrepareRejectionKind kind)
+    {
+        if (kind == Writes.PrepareRejectionKind.None)
+            return;
+
+        (HLCTimestamp, long, string) identity = (transactionId, epoch, key);
+        if (prepareRejections.Count >= PrepareRejectionsMax && !prepareRejections.ContainsKey(identity))
+            return;
+
+        prepareRejections[identity] = kind;
+    }
+
+    /// <summary>Takes (and forgets) the refusal kind memoed for one prepare, or false when none was recorded —
+    /// the refusal happened on another node that answered without a kind, or the batch never committed.</summary>
+    internal bool TryTakePrepareRejection(HLCTimestamp transactionId, long epoch, string key, out Writes.PrepareRejectionKind kind) =>
+        prepareRejections.TryRemove((transactionId, epoch, key), out kind);
+
+    /// <summary>Memos <paramref name="kind"/> under every prepare identity <paramref name="prepareDelta"/> carries —
+    /// the origin-side mirror of a remote leader's typed refusal.</summary>
+    internal void RecordPrepareRejectionsForDelta(byte[] prepareDelta, Writes.PrepareRejectionKind kind)
+    {
+        if (kind == Writes.PrepareRejectionKind.None)
+            return;
+
+        foreach (PreparedIntentCommand command in DecodeDelta(prepareDelta))
+        {
+            if (command is PrepareIntentCommand prepare)
+                RecordPrepareRejection(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key, kind);
+        }
+    }
+
+    /// <summary>Takes the dominant refusal kind memoed for the prepares of <paramref name="prepareDelta"/> (a
+    /// stale base outranks a held key) — the receiving leader's answer to a forwarded bundle whose prepare it
+    /// refused.</summary>
+    internal Writes.PrepareRejectionKind TakePrepareRejectionForDelta(byte[] prepareDelta)
+    {
+        Writes.PrepareRejectionKind dominant = Writes.PrepareRejectionKind.None;
+
+        foreach (PreparedIntentCommand command in DecodeDelta(prepareDelta))
+        {
+            if (command is PrepareIntentCommand prepare
+                && TryTakePrepareRejection(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key, out Writes.PrepareRejectionKind kind)
+                && kind > dominant)
+                dominant = kind;
+        }
+
+        return dominant;
+    }
+
     public bool ApplyDeltaAckPrepares(RaftLog log) => ApplyDeltaAckPrepares(UnattributedPartition, log);
 
     /// <inheritdoc cref="ApplyDeltaAckPrepares(RaftLog)"/>
@@ -1237,6 +1296,13 @@ internal sealed class PreparedIntentStore
                 allPreparesAccepted = false;
                 if (result.StaleBase)
                     (staleFlagged ??= []).Add(prepare.Intent);
+
+                // A state-machine rejection means another transaction's live intent holds the key; a stale-base
+                // flag means the base moved. The proposing finalizer takes this to decide between helping, backing
+                // off, and aborting at once.
+                RecordPrepareRejection(
+                    prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key,
+                    result.StaleBase ? Writes.PrepareRejectionKind.StaleBase : Writes.PrepareRejectionKind.KeyHeld);
             }
         }
 

@@ -16,6 +16,7 @@ using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Routing;
 using Kahuna.Shared.Routing;
 using Kahuna.Shared.Communication.Grpc;
@@ -2550,6 +2551,43 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         {
             Found = record is not null,
             Record = record is not null ? UnsafeByteOperations.UnsafeWrap(record) : ByteString.Empty
+        };
+    }
+
+    internal async Task<GrpcDurableBundleResponse> DurableBundleInternal(GrpcDurableBundleRequest request, ServerCallContext context)
+    {
+        (string LogType, byte[] Payload)[] entries = new (string, byte[])[request.Entries.Count];
+        for (int i = 0; i < request.Entries.Count; i++)
+            entries[i] = (request.Entries[i].LogType, request.Entries[i].Payload.ToByteArray());
+
+        DurableBundleWireReply? reply = await keyValues.DurableBundleLocal(
+            request.PartitionId, entries, terminal: request.AdmissionClass == 1,
+            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
+
+        // A null reply here means the receiver could not run the bundle at all (an unresolved leadership); the
+        // origin reads a not-committed batch and retries.
+        return new GrpcDurableBundleResponse
+        {
+            BatchCommitted = reply?.BatchCommitted ?? false,
+            PrepareAcknowledged = reply?.PrepareAcknowledged ?? false,
+            PrepareRejection = reply?.PrepareRejection ?? 0
+        };
+    }
+
+    internal async Task<GrpcDurableDecisionResponse> DurableDecisionInternal(GrpcDurableDecisionRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+
+        DurableDecisionWireReply? reply = await keyValues.DurableDecisionLocal(
+            request.PartitionId, request.DecisionDelta.ToByteArray(), transactionId, request.Epoch,
+            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
+
+        return new GrpcDurableDecisionResponse
+        {
+            Replicated = reply?.Replicated ?? false,
+            Known = reply?.Known ?? false,
+            Decision = reply?.Decision ?? 0,
+            AbortClass = reply?.AbortClass ?? 0
         };
     }
 

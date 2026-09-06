@@ -104,6 +104,13 @@ internal class TransactionContext
     internal DurableFinalizeInput? UnresolvedDurableFinalize { get; set; }
 
     /// <summary>
+    /// True once any finalize attempt of this transaction had its commit rejected by the record's deadline
+    /// gate. Lets the coordinator count late-commit rejections once per transaction, so a client that retries
+    /// the same commit several times is not counted as several lost transactions.
+    /// </summary>
+    internal bool LateCommitRejected { get; set; }
+
+    /// <summary>
     /// Point locks acquired during execution.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? LocksAcquired { get; set; }

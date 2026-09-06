@@ -56,8 +56,18 @@ internal enum StagedBaseValidation
 
 /// <summary>The outcome of a finalize attempt, already mapped to the MustRetry/Aborted result contract: only a
 /// conflict-class abort is <see cref="DurableFinalizeResult.Aborted"/>; every other abort and every
-/// infrastructural failure is <see cref="DurableFinalizeResult.MustRetry"/>.</summary>
-internal readonly record struct DurableFinalizeOutcome(DurableFinalizeResult Result, TransactionAbortClass AbortClass);
+/// infrastructural failure is <see cref="DurableFinalizeResult.MustRetry"/>.
+/// <para><paramref name="LateCommitRejected"/> marks a <see cref="DurableFinalizeResult.MustRetry"/> whose commit
+/// request the record's deadline gate withheld (the attempt HLC passed the frozen decision deadline), so the
+/// coordinator can count that cause once per transaction rather than once per retried attempt.</para></summary>
+internal readonly record struct DurableFinalizeOutcome(
+    DurableFinalizeResult Result,
+    TransactionAbortClass AbortClass,
+    bool LateCommitRejected = false,
+    // True when Result was read from the canonical record after the decision applied (locally on the anchor
+    // leader, or from the anchor leader's typed answer), so the resolution can take its direction from it
+    // without a second canonical read.
+    bool CanonicalDecisionRead = false);
 
 /// <summary>
 /// Drives one transaction's finalize under the durable-intent 2PC model: initialize the canonical
@@ -68,9 +78,10 @@ internal readonly record struct DurableFinalizeOutcome(DurableFinalizeResult Res
 /// </summary>
 internal sealed class DurableTransactionFinalizer : IDisposable
 {
-    // Local apply is actor work, not Raft I/O. This gate is shared by every finalize using this finalizer, so
-    // concurrent transactions cannot multiply their individual fan-out into an unbounded actor-inbox flood.
-    private const int MaxConcurrentLocalApplies = 32;
+    // Local apply is actor work, not Raft I/O. This gate is shared by every finalize using this finalizer — and,
+    // when the node hands one in, by its recovery paths too — so concurrent transactions and helping passes
+    // cannot multiply their individual fan-out into an unbounded actor-inbox flood.
+    internal const int MaxConcurrentLocalApplies = 32;
 
     // A prepare rejected only because the key still holds a predecessor's committed-but-unsettled intent (deferred
     // settlement removes it a moment later) is retryable in place — re-prepare the set a few times before conceding,
@@ -78,7 +89,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // intent settles within a few ms and the frozen decision deadline is the real ceiling.
     private const int MaxPrepareRetries = 8;
 
-    private readonly SemaphoreSlim localApplyGate = new(MaxConcurrentLocalApplies);
+    private readonly SemaphoreSlim localApplyGate;
+
+    // True when this finalizer created its gate and must dispose it; false for a node-shared gate.
+    private readonly bool ownsLocalApplyGate;
 
     /// <summary>Replicates a partition's serialized delta of the given log type and returns whether it committed
     /// durably. In production this is an auto-commit Raft round trip; the finalizer applies the delta to the
@@ -163,6 +177,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// protocol-test configurations, where the local apply IS the canonical apply).</summary>
     public delegate Task<bool> ReplicateDecisionDelegate(int partitionId, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
+    /// <summary>Replicates the terminal decision delta on the anchor partition and answers the CANONICAL outcome
+    /// read after the ordered apply — from this node's own store when it leads the anchor, from the anchor
+    /// leader's typed answer otherwise — so the winner needs no separate lookup call. An answer that is
+    /// replicated but not <c>Known</c> (an older remote node) falls back to the routed lookup. Preferred over
+    /// <see cref="ReplicateDecisionDelegate"/> when wired.</summary>
+    public delegate Task<Writes.DurableDecisionReply> DecideDelegate(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
     /// <summary>Reads the transaction's canonical record by its anchor key — locally when this node leads the
     /// anchor partition, routed to the anchor leader otherwise. The decision winner and the resolution
     /// direction must come from this, never from a node-local store a losing decision's projection could have
@@ -204,6 +225,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Projection-free decision replicate; null falls back to the ordinary fenced/unfenced replicate.
     private readonly ReplicateDecisionDelegate? replicateDecision;
+
+    // Typed decision: replicate and read the canonical winner in one round; null keeps replicate-then-lookup.
+    private readonly DecideDelegate? decide;
 
     // Canonical record read for the decision winner and the resolution direction; null reads the local store.
     private readonly LookupRecordRoutedDelegate? lookupRecordRouted;
@@ -254,8 +278,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ReplicateDecisionDelegate? replicateDecision = null,
         LookupRecordRoutedDelegate? lookupRecordRouted = null,
         ConfirmReplicaFenceDelegate? confirmReplicaFence = null,
-        bool materializeByReference = false)
+        bool materializeByReference = false,
+        SemaphoreSlim? localApplyGate = null,
+        DecideDelegate? decide = null)
     {
+        this.decide = decide;
+        // A node-shared gate bounds local applies across the finalizer and its recovery paths together; a
+        // finalizer built without one (protocol tests) bounds only itself.
+        this.localApplyGate = localApplyGate ?? new SemaphoreSlim(MaxConcurrentLocalApplies);
+        ownsLocalApplyGate = localApplyGate is null;
         this.materializeByReference = materializeByReference;
         this.validateStagedBases = validateStagedBases;
         this.confirmReplicaFence = confirmReplicaFence;
@@ -333,7 +364,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // so TryOnePhaseFinalizeAsync re-runs this validation immediately before its propose instead.
         if (validateStagedBases is not null)
         {
-            switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
+            long preflightStart = Stopwatch.GetTimestamp();
+            StagedBaseValidation preflight = await validateStagedBases(input, cancellationToken).ConfigureAwait(false);
+            DurableTransactionMetrics.FinalizePreflightMs.Record(Stopwatch.GetElapsedTime(preflightStart).TotalMilliseconds);
+
+            switch (preflight)
             {
                 case StagedBaseValidation.Conflict:
                 {
@@ -410,12 +445,19 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // only for the dependencies no deterministic apply-time check exists for (predicates, off-partition
         // reads). The pre-propose validations below stay: they avoid proposing bundles that will be rejected;
         // the apply-time check is the backstop for the stall window, not their replacement.
-        if (replicateOnePhaseBundle is not null &&
-            !readSetExtendsBeyondWrites &&
-            input.Partitions.Count == 1 &&
-            input.Partitions[0].PartitionId == input.AnchorPartitionId)
+        // Every finalize records its gate verdict, so excluded transactions are visible beside the entered ones
+        // that later commit or fall back.
+        OnePhaseGateOutcome gate =
+            replicateOnePhaseBundle is null ? OnePhaseGateOutcome.Disabled
+            : readSetExtendsBeyondWrites ? OnePhaseGateOutcome.ReadSetBeyondWrites
+            : input.Partitions.Count != 1 ? OnePhaseGateOutcome.MultiPartition
+            : input.Partitions[0].PartitionId != input.AnchorPartitionId ? OnePhaseGateOutcome.AnchorOffPartition
+            : OnePhaseGateOutcome.Entered;
+        DurableTransactionMetrics.OnePhaseGateDecided(gate);
+
+        if (gate == OnePhaseGateOutcome.Entered)
         {
-            DurableFinalizeOutcome? onePhase = await TryOnePhaseFinalizeAsync(
+            (DurableFinalizeOutcome? onePhase, OnePhaseFallbackReason fallback) = await TryOnePhaseFinalizeAsync(
                 input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, cancellationToken).ConfigureAwait(false);
 
             if (onePhase is { } fastOutcome)
@@ -425,8 +467,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 return fastOutcome;
             }
 
-            DurableTransactionMetrics.OnePhaseFallbacks.Add(1);
+            DurableTransactionMetrics.OnePhaseFellBack(fallback);
         }
+
+        // The first barrier alone is timed separately from the whole prepare stage, so the retry loop's share
+        // (helping, backoff, re-proposals) is the difference.
+        long firstPrepareStart = Stopwatch.GetTimestamp();
 
         int anchorIndex = -1;
         if (replicateAnchorBundle is not null)
@@ -441,6 +487,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             }
         }
 
+        // Per-participant acknowledgement, kept across retry rounds. An acknowledged participant's intent is
+        // replicated state that stays until a decision or a presumed-abort resolves it (a range move waits for
+        // undecided intents inside their window before it cuts over), so re-proposing it buys nothing but a log
+        // append and a replication round; only the participants still unacknowledged are re-proposed.
+        bool[] acknowledged = new bool[input.Partitions.Count];
         bool allPrepared;
         if (anchorIndex >= 0)
         {
@@ -474,7 +525,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             // The record is durably initialized. Fold the anchor prepare's own acknowledgement in with the others;
             // a rejected anchor prepare (another transaction owns the anchor key) drops allPrepared and drives the
             // truthful abort below, exactly as a rejected non-anchor prepare does.
-            allPrepared = anchorResult.PrepareAcknowledged && otherResults.All(static prepared => prepared);
+            acknowledged[anchorIndex] = anchorResult.PrepareAcknowledged;
+            for (int i = 0, other = 0; i < input.Partitions.Count; i++)
+            {
+                if (i != anchorIndex)
+                    acknowledged[i] = otherResults[other++];
+            }
+
+            allPrepared = AllAcknowledged(acknowledged);
         }
         else
         {
@@ -493,55 +551,155 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
             }
             bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
-            allPrepared = prepareResults.All(static prepared => prepared);
+            for (int i = 0; i < prepareResults.Length; i++)
+                acknowledged[i] = prepareResults[i];
+
+            allPrepared = AllAcknowledged(acknowledged);
         }
+
+        DurableTransactionMetrics.FinalizeFirstPrepareMs.Record(Stopwatch.GetElapsedTime(firstPrepareStart).TotalMilliseconds);
 
         // ── Prepare retry (window narrowing): a prepare rejected because the key still holds a predecessor's
         // committed-but-unsettled intent is retryable — the predecessor's background settlement removes that intent a
-        // moment later. Re-prepare the whole set (the record is already durable, so no re-init): a partition that
-        // already prepared answers with an idempotent same-identity match, while a blocked partition retries until the
+        // moment later. Re-prepare the participants that are still unacknowledged (the record is already durable,
+        // so no re-init; an acknowledged participant's intent stays put): a blocked partition retries until the
         // foreign intent settles. Bounded, with a short backoff to yield to settlement. No decision has been written
         // yet, so a retry that succeeds still commits truthfully instead of aborting a healthy commit to MustRetry. A
         // genuine conflict (another live transaction, or an undecided intent that never resolves) simply exhausts the
-        // budget and falls through to the truthful abort below; the frozen decision deadline is the final ceiling. ──
+        // budget and falls through to the truthful abort below; the frozen decision deadline is the final ceiling.
+        //
+        // Each refusal is classified before it is retried: a stale base is final (heads only advance, so every
+        // re-ask answers the same) and aborts as a conflict at once; a range that moved since freeze can never
+        // accept this frozen input and yields a clean retry from a fresh freeze; a held key is helped and retried;
+        // a refusal with no verdict (a lost reply, an older remote node) is retried as before. ──
+        //
+        // The loop's cost is attributed separately from the first barrier: rounds, helper calls and time, and
+        // backoff time per finalize, plus how the loop ended. All are recorded only for finalizes that entered it.
+        bool retryLoopEntered = !allPrepared;
+        int retryRounds = 0;
+        int helperCalls = 0;
+        double helperMs = 0;
+        double backoffMs = 0;
+        bool retryCancelled = false;
+        bool staleBase = false;
+        bool rangeMoved = false;
+        List<int> unacknowledged = new(input.Partitions.Count);
+
         for (int attempt = 0; !allPrepared && attempt < MaxPrepareRetries && !cancellationToken.IsCancellationRequested; attempt++)
         {
-            // Helping pass: a blocking intent whose record is already decided is pure settlement lag — settle it
-            // now and re-prepare immediately, instead of sleeping in the hope that the deferred-settlement task
-            // wins the race. Only when nothing could be helped (a live conflict, or helping unavailable) does the
-            // backoff apply; helping failures degrade to that same backoff, never to an escaped exception.
+            unacknowledged.Clear();
+            for (int i = 0; i < input.Partitions.Count; i++)
+            {
+                if (acknowledged[i])
+                    continue;
+
+                switch (ClassifyPrepareRefusal(input, input.Partitions[i]))
+                {
+                    case Writes.PrepareRejectionKind.StaleBase:
+                        staleBase = true;
+                        break;
+
+                    case Writes.PrepareRejectionKind.RangeMoved:
+                        rangeMoved = true;
+                        break;
+                }
+
+                unacknowledged.Add(i);
+            }
+
+            if (staleBase || rangeMoved)
+                break;
+
+            // Helping pass over the refused participants only, concurrently: a blocking intent whose record is
+            // already decided is pure settlement lag — settle it now and re-prepare immediately, instead of
+            // sleeping in the hope that the deferred-settlement task wins the race. Only when nothing could be
+            // helped (a live conflict, or helping unavailable) does the backoff apply; helping failures degrade to
+            // that same backoff, never to an escaped exception.
             bool helped = false;
             if (resolveDecidedBlockers is not null)
             {
+                long helperStart = Stopwatch.GetTimestamp();
                 try
                 {
-                    for (int i = 0; i < input.Partitions.Count; i++)
+                    Task<int>[] helps = new Task<int>[unacknowledged.Count];
+                    for (int k = 0; k < unacknowledged.Count; k++)
                     {
-                        DurablePartitionPrepare partition = input.Partitions[i];
-                        if (await resolveDecidedBlockers(partition.PartitionId, partition.Intents, input.TransactionId, input.Epoch, cancellationToken).ConfigureAwait(false) > 0)
+                        DurablePartitionPrepare partition = input.Partitions[unacknowledged[k]];
+                        helps[k] = resolveDecidedBlockers(partition.PartitionId, partition.Intents, input.TransactionId, input.Epoch, cancellationToken);
+                    }
+
+                    helperCalls += helps.Length;
+                    foreach (int settled in await Task.WhenAll(helps).ConfigureAwait(false))
+                    {
+                        if (settled > 0)
                             helped = true;
                     }
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException) { retryCancelled = true; }
                 catch { helped = false; }
+                finally
+                {
+                    helperMs += Stopwatch.GetElapsedTime(helperStart).TotalMilliseconds;
+                }
+
+                if (retryCancelled)
+                    break;
             }
 
             if (!helped)
             {
+                long backoffStart = Stopwatch.GetTimestamp();
                 try { await Task.Delay(Math.Min(2 * (attempt + 1), 20), cancellationToken).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException) { retryCancelled = true; }
+                finally
+                {
+                    backoffMs += Stopwatch.GetElapsedTime(backoffStart).TotalMilliseconds;
+                }
+
+                if (retryCancelled)
+                    break;
             }
 
-            Task<bool>[] retryTasks = new Task<bool>[input.Partitions.Count];
-            for (int i = 0; i < input.Partitions.Count; i++)
+            retryRounds++;
+
+            // Re-propose only the refused participants; every submitted task is awaited, never abandoned.
+            Task<bool>[] retryTasks = new Task<bool>[unacknowledged.Count];
+            for (int k = 0; k < unacknowledged.Count; k++)
             {
+                int i = unacknowledged[k];
                 DurablePartitionPrepare partition = input.Partitions[i];
-                retryTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
+                retryTasks[k] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
             }
-            allPrepared = (await Task.WhenAll(retryTasks).ConfigureAwait(false)).All(static prepared => prepared);
+
+            bool[] retryResults = await Task.WhenAll(retryTasks).ConfigureAwait(false);
+            for (int k = 0; k < retryResults.Length; k++)
+                acknowledged[unacknowledged[k]] = retryResults[k];
+
+            allPrepared = AllAcknowledged(acknowledged);
+        }
+
+        DurableTransactionMetrics.FinalizePrepareRetries.Record(retryRounds);
+
+        if (retryLoopEntered)
+        {
+            DurableTransactionMetrics.FinalizeHelperCalls.Record(helperCalls);
+            DurableTransactionMetrics.FinalizeHelperMs.Record(helperMs);
+            DurableTransactionMetrics.FinalizeBackoffMs.Record(backoffMs);
+            DurableTransactionMetrics.PrepareRetryLoopEnded(
+                allPrepared ? PrepareRetryLoopOutcome.Prepared
+                : retryCancelled || cancellationToken.IsCancellationRequested ? PrepareRetryLoopOutcome.Cancelled
+                : staleBase ? PrepareRetryLoopOutcome.StaleBase
+                : rangeMoved ? PrepareRetryLoopOutcome.RangeMoved
+                : PrepareRetryLoopOutcome.Exhausted);
         }
 
         DurableTransactionMetrics.FinalizePrepareMs.Record(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+
+        // The range a refused participant was frozen against moved: this input can never prepare there. Nothing
+        // decided is durable (the record is Undecided and the acknowledged intents stay recoverable), so a clean
+        // retry from a fresh freeze is truthful; the abandoned-attempt fence covers a client that gives up instead.
+        if (!allPrepared && rangeMoved && !staleBase)
+            return Retry();
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
         // The replica fence confirmation runs alongside the read-set validation: both need the prepares
@@ -570,7 +728,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken).ConfigureAwait(false);
         else
         {
-            TransactionAbortClass abortClass = !allPrepared ? TransactionAbortClass.RetryableFailure : TransactionAbortClass.Conflict;
+            // A stale base is a genuine conflict (the write was validated against a base that moved), whatever
+            // round it surfaced in; any other unacknowledged participant is a retryable failure.
+            TransactionAbortClass abortClass = !allPrepared && !staleBase ? TransactionAbortClass.RetryableFailure : TransactionAbortClass.Conflict;
             outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionMs.Record(Stopwatch.GetElapsedTime(decisionStart).TotalMilliseconds);
@@ -601,11 +761,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (outcome.Result == DurableFinalizeResult.MustRetry)
             return;
 
+        // A decision read from the canonical record (locally on the anchor leader, or from the anchor leader's
+        // typed answer) is the resolution direction; an outcome that was not read that way re-reads the record.
+        bool? knownCommit = outcome.CanonicalDecisionRead ? outcome.Result == DurableFinalizeResult.Committed : null;
+
         if (scheduleResolution is null)
         {
             try
             {
-                await ResolveAsync(input, cancellationToken).ConfigureAwait(false);
+                await ResolveAsync(input, knownCommit, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -614,17 +778,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
         else
         {
-            scheduleResolution(ct => ResolveAsync(input, ct));
+            scheduleResolution(ct => ResolveAsync(input, knownCommit, ct));
         }
     }
 
     /// <summary>
-    /// The one-phase commit fast path body. Returns the finalize outcome, or <see langword="null"/> when this
-    /// transaction must fall back to the standard 2PC flow (foreign durable intent on a written key, failed
-    /// up-front validation, or a remote anchor leader). Callable only when the participant set is exactly the
-    /// anchor partition and <see cref="replicateOnePhaseBundle"/> is wired.
+    /// The one-phase commit fast path body. Returns the finalize outcome, or a <see langword="null"/> outcome with
+    /// the reason when this transaction must fall back to the standard 2PC flow (foreign durable intent on a
+    /// written key, failed up-front validation, or a remote anchor leader). Callable only when the participant
+    /// set is exactly the anchor partition and <see cref="replicateOnePhaseBundle"/> is wired.
     /// </summary>
-    private async Task<DurableFinalizeOutcome?> TryOnePhaseFinalizeAsync(
+    private async Task<(DurableFinalizeOutcome? Outcome, OnePhaseFallbackReason Fallback)> TryOnePhaseFinalizeAsync(
         DurableFinalizeInput input,
         byte[] initDelta,
         byte[] anchorPrepareDelta,
@@ -647,7 +811,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             PreparedIntent? holder = intentStore.Get(intent.Key);
             if (holder is not null && (holder.TransactionId != input.TransactionId || holder.Epoch != input.Epoch))
-                return null;
+                return (null, OnePhaseFallbackReason.ForeignIntent);
         }
 
         // Validation runs BEFORE anything durable — unlike 2PC's post-prepare validation. Safe for the same
@@ -659,7 +823,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool validated = await validateReadSet(cancellationToken).ConfigureAwait(false);
         DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
         if (!validated)
-            return null;
+            return (null, OnePhaseFallbackReason.ValidationFailed);
 
         // Late staged-base re-validation, as close to the propose as the bundle allows. The bundle decides in
         // the same atomic batch as its prepare, so the prepare-apply staged-base fence cannot withhold its
@@ -676,10 +840,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
             {
                 case StagedBaseValidation.Conflict:
-                    return await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false);
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case StagedBaseValidation.Unknown:
-                    return Retry();
+                    return (Retry(), OnePhaseFallbackReason.None);
             }
         }
 
@@ -713,11 +877,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         // Remote anchor leader: the atomic bundle cannot cross the wire; standard 2PC handles it.
         if (proposed is null)
-            return null;
+            return (null, OnePhaseFallbackReason.RemoteLeader);
 
         // Nothing durable — a clean retry, exactly as a failed 2PC record init.
         if (!proposed.Value.BatchCommitted)
-            return Retry();
+            return (Retry(), OnePhaseFallbackReason.None);
 
         // A rejected bundled prepare (another transaction took a key while this proposal was in flight) also
         // rejects the bundled commit through the record store's bundled-prepare gate, so the record read below
@@ -731,7 +895,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // truthfully), and a concurrent recovery abort may have won the race in the log.
         TransactionRecord? record = recordStore.Get(input.TransactionId, input.Epoch);
         if (record is null)
-            return Retry();
+            return (Retry(), OnePhaseFallbackReason.None);
 
         if (record.Decision == TransactionDecision.Undecided)
         {
@@ -748,14 +912,18 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             if (recordStore.TryTakeGatedRejectionVerdict(input.TransactionId, input.Epoch, opId, out BundledCommitVerdict verdict))
             {
                 if (verdict is BundledCommitVerdict.StaleBase or BundledCommitVerdict.StaleRead)
-                    return await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false);
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
 
-                return Retry();
+                return (Retry(), OnePhaseFallbackReason.None);
             }
 
             if (proposed.Value.PrepareAcknowledged)
+            {
                 DurableTransactionMetrics.LateCommitRejections.Add(1);
-            return Retry();
+                return (LateCommitRejectedRetry(), OnePhaseFallbackReason.None);
+            }
+
+            return (Retry(), OnePhaseFallbackReason.None);
         }
 
         if (record.Decision == TransactionDecision.Commit)
@@ -784,12 +952,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             }
         }
 
-        return record.Decision switch
+        return (record.Decision switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
             TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
             _ => Retry()
-        };
+        }, OnePhaseFallbackReason.None);
     }
 
     /// <summary>
@@ -831,49 +999,94 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // ordinary-write burst saturating the anchor partition can never reject it. The projection-free
         // decision replicate is preferred: a decision can lose at a remote anchor to one that already won, and
         // projecting the losing delta into this node's store would diverge it from the canonical record.
-        bool replicated = replicateDecision is not null
-            ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
-            : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+        // The two halves of the decision stage are timed apart: the replication round trip, and the canonical
+        // read-back that names the winner (one inter-node call when the anchor is remote).
+        long replicateStart = Stopwatch.GetTimestamp();
+        bool replicated;
+        Writes.DurableDecisionReply? typed = null;
+        if (decide is not null)
+        {
+            Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+            typed = reply;
+            replicated = reply.Replicated;
+        }
+        else
+        {
+            replicated = replicateDecision is not null
+                ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
+                : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+        }
+        DurableTransactionMetrics.FinalizeDecisionReplicateMs.Record(Stopwatch.GetElapsedTime(replicateStart).TotalMilliseconds);
 
         if (!replicated)
             return Retry();
 
         // The winner is whatever the CANONICAL record actually reflects after apply, not what we requested — a
-        // concurrent recovery abort may have won the race in the log. Read it by the anchor route: the local
-        // store answers only when this node leads the anchor partition, so a sender-side projection can never
-        // report a decision the anchor rejected.
-        TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
-        if (record is null)
-            return Retry();
+        // concurrent recovery abort may have won the race in the log. The typed decision carries it back from the
+        // anchor leader's store; otherwise read it by the anchor route: the local store answers only when this
+        // node leads the anchor partition, so a sender-side projection can never report a decision the anchor
+        // rejected.
+        TransactionDecision decisionRead;
+        TransactionAbortClass abortClassRead;
+        if (typed is { Known: true } known)
+        {
+            decisionRead = known.Decision;
+            abortClassRead = known.AbortClass;
+        }
+        else
+        {
+            long lookupStart = Stopwatch.GetTimestamp();
+            TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
+            DurableTransactionMetrics.FinalizeDecisionLookupMs.Record(Stopwatch.GetElapsedTime(lookupStart).TotalMilliseconds);
+            if (record is null)
+                return Retry();
+
+            decisionRead = record.Decision;
+            abortClassRead = record.AbortClass;
+        }
 
         // A commit we requested that left the record Undecided was rejected by the state machine's deadline gate
         // (the only transition that keeps an initialized record Undecided): the attempt's HLC passed the frozen
         // decision deadline, so the transaction yields to presumed-abort recovery. Surface it — a rising rate means
         // the deadline is too tight for the current finalize latency and healthy commits are being aborted.
-        if (commit && record.Decision == TransactionDecision.Undecided)
+        if (commit && decisionRead == TransactionDecision.Undecided)
+        {
             DurableTransactionMetrics.LateCommitRejections.Add(1);
+            return LateCommitRejectedRetry();
+        }
 
         // A durable abort is terminal whatever drove it: the record decides once and a later commit against it is
-        // rejected, so every abort class reports Aborted. Only a record that is still undecided is retryable.
-        return record.Decision switch
+        // rejected, so every abort class reports Aborted. Only a record that is still undecided is retryable. Both
+        // reads above are canonical (the anchor leader's store after the apply), so the resolution may take its
+        // direction from the outcome without reading the record again.
+        return decisionRead switch
         {
-            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
-            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
+            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, abortClassRead, CanonicalDecisionRead: true),
             _ => Retry()
         };
     }
 
-    private async Task ResolveAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
+    private async Task ResolveAsync(DurableFinalizeInput input, bool? knownCommit, CancellationToken cancellationToken)
     {
         // The resolution DIRECTION must come from the canonical record: materializing legs off a node-local
         // answer that disagrees with the anchor turns an aborted transaction's prepared leg into a durable
-        // write nobody counted — the conserved-total drift signature. A null or non-terminal answer leaves
-        // resolution to the recovery sweep, which reads the same canonical route.
-        TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
-        if (record is null || !record.IsTerminal)
-            return;
+        // write nobody counted — the conserved-total drift signature. A decision the finalize already read from
+        // that record is the direction; otherwise read it here. A null or non-terminal answer leaves resolution
+        // to the recovery sweep, which reads the same canonical route.
+        bool commit;
+        if (knownCommit is { } known)
+        {
+            commit = known;
+        }
+        else
+        {
+            TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
+            if (record is null || !record.IsTerminal)
+                return;
 
-        bool commit = record.Decision == TransactionDecision.Commit;
+            commit = record.Decision == TransactionDecision.Commit;
+        }
 
         await Task.WhenAll(input.Partitions.Select(partition => ResolvePartitionAsync(partition, commit, localApplyGate, cancellationToken))).ConfigureAwait(false);
     }
@@ -957,6 +1170,43 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <summary>The intent's current data partition per the wired resolver; the frozen fallback when the
     /// resolver is absent or throws (routing momentarily unavailable — the frozen target keeps the recovery
     /// semantics it always had).</summary>
+    private static bool AllAcknowledged(bool[] acknowledged)
+    {
+        for (int i = 0; i < acknowledged.Length; i++)
+        {
+            if (!acknowledged[i])
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Why <paramref name="partition"/>'s prepare was refused, as far as this node can tell: the leader's memo
+    /// for this transaction's keys (recorded at the prepare's apply, locally or mirrored from a remote leader's
+    /// typed answer; a stale base outranks a held key), else a range that no longer routes the key to the frozen
+    /// partition, else <see cref="Writes.PrepareRejectionKind.None"/> — no verdict, retried as before.
+    /// </summary>
+    private Writes.PrepareRejectionKind ClassifyPrepareRefusal(DurableFinalizeInput input, DurablePartitionPrepare partition)
+    {
+        Writes.PrepareRejectionKind dominant = Writes.PrepareRejectionKind.None;
+
+        foreach (PreparedIntent intent in partition.Intents)
+        {
+            if (intentStore.TryTakePrepareRejection(input.TransactionId, input.Epoch, intent.Key, out Writes.PrepareRejectionKind kind) && kind > dominant)
+                dominant = kind;
+        }
+
+        if (dominant != Writes.PrepareRejectionKind.None)
+            return dominant;
+
+        if (resolveCurrentPartition is not null && partition.Intents.Count > 0
+            && ResolveCurrentPartitionSafe(partition.Intents[0].Key, partition.PartitionId) != partition.PartitionId)
+            return Writes.PrepareRejectionKind.RangeMoved;
+
+        return Writes.PrepareRejectionKind.None;
+    }
+
     private int ResolveCurrentPartitionSafe(string key, int frozenPartitionId)
     {
         try
@@ -998,6 +1248,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     cancellationToken).ConfigureAwait(false);
 
             settleable = partition.Intents.Where((_, index) => materialized[index]).ToList();
+            DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, settleable.Count);
 
             // Every intent left behind stays committed-but-unsettled until the recovery sweep — a window in
             // which the value is visible only through the intent overlay. Surface the rate: settlement being
@@ -1025,11 +1276,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             await SettleIntentsAsync(partition.PartitionId, settleable, commit, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool[]> MaterializePartitionAsync(DurablePartitionPrepare partition, CancellationToken cancellationToken)
+    private Task<bool[]> MaterializePartitionAsync(DurablePartitionPrepare partition, CancellationToken cancellationToken)
     {
-        bool[] materialized = new bool[partition.Intents.Count];
-        int next = 0;
-
         // Abort fence, re-checked at the last moment before any value reaches the log: the resolution
         // direction was read from the canonical record, but a locally visible terminal Abort is definitive
         // (an abort never overwrites a commit, and terminal records replicate only through the canonical
@@ -1041,70 +1289,19 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             if (recordStore.Get(fenceProbe.TransactionId, fenceProbe.Epoch) is { Decision: TransactionDecision.Abort })
             {
                 DurableTransactionMetrics.AbortFencedCommitApplies.Add(partition.Intents.Count);
-                return materialized;
+                return Task.FromResult(new bool[partition.Intents.Count]);
             }
         }
 
-        // One scratch message serves the whole partition; each serialization fully consumes it before the next
-        // intent overwrites it.
-        KeyValueMessage scratch = new();
-
-        // The record that overflowed the previous window's byte limit. It belongs to the intent at `next`
-        // (the cursor did not advance on overflow), so the next window consumes it as its first entry
-        // instead of serializing the same intent a second time.
-        byte[]? carriedRecord = null;
-
-        while (next < partition.Intents.Count)
-        {
-            List<(int Index, byte[] Record)> window = new(Math.Min(maxMaterializationBatchItems, partition.Intents.Count - next));
-            long windowBytes = 0;
-
-            while (next < partition.Intents.Count && window.Count < maxMaterializationBatchItems)
-            {
-                byte[] record = carriedRecord ?? PreparedIntentMaterializer.ToKeyValueRecord(partition.Intents[next], scratch, materializeByReference);
-                if (window.Count > 0 && windowBytes + record.Length > maxMaterializationBatchBytes)
-                {
-                    carriedRecord = record;
-                    break;
-                }
-
-                carriedRecord = null;
-                window.Add((next, record));
-                windowBytes += record.Length;
-                next++;
-
-                if (windowBytes >= maxMaterializationBatchBytes)
-                    break;
-            }
-
-            Task<bool>[] tasks = window
-                .Select(item => MaterializeAsync(partition.PartitionId, item.Record, cancellationToken))
-                .ToArray();
-            bool[] results = await Task.WhenAll(tasks).ConfigureAwait(false);
-            for (int i = 0; i < results.Length; i++)
-                materialized[window[i].Index] = results[i];
-        }
-
-        return materialized;
+        return DurableMaterializationWindow.MaterializeAsync(
+            partition.PartitionId, partition.Intents, materializeByReference,
+            maxMaterializationBatchItems, maxMaterializationBatchBytes, replicate, cancellationToken);
     }
 
-    private async Task<bool> MaterializeAsync(int partitionId, byte[] kvRecord, CancellationToken cancellationToken)
-    {
-        try
-        {
-            // Replicate the committed value as an ordinary key/value record so followers converge. The leader
-            // applies it separately through its owning actor after the durable record is acknowledged. This is
-            // post-decision materialization — terminal work — so it draws on reserve capacity and is never
-            // starved by an ordinary-write burst.
-            return await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static async Task<bool[]> ApplyLocallyAsync(
+    /// <summary>Runs one leader-local apply per intent whose durable effect landed, under the node's shared
+    /// bounded gate, and reports which applies confirmed. Shared with the recovery paths so helping and the
+    /// sweep cannot multiply their fan-out past the same bound the finalizer honors.</summary>
+    internal static async Task<bool[]> ApplyLocallyAsync(
         int partitionId,
         IReadOnlyList<PreparedIntent> intents,
         IReadOnlyList<bool> durableEffects,
@@ -1143,7 +1340,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         return applied;
     }
 
-    public void Dispose() => localApplyGate.Dispose();
+    public void Dispose()
+    {
+        if (ownsLocalApplyGate)
+            localApplyGate.Dispose();
+    }
 
     // Resolves and removes each intent in one atomic delta (applied in order Pending -> resolved -> deleted), so
     // no "resolved-but-not-removed" state can linger to block a later write to the key or serve a stale value.
@@ -1158,7 +1359,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
 
         byte[] delta = PreparedIntentStore.SerializeDelta(settle);
-        await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false);
+        if (await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false))
+            DurableTransactionMetrics.Settled(ResolutionSource.Finalize, intents.Count);
     }
 
     // Both replicate helpers return whatever the replicate seam reports. The seam is the single apply owner: on a
@@ -1199,4 +1401,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     }
 
     private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
+
+    // A retry whose cause is the record's deadline gate withholding the requested commit; the coordinator counts
+    // the cause once per transaction from the flag.
+    private static DurableFinalizeOutcome LateCommitRejectedRetry() =>
+        new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure, LateCommitRejected: true);
 }

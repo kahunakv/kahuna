@@ -131,7 +131,7 @@ internal sealed class PartitionWriteAggregator : IDisposable
             return false;
         }
 
-        PartitionWriteAggregatorMetrics.AdmittedItems.Add(1);
+        PartitionWriteAggregatorMetrics.Admitted(item.AdmissionClass);
         return true;
     }
 

@@ -53,6 +53,182 @@ internal sealed class DurableReplicationGateway
 
     internal (int PartitionId, long Generation) LocateDurablePartition(string key) => locator.LocateRange(key);
 
+    // Instance-owned transport counts, beside the process-wide meter counters: in-process test clusters share
+    // the static meter across every node, so a per-node figure (how many calls ONE coordinator made for ONE
+    // commit) is only readable here.
+    private long replicateForwards;
+    private long commitForwards;
+    private long rollbackForwards;
+    private long recordLookupForwards;
+    private long redirects;
+    private long bundleForwards;
+    private long decisionForwards;
+
+    /// <summary>The transport calls this node's durable path has made so far (see <see cref="DurableTransportCounts"/>).</summary>
+    internal DurableTransportCounts TransportCounts => new(
+        Interlocked.Read(ref replicateForwards),
+        Interlocked.Read(ref commitForwards),
+        Interlocked.Read(ref rollbackForwards),
+        Interlocked.Read(ref recordLookupForwards),
+        Interlocked.Read(ref redirects),
+        Interlocked.Read(ref bundleForwards),
+        Interlocked.Read(ref decisionForwards));
+
+    /// <summary>
+    /// Forwards an ordered group of deltas to <paramref name="node"/> as one typed bundle. Null means the receiver
+    /// does not implement the operation, so the caller falls back to per-entry forwards. A single-entry bundle is
+    /// counted as a delta forward (it replaces one), a multi-entry one as a bundle forward.
+    /// </summary>
+    private async Task<DurableBundleReply?> ForwardDurableBundleAsync(
+        string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        WriteAdmissionClass admissionClass, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        bool multi = entries.Count > 1;
+
+        // Counted only when the receiver answered (or the call threw): a refused attempt against an older node
+        // is followed by the untyped forward, which counts itself, so the fallback path keeps the old totals.
+        DurableBundleReply? reply;
+        try
+        {
+            DurableBundleWireReply? wire = await interNodeCommunication.DurableBundle(
+                node, partitionId, entries, admissionClass == WriteAdmissionClass.Terminal, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            reply = wire is { } answeredWire ? DurableBundleReply.FromWire(answeredWire) : null;
+        }
+        catch
+        {
+            if (multi)
+            {
+                Interlocked.Increment(ref bundleForwards);
+                DurableTransactionMetrics.DurableBundleForwardThrew();
+            }
+            else
+            {
+                Interlocked.Increment(ref replicateForwards);
+                DurableTransactionMetrics.DurableOperationForwardThrew(DurableOpReplicate);
+            }
+            throw;
+        }
+
+        if (reply is { } answered)
+        {
+            if (multi)
+            {
+                Interlocked.Increment(ref bundleForwards);
+                DurableTransactionMetrics.DurableBundleForwarded(answered.BatchCommitted && answered.PrepareAcknowledged);
+            }
+            else
+            {
+                Interlocked.Increment(ref replicateForwards);
+                DurableTransactionMetrics.DurableOperationForwarded(DurableOpReplicate, answered.BatchCommitted && answered.PrepareAcknowledged);
+            }
+        }
+
+        return reply;
+    }
+
+    /// <summary>
+    /// Forwards one delta to the leader as a single-entry typed bundle, so the receiver admits it under the
+    /// origin's class and re-fences it, and mirrors a refused prepare's verdict into the local intent store for
+    /// the finalizer's classification. Falls back to the untyped forward when the receiver is an older node
+    /// (no class, no fence, no verdict — exactly its old behavior).
+    /// </summary>
+    private async Task<bool> ForwardDurableDeltaAsync(
+        string node, int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        DurableBundleReply? typed = await ForwardDurableBundleAsync(
+            node, partitionId, [(logType, data)], admissionClass, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+
+        if (typed is { } reply)
+        {
+            if (reply.BatchCommitted && !reply.PrepareAcknowledged && logType == ReplicationTypes.PreparedIntent)
+                preparedIntentStore.RecordPrepareRejectionsForDelta(data, reply.Rejection);
+
+            return reply.BatchCommitted && reply.PrepareAcknowledged;
+        }
+
+        return await ForwardDurableOperationAsync(node, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Forwards a terminal decision to the anchor leader as the typed decision operation. Null means the
+    /// receiver does not implement it.</summary>
+    private async Task<DurableDecisionReply?> ForwardDurableDecisionAsync(
+        string node, int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        DurableDecisionReply? reply;
+        try
+        {
+            DurableDecisionWireReply? wire = await interNodeCommunication.DurableDecision(
+                node, partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            reply = wire is { } answeredWire ? DurableDecisionReply.FromWire(answeredWire) : null;
+        }
+        catch
+        {
+            Interlocked.Increment(ref decisionForwards);
+            DurableTransactionMetrics.DurableDecisionForwardThrew();
+            throw;
+        }
+
+        // Counted only when answered, as the bundle forward is; a refused attempt is followed by the untyped
+        // forward and the lookup, which count themselves.
+        if (reply is { } answered)
+        {
+            Interlocked.Increment(ref decisionForwards);
+            DurableTransactionMetrics.DurableDecisionForwarded(answered.Replicated);
+        }
+
+        return reply;
+    }
+
+    /// <summary>The single exit for a durable operation forwarded to another node: counts it by kind and
+    /// result on the meter and on this instance, then returns (or rethrows) the transport's answer unchanged.</summary>
+    private async Task<bool> ForwardDurableOperationAsync(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
+    {
+        switch (kind)
+        {
+            case DurableOpCommit: Interlocked.Increment(ref commitForwards); break;
+            case DurableOpRollback: Interlocked.Increment(ref rollbackForwards); break;
+            default: Interlocked.Increment(ref replicateForwards); break;
+        }
+
+        bool ok;
+        try
+        {
+            ok = await interNodeCommunication.DurableOperation(node, partitionId, kind, logType, payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            DurableTransactionMetrics.DurableOperationForwardThrew(kind);
+            throw;
+        }
+
+        DurableTransactionMetrics.DurableOperationForwarded(kind, ok);
+        return ok;
+    }
+
+    /// <summary>The single exit for a canonical record lookup sent to another node, counted like the forward above.</summary>
+    private async Task<byte[]?> ForwardRecordLookupAsync(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref recordLookupForwards);
+
+        byte[]? serialized;
+        try
+        {
+            serialized = await interNodeCommunication
+                .LookupTransactionRecord(node, partitionId, transactionId, epoch, anchorKey, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            DurableTransactionMetrics.RecordLookupForwardThrew();
+            throw;
+        }
+
+        DurableTransactionMetrics.RecordLookupForwarded(serialized is not null);
+        return serialized;
+    }
+
     /// <summary>
     /// Replicates a durable-intent 2PC delta through the shared partition write scheduler so it coalesces with
     /// concurrent transactions' records to the same partition into one <c>ReplicateEntries</c> proposal. Returns
@@ -101,7 +277,7 @@ internal sealed class DurableReplicationGateway
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
-            bool ok = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+            bool ok = await ForwardDurableDeltaAsync(leader, partitionId, logType, data, admissionClass, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
 
             // The authoritative apply happened on the remote leader (its scheduler is the single ordered owner).
             // Keep a local projection of the canonical record only, so this node's own decision read-back and
@@ -125,18 +301,18 @@ internal sealed class DurableReplicationGateway
     }
 
     /// <summary>
-    /// Like <see cref="ReplicateDurableThroughScheduler"/> but re-fences the local submission at dispatch against
-    /// the range descriptor <paramref name="fenceKey"/> resolved to at freeze (<paramref name="fenceGeneration"/>):
+    /// Like <see cref="ReplicateDurableThroughScheduler"/> but re-fences the submission at dispatch against the
+    /// range descriptor <paramref name="fenceKey"/> resolved to at freeze (<paramref name="fenceGeneration"/>):
     /// a split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
-    /// The re-fence applies on the local aggregator path; a forward to a remote leader carries no fence (the
-    /// remote's freeze-to-dispatch race is a follow-up).
+    /// A forward to a remote leader carries the fence and the admission class on the typed bundle wire; an older
+    /// receiver runs the untyped forward without them.
     /// </summary>
     internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken, bool projectRecordLocally = true)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
-            bool ok = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, logType, data, cancellationToken).ConfigureAwait(false);
+            bool ok = await ForwardDurableDeltaAsync(leader, partitionId, logType, data, admissionClass, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
 
             // Same projection contract as the unfenced variant: sound only for a delta whose sender is the
             // transition's sole author. A terminal DECISION forwarded to a remote leader must pass
@@ -193,21 +369,198 @@ internal sealed class DurableReplicationGateway
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
-            // The durable-operation wire carries a single (logType, data) per call, so the two-entry atomic bundle
-            // cannot cross to a remote leader as one proposal. Forward the record init and the anchor prepare as the
-            // two sequential ops they were before this optimization — the bundle win is the local-leader path (the
-            // embedded single-node target); a remote atomic bundle needs a wire change and is a follow-up.
-            bool initOk = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, ReplicationTypes.TransactionRecord, recordInitDelta, cancellationToken).ConfigureAwait(false);
+            // The typed bundle wire carries the ordered pair as ONE submission on the remote leader, with the
+            // origin's admission class and fence, so a remote anchor pays one durable barrier like a local one.
+            DurableBundleReply? typed = await ForwardDurableBundleAsync(
+                leader, partitionId,
+                [(ReplicationTypes.TransactionRecord, recordInitDelta), (ReplicationTypes.PreparedIntent, anchorPrepareDelta)],
+                Writes.WriteAdmissionClass.Ordinary, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+
+            if (typed is { } reply)
+            {
+                // Same projection contract as the single-op forward: the init is this transaction's own record,
+                // projected only once it is known durable.
+                if (reply.BatchCommitted)
+                    transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = recordInitDelta });
+
+                if (reply.BatchCommitted && !reply.PrepareAcknowledged)
+                    preparedIntentStore.RecordPrepareRejectionsForDelta(anchorPrepareDelta, reply.Rejection);
+
+                return (reply.BatchCommitted, reply.PrepareAcknowledged);
+            }
+
+            // An older receiver without the bundle operation: forward the record init and the anchor prepare as
+            // the two sequential ops they were before the typed wire existed.
+            bool initOk = await ForwardDurableOperationAsync(leader, partitionId, DurableOpReplicate, ReplicationTypes.TransactionRecord, recordInitDelta, cancellationToken).ConfigureAwait(false);
             if (!initOk)
                 return (false, false);
 
             transactionRecordStore.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = recordInitDelta });
 
-            bool prepareOk = await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpReplicate, ReplicationTypes.PreparedIntent, anchorPrepareDelta, cancellationToken).ConfigureAwait(false);
+            bool prepareOk = await ForwardDurableOperationAsync(leader, partitionId, DurableOpReplicate, ReplicationTypes.PreparedIntent, anchorPrepareDelta, cancellationToken).ConfigureAwait(false);
             return (true, prepareOk);
         }
 
         return await ReplicateDurableBundleLocal(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Replicates a transaction's terminal decision on its anchor partition and answers the canonical outcome
+    /// read after the ordered apply: from this node's own store when it leads the anchor (the completion path
+    /// applies the delta before it resolves the submission), from the anchor leader's typed answer otherwise. An
+    /// older remote leader answers the untyped forward and the result is not <c>Known</c>; the finalizer then
+    /// looks the record up as before. The decision is never projected into this node's store: it can lose at
+    /// the anchor to one that already won.
+    /// </summary>
+    internal async Task<DurableDecisionReply> ReplicateDurableDecisionThroughSchedulerFenced(
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+        {
+            bool replicated = await ReplicateDurableLocal(partitionId, ReplicationTypes.TransactionRecord, decisionDelta, Writes.WriteAdmissionClass.Terminal, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            if (!replicated)
+                return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None);
+
+            return ReadDecisionAfterApply(transactionId, epoch);
+        }
+
+        DurableDecisionReply? typed = await ForwardDurableDecisionAsync(leader, partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        if (typed is { } reply)
+            return reply;
+
+        bool ok = await ForwardDurableOperationAsync(leader, partitionId, DurableOpReplicate, ReplicationTypes.TransactionRecord, decisionDelta, cancellationToken).ConfigureAwait(false);
+        return new DurableDecisionReply(ok, false, TransactionDecision.Undecided, TransactionAbortClass.None);
+    }
+
+    /// <summary>The leader's record after the decision applied: <c>Known</c> with its decision and abort class,
+    /// or replicated-but-unknown when the record is absent (a reclaimed or never-initialized record).</summary>
+    private DurableDecisionReply ReadDecisionAfterApply(HLCTimestamp transactionId, long epoch)
+    {
+        TransactionRecord? record = transactionRecordStore.Get(transactionId, epoch);
+        return record is null
+            ? new DurableDecisionReply(true, false, TransactionDecision.Undecided, TransactionAbortClass.None)
+            : new DurableDecisionReply(true, true, record.Decision, record.AbortClass);
+    }
+
+    /// <summary>
+    /// Runs a forwarded typed bundle on this node because it leads the partition: the ordered entries enter the
+    /// local scheduler as ONE atomic submission under the origin's admission class and fence. Redirects once to
+    /// the actual leader when routed here on a stale guess; null when leadership cannot be resolved.
+    /// </summary>
+    internal async Task<DurableBundleWireReply?> DurableBundleLocal(
+        int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        WriteAdmissionClass admissionClass = terminal ? WriteAdmissionClass.Terminal : WriteAdmissionClass.Ordinary;
+
+        if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string? actualLeader;
+            try
+            {
+                actualLeader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RaftException)
+            {
+                return new DurableBundleWireReply(false, false, 0);
+            }
+
+            if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
+            {
+                Interlocked.Increment(ref redirects);
+                DurableTransactionMetrics.DurableOperationRedirected();
+                DurableBundleReply? redirected = await ForwardDurableBundleAsync(actualLeader, partitionId, entries, admissionClass, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                return redirected?.ToWire();
+            }
+
+            if (actualLeader is null)
+                return new DurableBundleWireReply(false, false, 0);
+        }
+
+        RaftProposalEntry[] proposal = new RaftProposalEntry[entries.Count];
+        for (int i = 0; i < entries.Count; i++)
+            proposal[i] = new RaftProposalEntry(entries[i].LogType, entries[i].Payload, AutoCommit: true, ExpectedGeneration: 0);
+
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool batchCommitted = false;
+
+        DurableProposalSubmission submission = new(
+            partitionId,
+            proposal,
+            completion,
+            admissionClass,
+            (batchPartitionId, batchEntries, entryLogIndices) =>
+            {
+                batchCommitted = true;
+                return ApplyDurableEntriesOnCommit(batchPartitionId, batchEntries, entryLogIndices);
+            },
+            fenceKey,
+            fenceGeneration);
+
+        if (!writeAggregator.TryEnqueue(submission))
+            return new DurableBundleWireReply(false, false, 0);
+
+        using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
+        bool acknowledged = await submission.Committed.ConfigureAwait(false);
+
+        // A committed batch whose prepare was refused: name the refusal from this leader's memo so the origin
+        // classifies it exactly as a local refusal.
+        PrepareRejectionKind rejection = PrepareRejectionKind.None;
+        if (batchCommitted && !acknowledged)
+        {
+            for (int i = 0; i < entries.Count; i++)
+            {
+                if (entries[i].LogType != ReplicationTypes.PreparedIntent)
+                    continue;
+
+                PrepareRejectionKind kind = preparedIntentStore.TakePrepareRejectionForDelta(entries[i].Payload);
+                if (kind > rejection)
+                    rejection = kind;
+            }
+        }
+
+        return new DurableBundleReply(batchCommitted, acknowledged, rejection).ToWire();
+    }
+
+    /// <summary>
+    /// Replicates a forwarded terminal decision on this node because it leads the anchor partition, and answers
+    /// the canonical outcome read from its record store after the ordered apply. Redirects once to the actual
+    /// leader when routed here on a stale guess.
+    /// </summary>
+    internal async Task<DurableDecisionWireReply?> DurableDecisionLocal(
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string? actualLeader;
+            try
+            {
+                actualLeader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RaftException)
+            {
+                return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None).ToWire();
+            }
+
+            if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
+            {
+                Interlocked.Increment(ref redirects);
+                DurableTransactionMetrics.DurableOperationRedirected();
+                DurableDecisionReply? redirected = await ForwardDurableDecisionAsync(actualLeader, partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                return redirected?.ToWire();
+            }
+
+            if (actualLeader is null)
+                return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None).ToWire();
+        }
+
+        bool replicated = await ReplicateDurableLocal(partitionId, ReplicationTypes.TransactionRecord, decisionDelta, Writes.WriteAdmissionClass.Terminal, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        if (!replicated)
+            return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None).ToWire();
+
+        return ReadDecisionAfterApply(transactionId, epoch).ToWire();
     }
 
     /// <summary>
@@ -373,7 +726,11 @@ internal sealed class DurableReplicationGateway
             }
 
             if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
-                return await interNodeCommunication.DurableOperation(actualLeader, partitionId, kind, logType, payload, cancellationToken).ConfigureAwait(false);
+            {
+                Interlocked.Increment(ref redirects);
+                DurableTransactionMetrics.DurableOperationRedirected();
+                return await ForwardDurableOperationAsync(actualLeader, partitionId, kind, logType, payload, cancellationToken).ConfigureAwait(false);
+            }
 
             if (actualLeader is null)
                 return false;
@@ -432,9 +789,11 @@ internal sealed class DurableReplicationGateway
             }
 
             if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
-                return await interNodeCommunication
-                    .LookupTransactionRecord(actualLeader, partitionId, transactionId, epoch, anchorKey, cancellationToken)
-                    .ConfigureAwait(false);
+            {
+                Interlocked.Increment(ref redirects);
+                DurableTransactionMetrics.RecordLookupRedirected();
+                return await ForwardRecordLookupAsync(actualLeader, partitionId, transactionId, epoch, anchorKey, cancellationToken).ConfigureAwait(false);
+            }
 
             if (actualLeader is null)
                 throw new PartitionNotHostedException(partitionId);
@@ -465,9 +824,7 @@ internal sealed class DurableReplicationGateway
         }
         else
         {
-            byte[]? serialized = await interNodeCommunication
-                .LookupTransactionRecord(leader, partitionId, transactionId, epoch, anchorKey, cancellationToken)
-                .ConfigureAwait(false);
+            byte[]? serialized = await ForwardRecordLookupAsync(leader, partitionId, transactionId, epoch, anchorKey, cancellationToken).ConfigureAwait(false);
 
             record = serialized is null ? null : TransactionRecordStore.DeserializeRecords(serialized) is [TransactionRecord r, ..] ? r : null;
         }
@@ -488,7 +845,7 @@ internal sealed class DurableReplicationGateway
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
-            return await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
+            return await ForwardDurableOperationAsync(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
 
         return await replicator.ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
     }
@@ -502,8 +859,25 @@ internal sealed class DurableReplicationGateway
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
-            return await interNodeCommunication.DurableOperation(leader, partitionId, DurableOpRollback, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
+            return await ForwardDurableOperationAsync(leader, partitionId, DurableOpRollback, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
 
         return await replicator.ApplyDurableRollback(partitionId, intent).ConfigureAwait(false);
     }
 }
+
+/// <summary>
+/// Transport calls one node's durable 2PC path made, split the way the cost model counts them: delta forwards
+/// (record init, prepare, decision, materialization, settle) to a remote partition leader, leader-state commit
+/// and rollback applies forwarded per intent, canonical record lookups sent to a remote anchor leader, and the
+/// redirects this node performed as a receiver whose sender guessed the leader wrong.
+/// </summary>
+internal readonly record struct DurableTransportCounts(
+    long ReplicateForwards,
+    long CommitForwards,
+    long RollbackForwards,
+    long RecordLookupForwards,
+    long Redirects,
+    // Typed multi-entry bundles (an anchor's record init + prepare in one call) and typed decisions that return
+    // the canonical outcome; each replaces two of the untyped calls above.
+    long BundleForwards,
+    long DecisionForwards);

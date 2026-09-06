@@ -63,6 +63,19 @@ internal sealed class DurableTransactionRecovery
     // upgrade order); an older node skips an unknown message type, which loses the write on that node.
     private readonly bool materializeByReference;
 
+    // Materialization window caps, the same the finalizer's resolution uses: one window coalesces into one capped
+    // scheduler proposal, and a large group advances window by window instead of admitting everything at once.
+    private readonly int maxMaterializationBatchItems;
+
+    private readonly long maxMaterializationBatchBytes;
+
+    // Bounds concurrent leader-local applies; the node's shared gate in production, a private one otherwise.
+    private readonly SemaphoreSlim localApplyGate;
+
+    // Blocker groups of one helping pass resolve concurrently up to this degree: independent transactions, so
+    // their materializations coalesce into the same proposals instead of serializing one durable round each.
+    private const int MaxConcurrentBlockerGroups = 4;
+
     public DurableTransactionRecovery(
         PreparedIntentStore intentStore,
         DurableTransactionFinalizer.ReplicateDelegate replicate,
@@ -72,9 +85,15 @@ internal sealed class DurableTransactionRecovery
         TimeSpan? recordRetentionTtl = null,
         ILogger<IKahuna>? logger = null,
         Func<HLCTimestamp, long, bool>? locallyAborted = null,
-        bool materializeByReference = false)
+        bool materializeByReference = false,
+        int maxMaterializationBatchItems = 512,
+        long maxMaterializationBatchBytes = 4 * 1024 * 1024,
+        SemaphoreSlim? localApplyGate = null)
     {
         this.materializeByReference = materializeByReference;
+        this.maxMaterializationBatchItems = Math.Max(1, maxMaterializationBatchItems);
+        this.maxMaterializationBatchBytes = Math.Max(1, maxMaterializationBatchBytes);
+        this.localApplyGate = localApplyGate ?? new SemaphoreSlim(DurableTransactionFinalizer.MaxConcurrentLocalApplies);
         this.intentStore = intentStore;
         this.replicate = replicate;
         this.lookupRecord = lookupRecord;
@@ -89,7 +108,9 @@ internal sealed class DurableTransactionRecovery
     }
 
     /// <summary>Resolves every eligible unresolved intent on <paramref name="partitionId"/> and returns how many
-    /// intents were resolved. Bounded by the current due set; safe to run repeatedly (idempotent).</summary>
+    /// intents were confirmed settled (their settle delta replicated). An intent whose materialization, local
+    /// apply or settle did not land is not counted; it stays for the next sweep. Bounded by the current due set;
+    /// safe to run repeatedly (idempotent).</summary>
     public async Task<int> SweepAsync(int partitionId, HLCTimestamp now, CancellationToken cancellationToken)
     {
         int resolved = 0;
@@ -105,8 +126,8 @@ internal sealed class DurableTransactionRecovery
             if (commit is null)
                 continue; // still within the decision window, or the abort drive did not land — retry next sweep.
 
-            await ResolveGroupAsync(partitionId, group, commit.Value, cancellationToken).ConfigureAwait(false);
-            resolved += group.Count();
+            ResolveGroupResult result = await ResolveGroupAsync(partitionId, group, commit.Value, ResolutionSource.Recovery, cancellationToken).ConfigureAwait(false);
+            resolved += result.Settled;
         }
 
         return resolved;
@@ -116,8 +137,10 @@ internal sealed class DurableTransactionRecovery
     /// Targeted "helping" resolution for a blocked finalize: given the intents a transaction failed to prepare on
     /// <paramref name="partitionId"/>, finds the foreign intents currently holding those keys whose canonical
     /// record is already terminal — committed- or aborted-but-unsettled, i.e. only waiting on deferred settlement —
-    /// and settles them now. Returns how many blocking intents were settled; the caller re-prepares immediately
-    /// when the count is positive instead of sleeping through a backoff.
+    /// and settles them now. Returns how many blocking intents were confirmed settled — their settle delta
+    /// replicated — so the caller re-prepares immediately only on real progress and otherwise sleeps through its
+    /// backoff; a pass whose materializations, local applies or settle did not land reports zero, never the
+    /// size of the group it attempted.
     ///
     /// <para>A blocker whose record is still <c>Undecided</c> is never touched: helping must not presume-abort a
     /// live coordinator inside its decision window. That case stays with the caller's bounded retry (and, past the
@@ -159,36 +182,56 @@ internal sealed class DurableTransactionRecovery
         if (byBlocker is null)
             return 0;
 
-        int settled = 0;
+        // Independent blockers resolve concurrently, a few at a time: each is a distinct decided transaction, so
+        // their materializations and settles coalesce into shared proposals instead of queueing one durable round
+        // behind another. The degree is small and fixed so one helping pass cannot flood the scheduler.
+        List<PreparedIntent>[] groups = [.. byBlocker.Values];
+        int[] settledPerGroup = new int[groups.Length];
 
-        foreach (List<PreparedIntent> group in byBlocker.Values)
-        {
-            if (cancellationToken.IsCancellationRequested)
-                break;
-
-            PreparedIntent representative = group[0];
-            TransactionRecord? record = await lookupRecord(
-                representative.TransactionId, representative.Epoch, representative.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
-
-            bool? commit = record?.Decision switch
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, groups.Length),
+            new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrentBlockerGroups, CancellationToken = cancellationToken },
+            async (index, ct) =>
             {
-                TransactionDecision.Commit => true,
-                TransactionDecision.Abort => false,
-                _ => null,
-            };
+                settledPerGroup[index] = await HelpBlockerGroupAsync(partitionId, groups[index], ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
 
-            // Undecided (or no record yet): a live conflict, not settlement lag — leave it alone.
-            if (commit is null)
-                continue;
-
-            await ResolveGroupAsync(partitionId, group, commit.Value, cancellationToken).ConfigureAwait(false);
-            settled += group.Count;
-        }
+        int settled = 0;
+        foreach (int count in settledPerGroup)
+            settled += count;
 
         if (settled > 0)
             DurableTransactionMetrics.PrepareConflictBlockersSettled.Add(settled);
 
         return settled;
+    }
+
+    /// <summary>Settles one blocker's intents when its record is terminal; returns the confirmed count. An
+    /// undecided blocker (or one with no record yet) is a live conflict, not settlement lag, and is left alone.</summary>
+    private async Task<int> HelpBlockerGroupAsync(int partitionId, List<PreparedIntent> group, CancellationToken cancellationToken)
+    {
+        PreparedIntent representative = group[0];
+        TransactionRecord? record = await lookupRecord(
+            representative.TransactionId, representative.Epoch, representative.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
+
+        bool? commit = record?.Decision switch
+        {
+            TransactionDecision.Commit => true,
+            TransactionDecision.Abort => false,
+            _ => null,
+        };
+
+        if (commit is null)
+            return 0;
+
+        ResolveGroupResult result = await ResolveGroupAsync(partitionId, group, commit.Value, ResolutionSource.Helping, cancellationToken).ConfigureAwait(false);
+
+        // A decided blocker the helper could not settle at all: the finalize backs off for this round, and the
+        // cause says whether the blocker's partition is refusing materializations, applies or settles.
+        if (result.Settled == 0)
+            DurableTransactionMetrics.HelpingSettledNone(result.Cause);
+
+        return result.Settled;
     }
 
     /// <summary>
@@ -199,8 +242,9 @@ internal sealed class DurableTransactionRecovery
     /// undecided <b>inside</b> its decision window is left alone — a live coordinator must not be
     /// presumed-aborted by a data move — and counts as unsettled; one undecided <b>past</b> its recovery
     /// deadline is driven through the ordinary presumed-abort protocol, exactly as the periodic sweep would.
-    /// Returns how many intents could not be settled: zero means the range carries no unsettled durable state
-    /// and the caller may proceed to copy and cut over.
+    /// Returns how many intents could not be settled — undecided ones, and decided ones whose materialization,
+    /// local apply or settle delta did not land: zero means the range carries no unsettled durable state and the
+    /// caller may proceed to copy and cut over.
     /// </summary>
     public async Task<int> SettleSuppliedIntentsAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp now, CancellationToken cancellationToken)
@@ -247,13 +291,17 @@ internal sealed class DurableTransactionRecovery
                 }
             }
 
+            int groupSize = group.Count();
             if (commit is null)
             {
-                unsettled += group.Count();
+                unsettled += groupSize;
                 continue;
             }
 
-            await ResolveGroupAsync(partitionId, group, commit.Value, cancellationToken).ConfigureAwait(false);
+            // A decided intent whose settle did not land is still unsettled durable state on the moving range;
+            // reporting it settled would let the cutover copy a range that still carries it.
+            ResolveGroupResult result = await ResolveGroupAsync(partitionId, group, commit.Value, ResolutionSource.RangeMove, cancellationToken).ConfigureAwait(false);
+            unsettled += groupSize - result.Settled;
         }
 
         return unsettled;
@@ -322,7 +370,14 @@ internal sealed class DurableTransactionRecovery
         };
     }
 
-    private async Task ResolveGroupAsync(int partitionId, IEnumerable<PreparedIntent> intents, bool commit, CancellationToken cancellationToken)
+    /// <summary>
+    /// Resolves one transaction's intents on a partition to its terminal decision and reports what was
+    /// <b>confirmed</b> settled: the number of intents whose settle delta replicated, and — when that number is
+    /// zero — the step that stopped the pass. A caller must never infer progress from the size of the group it
+    /// handed in: materialization can be refused, the leader-local apply can fail to confirm, and the settle
+    /// delta itself can be rejected by the scheduler, each leaving every intent exactly where it was.
+    /// </summary>
+    private async Task<ResolveGroupResult> ResolveGroupAsync(int partitionId, IEnumerable<PreparedIntent> intents, bool commit, ResolutionSource source, CancellationToken cancellationToken)
     {
         List<PreparedIntent> group = intents.ToList();
 
@@ -345,40 +400,46 @@ internal sealed class DurableTransactionRecovery
                 logger?.LogError(
                     "Refusing commit-direction settle for transaction {TransactionId} epoch {Epoch} ({Count} intents): a terminal Abort is locally visible",
                     fenceProbe.TransactionId, fenceProbe.Epoch, group.Count);
-                return;
+                return new ResolveGroupResult(0, ResolveFailureCause.Fenced);
             }
+
+            // Materialize the whole group in scheduler-sized windows (every record of a window submitted before
+            // the window is awaited), exactly as the finalizer's own resolution does, so a blocked successor
+            // waits one coalesced round for a predecessor's keys instead of one durable round per key.
+            bool[] materialized = await DurableMaterializationWindow.MaterializeAsync(
+                partitionId, group, materializeByReference, maxMaterializationBatchItems, maxMaterializationBatchBytes,
+                replicate, cancellationToken).ConfigureAwait(false);
+
+            // Replication makes the value durable and converges followers, but the leader applies a key/value
+            // materialization to its own in-memory KV state through its dedicated apply path, not the generic
+            // commit apply — so without this the recovered value is durable in the log yet invisible on the
+            // recovering leader until a restart replays it. Mirror the finalizer's resolution: apply the
+            // committed value locally before settling, under the node's shared bound. If the local apply does not
+            // confirm (e.g. leadership lost mid-sweep), leave the intent for a later sweep rather than settling an
+            // unapplied commit.
+            bool[] applied = applyCommitLocally is null
+                ? materialized
+                : await DurableTransactionFinalizer.ApplyLocallyAsync(
+                    partitionId, group, materialized, (p, intent) => applyCommitLocally(p, intent), localApplyGate, cancellationToken).ConfigureAwait(false);
 
             settleable = new(group.Count);
+            bool anyMaterializeFailed = false;
+            bool anyApplyFailed = false;
 
-            // One scratch message serves the whole group; each serialization fully consumes it before the next
-            // intent overwrites it.
-            KeyValueMessage scratch = new();
-
-            foreach (PreparedIntent intent in group)
+            for (int i = 0; i < group.Count; i++)
             {
-                bool materialized;
-                try
-                {
-                    byte[] kvRecord = PreparedIntentMaterializer.ToKeyValueRecord(intent, scratch, materializeByReference);
-                    materialized = await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
-
-                    // Replication makes the value durable and converges followers, but the leader applies a key/value
-                    // materialization to its own in-memory KV state through its dedicated apply path, not the generic
-                    // commit apply — so without this the recovered value is durable in the log yet invisible on the
-                    // recovering leader until a restart replays it. Mirror the finalizer's resolution: apply the
-                    // committed value locally before settling. If the local apply does not confirm (e.g. leadership
-                    // lost mid-sweep), leave the intent for a later sweep rather than settling an unapplied commit.
-                    if (materialized && applyCommitLocally is not null)
-                        materialized = await applyCommitLocally(partitionId, intent).ConfigureAwait(false);
-                }
-                catch
-                {
-                    materialized = false;
-                }
-
-                if (materialized)
-                    settleable.Add(intent);
+                if (!materialized[i])
+                    anyMaterializeFailed = true;
+                else if (!applied[i])
+                    anyApplyFailed = true;
+                else
+                    settleable.Add(group[i]);
             }
+
+            DurableTransactionMetrics.Materialized(source, settleable.Count);
+
+            if (settleable.Count == 0)
+                return new ResolveGroupResult(0, anyMaterializeFailed ? ResolveFailureCause.MaterializeFailed : anyApplyFailed ? ResolveFailureCause.ApplyFailed : ResolveFailureCause.None);
         }
         else
         {
@@ -386,7 +447,7 @@ internal sealed class DurableTransactionRecovery
         }
 
         if (settleable.Count == 0)
-            return;
+            return new ResolveGroupResult(0, ResolveFailureCause.None);
 
         // Resolve and remove each intent atomically (Pending -> resolved -> deleted), so recovery leaves no
         // lingering resolved intent. Idempotent under replay.
@@ -400,7 +461,32 @@ internal sealed class DurableTransactionRecovery
         // The replicate seam is the single ordered apply owner: on the partition leader it applies this settle
         // delta through the scheduler's Raft-ordered completion, in the same order as any concurrent finalizer
         // decision for the same record — so recovery and the live coordinator can never apply out of log order.
+        // A settle that does not replicate settles nothing: the materialized values are durable and idempotent to
+        // re-materialize, and every intent stays for the next pass.
         byte[] resolveDelta = PreparedIntentStore.SerializeDelta(settle);
-        await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+        bool settled;
+        try
+        {
+            settled = await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            settled = false;
+        }
+
+        if (!settled)
+            return new ResolveGroupResult(0, ResolveFailureCause.SettleFailed);
+
+        DurableTransactionMetrics.Settled(source, settleable.Count);
+        return new ResolveGroupResult(settleable.Count, ResolveFailureCause.None);
     }
 }
+
+/// <summary>What one resolution pass over a transaction's intents confirmed: <paramref name="Settled"/> is the
+/// number of intents whose settle delta replicated; <paramref name="Cause"/> names the step that stopped the pass
+/// when nothing was settled, and is <see cref="ResolveFailureCause.None"/> otherwise.</summary>
+internal readonly record struct ResolveGroupResult(int Settled, ResolveFailureCause Cause);

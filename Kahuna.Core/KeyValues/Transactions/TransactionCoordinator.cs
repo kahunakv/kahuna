@@ -1514,7 +1514,14 @@ internal sealed class TransactionCoordinator : IDisposable
         // Replicate the post-decision materialization by reference when the cluster is known to apply it: the
         // record then names the prepared intent every replica already holds instead of copying the committed
         // value through the log a second time.
-        materializeByReference: configuration.DurableMaterializeByReference);
+        materializeByReference: configuration.DurableMaterializeByReference,
+        // One node-wide bound on leader-local applies, shared with the recovery paths that resolve on this node.
+        localApplyGate: manager.DurableLocalApplyGate,
+        // The typed decision: replicate the terminal transition and read the canonical winner in one round —
+        // locally when this node leads the anchor, from the anchor leader's answer otherwise — so a remote anchor
+        // costs no separate lookup call. Supersedes replicateDecision + lookupRecordRouted for the decision; both
+        // stay wired for the read-back an older remote node still needs and for the resolution direction.
+        decide: manager.ReplicateDurableDecisionThroughSchedulerFenced);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
@@ -1748,6 +1755,15 @@ internal sealed class TransactionCoordinator : IDisposable
         // contradict it; only a MustRetry leaves the attempt unresolved and keeps the fence obligation in place.
         if (outcome.Result is DurableFinalizeResult.Committed or DurableFinalizeResult.Aborted)
             context.UnresolvedDurableFinalize = null;
+
+        // Per-transaction view of the deadline gate: the finalizer counts one event per rejected attempt, and a
+        // client that retries the same commit produces one attempt per retry. Count the transaction once, on its
+        // first rejection, so the two counters together show how many transactions the gate actually cost.
+        if (outcome.LateCommitRejected && !context.LateCommitRejected)
+        {
+            context.LateCommitRejected = true;
+            DurableTransactionMetrics.LateCommitRejectedTransaction();
+        }
 
         context.Result = outcome.Result switch
         {

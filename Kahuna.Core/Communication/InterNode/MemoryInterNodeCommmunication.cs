@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
@@ -1125,6 +1126,44 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
             return await kahunaNode.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Test knob: when false, the typed durable bundle and decision operations answer null exactly as an
+    /// older receiver that lacks them does, so the sender's per-entry fallback path can be exercised in-process.</summary>
+    internal bool TypedDurableOperations { get; set; } = true;
+
+    public async Task<DurableBundleWireReply?> DurableBundle(
+        string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
+        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        if (!TypedDurableOperations)
+            return null;
+
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    public async Task<DurableDecisionWireReply?> DurableDecision(
+        string node, int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        if (!TypedDurableOperations)
+            return null;
+
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");

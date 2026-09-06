@@ -306,7 +306,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Locked, lockType);
 
             // Live working-set query reflects the confirmed effects.
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.Contains(live!.ModifiedKeys, m => m.Key == "wk1");
             Assert.Contains(live.AcquiredLocks, m => m.Key == "lk1");
@@ -426,7 +426,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[2].Kahuna.LocateAndTryAcquireExclusivePrefixLock(handle.TransactionId, prefix, 10_000, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, acquireOp));
 
             // The coordinator working set reflects the held prefix lock.
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.Contains(live!.AcquiredPrefixLocks, m => m.Key == prefix);
 
@@ -439,7 +439,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[1].Kahuna.LocateAndTryReleaseExclusivePrefixLock(handle.TransactionId, prefix, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp));
 
             // After a confirmed release the descriptor is dropped from the coordinator-owned lock set.
-            TransactionWorkingSet? afterRelease = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterRelease = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(afterRelease);
             Assert.DoesNotContain(afterRelease!.AcquiredPrefixLocks, m => m.Key == prefix);
         }
@@ -474,7 +474,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[2].Kahuna.LocateAndTryAcquireRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Shared, ct, handle.CoordinatorKey, sharedOp);
             Assert.Equal(KeyValueResponseType.Locked, replayShared);
 
-            TransactionWorkingSet? afterShared = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterShared = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(afterShared);
             KeyValueTransactionRangeLock? sharedDesc = afterShared!.AcquiredRangeLocks.SingleOrDefault(r => r.Prefix == prefix && r.StartKey == startKey && r.EndKey == endKey);
             Assert.NotNull(sharedDesc);
@@ -486,7 +486,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 nodes[0].Kahuna.LocateAndTryAcquireRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, 10_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handle.CoordinatorKey, upgradeOp), ct);
             Assert.Equal(KeyValueResponseType.Locked, upgraded);
 
-            TransactionWorkingSet? afterUpgrade = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterUpgrade = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.NotNull(afterUpgrade);
             // The upgrade replaces the mode of the matching descriptor — exactly one range, now exclusive.
             List<KeyValueTransactionRangeLock> matching = afterUpgrade!.AcquiredRangeLocks.Where(r => r.Prefix == prefix && r.StartKey == startKey && r.EndKey == endKey).ToList();
@@ -502,7 +502,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Unlocked,
                 await nodes[0].Kahuna.LocateAndTryReleaseExclusiveRangeLock(handle.TransactionId, prefix, startKey, true, endKey, false, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, releaseOp));
 
-            TransactionWorkingSet? afterRelease = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterRelease = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.NotNull(afterRelease);
             Assert.DoesNotContain(afterRelease!.AcquiredRangeLocks, r => r.Prefix == prefix && r.StartKey == startKey && r.EndKey == endKey);
         }
@@ -538,7 +538,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(2, result.Items.Count);
 
             // Every returned item is recorded in the coordinator read set with point-read-set semantics.
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.Contains(live!.ReadKeys, r => r.Key == k1);
             Assert.Contains(live.ReadKeys, r => r.Key == k2);
@@ -548,7 +548,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Get, replay.Type);
             Assert.Equal(2, replay.Items.Count);
 
-            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterReplay = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(afterReplay);
             Assert.Equal(2, afterReplay!.ReadKeys.Count);
         }
@@ -787,7 +787,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal("ck1", anchor);
 
             TransactionWorkingSet? ws =
-                await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(ws);
             Assert.Equal("ck1", ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "ck1");
@@ -964,7 +964,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 ct, handle.CoordinatorKey, TransactionOperationId.NewRandom());
 
             TransactionWorkingSet? ws =
-                await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(ws);
             Assert.DoesNotContain(ws!.ReadKeys, r => r.Key == "snapKey");
             Assert.Contains(ws.ReadKeys, r => r.Key == "latestKey");
@@ -1118,7 +1118,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Set,
                 await SetKeyWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "anchor/a", value, KeyValueDurability.Persistent, ct));
 
-            TransactionWorkingSet? afterFirst = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterFirst = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(afterFirst);
             Assert.Equal("anchor/a", afterFirst!.RecordAnchorKey);
 
@@ -1126,7 +1126,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Set,
                 await SetKeyWithRetry(nodes[0], handle, TransactionOperationId.NewRandom(), "anchor/b", value, KeyValueDurability.Persistent, ct));
 
-            TransactionWorkingSet? afterSecond = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterSecond = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.NotNull(afterSecond);
             Assert.Equal("anchor/a", afterSecond!.RecordAnchorKey);
             Assert.Contains(afterSecond.ModifiedKeys, m => m.Key == "anchor/b");
@@ -1154,7 +1154,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Set,
                 await SetKeyWithRetry(nodes[1], handle, TransactionOperationId.NewRandom(), "eph/a", "v"u8.ToArray(), KeyValueDurability.Ephemeral, ct));
 
-            TransactionWorkingSet? ws = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? ws = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(ws);
             Assert.Null(ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "eph/a");
@@ -1198,7 +1198,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             foreach (KahunaDeleteKeyValueResponseItem r in responses)
                 Assert.Equal(KeyValueResponseType.Deleted, r.Type);
 
-            TransactionWorkingSet? ws = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? ws = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.NotNull(ws);
             Assert.Equal("batch/m", ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "batch/m");
@@ -1236,14 +1236,14 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             TransactionOperationId op = TransactionOperationId.NewRandom();
             await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct);
 
-            TransactionWorkingSet? afterFirst = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterFirst = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.Equal("dup/m", afterFirst!.RecordAnchorKey);
             int modifiedCount = afterFirst.ModifiedKeys.Count;
 
             // Replay the identical batch under the same operation id.
             await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct);
 
-            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterReplay = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.Equal("dup/m", afterReplay!.RecordAnchorKey);
             Assert.Equal(modifiedCount, afterReplay.ModifiedKeys.Count);
         }
@@ -1277,7 +1277,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             foreach (KahunaSetKeyValueResponseItem r in responses)
                 Assert.Equal(KeyValueResponseType.Set, r.Type);
 
-            TransactionWorkingSet? ws = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? ws = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.NotNull(ws);
             Assert.Equal("bset/m", ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "bset/m");
@@ -1308,7 +1308,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             await SetManyWithRetry(nodes[2], handle, op,
                 SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct);
 
-            TransactionWorkingSet? afterFirst = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterFirst = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.Equal("rset/m", afterFirst!.RecordAnchorKey);
             int modifiedCount = afterFirst.ModifiedKeys.Count;
 
@@ -1316,7 +1316,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             await SetManyWithRetry(nodes[2], handle, op,
                 SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct);
 
-            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterReplay = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.Equal("rset/m", afterReplay!.RecordAnchorKey);
             Assert.Equal(modifiedCount, afterReplay.ModifiedKeys.Count);
         }
@@ -1362,7 +1362,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal(KeyValueResponseType.Set, byKey["mixset/znew"]);
             Assert.Equal(KeyValueResponseType.Set, byKey["mixset/anew"]);
 
-            TransactionWorkingSet? ws = await nodes[1].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? ws = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.NotNull(ws);
             Assert.Equal("mixset/znew", ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "mixset/znew");
@@ -1401,7 +1401,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.All(noCoord, r => Assert.Equal(KeyValueResponseType.InvalidInput, r.Type));
 
             // Neither rejected request registered or folded an effect: no anchor was assigned.
-            TransactionWorkingSet? ws = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? ws = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(ws);
             Assert.Null(ws!.RecordAnchorKey);
         }
@@ -1439,7 +1439,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[1].Kahuna.LocateAndTryGetManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct, handle.CoordinatorKey, op);
             Assert.All(results, r => Assert.Equal(KeyValueResponseType.Get, r.Item1));
 
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.Contains(live!.ReadKeys, r => r.Key == gk1);
             Assert.Contains(live.ReadKeys, r => r.Key == gk2);
@@ -1450,7 +1450,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[2].Kahuna.LocateAndTryGetManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct, handle.CoordinatorKey, op);
             Assert.All(replay, r => Assert.Equal(KeyValueResponseType.Get, r.Item1));
 
-            TransactionWorkingSet? afterReplay = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? afterReplay = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(afterReplay);
             Assert.Equal(readCount, afterReplay!.ReadKeys.Count);
         }
@@ -1486,7 +1486,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[1].Kahuna.LocateAndTryExistsManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct, handle.CoordinatorKey, TransactionOperationId.NewRandom());
             Assert.All(results, r => Assert.Equal(KeyValueResponseType.Exists, r.Item1));
 
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.Contains(live!.ReadKeys, r => r.Key == ek1);
             Assert.Contains(live.ReadKeys, r => r.Key == ek2);
@@ -1522,7 +1522,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[1].Kahuna.LocateAndTryGetManyValues(handle.TransactionId, HLCTimestamp.Zero, keys, ct);
             Assert.All(results, r => Assert.Equal(KeyValueResponseType.Get, r.Item1));
 
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.DoesNotContain(live!.ReadKeys, r => r.Key == lk1);
         }
@@ -1560,7 +1560,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             Assert.Equal(3, seen.Count);
 
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             foreach (string key in seeded)
                 Assert.Contains(live!.ReadKeys, r => r.Key == key);
@@ -1598,7 +1598,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             {
             }
 
-            TransactionWorkingSet? live = await nodes[2].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? live = await WorkingSetWithRetry(nodes[2], handle, ct);
             Assert.NotNull(live);
             Assert.DoesNotContain(live!.ReadKeys, r => r.Key is not null && r.Key.StartsWith(prefix, StringComparison.Ordinal));
         }
@@ -1826,7 +1826,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.All(delResponses, r => Assert.Equal(KeyValueResponseType.Deleted, r.Type));
 
             // Every confirmed batch write folded its implicit point lock into the coordinator working set.
-            TransactionWorkingSet? ws = await nodes[0].Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            TransactionWorkingSet? ws = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.NotNull(ws);
             foreach (string key in new[] { "cbatch/a", "cbatch/b", "cbatch/x", "cbatch/y" })
                 Assert.Contains(ws!.AcquiredLocks, l => l.Key == key);
@@ -1977,6 +1977,25 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
     {
         (KeyValueResponseType type, _) = await CommitReturningAnchor(node, handle, ct);
         return type;
+    }
+
+    /// <summary>
+    /// The routed working-set read answers null while the session's coordinator cannot be reached (a stale
+    /// leader hint, a forward in flight during an election), exactly as the lost-session consult does; a live
+    /// session's set is never null for long. Poll briefly instead of dereferencing the first answer, so a
+    /// transient routing miss does not fail an assertion about the working set's contents.
+    /// </summary>
+    private static async Task<TransactionWorkingSet?> WorkingSetWithRetry(Node node, TransactionHandle handle, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            TransactionWorkingSet? workingSet = await node.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            if (workingSet is not null || Environment.TickCount64 >= deadline)
+                return workingSet;
+
+            await Task.Delay(50, ct);
+        }
     }
 
     private static async Task<(KeyValueResponseType, string?)> CommitReturningAnchor(Node node, TransactionHandle handle, CancellationToken ct)

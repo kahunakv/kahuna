@@ -85,4 +85,9 @@ internal sealed class KeyValuesRuntime
 
     /// <summary>The durable-2PC replication path. Assigned in the second wiring pass.</summary>
     internal Writes.DurableReplicationGateway DurableReplication { get; set; } = null!;
+
+    /// <summary>The node's single bound on concurrent leader-local applies of committed intents, shared by the
+    /// finalizer's resolution and every recovery path (sweep, helping, range-move barrier), so their combined
+    /// fan-out into the key actors stays under one limit.</summary>
+    internal SemaphoreSlim DurableLocalApplyGate { get; } = new(DurableTransactionFinalizer.MaxConcurrentLocalApplies);
 }

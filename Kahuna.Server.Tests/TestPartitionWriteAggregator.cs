@@ -1148,4 +1148,65 @@ public sealed class TestPartitionWriteAggregator
         Assert.Equal(0, c.KeyValueWriteTerminalReserveBytesGlobal);
         Assert.True(c.KeyValueWriteMaxOperationBytes >= c.KeyValueWriteMaxBatchBytes);
     }
+
+    // ── attribution metrics ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// The scheduler's attribution instruments: admitted items, dispatched entries, the batch's head-of-line
+    /// age and every submission's own queue delay are tagged by admission class, and each settled batch records
+    /// one completion-delay sample from the Raft return to the end of the lane's completion turn. The manual
+    /// clock makes the per-submission delay exact: items admitted behind a held batch age 7 ms before it
+    /// releases, so a terminal decision-like item that waited behind ordinary work shows up as a terminal
+    /// sample of 7 ms, which the batch-level oldest-item age alone could not attribute.
+    /// </summary>
+    [Fact]
+    public async Task Metrics_QueueDelayAndEntries_TaggedByClass_CompletionDelaySampledPerBatch()
+    {
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        ManualTimeProvider time = new();
+        exec.Gate(11);
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 8, LingerMs = 0, MaxQueuedItemsPerPartition = 100, MaxQueueDelayMs = 60_000
+        }, timeProvider: time);
+
+        using MetricCapture capture = new("class",
+            "kahuna.kv.write.admitted", "kahuna.kv.write.entries", "kahuna.kv.write.queue_age",
+            "kahuna.kv.write.submission_queue_delay", "kahuna.kv.write.completion_delay");
+
+        // First batch: one ordinary item, dispatched at once (linger 0) and held at the executor's gate.
+        agg.TryEnqueue(Item(11, 1, sink: router));
+        await WaitUntil(() => !exec.Calls.IsEmpty);
+
+        // Queued behind it: terminal first (so it is the second batch's oldest item), then ordinary. All are
+        // stamped at the manual clock's current tick and age 7 ms before the gate releases.
+        agg.TryEnqueue(Item(11, 2, sink: router, admissionClass: WriteAdmissionClass.Terminal));
+        agg.TryEnqueue(Item(11, 3, sink: router, admissionClass: WriteAdmissionClass.Terminal));
+        agg.TryEnqueue(Item(11, 4, sink: router));
+        time.Advance(TimeSpan.FromMilliseconds(7));
+
+        exec.Release(11);
+        await WaitUntil(() => router.Completed.Count == 4);
+        await WaitUntil(() => capture.Samples("kahuna.kv.write.completion_delay").Count >= 2);
+
+        // The meter is process-wide, so other test classes can add samples; every assertion below is a
+        // presence check, never an exact total.
+        Assert.True(capture.Total("kahuna.kv.write.admitted", "terminal") >= 2);
+        Assert.True(capture.Total("kahuna.kv.write.admitted", "ordinary") >= 2);
+        Assert.True(capture.Total("kahuna.kv.write.entries", "terminal") >= 2);
+        Assert.True(capture.Total("kahuna.kv.write.entries", "ordinary") >= 2);
+
+        // Per-submission delay by class: both terminal items and the trailing ordinary one waited exactly the
+        // 7 ms of manual time; the first batch's item waited 0.
+        Assert.True(capture.Samples("kahuna.kv.write.submission_queue_delay", "terminal").Count(d => d == 7) >= 2);
+        Assert.Contains(7, capture.Samples("kahuna.kv.write.submission_queue_delay", "ordinary"));
+        Assert.Contains(0, capture.Samples("kahuna.kv.write.submission_queue_delay", "ordinary"));
+
+        // The batch's head-of-line age carries the oldest item's class: terminal for the second batch.
+        Assert.Contains(7, capture.Samples("kahuna.kv.write.queue_age", "terminal"));
+
+        // One completion-delay sample per settled batch, never negative.
+        Assert.All(capture.Samples("kahuna.kv.write.completion_delay"), d => Assert.True(d >= 0));
+    }
 }

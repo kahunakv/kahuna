@@ -204,6 +204,14 @@ internal sealed class KeyValueServerBatcher
                 _ = DurableOperationDelayed(semaphore, request, responseStream, context, drain);
                 break;
 
+            case GrpcServerBatchType.ServerDurableBundle:
+                _ = DurableBundleDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
+            case GrpcServerBatchType.ServerDurableDecision:
+                _ = DurableDecisionDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
             case GrpcServerBatchType.ServerLookupTransactionRecord:
                 _ = LookupTransactionRecordDelayed(semaphore, request, responseStream, context, drain);
                 break;
@@ -1139,6 +1147,78 @@ internal sealed class KeyValueServerBatcher
                     Type = GrpcServerBatchType.ServerDurableOperation,
                     RequestId = request.RequestId,
                     DurableOperation = resp
+                });
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            await ObserveFault(semaphore, request, responseStream, context, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
+    }
+
+    private async Task DurableBundleDelayed(
+        SemaphoreSlim semaphore,
+        GrpcBatchServerKeyValueRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+            try
+            {
+                GrpcDurableBundleResponse resp = await service.DurableBundleInternal(request.DurableBundle, context);
+                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+                {
+                    Type = GrpcServerBatchType.ServerDurableBundle,
+                    RequestId = request.RequestId,
+                    DurableBundle = resp
+                });
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            await ObserveFault(semaphore, request, responseStream, context, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
+    }
+
+    private async Task DurableDecisionDelayed(
+        SemaphoreSlim semaphore,
+        GrpcBatchServerKeyValueRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+            try
+            {
+                GrpcDurableDecisionResponse resp = await service.DurableDecisionInternal(request.DurableDecision, context);
+                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+                {
+                    Type = GrpcServerBatchType.ServerDurableDecision,
+                    RequestId = request.RequestId,
+                    DurableDecision = resp
                 });
             }
             finally

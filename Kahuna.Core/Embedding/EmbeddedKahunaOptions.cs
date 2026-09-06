@@ -363,10 +363,11 @@ public sealed class EmbeddedKahunaOptions
     /// write, removing one serial fsync from the caller's critical path without weakening durability.
     /// Mirrors <c>RaftConfiguration.WalSingleFsyncCommit</c>.
     /// <para>
-    /// Defaults to <c>false</c> — Kommander's own default (byte-for-byte the prior two-fsync commit) —
-    /// <b>not</b> the <c>Kahuna.Server</c> default, which is single-fsync <b>on</b>. Flipping this
-    /// changes durability/recovery timing for every embedded consumer, so enabling it is an explicit
-    /// consumer decision. Enable and measure before relying on it.
+    /// Defaults to <c>false</c> (the prior two-fsync commit, byte-for-byte). This is <b>not</b> Kommander's
+    /// own default — <c>RaftConfiguration.WalSingleFsyncCommit</c> defaults to <c>true</c> — and not the
+    /// <c>Kahuna.Server</c> default, which is single-fsync <b>on</b> as well. The embedded surface keeps the
+    /// conservative value because flipping it changes durability/recovery timing for every embedded
+    /// consumer, so enabling it is an explicit consumer decision. Enable and measure before relying on it.
     /// </para>
     /// </summary>
     public bool RaftWalSingleFsyncCommit { get; set; }

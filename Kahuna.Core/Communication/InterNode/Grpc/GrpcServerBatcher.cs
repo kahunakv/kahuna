@@ -485,6 +485,24 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcDurableBundleRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcDurableDecisionRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcReplicateKeyValueRangePageRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1074,6 +1092,16 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerDurableOperation;
             batchRequest.DurableOperation = itemRequest.DurableOperation;
         }
+        else if (itemRequest.DurableBundle is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerDurableBundle;
+            batchRequest.DurableBundle = itemRequest.DurableBundle;
+        }
+        else if (itemRequest.DurableDecision is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerDurableDecision;
+            batchRequest.DurableDecision = itemRequest.DurableDecision;
+        }
         else if (itemRequest.LookupTransactionRecord is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerLookupTransactionRecord;
@@ -1365,6 +1393,14 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerDurableOperation:
                         item.Promise.TrySetResult(new(response.DurableOperation));
+                        break;
+
+                    case GrpcServerBatchType.ServerDurableBundle:
+                        item.Promise.TrySetResult(new(response.DurableBundle));
+                        break;
+
+                    case GrpcServerBatchType.ServerDurableDecision:
+                        item.Promise.TrySetResult(new(response.DurableDecision));
                         break;
 
                     case GrpcServerBatchType.ServerLookupTransactionRecord:

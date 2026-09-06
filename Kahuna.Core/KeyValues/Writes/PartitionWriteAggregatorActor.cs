@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Nixie;
 using Kommander;
 using Kommander.Data;
@@ -196,6 +197,11 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         ScheduleWake(message.PartitionId, state);
         PruneIfIdle(message.PartitionId, state);
+
+        // One timestamp read per completed batch: the mailbox wait plus this whole completion turn (ordered
+        // apply/complete of every submission, then the re-dispatch above), measured from the Raft return the
+        // detached batch stamped on the message.
+        PartitionWriteAggregatorMetrics.BatchCompleted(Stopwatch.GetElapsedTime(message.RaftReturnedTimestamp).TotalMilliseconds);
     }
 
     private void OnStop()
@@ -276,19 +282,31 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             }
 
             long batchBytes = 0;
+            int ordinaryEntries = 0;
+            int terminalEntries = 0;
             // One heterogeneous proposal: flatten each submission's ordered bundle in submission order, keeping
             // every entry's producer log type. A submission's entries are contiguous and never split — that is
             // what makes a multi-entry submission an atomic ordered bundle. Direct writes contribute one entry.
             List<RaftProposalEntry> entryList = new(valid.Count);
             for (int i = 0; i < valid.Count; i++)
             {
-                entryList.AddRange(valid[i].Entries);
-                batchBytes += valid[i].ByteLength;
+                IProposalSubmission item = valid[i];
+                entryList.AddRange(item.Entries);
+                batchBytes += item.ByteLength;
+
+                if (item.AdmissionClass == WriteAdmissionClass.Terminal)
+                    terminalEntries += item.Entries.Count;
+                else
+                    ordinaryEntries += item.Entries.Count;
+
+                // Per-submission queue delay by class: the batch's oldest-item age below cannot tell whether a
+                // decision waited behind background terminal work, this can.
+                PartitionWriteAggregatorMetrics.SubmissionDispatched(now - item.EnqueueTicks, item.AdmissionClass, item.Entries.Count > 0 ? item.Entries[0].Type : string.Empty);
             }
 
             RaftProposalEntry[] entries = [.. entryList];
 
-            PartitionWriteAggregatorMetrics.BatchDispatched(entries.Length, batchBytes, now - valid[0].EnqueueTicks);
+            PartitionWriteAggregatorMetrics.BatchDispatched(ordinaryEntries, terminalEntries, batchBytes, now - valid[0].EnqueueTicks, valid[0].AdmissionClass);
             admission.IncInFlight();
 
             _ = RunBatch(partitionId, valid, entries);
@@ -350,7 +368,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // was retryable. (A mixed batch is rare — only per-entry fencing produces it — and records as a failure.)
         PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Environment.TickCount64 - start);
 
-        self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes));
+        self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes, Stopwatch.GetTimestamp()));
     }
 
     /// <summary>

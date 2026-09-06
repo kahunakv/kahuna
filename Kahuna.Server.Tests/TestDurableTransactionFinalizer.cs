@@ -746,6 +746,10 @@ public sealed class TestDurableTransactionFinalizer
 
         Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
         Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+
+        // The retry names its cause, so the coordinator can count the transaction once however many times the
+        // client retries this commit.
+        Assert.True(outcome.LateCommitRejected);
     }
 
     [Fact]
@@ -1058,6 +1062,134 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(winnerTx, holder!.TransactionId);
     }
 
+    /// <summary>
+    /// The one-phase accounting closes: every finalize records a gate verdict (<c>entered</c>, or why it was
+    /// excluded), and an entered attempt that falls back records its reason. A seam that answers "remote anchor
+    /// leader" produces one entered verdict and one <c>remote_leader</c> fallback; a read set beyond the writes
+    /// and a multi-partition set are excluded before any attempt.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_GateVerdictsAndFallbackReasons_AreCounted()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _) => Task.FromResult<(bool BatchCommitted, bool PrepareAcknowledged)?>(null));
+
+        using MetricCapture gate = new("outcome", "kahuna.durable_tx.one_phase_gate");
+        using MetricCapture fallback = new("reason", "kahuna.durable_tx.one_phase_fallbacks");
+
+        DurableFinalizeOutcome remote = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, remote.Result); // through 2PC after the fallback
+        Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "entered") >= 1);
+        Assert.True(fallback.Total("kahuna.durable_tx.one_phase_fallbacks", "remote_leader") >= 1);
+
+        DurableFinalizeOutcome readSet = await finalizer.FinalizeAsync(
+            Input(Ts(3000), 1, (5, "acct/2")), Validate(true), opId: Ts(4000), CancellationToken.None,
+            readSetExtendsBeyondWrites: true);
+        Assert.Equal(DurableFinalizeResult.Committed, readSet.Result);
+        Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "read_set_beyond_writes") >= 1);
+
+        DurableFinalizeOutcome fanOut = await finalizer.FinalizeAsync(
+            Input(Ts(5000), 1, (5, "acct/3"), (6, "acct/4")), Validate(true), opId: Ts(6000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, fanOut.Result);
+        Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "multi_partition") >= 1);
+    }
+
+    /// <summary>
+    /// A bundle whose attempt HLC passed the frozen decision deadline by the time it applies (a stalled
+    /// proposal): the record's deadline gate keeps it Undecided, the finalize answers the retryable outcome that
+    /// names the late commit, and nothing is applied to the leader's live state. Presumed-abort recovery owns the
+    /// record from here.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_ExpiredAttempt_StaysUndecided_AndNamesTheLateCommit()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        ConcurrentQueue<string> localApplies = new();
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyCommitLocally: (_, i) => { localApplies.Enqueue(i.Key); return Task.FromResult(true); },
+            replicateOnePhaseBundle: OnePhase(records, intents),
+            // The attempt HLC minted before the propose already lies past the frozen deadline (9000).
+            attemptClock: () => Ts(10000));
+
+        long late = await MeasureCounter("kahuna.durable_tx.late_commit_rejections", async () =>
+        {
+            DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+                Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+            Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+            Assert.True(outcome.LateCommitRejected);
+        });
+
+        Assert.True(late >= 1);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+        Assert.Empty(localApplies);
+        Assert.NotNull(intents.Get("acct/1")); // the prepared intent stays for recovery to resolve
+    }
+
+    /// <summary>A bundle delivered twice (a retry after a lost acknowledgement re-proposes the identical batch)
+    /// applies once: the second delivery is an idempotent no-op on every store, the record commits exactly once,
+    /// and the resolution settles the single intent.</summary>
+    [Fact]
+    public async Task OnePhase_DuplicateBundleDelivery_IsIdempotent()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate once = OnePhase(records, intents);
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct) =>
+            {
+                (bool BatchCommitted, bool PrepareAcknowledged)? first = await once(partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct);
+                // The duplicate: the same three entries replayed in order against the already-applied stores.
+                records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
+                intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
+                records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = decisionDelta });
+                return first;
+            });
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Equal(1, records.Count);
+        Assert.Null(intents.Get("acct/1")); // settled once by the inline resolution
+        Assert.Equal(1, seam.Calls.Count(c => c.Type == ReplicationTypes.KeyValues)); // materialized once
+    }
+
+    /// <summary>A same-identity re-finalize of an already committed one-phase transaction (a client retry after a
+    /// lost reply) answers Committed again and leaves one record and no lingering intent.</summary>
+    [Fact]
+    public async Task OnePhase_ReFinalize_SameInput_AnswersCommittedAgain()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate, replicateOnePhaseBundle: OnePhase(records, intents));
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+        DurableFinalizeOutcome second = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.Equal(DurableFinalizeResult.Committed, second.Result);
+        Assert.Equal(1, records.Count);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1"));
+    }
+
     /// <summary>The gate must not over-reject: an uncontended one-phase bundle applies its own prepare in the
     /// same batch, so the bundled commit passes the gate and the fast path commits and settles as before.</summary>
     [Fact]
@@ -1233,5 +1365,318 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal((int)KeyValueRequestType.TryDelete, deleteMessage.Type);
         Assert.Equal(3, deleteMessage.Revision);
         Assert.Equal(Ts(2345), new HLCTimestamp(deleteMessage.LastModifiedNode, deleteMessage.LastModifiedPhysical, deleteMessage.LastModifiedCounter));
+    }
+
+    // ── prepare retry attribution ─────────────────────────────────────────────
+
+    /// <summary>
+    /// A finalize whose first barrier leaves one participant unprepared enters the retry loop; the loop's cost
+    /// is attributed separately from the first barrier: re-proposal rounds, helping invocations and their time,
+    /// backoff time, and how the loop ended. Partition 6 rejects three prepares (the first barrier and two retry
+    /// rounds) and acknowledges the fourth, with a helper that never settles anything, so every round backs off.
+    /// </summary>
+    [Fact]
+    public async Task PrepareRetryLoop_RecordsRoundsHelperCallsBackoffAndOutcome()
+    {
+        Seam seam = new();
+        int rejectionsLeft = 3;
+        seam.Fail = (partition, type) => partition == 6 && type == ReplicationTypes.PreparedIntent && Interlocked.Decrement(ref rejectionsLeft) >= 0;
+
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+
+        int helperCalls = 0;
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            resolveDecidedBlockers: (_, _, _, _, _) =>
+            {
+                Interlocked.Increment(ref helperCalls);
+                return Task.FromResult(0);
+            });
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.durable_tx.finalize_prepare_retries", "kahuna.durable_tx.finalize_helper_calls",
+            "kahuna.durable_tx.finalize_helper_ms", "kahuna.durable_tx.finalize_backoff_ms",
+            "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.finalize_first_prepare_ms");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (6, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+
+        // Three re-proposal rounds: the first barrier and rounds one and two were rejected; round three landed.
+        Assert.Contains(3, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+
+        // The helper runs once per REFUSED participant per round: only partition 6, three rounds. The acknowledged
+        // partition 5 is neither helped nor re-proposed: its intent-typed calls are its one prepare and its one
+        // settle; partition 6's are three refused prepares, the acknowledged fourth, and its settle.
+        Assert.Equal(3, helperCalls);
+        Assert.Contains(3, capture.Samples("kahuna.durable_tx.finalize_helper_calls"));
+        Assert.Equal(2, seam.Calls.Count(c => c.Partition == 5 && c.Type == ReplicationTypes.PreparedIntent));
+        Assert.Equal(5, seam.Calls.Count(c => c.Partition == 6 && c.Type == ReplicationTypes.PreparedIntent));
+        Assert.NotEmpty(capture.Samples("kahuna.durable_tx.finalize_helper_ms"));
+
+        // Nothing was helped, so every round slept: 2 + 4 + 6 ms nominal; timers can undershoot by a fraction
+        // of a millisecond per round.
+        Assert.Contains(capture.Samples("kahuna.durable_tx.finalize_backoff_ms"), d => d >= 9);
+
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "prepared") >= 1);
+        Assert.NotEmpty(capture.Samples("kahuna.durable_tx.finalize_first_prepare_ms"));
+    }
+
+    // The real recovery wired as the finalizer's helping pass, over the same stores and replicate seam, with the
+    // canonical record read from the shared record store. Mirrors the production wiring closely enough that the
+    // helper's confirmed-progress answer drives the finalizer's backoff decision for real.
+    private static DurableTransactionRecovery HelpingRecovery(TransactionRecordStore records, PreparedIntentStore intents, Seam seam) =>
+        new(intents, seam.Replicate,
+            (transactionId, epoch, _, _) => Task.FromResult(records.Get(transactionId, epoch)),
+            (abort, _, _) =>
+            {
+                records.Apply(abort);
+                return Task.FromResult(records.Get(abort.TransactionId, abort.Epoch));
+            });
+
+    // A committed-but-unsettled blocker on <paramref name="key"/>: its intent is live and its record is Commit,
+    // the exact settlement-lag shape the helping pass exists to clear.
+    private static void InstallCommittedBlocker(TransactionRecordStore records, PreparedIntentStore intents, HLCTimestamp blockerTx, string key)
+    {
+        intents.Apply(new PrepareIntentCommand(Intent(blockerTx, 1, key)));
+        records.Apply(new InitializeTransactionCommand(
+            blockerTx, 1, "coord", "anchor", CommitTimestamp: Ts(600), DecisionDeadline: Ts(9000),
+            ManifestHash: 0, [], OpId: Ts(600), CreatedAt: Ts(500)));
+        records.Apply(new CommitTransactionCommand(blockerTx, 1, ManifestHash: 0, OpId: Ts(600), AttemptHlc: Ts(700)));
+        Assert.Equal(TransactionDecision.Commit, records.Get(blockerTx, 1)!.Decision);
+    }
+
+    /// <summary>
+    /// The helper's answer drives the finalizer's backoff for real: when every materialization of the committed
+    /// blocker is refused, the helper reports no progress, the finalize sleeps through every round's backoff (the
+    /// full 72 ms budget) instead of re-proposing at once, and the blocker's intent is left untouched.
+    /// </summary>
+    [Fact]
+    public async Task Helping_BlockerMaterializationRefused_FinalizeBacksOff_AndLeavesTheBlocker()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        seam.Fail = (_, type) => type == ReplicationTypes.KeyValues;
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync);
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.durable_tx.finalize_backoff_ms", "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.finalize_helper_calls");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
+        Assert.Contains(8, capture.Samples("kahuna.durable_tx.finalize_helper_calls"));
+        // Nominal sum 2+4+...+16 = 72 ms; timers can undershoot by a fraction of a millisecond per round.
+        Assert.Contains(capture.Samples("kahuna.durable_tx.finalize_backoff_ms"), d => d >= 64);
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "exhausted") >= 1);
+
+        PreparedIntent? holder = intents.Get("acct/2");
+        Assert.NotNull(holder);
+        Assert.Equal(blockerTx, holder!.TransactionId);
+        Assert.Equal(PreparedIntentResolution.Pending, holder.Resolution);
+    }
+
+    /// <summary>The positive control: the same blocker settles on the first helping pass, the finalize re-prepares
+    /// at once with no backoff, and commits above the blocker's committed head.</summary>
+    [Fact]
+    public async Task Helping_BlockerSettles_FinalizeReprepares_WithoutBackoff()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync);
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.durable_tx.finalize_backoff_ms", "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.finalize_prepare_retries");
+
+        // The blocker committed revision 1 of the key; this transaction read it and writes revision 2 above it.
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, revision: 2, baseRevision: 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Contains(1, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+        Assert.Contains(0, capture.Samples("kahuna.durable_tx.finalize_backoff_ms"));
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "prepared") >= 1);
+        Assert.Null(intents.Get("acct/2")); // blocker settled by helping, own intent settled by resolution
+    }
+
+    // ── per-participant prepare results ───────────────────────────────────────
+
+    /// <summary>
+    /// Three participants, one of which refuses twice before it acknowledges: the two acknowledged participants
+    /// receive exactly one proposal each (their intents are replicated state that stays put), the refusing one is
+    /// re-proposed until it acknowledges, and the transaction commits with every intent settled.
+    /// </summary>
+    [Fact]
+    public async Task PrepareRetry_ReproposesOnlyTheRefusedParticipant()
+    {
+        Seam seam = new();
+        int rejectionsLeft = 2;
+        seam.Fail = (partition, type) => partition == 7 && type == ReplicationTypes.PreparedIntent && Interlocked.Decrement(ref rejectionsLeft) >= 0;
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = Build(seam);
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1"), (6, "acct/2"), (7, "acct/3")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+
+        // Intent-typed calls per partition are its prepares plus its one settle delta: one prepare each for the
+        // acknowledged partitions, three (two refused, one acknowledged) for the refusing one.
+        Assert.Equal(2, seam.Calls.Count(c => c.Partition == 5 && c.Type == ReplicationTypes.PreparedIntent));
+        Assert.Equal(2, seam.Calls.Count(c => c.Partition == 6 && c.Type == ReplicationTypes.PreparedIntent));
+        Assert.Equal(4, seam.Calls.Count(c => c.Partition == 7 && c.Type == ReplicationTypes.PreparedIntent));
+        Assert.Equal(0, intents.Count); // every intent resolved and settled
+    }
+
+    /// <summary>
+    /// A refusal that names a stale base ends the retry loop at once: the base can never become current again, so
+    /// re-proposing would only re-ask the same question. The finalize drives a record-backed conflict abort with
+    /// zero retry rounds, and the competitor's committed value stays.
+    /// </summary>
+    [Fact]
+    public async Task StaleBaseRefusal_AbortsAsConflict_WithoutRetryRounds()
+    {
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = Build(seam);
+
+        // A first transaction commits revision 1 of the key and settles; its committed head is remembered.
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.Null(intents.Get("acct/1"));
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.finalize_prepare_retries", "kahuna.durable_tx.prepare_retry_loops");
+
+        // A second transaction validated against the ORIGINAL base (revision 0): the prepare-apply fence refuses
+        // it as stale, and the finalize must not spend its retry budget on it.
+        HLCTimestamp staleTx = Ts(3000);
+        DurableFinalizeOutcome stale = await finalizer.FinalizeAsync(
+            Input(staleTx, 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, stale.Result);
+        Assert.Equal(TransactionAbortClass.Conflict, stale.AbortClass);
+        Assert.Equal(TransactionDecision.Abort, records.Get(staleTx, 1)!.Decision);
+        Assert.Contains(0, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "stale_base") >= 1);
+
+        // Intent-typed calls: each transaction's one prepare and one settle (the second's settle rolls its
+        // refused-but-installed intent back). No retry rounds.
+        Assert.Equal(4, seam.Calls.Count(c => c.Partition == 5 && c.Type == ReplicationTypes.PreparedIntent));
+        Assert.Null(intents.Get("acct/1")); // the refused intent was rolled back by the abort's resolution
+    }
+
+    /// <summary>
+    /// A refused participant whose range no longer routes the key to the frozen partition can never accept this
+    /// frozen input: the loop ends with a clean retry (nothing decided is durable; the record stays Undecided for
+    /// the abandoned-attempt fence or a fresh freeze) instead of eight futile rounds and a retryable abort.
+    /// </summary>
+    [Fact]
+    public async Task RangeMovedRefusal_ReturnsRetry_WithoutRetryRounds()
+    {
+        Seam seam = new();
+        seam.Fail = (partition, type) => partition == 5 && type == ReplicationTypes.PreparedIntent;
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+
+        // The router now places every key on partition 99: the frozen partition 5 is retired for this key.
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate, resolveCurrentPartition: _ => 99);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.finalize_prepare_retries", "kahuna.durable_tx.prepare_retry_loops");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision); // no decision was written
+        Assert.Contains(0, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "range_moved") >= 1);
+        Assert.Equal(1, seam.Calls.Count(c => c.Partition == 5 && c.Type == ReplicationTypes.PreparedIntent));
+    }
+
+    /// <summary>A participant that never acknowledges exhausts the retry budget: eight rounds, the loop counted
+    /// as exhausted, the 72 ms backoff sum (less timer slack), and a retryable abort as before.</summary>
+    [Fact]
+    public async Task PrepareRetryLoop_Exhausted_IsCountedAsExhausted_AndAbortsRetryably()
+    {
+        Seam seam = new();
+        seam.Fail = (partition, type) => partition == 6 && type == ReplicationTypes.PreparedIntent;
+        (DurableTransactionFinalizer finalizer, _, _) = Build(seam);
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.durable_tx.finalize_prepare_retries", "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.finalize_backoff_ms");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (6, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
+        Assert.Contains(8, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "exhausted") >= 1);
+        // Nominal sum 2+4+...+16 = 72 ms; timers can undershoot by a fraction of a millisecond per round.
+        Assert.Contains(capture.Samples("kahuna.durable_tx.finalize_backoff_ms"), d => d >= 64);
+    }
+
+    /// <summary>The uncontended path records zero retry rounds and never enters the loop.</summary>
+    [Fact]
+    public async Task UncontendedFinalize_RecordsZeroPrepareRetries()
+    {
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, _, _) = Build(seam);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.finalize_prepare_retries");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Contains(0, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+    }
+
+    /// <summary>
+    /// Every finalize records its one-phase gate verdict (here <c>disabled</c>: no bundle seam is wired), and the
+    /// decision stage is timed as two halves — the replication round trip and the canonical read-back — so a
+    /// remote anchor's lookup cost is separable from its proposal cost.
+    /// </summary>
+    [Fact]
+    public async Task Finalize_RecordsOnePhaseGateVerdict_AndDecisionStageHalves()
+    {
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, _, _) = Build(seam);
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.durable_tx.one_phase_gate", "kahuna.durable_tx.finalize_decision_replicate_ms",
+            "kahuna.durable_tx.finalize_decision_lookup_ms");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.True(capture.Total("kahuna.durable_tx.one_phase_gate", "disabled") >= 1);
+        Assert.NotEmpty(capture.Samples("kahuna.durable_tx.finalize_decision_replicate_ms"));
+        Assert.NotEmpty(capture.Samples("kahuna.durable_tx.finalize_decision_lookup_ms"));
+        Assert.All(capture.Samples("kahuna.durable_tx.finalize_decision_lookup_ms"), d => Assert.True(d >= 0));
     }
 }
