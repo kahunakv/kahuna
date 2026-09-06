@@ -75,7 +75,7 @@ internal sealed class SequencerManager
 
         router = actorSystem.CreateConsistentHashRouter(instances);
 
-        locator = new(this, raft, interNodeCommunication, logger);
+        locator = new(this, raft, interNodeCommunication, configuration, logger);
     }
 
     // ── locating entry points ───────────────────────────────────────────────────────────────────

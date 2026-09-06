@@ -209,6 +209,71 @@ public sealed class ClusterService : Cluster.ClusterBase
     }
 
     /// <summary>
+    /// Publishes the scoped routing metadata a client uses to resolve a resource it has never seen.
+    /// Mirrors REST <c>GET /v1/cluster/routing</c> 1:1 — both transports project the same builder,
+    /// so the two cannot describe different maps.
+    /// </summary>
+    public override async Task<GrpcGetRoutingMetadataResponse> GetRoutingMetadata(GrpcGetRoutingMetadataRequest request, ServerCallContext context)
+    {
+        KahunaRoutingMetadataResponse metadata = await keyValues.GetRoutingMetadata(
+            string.IsNullOrEmpty(request.KeySpace) ? null : request.KeySpace);
+
+        GrpcGetRoutingMetadataResponse response = new()
+        {
+            Initialized = metadata.Initialized,
+            SchemaVersion = metadata.SchemaVersion,
+            HashAlgorithm = metadata.HashAlgorithm,
+            PrefixSeparator = metadata.PrefixSeparator,
+            HashPoolSize = metadata.HashPoolSize,
+            HashPartitionOffset = metadata.HashPartitionOffset,
+            SequenceStorageKeyFormat = metadata.SequenceStorageKeyFormat,
+            ReservedKeyPrefix = metadata.ReservedKeyPrefix,
+            LocalEndpoint = metadata.LocalEndpoint,
+            SnapshotVersion = metadata.SnapshotVersion,
+            Coherent = metadata.Coherent
+        };
+
+        foreach (KahunaRoutingKeySpaceResponse space in metadata.KeySpaces)
+        {
+            GrpcRoutingKeySpace entry = new()
+            {
+                KeySpace = space.KeySpace,
+                RoutingMode = space.RoutingMode
+            };
+
+            foreach (KahunaRoutingRangeResponse range in space.Ranges)
+            {
+                // Leaving a bound unset is what carries ±infinity; assigning null to an `optional`
+                // field clears presence, so an open end never arrives as an empty-string bound.
+                GrpcRoutingRange wire = new()
+                {
+                    PartitionId = range.PartitionId,
+                    Generation = range.Generation
+                };
+
+                if (range.StartKey is not null)
+                    wire.StartKey = range.StartKey;
+
+                if (range.EndKey is not null)
+                    wire.EndKey = range.EndKey;
+
+                entry.Ranges.Add(wire);
+            }
+
+            response.KeySpaces.Add(entry);
+        }
+
+        foreach (KahunaPartitionLeaderResponse leader in metadata.Leaders)
+            response.Leaders.Add(new GrpcPartitionLeader
+            {
+                PartitionId = leader.PartitionId,
+                Endpoint = leader.Endpoint
+            });
+
+        return response;
+    }
+
+    /// <summary>
     /// Splits the range covering the given key. Mirrors REST <c>POST /v1/ranges/split</c> 1:1,
     /// including the leadership gate and the determinate/indeterminate split of the outcomes — both
     /// transports call the same manager method, so the classification cannot drift between them.

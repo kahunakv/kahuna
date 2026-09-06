@@ -13,6 +13,9 @@ using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
+
 namespace Kahuna.Server.KeyValues;
 
 /// <summary>
@@ -33,6 +36,8 @@ internal sealed class KeyValueLocator
 
     private readonly DataPartitionRouter dataPartitionRouter;
 
+    private readonly ClientEndpointAdvertiser advertiser;
+
     private readonly ILogger<IKahuna> logger;
 
     public KeyValueLocator(
@@ -50,8 +55,32 @@ internal sealed class KeyValueLocator
         this.interNodeCommunication = interNodeCommunication;
         this.keySpaceRegistry = keySpaceRegistry;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
+        this.advertiser = ClientEndpointAdvertiserFactory.Create(raft, configuration);
         this.logger = logger;
     }
+
+    /// <summary>
+    /// Records that <paramref name="key"/> was admitted on this node, so the response can carry the
+    /// route back as an advisory hint. A no-op when no capture is open or the node advertises no
+    /// client endpoint.
+    /// </summary>
+    private void RecordLocalKeyRoute(string key, int partitionId, long generation = 0) =>
+        RouteCaptureScope.Record(KahunaRoutingDomain.KeyValue, key, partitionId, advertiser.LocalAdvertised, KahunaRouteProvenance.Executed, generation);
+
+    /// <summary>
+    /// Records that <paramref name="key"/> was forwarded to <paramref name="leader"/>. That node
+    /// re-resolves ownership on arrival, so the hint is a suggestion rather than a proven executor.
+    /// </summary>
+    private void RecordForwardedKeyRoute(string key, int partitionId, string leader, long generation = 0) =>
+        RouteCaptureScope.Record(KahunaRoutingDomain.KeyValue, key, partitionId, advertiser.Advertise(leader), KahunaRouteProvenance.Forwarded, generation);
+
+    /// <summary>
+    /// Records the destination a batch planning loop picked for one of its keys. A planning loop has
+    /// resolved a target and not yet run anything, so every key it plans — including the ones it
+    /// keeps — is recorded as a suggestion rather than as a proven executor.
+    /// </summary>
+    private void RecordBatchKeyRoute(string key, int partitionId, string leader, long generation = 0) =>
+        RouteCaptureScope.Record(KahunaRoutingDomain.KeyValue, key, partitionId, advertiser.Advertise(leader), KahunaRouteProvenance.Forwarded, generation);
 
     /// <summary>
     /// The key-order router: resolves <paramref name="key"/> to <c>(partitionId,
@@ -233,6 +262,8 @@ internal sealed class KeyValueLocator
 
         if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
+            RecordLocalKeyRoute(key, partitionId, routedGeneration);
+
             return await manager.TrySetKeyValue(
                 transactionId,
                 key,
@@ -250,7 +281,12 @@ internal sealed class KeyValueLocator
         if (leader is null)
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         if (leader == raft.GetLocalEndpoint())
+        {
+            RecordLocalKeyRoute(key, partitionId, routedGeneration);
             return await manager.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
+        }
+
+        RecordForwardedKeyRoute(key, partitionId, leader, routedGeneration);
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -321,6 +357,8 @@ internal sealed class KeyValueLocator
             string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. setManyItems.Select(static i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry, Durability = i.Durability })];
+
+            RecordBatchKeyRoute(key.Key, partitionId, leader, key.RoutedGeneration);
 
             if (acquisitionPlan.TryGetValue(leader, out List<KahunaSetKeyValueRequestItem>? list))
                 list.Add(key);
@@ -398,6 +436,8 @@ internal sealed class KeyValueLocator
             if (leader is null)
                 return [.. deleteManyItems.Select(static i => new KahunaDeleteKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry, Durability = i.Durability })];
 
+            RecordBatchKeyRoute(item.Key, partitionId, leader);
+
             if (acquisitionPlan.TryGetValue(leader, out List<KahunaDeleteKeyValueRequestItem>? list))
                 list.Add(item);
             else
@@ -463,16 +503,24 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
         if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            RecordLocalKeyRoute(key, partitionId);
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
-            
+        }
+
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         if (leader == raft.GetLocalEndpoint())
+        {
+            RecordLocalKeyRoute(key, partitionId);
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
+        }
 
         logger.LogDeleteKeyValueRedirected(key, partitionId, leader);
-        
+
+        RecordForwardedKeyRoute(key, partitionId, leader);
+
         return await interNodeCommunication.TryDeleteKeyValue(leader, transactionId, key, durability, cancellationToken);
     }
     
@@ -496,15 +544,23 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
         if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
-            
+        }
+
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         if (leader == raft.GetLocalEndpoint())
+        {
+            RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
+        }
 
         logger.LogExtendKeyValueRedirected(key, partitionId, leader);
+
+        RecordForwardedKeyRoute(key, partitionId, leader);
 
         return await interNodeCommunication.TryExtendKeyValue(leader, transactionId, key, expiresMs, durability, cancellationToken);
     }
@@ -535,13 +591,18 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, null);
 
         if (await ConfirmLeadershipForRead(partitionId, cancellationToken))
+        {
+            RecordLocalKeyRoute(key, partitionId);
             return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
             return (KeyValueResponseType.MustRetry, null);
         if (leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, null);
+
+        RecordForwardedKeyRoute(key, partitionId, leader);
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
@@ -579,7 +640,10 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, null);
 
         if (await ConfirmLeadershipForRead(partitionId, cancellationToken))
+        {
+            RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null)
@@ -588,6 +652,8 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, null);
 
         logger.LogExistsKeyValueRedirect(key, partitionId, leader);
+
+        RecordForwardedKeyRoute(key, partitionId, leader);
 
         return await interNodeCommunication.TryExistsValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken);
     }
@@ -616,6 +682,8 @@ internal sealed class KeyValueLocator
             string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))];
+
+            RecordBatchKeyRoute(item.key, partitionId, leader);
 
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
                 list.Add(item);
@@ -716,6 +784,8 @@ internal sealed class KeyValueLocator
             string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancellationToken);
             if (leader is null)
                 return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))];
+
+            RecordBatchKeyRoute(item.key, partitionId, leader);
 
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
                 list.Add(item);

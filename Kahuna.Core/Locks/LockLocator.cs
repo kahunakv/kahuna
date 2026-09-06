@@ -5,7 +5,9 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Locks.Logging;
+using Kahuna.Server.Routing;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Routing;
 
 namespace Kahuna.Server.Locks;
 
@@ -24,6 +26,8 @@ internal sealed class LockLocator
 
     private readonly IInterNodeCommunication interNodeCommunication;
 
+    private readonly ClientEndpointAdvertiser advertiser;
+
     private readonly ILogger<IKahuna> logger;
 
     /// <summary>
@@ -41,8 +45,19 @@ internal sealed class LockLocator
         this.raft = raft;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.interNodeCommunication = interNodeCommunication;
+        this.advertiser = ClientEndpointAdvertiserFactory.Create(raft, configuration);
         this.logger = logger;
     }
+
+    /// <summary>
+    /// Records where a lock resource was admitted, so the response can carry it back as an advisory
+    /// hint. A no-op when no capture is open or the node advertises no client endpoint.
+    /// </summary>
+    private void RecordLocalRoute(string resource, int partitionId) =>
+        RouteCaptureScope.Record(KahunaRoutingDomain.Lock, resource, partitionId, advertiser.LocalAdvertised, KahunaRouteProvenance.Executed);
+
+    private void RecordForwardedRoute(string resource, int partitionId, string leader) =>
+        RouteCaptureScope.Record(KahunaRoutingDomain.Lock, resource, partitionId, advertiser.Advertise(leader), KahunaRouteProvenance.Forwarded);
 
     /// <summary>
     /// Locates the leader node for the given key and passes a TryLock request to the locker actor for the given lock name.
@@ -64,7 +79,10 @@ internal sealed class LockLocator
             return (LockResponseType.MustRetry, 0);
 
         if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.TryLock(resource, owner, expiresMs, durability);
+        }
 
         string? leader;
 
@@ -91,9 +109,14 @@ internal sealed class LockLocator
         }
 
         if (leader == raft.GetLocalEndpoint())
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.TryLock(resource, owner, expiresMs, durability);
+        }
 
         logger.LogLockRedirect(resource, partitionId, leader);
+
+        RecordForwardedRoute(resource, partitionId, leader);
 
         return await interNodeCommunication.TryLock(leader, resource, owner, expiresMs, durability, cancellationToken);
     }
@@ -118,7 +141,10 @@ internal sealed class LockLocator
             return (LockResponseType.MustRetry, 0);
 
         if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
+        }
 
         string? leader;
 
@@ -145,9 +171,14 @@ internal sealed class LockLocator
         }
 
         if (leader == raft.GetLocalEndpoint())
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.TryExtendLock(resource, owner, expiresMs, durability);
+        }
 
         logger.LogExtendLockRedirect(resource, partitionId, leader);
+
+        RecordForwardedRoute(resource, partitionId, leader);
 
         return await interNodeCommunication.TryExtendLock(leader, resource, owner, expiresMs, durability, cancellationToken);
     }
@@ -172,7 +203,10 @@ internal sealed class LockLocator
             return LockResponseType.MustRetry;
 
         if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.TryUnlock(resource, owner, durability);
+        }
 
         string? leader;
 
@@ -199,9 +233,14 @@ internal sealed class LockLocator
         }
 
         if (leader == raft.GetLocalEndpoint())
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.TryUnlock(resource, owner, durability);
+        }
 
         logger.LogExtendLockRedirect(resource, partitionId, leader);
+
+        RecordForwardedRoute(resource, partitionId, leader);
 
         return await interNodeCommunication.TryUnlock(leader, resource, owner, durability, cancellationToken);
     }
@@ -228,7 +267,10 @@ internal sealed class LockLocator
         // stale holder — the one read where staleness can break mutual-exclusion assumptions.
         // Writes don't need this; replication itself fails on a deposed leader.
         if (await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+        {
+            RecordLocalRoute(resource, partitionId);
             return await manager.GetLock(resource, durability);
+        }
 
         string? leader;
 
@@ -258,6 +300,8 @@ internal sealed class LockLocator
             return (LockResponseType.MustRetry, null);
 
         logger.LogGetLockRedirect(resource, partitionId, leader);
+
+        RecordForwardedRoute(resource, partitionId, leader);
 
         return await interNodeCommunication.GetLock(leader, resource, durability, cancellationToken);
     }

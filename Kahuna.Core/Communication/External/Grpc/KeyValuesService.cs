@@ -16,6 +16,8 @@ using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
@@ -89,6 +91,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         byte[]? compareValue = ByteStringPayload.GetArrayOrNull(request.HasCompareValue, request.CompareValue);
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -104,7 +108,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
-        return new()
+        GrpcTrySetKeyValueResponse setResponse = new()
         {
             Type = (GrpcKeyValueResponseType)response,
             Revision = revision,
@@ -113,6 +117,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        // A conditional write that failed its compare is a terminal answer about a key whose owner
+        // was resolved, so it carries the hint like a success does.
+        GrpcRouteHint? setRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+        if (setRoute is not null)
+            setResponse.Route = setRoute;
+
+        return setResponse;
     }
     
     /// <summary>
@@ -212,6 +224,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {       
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
    
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
             GetRequestSetManyItems(request.Items),
             context.CancellationToken
@@ -222,7 +236,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
 
-        response.Items.AddRange(GetResponseSetManyItems(responses));
+        RouteHintWriter.Table routes = new(capture);
+
+        response.Items.AddRange(GetResponseSetManyItems(responses, routes));
+
+        if (routes.HasRoutes)
+            response.Routes.AddRange(routes.ToGrpc());
 
         return response;
     }    
@@ -255,7 +274,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return requestItems;
     }
     
-    private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponseItem> responses)
+    private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponseItem> responses, RouteHintWriter.Table routes)
     {
         foreach (KahunaSetKeyValueResponseItem response in responses)
         {
@@ -267,7 +286,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 LastModifiedNode = response.LastModified.N,
                 LastModifiedPhysical = response.LastModified.L,
                 LastModifiedCounter = response.LastModified.C,
-                Durability = (GrpcKeyValueDurability)response.Durability
+                Durability = (GrpcKeyValueDurability)response.Durability,
+                RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? "")
             };
         }
     }
@@ -281,6 +301,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             ? new(request.OperationIdHigh, request.OperationIdLow)
             : default;
 
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
             GetRequestDeleteManyItems(request.Items),
             context.CancellationToken,
@@ -293,7 +315,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
 
-        response.Items.AddRange(GetResponseDeleteManyItems(responses));
+        RouteHintWriter.Table routes = new(capture);
+
+        response.Items.AddRange(GetResponseDeleteManyItems(responses, routes));
+
+        if (routes.HasRoutes)
+            response.Routes.AddRange(routes.ToGrpc());
 
         return response;
     }
@@ -315,7 +342,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return requestItems;
     }
 
-    private static IEnumerable<GrpcTryDeleteManyKeyValueResponseItem> GetResponseDeleteManyItems(List<KahunaDeleteKeyValueResponseItem> responses)
+    private static IEnumerable<GrpcTryDeleteManyKeyValueResponseItem> GetResponseDeleteManyItems(List<KahunaDeleteKeyValueResponseItem> responses, RouteHintWriter.Table routes)
     {
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
         {
@@ -327,7 +354,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 LastModifiedNode = response.LastModified.N,
                 LastModifiedPhysical = response.LastModified.L,
                 LastModifiedCounter = response.LastModified.C,
-                Durability = (GrpcKeyValueDurability)response.Durability
+                Durability = (GrpcKeyValueDurability)response.Durability,
+                RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? "")
             };
         }
     }
@@ -359,6 +387,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -369,7 +399,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
-        return new()
+        GrpcTryExtendKeyValueResponse extendResponse = new()
         {
             Type = (GrpcKeyValueResponseType)type,
             Revision = revision,
@@ -378,6 +408,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        GrpcRouteHint? extendRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+        if (extendRoute is not null)
+            extendResponse.Route = extendRoute;
+
+        return extendResponse;
     }
 
     /// <summary>
@@ -407,6 +443,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -416,7 +454,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
-        return new()
+        GrpcTryDeleteKeyValueResponse deleteResponse = new()
         {
             Type = (GrpcKeyValueResponseType)type,
             Revision = revision,
@@ -425,6 +463,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             LastModifiedCounter = lastModified.C,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        GrpcRouteHint? deleteRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+        if (deleteRoute is not null)
+            deleteResponse.Route = deleteRoute;
+
+        return deleteResponse;
     }
 
     /// <summary>
@@ -464,6 +508,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         // partition this node does not lead is stale or absent, so a batched read would miss a committed value a
         // routed single-key read (or a same-transaction scan) sees. The non-locating internal is only correct on
         // the inter-node path, where the caller already routed the keys to this leader.
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
@@ -472,7 +518,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryGetManyValuesResponse response = new();
-        response.Items.Add(GetResponseGetManyValuesItems(responses));
+        RouteHintWriter.Table routes = new(capture);
+        response.Items.Add(GetResponseGetManyValuesItems(responses, routes));
+
+        if (routes.HasRoutes)
+            response.Routes.AddRange(routes.ToGrpc());
+
         return response;
     }
 
@@ -492,6 +543,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -526,14 +579,26 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             if (keyValueContext.Value is not null)
                 response.Value = UnsafeByteOperations.UnsafeWrap(keyValueContext.Value);
 
+            GrpcRouteHint? foundRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+            if (foundRoute is not null)
+                response.Route = foundRoute;
+
             return response;
         }
 
-        return new()
+        GrpcTryGetKeyValueResponse missing = new()
         {
             Type = (GrpcKeyValueResponseType)type,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        // "The key does not exist" is a terminal answer about a key whose owner was resolved. Left
+        // without a hint, a read-mostly workload over absent keys would never learn a route.
+        GrpcRouteHint? missingRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+        if (missingRoute is not null)
+            missing.Route = missingRoute;
+
+        return missing;
     }
 
     /// <summary>
@@ -588,6 +653,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         // Route per key for the same reason as TryGetManyValues: the non-locating internal reads only this node's
         // actors and is correct only on the already-routed inter-node path.
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
@@ -596,7 +663,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryExistsManyValuesResponse response = new();
-        response.Items.Add(GetResponseExistsManyValuesItems(responses));
+        RouteHintWriter.Table routes = new(capture);
+        response.Items.Add(GetResponseExistsManyValuesItems(responses, routes));
+
+        if (routes.HasRoutes)
+            response.Routes.AddRange(routes.ToGrpc());
+
         return response;
     }
 
@@ -616,6 +688,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -646,15 +720,25 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 State = (GrpcKeyValueState)keyValueContext.State,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
-            
+
+            GrpcRouteHint? presentRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+            if (presentRoute is not null)
+                response.Route = presentRoute;
+
             return response;
         }
 
-        return new()
+        GrpcTryExistsKeyValueResponse absent = new()
         {
             Type = (GrpcKeyValueResponseType)type,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        GrpcRouteHint? absentRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
+        if (absentRoute is not null)
+            absent.Route = absentRoute;
+
+        return absent;
     }
 
     /// <summary>
@@ -688,7 +772,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     private static IEnumerable<GrpcTryGetManyValuesResponseItem> GetResponseGetManyValuesItems(
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
+        RouteHintWriter.Table? routes = null
     )
     {
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
@@ -718,12 +803,16 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                     item.Value = UnsafeByteOperations.UnsafeWrap(entry.Value);
             }
 
+            if (routes is not null)
+                item.RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, key);
+
             yield return item;
         }
     }
 
     private static IEnumerable<GrpcTryExistsManyValuesResponseItem> GetResponseExistsManyValuesItems(
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
+        RouteHintWriter.Table? routes = null
     )
     {
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
@@ -749,6 +838,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 item.LastModifiedCounter = entry.LastModified.C;
                 item.State = (GrpcKeyValueState)entry.State;
             }
+
+            if (routes is not null)
+                item.RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, key);
 
             yield return item;
         }

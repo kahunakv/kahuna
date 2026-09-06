@@ -64,6 +64,16 @@ public static class ConfigurationValidator
         if (string.IsNullOrEmpty(configuration.InterNodeGrpcScheme))
             configuration.InterNodeGrpcScheme = "https://";
 
+        // A hint that names a peer is built by prefixing that peer's Raft endpoint, so the scheme
+        // defaults to the one this node already dials its peers with rather than to a fixed value.
+        if (string.IsNullOrEmpty(configuration.AdvertisedClientScheme))
+            configuration.AdvertisedClientScheme = configuration.InterNodeGrpcScheme;
+
+        // A trailing slash would produce a double separator once a client appends a path, and the
+        // client compares endpoints ordinally, so one node advertising a trailing slash would look
+        // like a different node from the same one advertising none.
+        configuration.AdvertisedClientEndpoint = configuration.AdvertisedClientEndpoint.TrimEnd('/');
+
         if (configuration.LocksWorkers <= 0)
             configuration.LocksWorkers = Math.Max(32, Environment.ProcessorCount * 4);
         

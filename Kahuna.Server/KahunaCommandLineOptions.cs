@@ -39,6 +39,18 @@ public sealed class KahunaCommandLineOptions
     [Option("dashboard-refresh-seconds", Required = false, HelpText = "How often the dashboard polls this node, in seconds (1-300)", Default = 5)]
     public int DashboardRefreshSeconds { get; set; }
 
+    [Option("advertised-client-endpoint", Required = false, HelpText = "Base URL this node advertises to clients in routing hints (e.g. https://node1:8082). Empty derives it from the Raft endpoint and --advertised-client-scheme; a deployment whose Raft address is not client-reachable must set it explicitly", Default = "")]
+    public string AdvertisedClientEndpoint { get; set; } = "";
+
+    [Option("advertised-client-scheme", Required = false, HelpText = "URL scheme prepended to a peer's Raft endpoint when a routing hint names that peer. Empty follows --raft-grpc-scheme", Default = "")]
+    public string AdvertisedClientScheme { get; set; } = "";
+
+    [Option("disable-peer-endpoint-advertisement", Required = false, HelpText = "Never name a peer in a routing hint. Set it where a peer's client URL cannot be derived from its Raft endpoint, so clients learn only routes that name the answering node")]
+    public bool DisablePeerEndpointAdvertisement { get; set; }
+
+    [Option("disable-routing-hints", Required = false, HelpText = "Do not return advisory routing hints on responses. Clients then keep their configured endpoint selection")]
+    public bool DisableRoutingHints { get; set; }
+
     [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
     public string Storage { get; set; } = "";
     

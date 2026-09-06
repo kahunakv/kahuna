@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "Communication/Grpc/Protos/routing.proto";
+
 service Sequencer {
   rpc CreateSequence (GrpcCreateSequenceRequest) returns (GrpcSequenceResponse);
   rpc GetSequence (GrpcGetSequenceRequest) returns (GrpcSequenceResponse);
@@ -69,6 +71,9 @@ message GrpcSequenceResponse {
   GrpcSequenceEntry Sequence = 3;
   int64 Revision = 4;
   int32 TimeElapsedMs = 5;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 6;
 }
 
 message GrpcSequenceAllocationResponse {
@@ -76,6 +81,9 @@ message GrpcSequenceAllocationResponse {
   GrpcSequenceResponseType Type = 2;
   GrpcSequenceAllocation Allocation = 3;
   int32 TimeElapsedMs = 4;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 5;
 }
 
 enum GrpcSequenceDurability {

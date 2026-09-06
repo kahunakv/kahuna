@@ -454,6 +454,19 @@ public interface IKahuna
     public KahunaRangeMapResponse GetRangeMap(string? keySpace = null);
 
     /// <summary>
+    /// Returns the scoped routing metadata a client needs to resolve a resource it has never seen to
+    /// its partition: the hash rule for hash-routed key spaces, the descriptor intervals for
+    /// key-range routed ones, and the advisory leader of each partition.
+    /// <para>
+    /// Read-only and advisory. Public handlers re-resolve every key, re-apply live range fences and
+    /// re-check leadership, so a client acting on stale metadata pays a forward and never gets a
+    /// wrong result. The routing modes reported are this node's own and are not replicated, so
+    /// asking a different node can legitimately give a different answer for the same space.
+    /// </para>
+    /// </summary>
+    public Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string? keySpace = null);
+
+    /// <summary>
     /// Checks every KeyRange descriptor and splits any that exceed the configured size threshold.
     /// Returns the number of splits performed. Only executes on the node holding leadership of
     /// both the system partition (0) and meta partition (1); returns 0 on other nodes.

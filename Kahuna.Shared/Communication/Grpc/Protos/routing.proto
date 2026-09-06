@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+// Additive routing metadata shared by the key-value, lock, sequence and cluster contracts.
+//
+// A hint is advisory. It tells a client which node the operation resolved to, so the next
+// operation on the same resource can start there instead of landing on an arbitrary node and
+// being forwarded. It is never an authority claim: the receiving node re-resolves the resource,
+// re-checks leadership and re-applies range fences on every request, so a stale hint costs a
+// forward and nothing else.
+
+// Where the endpoint in a hint comes from.
+enum GrpcRouteProvenance {
+  // No usable route was resolved; ignore the rest of the hint.
+  ROUTE_PROVENANCE_UNKNOWN = 0;
+  // The answering node resolved itself as the owner and executed the operation. The endpoint is
+  // the final serving destination.
+  ROUTE_PROVENANCE_EXECUTED = 1;
+  // The answering node forwarded the operation to the endpoint. That node re-resolves ownership
+  // on arrival, so the endpoint is a best-effort suggestion, not a proven executor.
+  ROUTE_PROVENANCE_FORWARDED = 2;
+}
+
+// One resolved route. Absent (or with UNKNOWN provenance) whenever ownership could not be
+// resolved, which leaves the caller on its existing endpoint selection.
+message GrpcRouteHint {
+  // The partition the resource resolved to. 0 when unknown.
+  int32 PartitionId = 1;
+  // The client-reachable base URL the node advertises, never a Raft transport address. Empty
+  // when the answering node advertises no client endpoint.
+  string Endpoint = 2;
+  GrpcRouteProvenance Provenance = 3;
+  // Committed generation of the range descriptor that admitted the resource, for key-range
+  // routed spaces. 0 for hash-routed spaces and whenever no descriptor was consulted.
+  int64 Generation = 4;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scoped routing metadata: enough for a client to resolve a previously unseen resource to its
+// partition without a round trip, plus the advisory leader of each partition.
+// ---------------------------------------------------------------------------------------------
+
+message GrpcGetRoutingMetadataRequest {
+  // Optional filter. Empty means every key space the answering node knows about.
+  string KeySpace = 1;
+}
+
+message GrpcGetRoutingMetadataResponse {
+  // Whether cluster initialization has completed. Until true the map is not usable and the
+  // client keeps its existing endpoint selection.
+  bool Initialized = 1;
+  // Contract version of this payload. A client that does not recognise it must fall back.
+  int32 SchemaVersion = 2;
+  // Identifier of the hash algorithm the server applies to hash-routed key spaces. A client that
+  // does not implement exactly this identifier must fall back.
+  string HashAlgorithm = 3;
+  // The character whose LAST occurrence ends the hashed prefix. A key without it is hashed whole.
+  string PrefixSeparator = 4;
+  // Number of buckets the hash maps onto.
+  int32 HashPoolSize = 5;
+  // Partition id of bucket 0; bucket b is partition HashPartitionOffset + b.
+  int32 HashPartitionOffset = 6;
+  // Format string for the storage key of a named sequence, with {0} standing for the name.
+  // Sequences route by the partition of this key, not by a hash of the bare name.
+  string SequenceStorageKeyFormat = 7;
+  // Key prefix reserved for server-managed records. A client must not route or cache keys under it.
+  string ReservedKeyPrefix = 8;
+  // The answering node's own advertised client endpoint.
+  string LocalEndpoint = 9;
+  // Identity of the committed view the key spaces below were read from. Two responses carrying
+  // the same identity describe the same map; a differing identity between pages means the map
+  // moved and the paged read must restart.
+  int64 SnapshotVersion = 10;
+  // False when the answering node could not produce one coherent view — a registration, split,
+  // merge or move ran across the read. The key spaces must then be discarded, never merged.
+  bool Coherent = 11;
+  repeated GrpcRoutingKeySpace KeySpaces = 12;
+  repeated GrpcPartitionLeader Leaders = 13;
+}
+
+message GrpcRoutingKeySpace {
+  string KeySpace = 1;
+  // "KeyRange" or "Hash", as the ANSWERING node routes it. Node-local and unreplicated, so two
+  // nodes may legitimately disagree; a client that reaches a different node re-reads the map.
+  string RoutingMode = 2;
+  // Ordered by StartKey ordinally, the way the server's own router searches them. Only present
+  // for key-range routed spaces.
+  repeated GrpcRoutingRange Ranges = 3;
+}
+
+message GrpcRoutingRange {
+  // Absent StartKey means -infinity within the key space; absent EndKey means +infinity. Field
+  // presence carries that distinction: an empty string is a real bound, not an open end.
+  optional string StartKey = 1;
+  optional string EndKey = 2;
+  int32 PartitionId = 3;
+  int64 Generation = 4;
+}
+
+message GrpcPartitionLeader {
+  int32 PartitionId = 1;
+  // Advertised client endpoint of the believed leader. Empty means the leader is unknown, which
+  // is reported explicitly rather than guessed.
+  string Endpoint = 2;
+}

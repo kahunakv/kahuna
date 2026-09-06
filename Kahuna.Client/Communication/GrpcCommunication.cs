@@ -16,8 +16,10 @@ using Google.Protobuf.Collections;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
+using Kahuna.Client.Routing;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -31,7 +33,7 @@ namespace Kahuna.Client.Communication;
 /// Provides an implementation of the IKahunaCommunication interface for gRPC-based communication.
 /// This class offers methods to perform distributed locking and manage key-value storage in a gRPC context.
 /// </summary>
-public class GrpcCommunication : IKahunaCommunication
+public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver, IKahunaRoutingTransport
 {
     // gRPC client stubs are thread-safe and bound to a channel, so one cached stub per channel
     // replaces a per-call allocation on every unary path. ConditionalWeakTable lets the entry die
@@ -135,6 +137,128 @@ public class GrpcCommunication : IKahunaCommunication
         this.logger = logger;
     }
 
+    private IKahunaRouteSink? routeSink;
+
+    /// <summary>
+    /// Set by the client when routing is enabled. Assigned once during construction, before any
+    /// batcher exists, so a batcher created later simply reads it.
+    /// </summary>
+    IKahunaRouteSink? IKahunaRouteSinkReceiver.RouteSink
+    {
+        set
+        {
+            routeSink = value;
+
+            // Batchers already built for a URL keep serving it, so the sink is pushed into them too
+            // rather than only into the ones created afterwards.
+            foreach (KeyValuePair<string, Lazy<GrpcBatcher>> entry in batchers)
+            {
+                if (entry.Value.IsValueCreated)
+                    entry.Value.Value.RouteSink = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records the route a response reported for one resource.
+    /// <para>
+    /// <paramref name="url"/> is the endpoint this request was sent to. The cache uses it to drop a
+    /// reply that arrives after a newer one already moved the route, instead of letting the late
+    /// reply undo the newer answer.
+    /// </para>
+    /// </summary>
+    private void LearnRoute(KahunaRoutingDomain domain, string resource, GrpcRouteHint? hint, string url)
+    {
+        IKahunaRouteSink? sink = routeSink;
+
+        if (sink is null || hint is null)
+            return;
+
+        sink.Learn(domain, resource, hint.PartitionId, hint.Endpoint, (KahunaRouteProvenance)hint.Provenance, hint.Generation, url);
+    }
+
+    /// <summary>
+    /// Records the routes a batched response reported, resolving each item's 1-based index into the
+    /// response's deduplicated hint table. An item with index 0 resolved no route.
+    /// </summary>
+    private void LearnBatchRoutes<TItem>(IReadOnlyList<TItem> items, RepeatedField<GrpcRouteHint> table, string url, Func<TItem, string> keyOf, Func<TItem, int> indexOf)
+    {
+        IKahunaRouteSink? sink = routeSink;
+
+        if (sink is null || table.Count == 0)
+            return;
+
+        foreach (TItem item in items)
+        {
+            int index = indexOf(item);
+
+            if (index <= 0 || index > table.Count)
+                continue;
+
+            GrpcRouteHint hint = table[index - 1];
+
+            sink.Learn(KahunaRoutingDomain.KeyValue, keyOf(item), hint.PartitionId, hint.Endpoint, (KahunaRouteProvenance)hint.Provenance, hint.Generation, url);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string url, string? keySpace, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+
+        Cluster.ClusterClient client = new(channel);
+
+        GrpcGetRoutingMetadataResponse response = await client.GetRoutingMetadataAsync(
+            new GrpcGetRoutingMetadataRequest { KeySpace = keySpace ?? "" },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        KahunaRoutingMetadataResponse metadata = new()
+        {
+            Initialized = response.Initialized,
+            SchemaVersion = response.SchemaVersion,
+            HashAlgorithm = response.HashAlgorithm,
+            PrefixSeparator = response.PrefixSeparator,
+            HashPoolSize = response.HashPoolSize,
+            HashPartitionOffset = response.HashPartitionOffset,
+            SequenceStorageKeyFormat = response.SequenceStorageKeyFormat,
+            ReservedKeyPrefix = response.ReservedKeyPrefix,
+            LocalEndpoint = response.LocalEndpoint,
+            SnapshotVersion = response.SnapshotVersion,
+            Coherent = response.Coherent
+        };
+
+        foreach (GrpcRoutingKeySpace space in response.KeySpaces)
+        {
+            KahunaRoutingKeySpaceResponse entry = new()
+            {
+                KeySpace = space.KeySpace,
+                RoutingMode = space.RoutingMode
+            };
+
+            foreach (GrpcRoutingRange range in space.Ranges)
+                entry.Ranges.Add(new KahunaRoutingRangeResponse
+                {
+                    // Field presence is what carries an open end; an unset bound must stay null
+                    // rather than become an empty-string bound, which is a real key.
+                    StartKey = range.HasStartKey ? range.StartKey : null,
+                    EndKey = range.HasEndKey ? range.EndKey : null,
+                    PartitionId = range.PartitionId,
+                    Generation = range.Generation
+                });
+
+            metadata.KeySpaces.Add(entry);
+        }
+
+        foreach (GrpcPartitionLeader leader in response.Leaders)
+            metadata.Leaders.Add(new KahunaPartitionLeaderResponse
+            {
+                PartitionId = leader.PartitionId,
+                Endpoint = leader.Endpoint
+            });
+
+        return metadata;
+    }
+
     /// <summary>
     /// Attempts to acquire a lock on a specified resource using the provided settings.
     /// </summary>
@@ -184,6 +308,8 @@ public class GrpcCommunication : IKahunaCommunication
 
                 if (response is null)
                     throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
 
                 if (response.Type == GrpcLockResponseType.LockResponseTypeLocked)
                     return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
@@ -249,6 +375,8 @@ public class GrpcCommunication : IKahunaCommunication
 
                 if (response is null)
                     throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
 
                 if (response.Type == GrpcLockResponseType.LockResponseTypeUnlocked)
                     return true;
@@ -324,6 +452,8 @@ public class GrpcCommunication : IKahunaCommunication
                 if (response is null)
                     throw new KahunaException("Response is null", LockResponseType.Errored);
 
+                LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
+
                 if (response.Type == GrpcLockResponseType.LockResponseTypeExtended)
                     return (true, response.FencingToken);
 
@@ -389,6 +519,8 @@ public class GrpcCommunication : IKahunaCommunication
 
                 if (response is null)
                     throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
 
                 if (response.Type == GrpcLockResponseType.LockResponseTypeGot)
                     return new(response.Owner?.ToByteArray(), new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter), response.FencingToken);
@@ -486,6 +618,8 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
+
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return (true, response.Revision, response.TimeElapsedMs);
             
@@ -523,7 +657,9 @@ public class GrpcCommunication : IKahunaCommunication
 
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
-            
+
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
+
         return (GetSetManyKeyValueResponseItems(response.Items), response.TimeElapsedMs);
     }
 
@@ -562,6 +698,8 @@ public class GrpcCommunication : IKahunaCommunication
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
+
         return (GetDeleteManyKeyValueResponseItems(response.Items), response.TimeElapsedMs);
     }
 
@@ -592,6 +730,8 @@ public class GrpcCommunication : IKahunaCommunication
             request, cancellationToken: cancellationToken
         ).ConfigureAwait(false);
 
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
+
         return (GetGetManyKeyValuesResponseItems(response.Items), 0);
     }
 
@@ -617,6 +757,8 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcTryExistsManyValuesResponse response = await client.TryExistsManyValuesAsync(
             request, cancellationToken: cancellationToken
         ).ConfigureAwait(false);
+
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
 
         return (GetExistsManyKeyValuesResponseItems(response.Items), 0);
     }
@@ -849,6 +991,8 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
+
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return (true, response.Revision, response.TimeElapsedMs);
             
@@ -929,6 +1073,8 @@ public class GrpcCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == GrpcKeyValueResponseType.TypeSet)
                 return (true, response.Revision, response.TimeElapsedMs);
@@ -1015,6 +1161,8 @@ public class GrpcCommunication : IKahunaCommunication
 
                     if (response is null)
                         throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+                    LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
                     switch (response.Type)
                     {
@@ -1111,6 +1259,8 @@ public class GrpcCommunication : IKahunaCommunication
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
+
             switch (response.Type)
             {
                 case GrpcKeyValueResponseType.TypeExists:
@@ -1175,6 +1325,8 @@ public class GrpcCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             switch (response.Type)
             {
@@ -1243,6 +1395,8 @@ public class GrpcCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             switch (response.Type)
             {
@@ -2082,6 +2236,8 @@ public class GrpcCommunication : IKahunaCommunication
             Durability = (GrpcSequenceDurability)durability
         }, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
+
         return ((SequenceResponseType)response.Type, ToReadOnlySequenceEntry(response.Sequence), response.TimeElapsedMs);
     }
 
@@ -2102,6 +2258,8 @@ public class GrpcCommunication : IKahunaCommunication
         Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceResponse response = await client.CreateSequenceAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
+
         return ((SequenceResponseType)response.Type, response.Revision, response.TimeElapsedMs);
     }
 
@@ -2119,6 +2277,8 @@ public class GrpcCommunication : IKahunaCommunication
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceAllocationResponse response = await client.NextSequenceValueAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
 
         return ((SequenceResponseType)response.Type, ToSequenceAllocation(response.Allocation), response.TimeElapsedMs);
     }
@@ -2139,6 +2299,8 @@ public class GrpcCommunication : IKahunaCommunication
         Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceAllocationResponse response = await client.ReserveSequenceRangeAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
+
         return ((SequenceResponseType)response.Type, ToSequenceAllocation(response.Allocation), response.TimeElapsedMs);
     }
 
@@ -2152,6 +2314,8 @@ public class GrpcCommunication : IKahunaCommunication
             Name = name,
             Durability = (GrpcSequenceDurability)durability
         }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
 
         return ((SequenceResponseType)response.Type, response.TimeElapsedMs);
     }
@@ -2227,7 +2391,8 @@ public class GrpcCommunication : IKahunaCommunication
     private Lazy<GrpcBatcher> CreateSharedBatcher(string url)
     {
         TimeSpan timeout = options?.DefaultOperationTimeout ?? TimeSpan.FromSeconds(30);
-        return new(() => new(url, timeout, options, logger));
+
+        return new(() => new(url, timeout, options, logger) { RouteSink = routeSink });
     }
 
     // Snapshot hold operations are intentionally unary: they are infrequent control-plane calls.

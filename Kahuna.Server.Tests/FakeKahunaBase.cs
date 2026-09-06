@@ -133,6 +133,8 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => throw new NotImplementedException();
     public virtual Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
     public virtual KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => throw new NotImplementedException();
+
+    public virtual Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string? keySpace = null) => throw new NotImplementedException();
     public virtual Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual bool IsBackupConfigured => throw new NotImplementedException();

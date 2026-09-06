@@ -1,5 +1,8 @@
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Sequences;
 using Kommander;
 
@@ -23,14 +26,17 @@ internal sealed class SequenceLocator
 
     private readonly IInterNodeCommunication interNodeCommunication;
 
+    private readonly ClientEndpointAdvertiser advertiser;
+
     private readonly ILogger<IKahuna> logger;
 
-    public SequenceLocator(SequencerManager manager, IRaft raft, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger)
+    public SequenceLocator(SequencerManager manager, IRaft raft, IInterNodeCommunication interNodeCommunication, KahunaConfiguration configuration, ILogger<IKahuna> logger)
     {
         this.manager = manager;
         this.raft = raft;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.interNodeCommunication = interNodeCommunication;
+        this.advertiser = ClientEndpointAdvertiserFactory.Create(raft, configuration);
         this.logger = logger;
     }
 
@@ -136,7 +142,10 @@ internal sealed class SequenceLocator
             : await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false);
 
         if (servesLocally)
+        {
+            RouteCaptureScope.Record(KahunaRoutingDomain.Sequence, name, partitionId, advertiser.LocalAdvertised, KahunaRouteProvenance.Executed);
             return (true, raft.GetLocalEndpoint());
+        }
 
         string? leader;
 
@@ -162,10 +171,18 @@ internal sealed class SequenceLocator
         }
 
         if (leader == raft.GetLocalEndpoint())
-            return confirmLeadership ? (false, "") : (true, leader);
+        {
+            if (confirmLeadership)
+                return (false, "");
+
+            RouteCaptureScope.Record(KahunaRoutingDomain.Sequence, name, partitionId, advertiser.LocalAdvertised, KahunaRouteProvenance.Executed);
+            return (true, leader);
+        }
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogDebug("Sequence '{Name}' on partition {PartitionId} redirected to {Leader}", name, partitionId, leader);
+
+        RouteCaptureScope.Record(KahunaRoutingDomain.Sequence, name, partitionId, advertiser.Advertise(leader), KahunaRouteProvenance.Forwarded);
 
         return (false, leader);
     }

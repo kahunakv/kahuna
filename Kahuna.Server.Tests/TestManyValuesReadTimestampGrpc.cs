@@ -254,6 +254,8 @@ public class TestManyValuesReadTimestampGrpc
         public Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => throw new NotImplementedException();
+
+        public Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string? keySpace = null) => throw new NotImplementedException();
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public bool IsBackupConfigured => throw new NotImplementedException();

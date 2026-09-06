@@ -14,6 +14,7 @@ using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
+using Kahuna.Client.Routing;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
@@ -207,6 +208,17 @@ internal sealed class GrpcBatcher
     /// Default deadline for batched ops with no caller-supplied token.
     /// <see cref="TimeSpan.Zero"/> disables the deadline (hang-forever on wedged streams).
     /// </param>
+    /// <summary>
+    /// Where this batcher reports that its endpoint stopped answering. One batcher serves one URL,
+    /// which makes it the single place every operation to that node passes through — so reporting
+    /// here covers every verb without a catch block per operation.
+    /// <para>
+    /// A report says the transport failed, and nothing about whether the operation ran. Whether it
+    /// may be retried is decided by that operation's own contract.
+    /// </para>
+    /// </summary>
+    public IKahunaRouteSink? RouteSink { get; set; }
+
     public GrpcBatcher(string url, TimeSpan operationTimeout = default, KahunaOptions? securityOptions = null, ILogger? logger = null)
     {
         this.url = url;
@@ -681,6 +693,8 @@ internal sealed class GrpcBatcher
                 InvalidateSharedConnections(MakeCacheKey(url, securityOptions));
                 RemoveRequestRefs(requests);
 
+                RouteSink?.ReportEndpointFailure(url);
+
                 if (attempt == 0 && requests.Count == 1)
                     continue;
 
@@ -690,6 +704,9 @@ internal sealed class GrpcBatcher
             catch (Exception ex)
             {
                 RemoveRequestRefs(requests);
+
+                RouteSink?.ReportEndpointFailure(url);
+
                 FailRequests(requests, ex);
                 return;
             }

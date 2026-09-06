@@ -11,6 +11,8 @@ using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Locks;
 using System.Runtime.InteropServices;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
 using Kahuna.Communication.External.Grpc.Logging;
 
 namespace Kahuna.Communication.External.Grpc;
@@ -67,7 +69,9 @@ public sealed class LocksService : Locker.LockerBase
         byte[] owner;
 
         owner = ByteStringPayload.GetArray(request.Owner);
-        
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (LockResponseType response, long fencingToken)  = await locks.LocateAndTryLock(
             request.Resource, 
             owner, 
@@ -76,12 +80,20 @@ public sealed class LocksService : Locker.LockerBase
             context.CancellationToken
         );
 
-        return new()
+        GrpcTryLockResponse lockResponse = new()
         {
             Type = (GrpcLockResponseType)response,
             FencingToken = fencingToken,
             ServedFrom = ""
         };
+
+        // A hint rides back on a refusal as well: the caller learns where the resource lives even
+        // when the lock was already held, which is the outcome a contended resource returns most.
+        GrpcRouteHint? lockRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.Lock, request.Resource);
+        if (lockRoute is not null)
+            lockResponse.Route = lockRoute;
+
+        return lockResponse;
     }
     
     public override Task<GrpcExtendLockResponse> TryExtendLock(GrpcExtendLockRequest request, ServerCallContext context)
@@ -101,6 +113,8 @@ public sealed class LocksService : Locker.LockerBase
 
         owner = ByteStringPayload.GetArray(request.Owner);
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
             request.Resource, 
             owner, 
@@ -109,12 +123,18 @@ public sealed class LocksService : Locker.LockerBase
             context.CancellationToken
         );
 
-        return new()
+        GrpcExtendLockResponse extendResponse = new()
         {
             Type = (GrpcLockResponseType)response,
             FencingToken = fencingToken,
             ServedFrom = ""
         };
+
+        GrpcRouteHint? extendRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.Lock, request.Resource);
+        if (extendRoute is not null)
+            extendResponse.Route = extendRoute;
+
+        return extendResponse;
     }
     
     public override Task<GrpcUnlockResponse> Unlock(GrpcUnlockRequest request, ServerCallContext context)
@@ -134,6 +154,8 @@ public sealed class LocksService : Locker.LockerBase
 
         owner = ByteStringPayload.GetArray(request.Owner);
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         LockResponseType response = await locks.LocateAndTryUnlock(
             request.Resource, 
             owner, 
@@ -141,11 +163,17 @@ public sealed class LocksService : Locker.LockerBase
             context.CancellationToken
         );
 
-        return new()
+        GrpcUnlockResponse unlockResponse = new()
         {
             Type = (GrpcLockResponseType)response,
             ServedFrom = ""
         };
+
+        GrpcRouteHint? unlockRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.Lock, request.Resource);
+        if (unlockRoute is not null)
+            unlockResponse.Route = unlockRoute;
+
+        return unlockResponse;
     }
     
     public override Task<GrpcGetLockResponse> GetLock(GrpcGetLockRequest request, ServerCallContext context)
@@ -161,17 +189,31 @@ public sealed class LocksService : Locker.LockerBase
                 Type = GrpcLockResponseType.LockResponseTypeInvalidInput
             };
         
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (LockResponseType type, ReadOnlyLockEntry? lockContext) = await locks.LocateAndGetLock(
             request.Resource, 
             (LockDurability)request.Durability, 
             context.CancellationToken
         );
-        
+
+        GrpcRouteHint? getRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.Lock, request.Resource);
+
+        // "The lock does not exist" is a terminal answer about a resource whose owner was resolved,
+        // so it carries the hint too — otherwise a caller reading a free lock would never learn
+        // where that lock lives.
         if (type != LockResponseType.Got)
-            return new()
+        {
+            GrpcGetLockResponse refusal = new()
             {
                 Type = (GrpcLockResponseType)type
             };
+
+            if (getRoute is not null)
+                refusal.Route = getRoute;
+
+            return refusal;
+        }
 
         GrpcGetLockResponse response = new()
         {
@@ -182,6 +224,9 @@ public sealed class LocksService : Locker.LockerBase
             ExpiresCounter = lockContext?.Expires.C ?? 0,
             ServedFrom = ""
         };
+
+        if (getRoute is not null)
+            response.Route = getRoute;
 
         // An ownerless lock leaves the field unset: the generated setter rejects null, so a conditional that
         // still runs it would throw instead of guarding. A held lock always names an owner, which is why this

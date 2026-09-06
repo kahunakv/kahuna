@@ -12,8 +12,10 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Flurl.Http;
 using Kommander.Diagnostics;
+using Kahuna.Client.Routing;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
 using Kommander.Time;
@@ -33,8 +35,81 @@ namespace Kahuna.Client.Communication;
 /// This class provides a set of asynchronous methods to facilitate communication
 /// with a REST-based backend for lock management and key-value store operations.
 /// </summary>
-public class RestCommunication : IKahunaCommunication
+public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver, IKahunaRoutingTransport
 {
+    private IKahunaRouteSink? routeSink;
+
+    /// <summary>Set by the client when routing is enabled; null leaves this transport unchanged.</summary>
+    IKahunaRouteSink? IKahunaRouteSinkReceiver.RouteSink
+    {
+        set => routeSink = value;
+    }
+
+    /// <summary>
+    /// Records the route a response reported for one resource.
+    /// <para>
+    /// <paramref name="url"/> is the endpoint this request was sent to. The cache uses it to drop a
+    /// reply that arrives after a newer one already moved the route, instead of letting the late
+    /// reply undo the newer answer.
+    /// </para>
+    /// </summary>
+    private void LearnRoute(KahunaRoutingDomain domain, string resource, KahunaRouteHint? hint, string url)
+    {
+        IKahunaRouteSink? sink = routeSink;
+
+        if (sink is null || hint is null)
+            return;
+
+        sink.Learn(domain, resource, hint.PartitionId, hint.Endpoint, hint.Provenance, hint.Generation, url);
+    }
+
+    /// <summary>
+    /// Records the routes a batched response reported, resolving each item's 1-based index into the
+    /// response's deduplicated hint table. An item with index 0 resolved no route.
+    /// </summary>
+    private void LearnBatchRoutes<TItem>(List<TItem>? items, List<KahunaRouteHint>? table, string url, Func<TItem, string?> keyOf, Func<TItem, int> indexOf)
+    {
+        IKahunaRouteSink? sink = routeSink;
+
+        if (sink is null || items is null || table is null || table.Count == 0)
+            return;
+
+        foreach (TItem item in items)
+        {
+            int index = indexOf(item);
+
+            if (index <= 0 || index > table.Count)
+                continue;
+
+            string? key = keyOf(item);
+
+            if (string.IsNullOrEmpty(key))
+                continue;
+
+            KahunaRouteHint hint = table[index - 1];
+
+            sink.Learn(KahunaRoutingDomain.KeyValue, key, hint.PartitionId, hint.Endpoint, hint.Provenance, hint.Generation, url);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string url, string? keySpace, CancellationToken cancellationToken)
+    {
+        KahunaRoutingMetadataResponse? response = await url
+            .WithOAuthBearerToken("xxx")
+            .AppendPathSegments("v1/cluster/routing")
+            .SetQueryParam("keySpace", keySpace ?? "")
+            .WithHeader("Accept", "application/json")
+            .WithSettings(o => o.HttpVersion = "2.0")
+            .GetJsonAsync<KahunaRoutingMetadataResponse>(cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        return response;
+    }
+
     /// <summary>
     /// Guards one-time Flurl global configuration so multiple instances don't race.
     /// Flurl's WithDefaults is process-global; we set it at most once per process.
@@ -160,6 +235,42 @@ public class RestCommunication : IKahunaCommunication
         };
     }
 
+    /// <summary>
+    /// Runs one HTTP call under the shared retry policy and reports a transport failure against the
+    /// endpoint it was sent to.
+    ///
+    /// <para>
+    /// This is the REST transport's single place where "the node stopped answering" is observable,
+    /// which is why the reporting lives here rather than in a catch block per verb. A caller's own
+    /// cancellation is not a node failure and is never reported.
+    /// </para>
+    ///
+    /// <para>
+    /// A report holds the endpoint out of routing for a cooldown. It says nothing about whether the
+    /// operation ran: a failure after the request was submitted has an ambiguous outcome, and
+    /// whether it may be retried is that operation's own contract to decide.
+    /// </para>
+    /// </summary>
+    private Task<T> Send<T>(string url, Func<Task<T>> call)
+    {
+        // With no sink there is nothing to report to, so the call keeps the exact shape it had
+        // before routing existed: no extra frame and no extra catch.
+        return routeSink is null ? SharedRetryPolicy.ExecuteAsync(call) : SendReporting(url, call);
+    }
+
+    private async Task<T> SendReporting<T>(string url, Func<Task<T>> call)
+    {
+        try
+        {
+            return await SharedRetryPolicy.ExecuteAsync(call).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && !IsCancellationException(ex))
+        {
+            routeSink?.ReportEndpointFailure(url);
+            throw;
+        }
+    }
+
     private static bool IsCancellationException(Exception exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
@@ -220,7 +331,7 @@ public class RestCommunication : IKahunaCommunication
 
                 try
                 {
-                    response = await SharedRetryPolicy.ExecuteAsync(() =>
+                    response = await Send(url, () =>
                         url
                         .WithOAuthBearerToken("xxx")
                         .AppendPathSegments("v1/locks/try-lock")
@@ -237,6 +348,8 @@ public class RestCommunication : IKahunaCommunication
 
                 if (response is null)
                     throw new KahunaException("Response is null", LockResponseType.Errored);
+
+                LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
 
                 if (response.Type == LockResponseType.Locked)
                     return (KahunaLockAcquireResult.Success, response.FencingToken, response.ServedFrom);
@@ -301,7 +414,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            KahunaLockResponse? response = await SharedRetryPolicy.ExecuteAsync(() => 
+            KahunaLockResponse? response = await Send(url, () => 
                 url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/locks/try-unlock")
@@ -314,6 +427,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
                 
             if (response.Type == LockResponseType.Unlocked)
                 return true;
@@ -374,7 +489,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            KahunaLockResponse? response = await SharedRetryPolicy.ExecuteAsync(() => 
+            KahunaLockResponse? response = await Send(url, () => 
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/locks/try-extend")
@@ -387,6 +502,8 @@ public class RestCommunication : IKahunaCommunication
             
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
             
             if (response.Type == LockResponseType.Extended)
                 return (true, response.FencingToken);
@@ -440,7 +557,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            KahunaGetLockResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
+            KahunaGetLockResponse? response = await Send(url, () =>
                     url
                         .WithOAuthBearerToken("xxx")
                         .AppendPathSegments("v1/locks/get-info")
@@ -453,6 +570,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", LockResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.Lock, resource, response.Route, url);
 
             if (response.Type == LockResponseType.Got)
                 return new(response.Owner, response.Expires, response.FencingToken);
@@ -526,7 +645,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-set")
@@ -539,6 +658,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Set)
                 return (true, response.Revision, 0);
@@ -573,7 +694,7 @@ public class RestCommunication : IKahunaCommunication
         if (cancellationToken.IsCancellationRequested)
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-        KahunaSetManyKeyValueResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
+        KahunaSetManyKeyValueResponse? response = await Send(url, () =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kv/try-set-many")
@@ -586,6 +707,8 @@ public class RestCommunication : IKahunaCommunication
 
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
 
         // A retryable server-side failure arrives as HTTP 200 whose body is only {"type":101}:
         // returning its absent item list as an empty batch would read as "nothing was written".
@@ -623,7 +746,7 @@ public class RestCommunication : IKahunaCommunication
         if (cancellationToken.IsCancellationRequested)
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-        KahunaDeleteManyKeyValueResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
+        KahunaDeleteManyKeyValueResponse? response = await Send(url, () =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kv/try-delete-many")
@@ -636,6 +759,8 @@ public class RestCommunication : IKahunaCommunication
 
         if (response is null)
             throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
 
         // Same refusal classification as TrySetManyKeyValues: an envelope-level MustRetry has no
         // per-key outcomes, so surfacing it as an empty batch would misreport "nothing was deleted".
@@ -677,6 +802,8 @@ public class RestCommunication : IKahunaCommunication
         // as "none of these keys exist" for a request that never reached a handler.
         if (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored)
             throw new KahunaException($"{verb} failed", response.Type);
+
+        LearnBatchRoutes(response.Items, response.Routes, url, static i => i.Key, static i => i.RouteIndex);
 
         return (response.Items ?? [], response.TimeElapsedMs);
     }
@@ -736,7 +863,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-set")
@@ -749,6 +876,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Set)
                 return (true, response.Revision, 0);
@@ -822,7 +951,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-set")
@@ -835,6 +964,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Set)
                 return (true, response.Revision, 0);
@@ -903,7 +1034,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-get")
@@ -916,6 +1047,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Get)
                 return (true, response.Value, response.Revision, response.LastModified, 0);
@@ -986,7 +1119,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-exists")
@@ -999,6 +1132,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Exists)
                 return (true, response.Revision, 0);
@@ -1062,7 +1197,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-delete")
@@ -1075,6 +1210,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Deleted)
                 return (true, response.Revision, 0);
@@ -1140,7 +1277,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-extend")
@@ -1153,6 +1290,8 @@ public class RestCommunication : IKahunaCommunication
 
             if (response is null)
                 throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+            LearnRoute(KahunaRoutingDomain.KeyValue, key, response.Route, url);
 
             if (response.Type == KeyValueResponseType.Extended)
                 return (true, response.Revision, 0);
@@ -1205,7 +1344,7 @@ public class RestCommunication : IKahunaCommunication
             if (cancellationToken.IsCancellationRequested)
                 throw new KahunaException("Operation cancelled", LockResponseType.Errored);
             
-            response = await SharedRetryPolicy.ExecuteAsync(() =>
+            response = await Send(url, () =>
                 url
                     .WithOAuthBearerToken("xxx")
                     .AppendPathSegments("v1/kv/try-execute-tx-script")
@@ -1587,7 +1726,7 @@ public class RestCommunication : IKahunaCommunication
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         KahunaSequenceNameRequest request = new() { Name = name, Durability = durability };
-        KahunaSequenceResponse response = await PostSequenceRequest(url, "get", request, KahunaJsonContext.Default.KahunaSequenceNameRequest, cancellationToken).ConfigureAwait(false);
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "get", name, request, KahunaJsonContext.Default.KahunaSequenceNameRequest, cancellationToken).ConfigureAwait(false);
         return (response.Type, response.Sequence, (int)stopwatch.GetElapsedMilliseconds());
     }
 
@@ -1595,7 +1734,7 @@ public class RestCommunication : IKahunaCommunication
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         KahunaSequenceCreateRequest request = new() { Name = name, InitialValue = initialValue, Increment = increment, MaxValue = maxValue, Durability = durability };
-        KahunaSequenceResponse response = await PostSequenceRequest(url, "create", request, KahunaJsonContext.Default.KahunaSequenceCreateRequest, cancellationToken).ConfigureAwait(false);
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "create", name, request, KahunaJsonContext.Default.KahunaSequenceCreateRequest, cancellationToken).ConfigureAwait(false);
         return (response.Type, response.Revision, (int)stopwatch.GetElapsedMilliseconds());
     }
 
@@ -1603,7 +1742,7 @@ public class RestCommunication : IKahunaCommunication
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         KahunaSequenceNextRequest request = new() { Name = name, IdempotencyKey = idempotencyKey, Durability = durability };
-        KahunaSequenceResponse response = await PostSequenceRequest(url, "next", request, KahunaJsonContext.Default.KahunaSequenceNextRequest, cancellationToken).ConfigureAwait(false);
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "next", name, request, KahunaJsonContext.Default.KahunaSequenceNextRequest, cancellationToken).ConfigureAwait(false);
         return (response.Type, response.Allocation, (int)stopwatch.GetElapsedMilliseconds());
     }
 
@@ -1611,7 +1750,7 @@ public class RestCommunication : IKahunaCommunication
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         KahunaSequenceReserveRequest request = new() { Name = name, Count = count, IdempotencyKey = idempotencyKey, Durability = durability };
-        KahunaSequenceResponse response = await PostSequenceRequest(url, "reserve", request, KahunaJsonContext.Default.KahunaSequenceReserveRequest, cancellationToken).ConfigureAwait(false);
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "reserve", name, request, KahunaJsonContext.Default.KahunaSequenceReserveRequest, cancellationToken).ConfigureAwait(false);
         return (response.Type, response.Allocation, (int)stopwatch.GetElapsedMilliseconds());
     }
 
@@ -1619,14 +1758,14 @@ public class RestCommunication : IKahunaCommunication
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
         KahunaSequenceNameRequest request = new() { Name = name, Durability = durability };
-        KahunaSequenceResponse response = await PostSequenceRequest(url, "delete", request, KahunaJsonContext.Default.KahunaSequenceNameRequest, cancellationToken).ConfigureAwait(false);
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "delete", name, request, KahunaJsonContext.Default.KahunaSequenceNameRequest, cancellationToken).ConfigureAwait(false);
         return (response.Type, (int)stopwatch.GetElapsedMilliseconds());
     }
 
-    private static async Task<KahunaSequenceResponse> PostSequenceRequest<T>(string url, string action, T request, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken)
+    private async Task<KahunaSequenceResponse> PostSequenceRequest<T>(string url, string action, string name, T request, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken)
     {
         byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, jsonTypeInfo);
-        KahunaSequenceResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
+        KahunaSequenceResponse? response = await Send(url, () =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/sequences/" + action)
@@ -1638,6 +1777,8 @@ public class RestCommunication : IKahunaCommunication
 
         if (response is null)
             throw new KahunaException("Response is null", SequenceResponseType.Error);
+
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
 
         return response;
     }
@@ -1797,7 +1938,7 @@ public class RestCommunication : IKahunaCommunication
     /// Posts a key-value request once and returns the deserialised response. Transport-level failures are
     /// retried by the shared HTTP policy; a MustRetry answer is handed back to the caller untouched.
     /// </summary>
-    private static async Task<TResponse> PostKeyValueRequest<TRequest, TResponse>(
+    private async Task<TResponse> PostKeyValueRequest<TRequest, TResponse>(
         string url,
         string verb,
         TRequest request,
@@ -1809,7 +1950,7 @@ public class RestCommunication : IKahunaCommunication
             throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
         byte[] payload = JsonSerializer.SerializeToUtf8Bytes(request, jsonTypeInfo);
-        TResponse? response = await SharedRetryPolicy.ExecuteAsync(() =>
+        TResponse? response = await Send(url, () =>
             url
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/kv/" + verb)

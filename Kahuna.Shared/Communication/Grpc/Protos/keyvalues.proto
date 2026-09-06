@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "Communication/Grpc/Protos/routing.proto";
+
 service KeyValuer {
   rpc TrySetKeyValue (GrpcTrySetKeyValueRequest) returns (GrpcTrySetKeyValueResponse);
   rpc TrySetManyKeyValue (GrpcTrySetManyKeyValueRequest) returns (GrpcTrySetManyKeyValueResponse);
@@ -68,6 +70,9 @@ message GrpcTrySetKeyValueResponse {
   int64 LastModifiedPhysical = 5;
   uint32 LastModifiedCounter = 6;
   int32 TimeElapsedMs = 7;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 8;
 }
 
 message GrpcTrySetManyKeyValueRequest {
@@ -91,6 +96,9 @@ message GrpcTrySetManyKeyValueRequestItem {
 message GrpcTrySetManyKeyValueResponse {
   repeated GrpcTrySetManyKeyValueResponseItem Items = 1;
   int32 TimeElapsedMs = 7;
+  // Deduplicated routing hints for the items below. An item points at one by index; a batch
+  // spanning several owners cannot be described by one response-level endpoint.
+  repeated GrpcRouteHint Routes = 3;
 }
 
 message GrpcTrySetManyKeyValueResponseItem {
@@ -102,6 +110,8 @@ message GrpcTrySetManyKeyValueResponseItem {
   int64 LastModifiedPhysical = 6;
   uint32 LastModifiedCounter = 7;
   GrpcKeyValueDurability Durability = 8;
+  // 1-based index into the response's Routes table; 0 when no route was resolved for this item.
+  int32 RouteIndex = 9;
 }
 
 message GrpcTryDeleteManyKeyValueRequest {
@@ -122,6 +132,9 @@ message GrpcTryDeleteManyKeyValueRequestItem {
 message GrpcTryDeleteManyKeyValueResponse {
   repeated GrpcTryDeleteManyKeyValueResponseItem Items = 1;
   int32 TimeElapsedMs = 7;
+  // Deduplicated routing hints for the items below. An item points at one by index; a batch
+  // spanning several owners cannot be described by one response-level endpoint.
+  repeated GrpcRouteHint Routes = 3;
 }
 
 message GrpcTryDeleteManyKeyValueResponseItem {
@@ -133,6 +146,8 @@ message GrpcTryDeleteManyKeyValueResponseItem {
   int64 LastModifiedPhysical = 6;
   uint32 LastModifiedCounter = 7;
   GrpcKeyValueDurability Durability = 8;
+  // 1-based index into the response's Routes table; 0 when no route was resolved for this item.
+  int32 RouteIndex = 9;
 }
 
 message GrpcTryExtendKeyValueRequest {
@@ -155,6 +170,9 @@ message GrpcTryExtendKeyValueResponse {
   int64 LastModifiedPhysical = 5;
   uint32 LastModifiedCounter = 6;
   int32 TimeElapsedMs = 7;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 8;
 }
 
 message GrpcTryDeleteKeyValueRequest {
@@ -176,6 +194,9 @@ message GrpcTryDeleteKeyValueResponse {
   int64 LastModifiedPhysical = 5;
   uint32 LastModifiedCounter = 6;
   int32 TimeElapsedMs = 7;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 8;
 }
 
 message GrpcTryGetKeyValueRequest {
@@ -209,6 +230,9 @@ message GrpcTryGetKeyValueResponse {
   uint32 LastModifiedCounter = 13;
   GrpcKeyValueState State = 14;
   int32 TimeElapsedMs = 15;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 16;
 }
 
 message GrpcTryExistsKeyValueRequest {
@@ -241,6 +265,9 @@ message GrpcTryExistsKeyValueResponse {
   uint32 LastModifiedCounter = 12;
   GrpcKeyValueState State = 13;
   int32 TimeElapsedMs = 14;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 15;
 }
 
 message GrpcTryManyValuesRequestItem {
@@ -262,6 +289,9 @@ message GrpcTryGetManyValuesRequest {
 message GrpcTryGetManyValuesResponse {
   optional string ServedFrom = 1;
   repeated GrpcTryGetManyValuesResponseItem Items = 2;
+  // Deduplicated routing hints for the items below. An item points at one by index; a batch
+  // spanning several owners cannot be described by one response-level endpoint.
+  repeated GrpcRouteHint Routes = 3;
 }
 
 message GrpcTryGetManyValuesResponseItem {
@@ -280,6 +310,8 @@ message GrpcTryGetManyValuesResponseItem {
   int64 LastModifiedPhysical = 13;
   uint32 LastModifiedCounter = 14;
   GrpcKeyValueState State = 15;
+  // 1-based index into the response's Routes table; 0 when no route was resolved for this item.
+  int32 RouteIndex = 16;
 }
 
 message GrpcTryExistsManyValuesRequest {
@@ -295,6 +327,9 @@ message GrpcTryExistsManyValuesRequest {
 message GrpcTryExistsManyValuesResponse {
   optional string ServedFrom = 1;
   repeated GrpcTryExistsManyValuesResponseItem Items = 2;
+  // Deduplicated routing hints for the items below. An item points at one by index; a batch
+  // spanning several owners cannot be described by one response-level endpoint.
+  repeated GrpcRouteHint Routes = 3;
 }
 
 message GrpcTryExistsManyValuesResponseItem {
@@ -312,6 +347,8 @@ message GrpcTryExistsManyValuesResponseItem {
   int64 LastModifiedPhysical = 12;
   uint32 LastModifiedCounter = 13;
   GrpcKeyValueState State = 14;
+  // 1-based index into the response's Routes table; 0 when no route was resolved for this item.
+  int32 RouteIndex = 15;
 }
 
 message GrpcTryExecuteTransactionScriptRequest {

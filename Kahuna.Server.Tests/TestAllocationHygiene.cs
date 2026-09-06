@@ -1,6 +1,7 @@
 
 using System.IO.Hashing;
 using System.Text;
+using Kahuna.Client.Routing;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
@@ -14,7 +15,9 @@ namespace Kahuna.Server.Tests;
 ///   • returning a compare-and-set request to the pool releases its (potentially large) compare
 ///     buffer instead of pinning it until the object is next reused;
 ///   • the span-based lock-resource hash yields the exact same value as encoding the resource into
-///     a fresh UTF-8 array and hashing that — so routing/partitioning is unchanged.
+///     a fresh UTF-8 array and hashing that — so routing/partitioning is unchanged;
+///   • a routing-cache hit allocates nothing, so learned routing costs no garbage on the very path
+///     it exists to speed up.
 /// </summary>
 public sealed class TestAllocationHygiene
 {
@@ -38,6 +41,33 @@ public sealed class TestAllocationHygiene
         Assert.Null(request.Value);
         Assert.Null(request.CompareValue);
         Assert.True(request.Promise.IsDefault);
+    }
+
+    /// <summary>
+    /// A cache hit runs on every routed operation. Allocating on it would trade one saved network
+    /// hop for garbage on the hottest client path, so the lookup must be allocation-free.
+    /// </summary>
+    [Fact]
+    public void ARoutingCacheHit_AllocatesNothing()
+    {
+        RouteCache cache = new(64, TimeSpan.FromMinutes(1));
+
+        RouteCacheKey key = new(Kahuna.Shared.Routing.KahunaRoutingDomain.KeyValue, "orders/1");
+
+        Assert.True(cache.TryAdd(key, "https://node-a:8000", 2, 0, Kahuna.Shared.Routing.KahunaRouteProvenance.Executed));
+
+        // Warm every path the measured loop touches (JIT, statics) before measuring.
+        for (int i = 0; i < 1000; i++)
+            Assert.NotNull(cache.TryGet(key));
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        for (int i = 0; i < 10_000; i++)
+            Assert.NotNull(cache.TryGet(key));
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(0, allocated);
     }
 
     [Fact]

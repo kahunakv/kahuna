@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "Communication/Grpc/Protos/routing.proto";
+
 service Cluster {
   rpc GetMembership (GrpcGetMembershipRequest) returns (GrpcGetMembershipResponse);
   rpc Leave (GrpcClusterLeaveRequest) returns (GrpcClusterLeaveResponse);
@@ -8,6 +10,7 @@ service Cluster {
   rpc GetRanges (GrpcGetRangesRequest) returns (GrpcGetRangesResponse);
   rpc SplitRange (GrpcSplitRangeRequest) returns (GrpcSplitRangeResponse);
   rpc MergeRanges (GrpcMergeRangesRequest) returns (GrpcMergeRangesResponse);
+  rpc GetRoutingMetadata (GrpcGetRoutingMetadataRequest) returns (GrpcGetRoutingMetadataResponse);
 }
 
 message GrpcGetMembershipRequest {

@@ -35,6 +35,12 @@
     </ItemGroup>
 
     <ItemGroup>
+        <Protobuf Include="Communication\Grpc\Protos\routing.proto">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+    </ItemGroup>
+
+    <ItemGroup>
       <Protobuf Include="Communication\Grpc\Protos\locks.proto">
         <Generator>MSBuild:Compile</Generator>
       </Protobuf>

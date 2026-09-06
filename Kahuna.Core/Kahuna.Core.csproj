@@ -45,6 +45,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The ASP.NET host lives in its own assembly but is part of this component: its REST handlers
+         are the transport half of the same request path the gRPC services here serve, and they need
+         the routing-capture types those services use. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Kahuna.Server</_Parameter1>
+    </AssemblyAttribute>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>Kahuna.Tests</_Parameter1>
     </AssemblyAttribute>

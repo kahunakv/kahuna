@@ -103,4 +103,20 @@ internal sealed class BenchmarkOptions
     [Option("seed", Default = 0,
         HelpText = "RNG seed for reproducible key/value selection (0 = time-based)")]
     public int Seed { get; set; } = 0;
+
+    [Option("routing", Default = "auto",
+        HelpText = "How the client picks a node: auto | roundrobin | learned | metadata. Auto learns when several endpoints are configured and rotates when only one is. Learned reuses the destination a response reported for the same resource; metadata also resolves resources the client has not seen")]
+    public string Routing { get; set; } = "auto";
+
+    [Option("routing-endpoint-map",
+        HelpText = "Comma-separated advertised=dialled pairs for a deployment where the address a node advertises is not the one this client dials, e.g. https://172.30.0.2:8082=https://localhost:8082")]
+    public string? RoutingEndpointMap { get; set; }
+
+    [Option("allow-unlisted-routing-endpoints", Default = false,
+        HelpText = "Dial an endpoint a response named even when it is neither configured nor mapped. Off by default")]
+    public bool AllowUnlistedRoutingEndpoints { get; set; }
+
+    [Option("routing-counters", Default = false,
+        HelpText = "Total the client's routing counters and print them after the run. Off by default: subscribing to a meter makes every counter the client publishes take a listener callback, and only the routing modes publish any, so leaving it on would tax one arm of an A/B comparison and not the other")]
+    public bool RoutingCounters { get; set; }
 }

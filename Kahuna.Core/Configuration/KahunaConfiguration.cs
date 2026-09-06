@@ -19,6 +19,40 @@ public sealed class KahunaConfiguration
     /// </summary>
     public string InterNodeGrpcScheme { get; set; } = "https://";
 
+
+    /// <summary>
+    /// The base URL this node advertises to clients in routing hints, for example
+    /// <c>https://node1.internal:8082</c>. Empty turns hint emission off for this node.
+    ///
+    /// <para>
+    /// It must be an address an application can dial, which the Raft endpoint is not in general:
+    /// container port mapping and split internal/external host names both break that assumption.
+    /// A deployment where the two do coincide can leave this empty and let the server derive it
+    /// from the Raft endpoint and <see cref="AdvertisedClientScheme"/>.
+    /// </para>
+    /// </summary>
+    public string AdvertisedClientEndpoint { get; set; } = "";
+
+    /// <summary>
+    /// URL scheme prepended to a peer's Raft endpoint to name that peer in a hint. Defaults to the
+    /// inter-node gRPC scheme, which is the rule this node already dials its peers with.
+    /// </summary>
+    public string AdvertisedClientScheme { get; set; } = "https://";
+
+    /// <summary>
+    /// Whether a hint may name a peer, derived from that peer's Raft endpoint and
+    /// <see cref="AdvertisedClientScheme"/>. Turn it off in a deployment where the derivation does
+    /// not hold — clients then learn only routes that name this node, rather than addresses they
+    /// cannot reach.
+    /// </summary>
+    public bool AdvertisePeerEndpoints { get; set; } = true;
+
+    /// <summary>
+    /// Whether the node collects the routes a request resolves and returns them as advisory hints.
+    /// Off means responses carry no hints and clients keep their existing endpoint selection.
+    /// </summary>
+    public bool RoutingHintsEnabled { get; set; } = true;
+
     public int LocksWorkers { get; set; }
     
     public int KeyValueWorkers { get; set; }

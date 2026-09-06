@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "Communication/Grpc/Protos/routing.proto";
+
 service Locker {
   rpc TryLock (GrpcTryLockRequest) returns (GrpcTryLockResponse);
   rpc TryExtendLock (GrpcExtendLockRequest) returns (GrpcExtendLockResponse);
@@ -20,6 +22,9 @@ message GrpcTryLockResponse {
   optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
   int64 FencingToken = 3;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 4;
 }
 
 message GrpcExtendLockRequest {
@@ -33,6 +38,9 @@ message GrpcExtendLockResponse {
   optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
   int64 FencingToken = 3;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 4;
 }
 
 message GrpcUnlockRequest {
@@ -44,6 +52,9 @@ message GrpcUnlockRequest {
 message GrpcUnlockResponse {
   optional string ServedFrom = 1;
   GrpcLockResponseType Type = 2;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 3;
 }
 
 message GrpcGetLockRequest {
@@ -59,6 +70,9 @@ message GrpcGetLockResponse {
   int64 ExpiresPhysical = 5;
   uint32 ExpiresCounter = 6;
   int64 FencingToken = 7;
+  // Additive advisory routing hint. Absent from a node that resolved no owner and from an
+  // older peer, which leaves the caller on its existing endpoint selection.
+  optional GrpcRouteHint Route = 8;
 }
 
 message GrpcBatchClientLockRequest {

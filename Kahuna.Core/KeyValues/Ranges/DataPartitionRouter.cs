@@ -26,7 +26,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 internal sealed class DataPartitionRouter
 {
     /// <summary>The lowest partition in the hash pool. Partition 0 is the system/meta partition.</summary>
-    private const int FirstUserPartitionId = 1;
+    internal const int FirstUserPartitionId = 1;
 
     private readonly IRaft raft;
 

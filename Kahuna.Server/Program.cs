@@ -239,6 +239,10 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     HttpsCertificate = opts.HttpsCertificate,
     HttpsCertificatePassword = opts.HttpsCertificatePassword,
     InterNodeGrpcScheme = opts.RaftGrpcScheme,
+    AdvertisedClientEndpoint = opts.AdvertisedClientEndpoint,
+    AdvertisedClientScheme = opts.AdvertisedClientScheme,
+    AdvertisePeerEndpoints = !opts.DisablePeerEndpointAdvertisement,
+    RoutingHintsEnabled = !opts.DisableRoutingHints,
     LocksWorkers = opts.LocksWorkers,
     KeyValueWorkers = opts.KeyValueWorkers,
     BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
@@ -297,6 +301,11 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     RangeSplitLoadWindow = TimeSpan.FromSeconds(opts.RangeSplitLoadWindowSeconds),
     RangeSplitLoadPollInterval = TimeSpan.FromSeconds(opts.RangeSplitLoadPollIntervalSeconds)
 }, opts.WalPath);
+
+// Process-wide, and this host runs exactly one node: with hints off a served request pays neither
+// the ambient write nor the capture object, so the switch actually removes the cost rather than
+// only blanking the field.
+Kahuna.Server.Routing.RouteCaptureScope.Enabled = kahunaConfiguration.RoutingHintsEnabled;
 
 ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLeaderStabilityMs);
 ConfigurationValidator.ValidateCollectionInterval(kahunaConfiguration);

@@ -9,7 +9,9 @@
 using System.Text;
 using Grpc.Core;
 using Kahuna.Client.Communication;
+using Kahuna.Client.Routing;
 using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -46,11 +48,119 @@ public class KahunaClient
 
     private readonly IKahunaCommunication communication;
 
+    /// <summary>
+    /// Learns and reuses destinations. Null in <see cref="KahunaRoutingMode.RoundRobin"/> — the
+    /// default — so an operation on that mode reaches its transport through exactly the code it
+    /// always did, with no route lookup and no per-operation state.
+    /// </summary>
+    private readonly ClientRouteResolver? router;
+
     private int currentServer;
     
     internal IKahunaCommunication Communication => communication;
     
     internal KahunaOptions Options { private set; get; }
+
+    /// <summary>The routing cache, for tests and diagnostics. Null unless routing is enabled.</summary>
+    internal ClientRouteResolver? Router => router;
+
+    private KahunaRoutingMode effectiveRouting;
+
+    /// <summary>
+    /// The mode actually in force, with <see cref="KahunaRoutingMode.Auto"/> already resolved. What
+    /// a caller should read when it wants to know how this client routes.
+    /// </summary>
+    public KahunaRoutingMode EffectiveRouting => effectiveRouting;
+
+    /// <summary>
+    /// Resolves <see cref="KahunaRoutingMode.Auto"/> against the number of endpoints the client was
+    /// given. An explicit mode is returned unchanged.
+    ///
+    /// <para>
+    /// A single-endpoint client is left on rotation because it could not act on most hints anyway: a
+    /// hint names whichever node owns the resource, and only configured endpoints are dialled, so
+    /// hints naming the other nodes are refused. It would keep a cache it could rarely use.
+    /// </para>
+    /// </summary>
+    private static KahunaRoutingMode ResolveRoutingMode(KahunaRoutingMode configured, int endpointCount) =>
+        configured != KahunaRoutingMode.Auto
+            ? configured
+            : endpointCount > 1
+                ? KahunaRoutingMode.Learned
+                : KahunaRoutingMode.RoundRobin;
+
+    /// <summary>
+    /// The endpoint to send an operation on <paramref name="resource"/> to: the destination this
+    /// client has learned or resolved for it, and otherwise the next endpoint in rotation.
+    /// <para>
+    /// A learned destination is an efficiency choice, never an authority claim. Whichever node
+    /// receives the request resolves the resource itself, so a stale answer here costs an inter-node
+    /// forward and cannot change the outcome.
+    /// </para>
+    /// </summary>
+    private string GetUrlFor(KahunaRoutingDomain domain, string resource)
+    {
+        ClientRouteResolver? resolver = router;
+
+        if (resolver is null)
+            return GetRoundRobinUrl();
+
+        return resolver.Select(domain, resource) ?? GetRoundRobinUrl();
+    }
+
+    /// <summary>
+    /// The endpoint a lock handle should use for a follow-up operation on its own resource.
+    ///
+    /// <para>
+    /// A handle that recorded where it was served keeps that affinity when
+    /// <see cref="KahunaOptions.UpgradeUrls"/> asked for it — that is its documented intent and it
+    /// takes precedence over a learned route. The affinity still passes the endpoint policy and the
+    /// failure cooldown, so a handle cannot dial an address the operator never configured, and stops
+    /// aiming at a node that has just stopped answering. Anything unusable falls through to the
+    /// ordinary routed path.
+    /// </para>
+    /// </summary>
+    internal string GetLockUrl(string resource, string? servedFrom)
+    {
+        if (!Options.UpgradeUrls || string.IsNullOrEmpty(servedFrom))
+            return GetUrlFor(KahunaRoutingDomain.Lock, resource);
+
+        ClientRouteResolver? resolver = router;
+
+        if (resolver is null)
+            return servedFrom;
+
+        return resolver.TryUseAffinity(servedFrom) ?? GetUrlFor(KahunaRoutingDomain.Lock, resource);
+    }
+
+    /// <summary>
+    /// Builds the route resolver for this client, or null when routing is off. Also hands the
+    /// resolver to the transport, which is where response hints are read and transport failures are
+    /// seen. A transport from outside this assembly implements neither hook, so it keeps working
+    /// unchanged and its client stays on endpoint rotation.
+    /// </summary>
+    private ClientRouteResolver? BuildRouter()
+    {
+        effectiveRouting = ResolveRoutingMode(Options.Routing, urls.Length);
+
+        if (effectiveRouting == KahunaRoutingMode.RoundRobin)
+            return null;
+
+        ClientRouteResolver resolver = new(
+            effectiveRouting,
+            new RouteCache(Options.RouteCacheCapacity, Options.RouteHintLifetime),
+            new RoutingEndpointPolicy(urls, Options.RoutingEndpointMap, Options.AllowUnlistedRoutingEndpoints),
+            communication as IKahunaRoutingTransport,
+            GetRoundRobinUrl,
+            Options.RoutingMetadataLifetime,
+            Options.RoutingEndpointCooldown,
+            logger);
+
+        if (communication is IKahunaRouteSinkReceiver receiver)
+            receiver.RouteSink = resolver;
+
+        return resolver;
+    }
     
     /// <summary>
     /// Constructor
@@ -65,6 +175,7 @@ public class KahunaClient
         this.logger = logger;
         this.Options = options ?? new();
         this.communication = communication ?? new GrpcCommunication(Options, logger);
+        this.router = BuildRouter();
     }
     
     /// <summary>
@@ -80,6 +191,7 @@ public class KahunaClient
         this.logger = logger;
         this.Options = options ?? new();
         this.communication = communication ?? new GrpcCommunication(Options, logger);
+        this.router = BuildRouter();
     }
 
     /// <summary>
@@ -94,7 +206,7 @@ public class KahunaClient
     private async Task<(KahunaLockAcquireResult, long, string?)> TryAcquireLock(string resource, byte[] owner, TimeSpan expiryTime, LockDurability durability, CancellationToken cancellationToken = default)
     {
         return await communication.TryAcquireLock(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.Lock, resource), 
             resource, 
             owner, 
             (int)expiryTime.TotalMilliseconds, 
@@ -296,7 +408,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+            return communication.TryExtendLock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -317,7 +429,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.TryExtendLock(GetRoundRobinUrl(), resource, owner, durationMs, durability, cancellationToken);
+            return communication.TryExtendLock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, owner, durationMs, durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -338,7 +450,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken);
+            return communication.TryExtendLock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, Encoding.UTF8.GetBytes(owner), durationMs, durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -359,7 +471,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.TryExtendLock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken);
+            return communication.TryExtendLock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, Encoding.UTF8.GetBytes(owner), (int)duration.TotalMilliseconds, durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -378,7 +490,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.TryUnlock(GetRoundRobinUrl(), resource, owner, durability, cancellationToken);
+            return communication.TryUnlock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, owner, durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -397,7 +509,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.TryUnlock(GetRoundRobinUrl(), resource, Encoding.UTF8.GetBytes(owner), durability, cancellationToken);
+            return communication.TryUnlock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, Encoding.UTF8.GetBytes(owner), durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -415,7 +527,7 @@ public class KahunaClient
     {
         try
         {
-            return communication.GetLock(GetRoundRobinUrl(), resource, durability, cancellationToken);
+            return communication.GetLock(GetUrlFor(KahunaRoutingDomain.Lock, resource), resource, durability, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -434,7 +546,7 @@ public class KahunaClient
     public async Task<KahunaKeyValue> SetKeyValue(string key, byte[]? value, int expiryTime = 0, KeyValueFlags flags = KeyValueFlags.Set, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key),
             HLCTimestamp.Zero,
             key, 
             value, 
@@ -572,7 +684,7 @@ public class KahunaClient
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             valueBytes, 
@@ -608,7 +720,7 @@ public class KahunaClient
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TrySetKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             valueBytes, 
@@ -669,7 +781,7 @@ public class KahunaClient
     )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             value, 
@@ -710,7 +822,7 @@ public class KahunaClient
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareValueAndSetKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             valueBytes, 
@@ -744,7 +856,7 @@ public class KahunaClient
     )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareRevisionAndSetKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             value, 
@@ -780,7 +892,7 @@ public class KahunaClient
         byte[] valueBytes = Encoding.UTF8.GetBytes(value);
         
         (bool success, long revision, int timeElapsedMs) = await communication.TryCompareRevisionAndSetKeyValue(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key),
             HLCTimestamp.Zero,
             key, 
             valueBytes, 
@@ -805,7 +917,7 @@ public class KahunaClient
         HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
 
         (bool success, byte[]? value, long revision, HLCTimestamp lastModified, int timeElapsedMs) = await communication.TryGetKeyValue(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key),
             HLCTimestamp.Zero,
             key,
             -1,
@@ -833,7 +945,7 @@ public class KahunaClient
         HLCTimestamp readTimestamp = snapshotMs == 0 ? HLCTimestamp.Zero : new HLCTimestamp(0, snapshotMs, uint.MaxValue);
 
         (bool success, long revision, int timeElapsedMs) = await communication.TryExistsKeyValue(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key),
             HLCTimestamp.Zero,
             key,
             -1,
@@ -857,7 +969,7 @@ public class KahunaClient
     public async Task<KahunaKeyValue> GetKeyValueRevision(string key, long revision, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, byte[]? value, long returnRevision, HLCTimestamp lastModified, int timeElapsedMs) = await communication.TryGetKeyValue(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key),
             HLCTimestamp.Zero,
             key,
             revision,
@@ -879,7 +991,7 @@ public class KahunaClient
     public async Task<KahunaKeyValue> DeleteKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryDeleteKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             durability, 
@@ -905,7 +1017,7 @@ public class KahunaClient
     )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             expiresMs, 
@@ -932,7 +1044,7 @@ public class KahunaClient
     )
     {
         (bool success, long revision, int timeElapsedMs) = await communication.TryExtendKeyValue(
-            GetRoundRobinUrl(), 
+            GetUrlFor(KahunaRoutingDomain.KeyValue, key), 
             HLCTimestamp.Zero,
             key, 
             (int)expiresMs.TotalMilliseconds, 
@@ -1435,7 +1547,7 @@ public class KahunaClient
     )
     {
         (SequenceResponseType response, _, _) = await communication.CreateSequence(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.Sequence, name),
             name,
             initialValue,
             increment,
@@ -1461,7 +1573,7 @@ public class KahunaClient
     )
     {
         (SequenceResponseType response, ReadOnlySequenceEntry? sequence, _) = await communication.GetSequence(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.Sequence, name),
             name,
             durability,
             cancellationToken
@@ -1489,7 +1601,7 @@ public class KahunaClient
         // async helper would not help either — it would move the extra state machine onto the range
         // method instead. Only the failure check is shared, and it needs no task of its own.
         (SequenceResponseType response, SequenceAllocation allocation, _) = await communication.ReserveSequenceRange(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.Sequence, name),
             name,
             1,
             idempotencyKey,
@@ -1522,7 +1634,7 @@ public class KahunaClient
     )
     {
         (SequenceResponseType response, SequenceAllocation allocation, _) = await communication.ReserveSequenceRange(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.Sequence, name),
             name,
             count,
             idempotencyKey,
@@ -1542,7 +1654,7 @@ public class KahunaClient
     )
     {
         (SequenceResponseType response, _) = await communication.DeleteSequence(
-            GetRoundRobinUrl(),
+            GetUrlFor(KahunaRoutingDomain.Sequence, name),
             name,
             durability,
             cancellationToken

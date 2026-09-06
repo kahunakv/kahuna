@@ -19,4 +19,11 @@ public sealed class KahunaSetManyKeyValueResponse
 
     [JsonPropertyName("timeElapsedMs")]
     public int TimeElapsedMs { get; set; }
+
+    /// <summary>
+    /// Deduplicated routing hints for the items in this response, referenced by each item's
+    /// <c>RouteIndex</c>, so a large batch does not repeat one endpoint string per item.
+    /// </summary>
+    [JsonPropertyName("routes")]
+    public List<KahunaRouteHint>? Routes { get; set; }
 }

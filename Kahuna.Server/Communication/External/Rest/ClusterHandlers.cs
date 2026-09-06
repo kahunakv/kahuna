@@ -59,6 +59,20 @@ public static class ClusterHandlers
                 BuildPlacementResponse(raft), KahunaJsonContext.Default.KahunaClusterPlacementResponse),
             "application/json"));
 
+        // Scoped routing metadata: the hash rule for hash-routed key spaces, the descriptor
+        // intervals for key-range routed ones, and the advisory leader of each partition. Read-only
+        // and advisory — a client that acts on a stale answer pays a forward, never a wrong result.
+        app.MapGet("/v1/cluster/routing", async (IKahuna keyValues, [FromQuery] string? keySpace) =>
+        {
+            KahunaRoutingMetadataResponse metadata = await keyValues
+                .GetRoutingMetadata(string.IsNullOrEmpty(keySpace) ? null : keySpace)
+                .ConfigureAwait(false);
+
+            return Results.Text(
+                JsonSerializer.Serialize(metadata, KahunaJsonContext.Default.KahunaRoutingMetadataResponse),
+                "application/json");
+        });
+
         // Per-partition replication-factor override (0 clears it). Leader-only like every map
         // mutation: a follower refuses with the reason and the caller retries against the
         // meta-partition leader. The change adjusts the placement target only — the rebalancer

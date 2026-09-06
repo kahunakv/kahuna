@@ -3,6 +3,8 @@ using Kommander;
 
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.Locks;
 
@@ -21,6 +23,8 @@ public static class LocksHandlers
             if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.InvalidInput };
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (LockResponseType response, long fencingToken)  = await locks.LocateAndTryLock(
                 request.Resource, 
                 request.Owner, 
@@ -33,7 +37,8 @@ public static class LocksHandlers
             {
                 Type = response,
                 FencingToken = fencingToken,
-                ServedFrom = ""
+                ServedFrom = "",
+                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.Lock, request.Resource)
             };
             
             /*if (string.IsNullOrEmpty(request.Resource))
@@ -90,6 +95,8 @@ public static class LocksHandlers
             if (string.IsNullOrEmpty(request.Resource) || request.Owner is null || request.ExpiresMs <= 0)
                 return new() { Type = LockResponseType.InvalidInput };
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (LockResponseType response, long fencingToken) = await locks.LocateAndTryExtendLock(
                 request.Resource, 
                 request.Owner, 
@@ -102,7 +109,8 @@ public static class LocksHandlers
             {
                 Type = response,
                 FencingToken = fencingToken,
-                ServedFrom = ""
+                ServedFrom = "",
+                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.Lock, request.Resource)
             };
             
             /*if (string.IsNullOrEmpty(request.Resource))
@@ -159,6 +167,8 @@ public static class LocksHandlers
             if (string.IsNullOrEmpty(request.Resource) || request.Owner is null)
                 return new() { Type = LockResponseType.InvalidInput };
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             LockResponseType response = await locks.LocateAndTryUnlock(
                 request.Resource, 
                 request.Owner, 
@@ -169,7 +179,8 @@ public static class LocksHandlers
             return new KahunaLockResponse()
             {
                 Type = response,
-                ServedFrom = ""
+                ServedFrom = "",
+                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.Lock, request.Resource)
             };
             
             /*int partitionId = raft.GetPartitionKey(request.Resource);
@@ -217,16 +228,23 @@ public static class LocksHandlers
             if (string.IsNullOrEmpty(request.Resource))
                 return new() { Type = LockResponseType.InvalidInput };
             
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (LockResponseType type, ReadOnlyLockEntry? lockContext) = await locks.LocateAndGetLock(
                 request.Resource, 
                 request.Durability, 
                 cancellationToken
             );
-        
+
+            KahunaRouteHint? lockRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.Lock, request.Resource);
+
+            // A free lock is a terminal answer about a resource whose owner was resolved, so it
+            // carries the hint as a held one does.
             if (type != LockResponseType.Got)
                 return new()
                 {
-                    Type = type
+                    Type = type,
+                    Route = lockRoute
                 };
 
             return new KahunaGetLockResponse
@@ -235,7 +253,8 @@ public static class LocksHandlers
                 Owner = lockContext?.Owner,
                 FencingToken = lockContext?.FencingToken ?? 0,
                 Expires = new(lockContext?.Expires.N ?? 0, lockContext?.Expires.L ?? 0, lockContext?.Expires.C ?? 0),
-                ServedFrom = ""
+                ServedFrom = "",
+                Route = lockRoute
             };
             
             /*int partitionId = raft.GetPartitionKey(request.LockName);

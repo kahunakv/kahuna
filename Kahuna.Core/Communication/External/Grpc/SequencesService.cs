@@ -10,6 +10,8 @@ using System.Runtime.CompilerServices;
 using Grpc.Core;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Sequences;
 using Kommander.Diagnostics;
 
@@ -46,6 +48,8 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context)
             ? sequences.CreateSequence(
                 request.Name,
@@ -62,12 +66,16 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 (SequenceDurability)request.Durability,
                 context.CancellationToken));
 
-        return new()
+        GrpcSequenceResponse createResponse = new()
         {
             Type = (GrpcSequenceResponseType)response,
             Revision = revision,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        AttachRoute(createResponse, capture, request.Name);
+
+        return createResponse;
     }
 
     public override Task<GrpcSequenceResponse> GetSequence(GrpcGetSequenceRequest request, ServerCallContext context)
@@ -79,6 +87,8 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
         (SequenceResponseType response, ReadOnlySequenceEntry? sequence) = await (InterNodeHeaders.IsForwarded(context)
             ? sequences.GetSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken)
@@ -94,6 +104,8 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (sequence is not null)
             grpcResponse.Sequence = ToGrpcSequenceEntry(sequence);
 
+        AttachRoute(grpcResponse, capture, request.Name);
+
         return grpcResponse;
     }
 
@@ -107,6 +119,8 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context)
             ? sequences.NextSequenceValue(
                 request.Name,
@@ -119,7 +133,11 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 (SequenceDurability)request.Durability,
                 context.CancellationToken));
 
-        return BuildAllocationResponse(response, allocation, stopwatch);
+        GrpcSequenceAllocationResponse nextResponse = BuildAllocationResponse(response, allocation, stopwatch);
+
+        AttachRoute(nextResponse, capture, request.Name);
+
+        return nextResponse;
     }
 
     public override Task<GrpcSequenceAllocationResponse> ReserveSequenceRange(GrpcReserveSequenceRangeRequest request, ServerCallContext context)
@@ -131,6 +149,8 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         if (string.IsNullOrWhiteSpace(request.Name) || request.Count <= 0)
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
         (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context)
             ? sequences.ReserveSequenceRange(
@@ -146,7 +166,11 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 (SequenceDurability)request.Durability,
                 context.CancellationToken));
 
-        return BuildAllocationResponse(response, allocation, stopwatch);
+        GrpcSequenceAllocationResponse reserveResponse = BuildAllocationResponse(response, allocation, stopwatch);
+
+        AttachRoute(reserveResponse, capture, request.Name);
+
+        return reserveResponse;
     }
 
     public override Task<GrpcSequenceResponse> DeleteSequence(GrpcDeleteSequenceRequest request, ServerCallContext context)
@@ -159,15 +183,42 @@ public sealed class SequencesService : Sequencer.SequencerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
 
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
         SequenceResponseType response = await (InterNodeHeaders.IsForwarded(context)
             ? sequences.DeleteSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken)
             : sequences.LocateAndDeleteSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken));
 
-        return new()
+        GrpcSequenceResponse deleteResponse = new()
         {
             Type = (GrpcSequenceResponseType)response,
             TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
         };
+
+        AttachRoute(deleteResponse, capture, request.Name);
+
+        return deleteResponse;
+    }
+
+    /// <summary>
+    /// Attaches the route the request resolved, if any. The sequence subsystem trims a name before
+    /// routing it, so the hint is looked up under the trimmed form — the untrimmed string never
+    /// reaches the router and would find nothing.
+    /// </summary>
+    private static void AttachRoute(GrpcSequenceResponse response, RouteCapture? capture, string name)
+    {
+        GrpcRouteHint? hint = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.Sequence, name.Trim());
+
+        if (hint is not null)
+            response.Route = hint;
+    }
+
+    private static void AttachRoute(GrpcSequenceAllocationResponse response, RouteCapture? capture, string name)
+    {
+        GrpcRouteHint? hint = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.Sequence, name.Trim());
+
+        if (hint is not null)
+            response.Route = hint;
     }
 
     private static GrpcSequenceEntry ToGrpcSequenceEntry(ReadOnlySequenceEntry sequence)

@@ -1,6 +1,8 @@
 
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Routing;
+using Kahuna.Shared.Routing;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -30,6 +32,8 @@ public static class KeyValuesHandlers
             if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
                 request.TransactionId,
                 request.Key,
@@ -49,6 +53,7 @@ public static class KeyValuesHandlers
                 Type = response,
                 Revision = revision,
                 LastModified = lastModified,
+                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key)
             };
         });
 
@@ -56,6 +61,8 @@ public static class KeyValuesHandlers
         {
             if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs <= 0)
                 return new() { Type = KeyValueResponseType.InvalidInput };
+
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
                 request.TransactionId,
@@ -71,7 +78,8 @@ public static class KeyValuesHandlers
             {
                 Type = response,
                 Revision = revision,
-                LastModified = lastModified
+                LastModified = lastModified,
+                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key)
             };
 
             /*int partitionId = raft.GetPartitionKey(request.Key);
@@ -119,6 +127,8 @@ public static class KeyValuesHandlers
             if (string.IsNullOrEmpty(request.Key))
                 return new() { Type = KeyValueResponseType.InvalidInput };
             
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
                 request.TransactionId,
                 request.Key,
@@ -132,7 +142,8 @@ public static class KeyValuesHandlers
             {
                 Type = response,
                 Revision = revision,
-                LastModified = lastModified
+                LastModified = lastModified,
+                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key)
             };
             
             /*int partitionId = raft.GetPartitionKey(request.Key);
@@ -213,16 +224,24 @@ public static class KeyValuesHandlers
 
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
                 request.Items,
                 cancellationToken
             );
 
+            RouteHintWriter.Table setRoutes = new(capture);
+
+            foreach (KahunaSetKeyValueResponseItem item in responses)
+                item.RouteIndex = setRoutes.IndexOf(KahunaRoutingDomain.KeyValue, item.Key ?? "");
+
             return new KahunaSetManyKeyValueResponse
             {
                 Type = KeyValueResponseType.Set,
                 Items = responses,
-                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds(),
+                Routes = setRoutes.ToRest()
             };
         });
 
@@ -265,6 +284,8 @@ public static class KeyValuesHandlers
 
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
                 request.Items,
                 cancellationToken,
@@ -272,11 +293,17 @@ public static class KeyValuesHandlers
                 deleteOperationId
             );
 
+            RouteHintWriter.Table deleteRoutes = new(capture);
+
+            foreach (KahunaDeleteKeyValueResponseItem item in responses)
+                item.RouteIndex = deleteRoutes.IndexOf(KahunaRoutingDomain.KeyValue, item.Key ?? "");
+
             return new KahunaDeleteManyKeyValueResponse
             {
                 Type = KeyValueResponseType.Deleted,
                 Items = responses,
-                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds(),
+                Routes = deleteRoutes.ToRest()
             };
         });
 
@@ -288,6 +315,8 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
                 request.TransactionId,
                 request.Key,
@@ -298,7 +327,9 @@ public static class KeyValuesHandlers
                 request.CoordinatorKey ?? "",
                 new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
-        
+
+            KahunaRouteHint? getRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
+
             if (keyValueContext is not null)
             {
                 KahunaGetKeyValueResponse response = new()
@@ -308,15 +339,19 @@ public static class KeyValuesHandlers
                     Value = keyValueContext.Value,
                     Revision = keyValueContext.Revision,
                     Expires = keyValueContext.Expires,
-                    LastModified = keyValueContext.LastModified
+                    LastModified = keyValueContext.LastModified,
+                    Route = getRoute
                 };
                 
                 return response;
             }
 
+            // A missing key is a terminal answer about a key whose owner was resolved, so it carries
+            // the hint too: a read-mostly workload over absent keys would otherwise learn no routes.
             return new()
             {
-                Type = type
+                Type = type,
+                Route = getRoute
             };
         });
         
@@ -328,6 +363,8 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
                 request.TransactionId,
                 request.Key,
@@ -338,7 +375,9 @@ public static class KeyValuesHandlers
                 request.CoordinatorKey ?? "",
                 new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
             );
-        
+
+            KahunaRouteHint? existsRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
+
             if (keyValueContext is not null)
             {
                 KahunaExistsKeyValueResponse response = new()
@@ -347,7 +386,8 @@ public static class KeyValuesHandlers
                     Type = type,
                     Revision = keyValueContext.Revision,
                     Expires = keyValueContext.Expires,
-                    LastModified = keyValueContext.LastModified
+                    LastModified = keyValueContext.LastModified,
+                    Route = existsRoute
                 };
                 
                 return response;
@@ -355,7 +395,8 @@ public static class KeyValuesHandlers
 
             return new()
             {
-                Type = type
+                Type = type,
+                Route = existsRoute
             };
         });
         
@@ -411,6 +452,8 @@ public static class KeyValuesHandlers
 
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
                 request.TransactionId,
                 request.ReadTimestamp,
@@ -418,11 +461,14 @@ public static class KeyValuesHandlers
                 cancellationToken
             );
 
+            RouteHintWriter.Table getManyRoutes = new(capture);
+
             return new KahunaManyKeyValuesResponse
             {
                 Type = KeyValueResponseType.Get,
-                Items = GetManyResponseItems(responses, includeValues: true),
-                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+                Items = GetManyResponseItems(responses, includeValues: true, getManyRoutes),
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds(),
+                Routes = getManyRoutes.ToRest()
             };
         });
 
@@ -438,6 +484,8 @@ public static class KeyValuesHandlers
 
             ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
             List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
                 request.TransactionId,
                 request.ReadTimestamp,
@@ -445,11 +493,14 @@ public static class KeyValuesHandlers
                 cancellationToken
             );
 
+            RouteHintWriter.Table existsManyRoutes = new(capture);
+
             return new KahunaManyKeyValuesResponse
             {
                 Type = KeyValueResponseType.Get,
-                Items = GetManyResponseItems(responses, includeValues: false),
-                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+                Items = GetManyResponseItems(responses, includeValues: false, existsManyRoutes),
+                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds(),
+                Routes = existsManyRoutes.ToRest()
             };
         });
 
@@ -766,7 +817,8 @@ public static class KeyValuesHandlers
     /// </summary>
     private static List<KahunaGetManyKeyValuesResponseItem> GetManyResponseItems(
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
-        bool includeValues)
+        bool includeValues,
+        RouteHintWriter.Table? routes = null)
     {
         List<KahunaGetManyKeyValuesResponseItem> items = new(responses.Count);
 
@@ -779,7 +831,8 @@ public static class KeyValuesHandlers
                 Value = includeValues ? entry?.Value : null,
                 Revision = entry?.Revision ?? 0,
                 LastModified = entry?.LastModified ?? HLCTimestamp.Zero,
-                Durability = durability
+                Durability = durability,
+                RouteIndex = routes?.IndexOf(KahunaRoutingDomain.KeyValue, key) ?? 0
             });
         }
 

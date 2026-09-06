@@ -5,6 +5,15 @@ using System.Text.Json.Serialization;
 
 namespace Kahuna.Shared.Communication.Rest;
 
+[JsonSerializable(typeof(KahunaRouteHint))]
+[JsonSerializable(typeof(List<KahunaRouteHint>))]
+[JsonSerializable(typeof(KahunaRoutingMetadataResponse))]
+[JsonSerializable(typeof(KahunaRoutingKeySpaceResponse))]
+[JsonSerializable(typeof(List<KahunaRoutingKeySpaceResponse>))]
+[JsonSerializable(typeof(KahunaRoutingRangeResponse))]
+[JsonSerializable(typeof(List<KahunaRoutingRangeResponse>))]
+[JsonSerializable(typeof(KahunaPartitionLeaderResponse))]
+[JsonSerializable(typeof(List<KahunaPartitionLeaderResponse>))]
 [JsonSerializable(typeof(KahunaGetLockRequest))]
 [JsonSerializable(typeof(KahunaGetLockResponse))]
 [JsonSerializable(typeof(KahunaLockRequest))]

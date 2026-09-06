@@ -772,6 +772,8 @@ public sealed class TestMembership : BaseCluster
         public Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => Task.FromResult(new KahunaSplitRangeResponse());
         public Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => Task.FromResult(new KahunaMergeRangesResponse());
         public KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => new();
+
+        public Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string? keySpace = null) => Task.FromResult(new KahunaRoutingMetadataResponse());
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => Task.FromResult(0);
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => Task.FromResult(0);
 

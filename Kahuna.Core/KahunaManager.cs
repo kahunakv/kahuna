@@ -15,6 +15,7 @@ using Kahuna.Server.Sequencer;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Composition;
 using Kahuna.Utils;
+using Kahuna.Server.Routing;
 using Writes = Kahuna.Server.KeyValues.Writes;
 
 namespace Kahuna;
@@ -83,6 +84,12 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
     private readonly BackupFacade backups;
 
     private readonly bool remoteRestoreAllowed;
+
+    /// <summary>
+    /// Publishes the scoped routing metadata a client uses to resolve a resource it has never seen
+    /// to its partition, plus the advisory leader of each partition.
+    /// </summary>
+    private readonly RoutingMetadataService routingMetadata;
 
 
     /// <summary>
@@ -169,6 +176,12 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         // leaks scheduler threads.
         backendReadScheduler.Start();
         backendWriteScheduler.Start();
+
+        routingMetadata = new RoutingMetadataService(
+            raft,
+            keyValues.RangeMapStore,
+            keyValues.KeySpaceRegistry,
+            ClientEndpointAdvertiserFactory.Create(raft, configuration));
 
         // Registered only after full construction, so a failed constructor never inflates the census.
         // The census feeds the proposed-delta caches' take budget; see InProcessNodeCensus.

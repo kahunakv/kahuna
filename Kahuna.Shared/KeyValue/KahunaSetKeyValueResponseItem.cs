@@ -23,4 +23,11 @@ public sealed class KahunaSetKeyValueResponseItem
     
     [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
+
+    /// <summary>
+    /// 1-based index into the enclosing response's <c>Routes</c> table; 0 when no route was
+    /// resolved for this item.
+    /// </summary>
+    [JsonPropertyName("routeIndex")]
+    public int RouteIndex { get; set; }
 }

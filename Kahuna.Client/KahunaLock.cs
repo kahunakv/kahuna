@@ -106,10 +106,8 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        if (string.IsNullOrEmpty(servedFrom) || !client.Options.UpgradeUrls)
-            return await client.TryExtendLock(resource, owner, duration, durability, cancellationToken);
-        
-        return await client.Communication.TryExtendLock(servedFrom, resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
+        return await client.Communication.TryExtendLock(
+            client.GetLockUrl(resource, servedFrom), resource, owner, (int)duration.TotalMilliseconds, durability, cancellationToken);
     }
     
     /// <summary>
@@ -125,10 +123,8 @@ public sealed class KahunaLock : IAsyncDisposable
         if (!IsAcquired || owner is null)
             throw new KahunaException("Lock was not acquired", LockResponseType.Errored);
 
-        if (string.IsNullOrEmpty(servedFrom) || !client.Options.UpgradeUrls)
-            return await client.TryExtendLock(resource, owner, durationMs, durability, cancellationToken);
-        
-        return await client.Communication.TryExtendLock(servedFrom, resource, owner, durationMs, durability, cancellationToken);
+        return await client.Communication.TryExtendLock(
+            client.GetLockUrl(resource, servedFrom), resource, owner, durationMs, durability, cancellationToken);
     }
     
     /// <summary>
@@ -138,10 +134,8 @@ public sealed class KahunaLock : IAsyncDisposable
     /// <exception cref="KahunaException"></exception>
     public async Task<KahunaLockInfo?> GetInfo(CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(servedFrom) || !client.Options.UpgradeUrls)
-            return await client.GetLockInfo(resource, durability, cancellationToken);
-        
-        return await client.Communication.GetLock(servedFrom, resource, durability, cancellationToken);
+        return await client.Communication.GetLock(
+            client.GetLockUrl(resource, servedFrom), resource, durability, cancellationToken);
     }
 
     /// <summary>
@@ -155,13 +149,8 @@ public sealed class KahunaLock : IAsyncDisposable
 
         if (IsAcquired && owner is not null)
         {
-            if (string.IsNullOrEmpty(servedFrom) || !client.Options.UpgradeUrls)
-            {
-                await client.Unlock(resource, owner, durability);
-                return;
-            }
-
-            await client.Communication.TryUnlock(servedFrom, resource, owner, durability, CancellationToken.None);
+            await client.Communication.TryUnlock(
+                client.GetLockUrl(resource, servedFrom), resource, owner, durability, CancellationToken.None);
         }
     }
 

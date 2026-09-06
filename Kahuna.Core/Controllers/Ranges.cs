@@ -502,6 +502,10 @@ public sealed partial class KahunaManager
         return response;
     }
 
+    /// <inheritdoc/>
+    public Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string? keySpace = null) =>
+        routingMetadata.BuildAsync(keySpace);
+
     /// <summary>The key-range data-movement primitive; register with <c>IRaft.RegisterStateMachineTransfer</c>.</summary>
     internal KvStateMachineTransfer KvStateMachineTransfer => keyValues.KvStateMachineTransfer;
 
