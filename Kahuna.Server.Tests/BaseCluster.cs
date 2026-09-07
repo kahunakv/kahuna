@@ -337,6 +337,11 @@ public abstract class BaseCluster
     /// Creates a single Raft+Kahuna node with the given identity and wires it into the shared transports.
     /// Does NOT call <c>JoinCluster</c> — callers are responsible for that step.
     /// </summary>
+    /// <param name="configureRaft">Runs over the node's <see cref="RaftConfiguration"/> after the defaults are
+    /// set, so a fixture can change a consensus knob the defaults fix — the proposal bound a test must outlive,
+    /// or a compaction cadence low enough to force a snapshot install.</param>
+    /// <param name="configureKahuna">Runs over the node's <see cref="KahunaConfiguration"/> after the defaults
+    /// are set.</param>
     protected static (IRaft, IKahuna) BuildNode(
         MemoryInterNodeCommmunication interNodeComm,
         InMemoryCommunication raftComm,
@@ -348,7 +353,9 @@ public abstract class BaseCluster
         ILogger<IKahuna> kahunaLogger,
         int initialPartitions = 3,
         int replicationFactor = 0,
-        bool enablePlacementRebalancer = false)
+        bool enablePlacementRebalancer = false,
+        Action<RaftConfiguration>? configureRaft = null,
+        Action<KahunaConfiguration>? configureKahuna = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         ActorSystem actorSystem = new(logger: raftLogger);
@@ -390,6 +397,7 @@ public abstract class BaseCluster
             CompactNumberEntries = 50,
             EnableQuiescence = false
         };
+        configureRaft?.Invoke(config);
 
         RaftManager raft = new(
             config,
@@ -415,6 +423,7 @@ public abstract class BaseCluster
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1)
         };
+        configureKahuna?.Invoke(configuration);
 
         KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, kahunaLogger);
 
@@ -442,7 +451,32 @@ public abstract class BaseCluster
         ILogger<IRaft> raftLogger,
         ILogger<IKahuna> kahunaLogger,
         int replicationFactor = 0,
-        bool enablePlacementRebalancer = false)
+        bool enablePlacementRebalancer = false,
+        Action<RaftConfiguration>? configureRaft = null,
+        Action<KahunaConfiguration>? configureKahuna = null)
+    {
+        (IRaft[] rafts, IKahuna[] kahunas, _, _) = await AssembleClusterWithTransports(
+            nodeCount, walStorage, partitions, raftLogger, kahunaLogger,
+            replicationFactor, enablePlacementRebalancer, configureRaft, configureKahuna);
+
+        return (rafts, kahunas);
+    }
+
+    /// <summary>
+    /// <see cref="AssembleCluster"/> plus the two in-memory transports, so a fixture can cut one node off the
+    /// network (<see cref="InMemoryCommunication.PartitionNode"/>) and heal it again — the only way to make a
+    /// follower fall below the leader's WAL compaction floor and be seeded by a real snapshot install.
+    /// </summary>
+    protected static async Task<(IRaft[] Rafts, IKahuna[] Kahunas, InMemoryCommunication RaftComm, MemoryInterNodeCommmunication InterComm)> AssembleClusterWithTransports(
+        int nodeCount,
+        string walStorage,
+        int partitions,
+        ILogger<IRaft> raftLogger,
+        ILogger<IKahuna> kahunaLogger,
+        int replicationFactor = 0,
+        bool enablePlacementRebalancer = false,
+        Action<RaftConfiguration>? configureRaft = null,
+        Action<KahunaConfiguration>? configureKahuna = null)
     {
         InMemoryCommunication raftComm = new();
         MemoryInterNodeCommmunication interComm = new();
@@ -458,7 +492,7 @@ public abstract class BaseCluster
             (rafts[i], kahunas[i]) = BuildNode(
                 interComm, raftComm, walStorage, i + 1, 8000 + i + 1,
                 endpoints.Where(e => e != self), raftLogger, kahunaLogger,
-                partitions, replicationFactor, enablePlacementRebalancer);
+                partitions, replicationFactor, enablePlacementRebalancer, configureRaft, configureKahuna);
         }
 
         interComm.SetNodes(endpoints.Zip(kahunas).ToDictionary(p => p.First, p => p.Second));
@@ -490,7 +524,7 @@ public abstract class BaseCluster
                 }
         }
 
-        return (rafts, kahunas);
+        return (rafts, kahunas, raftComm, interComm);
     }
 
     /// <summary>

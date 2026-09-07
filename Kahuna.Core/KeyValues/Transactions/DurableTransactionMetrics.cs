@@ -951,6 +951,57 @@ internal static class DurableTransactionMetrics
     internal static void RecordLookupRedirected() => ForwardRedirects.Add(1, OpRecordLookup);
 
     /// <summary>
+    /// Session-registration calls this node made for a transaction whose session lives on the node that leads
+    /// the coordinator partition, tagged by <c>op</c> (<c>begin</c>, <c>complete</c>, <c>working_set</c>),
+    /// <c>route</c> (<c>local</c> when this node holds the session, <c>forwarded</c> when the call left the
+    /// node) and <c>result</c> (<c>ok</c>, <c>refused</c> for a rejection or a not-delivered answer,
+    /// <c>threw</c>, <c>unrouted</c> for an attempt that found no reachable session leader and so never left
+    /// the node). An operation executed away from its session node costs one <c>begin</c> and one
+    /// <c>complete</c> forward; a working-set query made away from the session node costs one
+    /// <c>working_set</c> forward. The forwarded count per committed transaction is the registration cost that
+    /// a session-local transaction never pays, and the local count is the denominator that turns it into a
+    /// share.
+    /// </summary>
+    internal static readonly Counter<long> SessionRegistrationForwards =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.session_registration_forwards",
+            description: "Session-registration calls, tagged by op, route and result.");
+
+    private static readonly KeyValuePair<string, object?> OpBegin = new("op", "begin");
+    private static readonly KeyValuePair<string, object?> OpComplete = new("op", "complete");
+    private static readonly KeyValuePair<string, object?> OpWorkingSet = new("op", "working_set");
+    private static readonly KeyValuePair<string, object?> RouteLocal = new("route", "local");
+    private static readonly KeyValuePair<string, object?> RouteForwarded = new("route", "forwarded");
+    private static readonly KeyValuePair<string, object?> ResultUnrouted = new("result", "unrouted");
+
+    private static KeyValuePair<string, object?> OpTag(SessionRegistrationOp op) => op switch
+    {
+        SessionRegistrationOp.Begin => OpBegin,
+        SessionRegistrationOp.Complete => OpComplete,
+        _ => OpWorkingSet
+    };
+
+    /// <summary>A registration served on this node because it holds the session.</summary>
+    internal static void SessionRegistrationLocal(SessionRegistrationOp op, bool ok) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteLocal, ok ? ResultOk : ResultRefused);
+
+    /// <summary>A registration this node sent to the session owner, and the answer it came back with.</summary>
+    internal static void SessionRegistrationForwarded(SessionRegistrationOp op, bool ok) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ok ? ResultOk : ResultRefused);
+
+    /// <summary>A registration this node sent to the session owner whose transport threw.</summary>
+    internal static void SessionRegistrationForwardThrew(SessionRegistrationOp op) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ResultThrew);
+
+    /// <summary>
+    /// A registration that had to be forwarded but found no session leader to forward it to, so no call left
+    /// the node. Counted apart from the forwards, because a hop that never happened must not inflate the hop
+    /// count a batching decision divides by.
+    /// </summary>
+    internal static void SessionRegistrationUnrouted(SessionRegistrationOp op) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ResultUnrouted);
+
+    /// <summary>
     /// Number of tracked read-set keys a finalize validated. Interpreted together with
     /// <see cref="FinalizeValidateMs"/>: a large set explains a slow validation; a small set with slow validation
     /// points at key-actor queueing instead.
