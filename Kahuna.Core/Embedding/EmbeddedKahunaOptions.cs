@@ -319,7 +319,29 @@ public sealed class EmbeddedKahunaOptions
     // the embedded default StartElectionTimeout is 500 ms.
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromMilliseconds(100);
 
-    public TimeSpan RecentHeartbeat { get; set; } = TimeSpan.FromMilliseconds(100);
+    private TimeSpan? recentHeartbeat;
+
+    /// <summary>
+    /// Per-peer de-duplication window for heartbeat sends. A heartbeat round skips a peer that the
+    /// leader already contacted within this window.
+    ///
+    /// <para>The value must stay strictly below <see cref="HeartbeatInterval"/>. At or above the
+    /// cadence, the window swallows every timer-driven round, so heartbeats and the follower
+    /// catch-up path go silent while the leader believes it beats. Kommander rejects that pair in
+    /// <c>RaftConfiguration.Validate()</c>, which fails node construction.</para>
+    ///
+    /// <para>While unset, this value tracks <see cref="HeartbeatInterval"/> at a quarter of the
+    /// cadence — 25 ms at the embedded 100 ms default. A fixed default cannot hold that relation: an
+    /// embedded consumer that lowers only <see cref="HeartbeatInterval"/>, as a fast test node does,
+    /// would leave the window at or above the new cadence and fail to construct the node. The getter
+    /// reads the current <see cref="HeartbeatInterval"/>, so object-initializer order does not
+    /// matter. Assign a value to override the derivation.</para>
+    /// </summary>
+    public TimeSpan RecentHeartbeat
+    {
+        get => recentHeartbeat ?? new TimeSpan(HeartbeatInterval.Ticks / 4);
+        set => recentHeartbeat = value;
+    }
 
     public TimeSpan VotingTimeout { get; set; } = TimeSpan.FromMilliseconds(1500);
 
