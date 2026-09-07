@@ -177,7 +177,8 @@ coordinator session has disappeared.
 ## 4. How an operation becomes part of the transaction
 
 Each registered operation has a 128-bit `TransactionOperationId` and a structured declaration. The
-declaration includes an `OperationKind` plus a SHA-256 digest of all inputs that define the operation.
+declaration includes an `OperationKind` plus a 128-bit xxHash (`XxHash128`) digest of all inputs that
+define the operation.
 Fields are length-prefixed before hashing, which keeps different field boundaries unambiguous.
 
 The operation follows this path:
