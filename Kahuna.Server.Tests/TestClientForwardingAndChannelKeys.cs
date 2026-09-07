@@ -287,8 +287,8 @@ public sealed class TestClientForwardingAndChannelKeys
 
             for (int round = 0; round < 3; round++)
             {
-                Task<GrpcBatcherResponse> first = batcher.Enqueue(new GrpcTryLockRequest());
-                Task<GrpcBatcherResponse> second = batcher.Enqueue(new GrpcTryLockRequest());
+                Task<GrpcBatcherResponse> first = batcher.Enqueue(new GrpcTryLockRequest(), TestContext.Current.CancellationToken);
+                Task<GrpcBatcherResponse> second = batcher.Enqueue(new GrpcTryLockRequest(), TestContext.Current.CancellationToken);
 
                 await Assert.ThrowsAnyAsync<Exception>(() => first);
                 await Assert.ThrowsAnyAsync<Exception>(() => second);

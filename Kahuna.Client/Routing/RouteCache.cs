@@ -26,8 +26,6 @@ internal sealed class RouteCache
 
     private readonly int shardMask;
 
-    private long revisions;
-
     /// <summary>How long a learned route is used before it must be observed again.</summary>
     public TimeSpan Lifetime { get; }
 

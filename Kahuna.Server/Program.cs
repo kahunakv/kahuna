@@ -431,6 +431,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         CheckLeaderInterval = TimeSpan.FromMilliseconds(opts.RaftCheckLeaderInterval),
         LeadershipBarrierTimeout = TimeSpan.FromMilliseconds(opts.RaftLeadershipBarrierTimeout),
         LeadershipConfirmationTimeout = TimeSpan.FromMilliseconds(opts.RaftLeadershipConfirmationTimeout),
+        ProposalTimeout = TimeSpan.FromMilliseconds(opts.RaftProposalTimeout),
         EnableCheckQuorum = opts.RaftEnableCheckQuorum,
         CheckQuorumIntervalMultiplier = opts.RaftCheckQuorumIntervalMultiplier,
         TimerInitialDelay = TimeSpan.FromMilliseconds(opts.RaftTimerInitialDelay),

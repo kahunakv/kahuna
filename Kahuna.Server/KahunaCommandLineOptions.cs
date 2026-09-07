@@ -213,6 +213,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-leadership-confirmation-timeout", Required = false, HelpText = "Maximum time a read-index leadership confirmation may wait for the quorum ack round plus applied-frontier catch-up before failing, in milliseconds", Default = 2000)]
     public int RaftLeadershipConfirmationTimeout { get; set; } = 2000;
 
+    [Option("raft-proposal-timeout", Required = false, HelpText = "How long a write caller waits for a proposal to reach quorum before the call returns ProposalTimeout, in milliseconds", Default = 10000)]
+    public int RaftProposalTimeout { get; set; } = 10000;
+
     [Option("raft-enable-check-quorum", Required = false, HelpText = "When set, a leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower", Default = false)]
     public bool RaftEnableCheckQuorum { get; set; }
 

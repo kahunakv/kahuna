@@ -22,6 +22,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.CheckLeaderInterval)] = nameof(KahunaCommandLineOptions.RaftCheckLeaderInterval),
         [nameof(RaftConfiguration.LeadershipBarrierTimeout)] = nameof(KahunaCommandLineOptions.RaftLeadershipBarrierTimeout),
         [nameof(RaftConfiguration.LeadershipConfirmationTimeout)] = nameof(KahunaCommandLineOptions.RaftLeadershipConfirmationTimeout),
+        [nameof(RaftConfiguration.ProposalTimeout)] = nameof(KahunaCommandLineOptions.RaftProposalTimeout),
         [nameof(RaftConfiguration.EnableCheckQuorum)] = nameof(KahunaCommandLineOptions.RaftEnableCheckQuorum),
         [nameof(RaftConfiguration.CheckQuorumIntervalMultiplier)] = nameof(KahunaCommandLineOptions.RaftCheckQuorumIntervalMultiplier),
         [nameof(RaftConfiguration.TimerInitialDelay)] = nameof(KahunaCommandLineOptions.RaftTimerInitialDelay),
