@@ -2133,6 +2133,9 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             // keeps followers fed between operations, and scaling the election window by the test timing scale
             // gives loaded CI runners the same slack the shared cluster harness relies on.
             HeartbeatInterval = TimeSpan.FromMilliseconds(30),
+            // Kommander rejects a de-dup window at or above the heartbeat cadence: the window would
+            // swallow every timer-driven round. Its 100 ms default sits far above these fast timers.
+            RecentHeartbeat = TimeSpan.FromMilliseconds(7.5),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(300 * TimingScale),

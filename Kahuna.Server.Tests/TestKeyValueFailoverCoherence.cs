@@ -52,6 +52,9 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
             Port                  = port,
             InitialPartitions     = 2,
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
+            // Kommander rejects a de-dup window at or above the heartbeat cadence: the window would
+            // swallow every timer-driven round. Its 100 ms default sits far above these fast timers.
+            RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
             StartElectionTimeout  = (int)(50  * TimingScale),
             EndElectionTimeout    = (int)(150 * TimingScale),

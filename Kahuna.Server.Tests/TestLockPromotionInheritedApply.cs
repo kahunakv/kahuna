@@ -81,6 +81,9 @@ public sealed class TestLockPromotionInheritedApply : RaftTrackingTest
             Port = port,
             InitialPartitions = 2,
             HeartbeatInterval = TimeSpan.FromMilliseconds(10),
+            // Kommander rejects a de-dup window at or above the heartbeat cadence: the window would
+            // swallow every timer-driven round. Its 100 ms default sits far above these fast timers.
+            RecentHeartbeat = TimeSpan.FromMilliseconds(2.5),
             CheckLeaderInterval = TimeSpan.FromMilliseconds(25),
             StartElectionTimeout = 50,
             EndElectionTimeout = 150,
