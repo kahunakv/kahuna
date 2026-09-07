@@ -1733,7 +1733,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 },
                 opId,
                 cancellationToken,
-                readSetExtendsBeyondWrites: eligibility.ReadSetExtendsBeyondWrites,
+                readSetExclusion: eligibility.ReadSetExclusion,
                 applyTimeValidation: eligibility.ApplyTimeValidation,
                 bundledReadDependencies: eligibility.OnPartitionReadDependencies).ConfigureAwait(false);
         }
@@ -1889,15 +1889,16 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>The one-phase bundle's eligibility inputs for one finalize, computed by
     /// <see cref="ComputeOnePhaseEligibility"/>.</summary>
-    /// <param name="ReadSetExtendsBeyondWrites">A validated dependency exists that the bundle cannot re-check at
-    /// apply time; keeps the bundle closed (the standard 2PC flow runs).</param>
+    /// <param name="ReadSetExclusion">The validated dependency shape that the bundle cannot re-check at apply
+    /// time, when one exists; keeps the bundle closed (the standard 2PC flow runs) and is recorded as the gate
+    /// verdict. Null admits the read set.</param>
     /// <param name="ApplyTimeValidation">The bundled commit must be validated at apply time against the
     /// partition's replicated committed-head ledger.</param>
     /// <param name="OnPartitionReadDependencies">The read-only point dependencies routed to the anchor
-    /// partition, carried into the bundled commit for that apply-time check; null when none or when the check
-    /// is off.</param>
+    /// partition, carried into the bundled commit for that apply-time check; null when none, when the check
+    /// is off, or when the read set is excluded (the 2PC flow validates the whole read set from the context).</param>
     private readonly record struct OnePhaseEligibility(
-        bool ReadSetExtendsBeyondWrites,
+        OnePhaseGateOutcome? ReadSetExclusion,
         bool ApplyTimeValidation,
         IReadOnlyList<BundledReadDependency>? OnPartitionReadDependencies);
 
@@ -1927,53 +1928,76 @@ internal sealed class TransactionCoordinator : IDisposable
     /// is a dependency no deterministic apply-time check exists for: a prefix or range lock (a predicate, not a
     /// key), a read-only key routed to another partition (no cross-partition state at apply), or a read-only
     /// key of a non-persistent durability (its writes never feed the ledger). Routing uses the same locate the
-    /// finalize-input builder froze the intents with, so a read and a write of one key agree on the partition.</para>
+    /// finalize-input builder froze the intents with, so a read and a write of one key agree on the partition.
+    /// Which partition a hash-routed read lands on is its key space's placement (<see cref="Shared.Routing.HashPlacement"/>):
+    /// a consumer that reads an index entry and writes a row keeps the bundle open by naming the index key
+    /// space in the row key space's placement group.</para>
+    ///
+    /// <para>The exclusion returned is the first one found, in the order predicate, then the read keys as the
+    /// context enumerates them; it is recorded verbatim as the gate verdict so an operator sees which shape
+    /// closed the bundle. Once the read set is excluded, no on-partition dependency is collected — the 2PC flow
+    /// validates the whole read set from the context, never from that list.</para>
     /// </summary>
     private OnePhaseEligibility ComputeOnePhaseEligibility(TransactionContext context, DurableFinalizeInput input)
     {
+        // Only a multi-process group closes the bundle on these shapes; a single-process group accepts the
+        // in-process residual for every one of them (see the summary) and still carries what it can check.
+        bool closesBundle = !configuration.SingleProcessRaftGroup;
+
         if (!configuration.OnePhaseApplyTimeValidation)
         {
-            bool closed = !configuration.SingleProcessRaftGroup
-                && (HasReadDependenciesBeyondWrites(context)
-                    || context.WrittenBaseObservations is { Count: > 0 });
+            OnePhaseGateOutcome? exclusion = null;
 
-            return new OnePhaseEligibility(closed, ApplyTimeValidation: false, OnPartitionReadDependencies: null);
+            if (closesBundle)
+            {
+                if (HasReadDependenciesBeyondWrites(context))
+                    exclusion = OnePhaseGateOutcome.ReadSetBeyondWrites;
+                else if (context.WrittenBaseObservations is { Count: > 0 })
+                    exclusion = OnePhaseGateOutcome.ValidatedBase;
+            }
+
+            return new OnePhaseEligibility(exclusion, ApplyTimeValidation: false, OnPartitionReadDependencies: null);
         }
 
+        if (!RequiresReadSetValidation(context))
+            return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
+
+        if (closesBundle && (context.PrefixLocksAcquired is { Count: > 0 } || context.RangeLocksAcquired is { Count: > 0 }))
+            return new OnePhaseEligibility(OnePhaseGateOutcome.PredicateRead, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
+
         List<BundledReadDependency>? onPartitionReads = null;
-        bool hasPredicateOrOffPartitionReads = false;
 
-        if (RequiresReadSetValidation(context))
+        if (context.ReadKeys is { Count: > 0 })
         {
-            if (context.PrefixLocksAcquired is { Count: > 0 } || context.RangeLocksAcquired is { Count: > 0 })
-                hasPredicateOrOffPartitionReads = true;
-
-            if (context.ReadKeys is { Count: > 0 })
+            foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
             {
-                foreach (KeyValueTransactionReadKey readKey in context.ReadKeys.Values)
+                if (string.IsNullOrEmpty(readKey.Key))
+                    continue;
+
+                if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
+                    continue;
+
+                if (readKey.Durability != KeyValueDurability.Persistent)
                 {
-                    if (string.IsNullOrEmpty(readKey.Key))
-                        continue;
+                    if (closesBundle)
+                        return new OnePhaseEligibility(OnePhaseGateOutcome.NonPersistentRead, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
 
-                    if (context.ModifiedKeys is not null && context.ModifiedKeys.Contains((readKey.Key, readKey.Durability)))
-                        continue;
-
-                    if (readKey.Durability != KeyValueDurability.Persistent
-                        || manager.LocateDurablePartition(readKey.Key).PartitionId != input.AnchorPartitionId)
-                    {
-                        hasPredicateOrOffPartitionReads = true;
-                        continue;
-                    }
-
-                    (onPartitionReads ??= []).Add(new BundledReadDependency(readKey.Key, readKey.Revision, readKey.Exists));
+                    continue;
                 }
+
+                if (manager.LocateDurablePartition(readKey.Key).PartitionId != input.AnchorPartitionId)
+                {
+                    if (closesBundle)
+                        return new OnePhaseEligibility(OnePhaseGateOutcome.OffPartitionRead, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
+
+                    continue;
+                }
+
+                (onPartitionReads ??= []).Add(new BundledReadDependency(readKey.Key, readKey.Revision, readKey.Exists));
             }
         }
 
-        return new OnePhaseEligibility(
-            ReadSetExtendsBeyondWrites: !configuration.SingleProcessRaftGroup && hasPredicateOrOffPartitionReads,
-            ApplyTimeValidation: true,
-            OnPartitionReadDependencies: onPartitionReads);
+        return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: onPartitionReads);
     }
 
     /// <summary>

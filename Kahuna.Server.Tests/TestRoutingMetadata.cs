@@ -46,7 +46,14 @@ public sealed class TestRoutingMetadata : BaseCluster
         "ünïcödé/ключ",
         "emoji/\U0001F600",
         "spaces in key/value",
-        "UPPER/lower"
+        "UPPER/lower",
+        // Placement groups: the key space keeps the whole prefix, the hash runs over the group.
+        "orders|rows/7",
+        "orders|idx:pk/7",
+        "t:r|i:pk/abc",
+        "|leading-group/1",
+        "a|b|c/d",
+        "no-slash|group"
     ];
 
     [Fact]
@@ -64,7 +71,9 @@ public sealed class TestRoutingMetadata : BaseCluster
             Assert.Equal(1, metadata.SchemaVersion);
             Assert.Equal(Partitions, metadata.HashPoolSize);
             Assert.Equal(1, metadata.HashPartitionOffset);
+            Assert.Equal(HashPlacement.AlgorithmIdentifier, metadata.HashAlgorithm);
             Assert.Equal("/", metadata.PrefixSeparator);
+            Assert.Equal("|", metadata.GroupSeparator);
             Assert.Equal("__kahuna:sequences:{0}", metadata.SequenceStorageKeyFormat);
             Assert.Equal("__kahuna:", metadata.ReservedKeyPrefix);
             Assert.Equal("http://" + raft1.GetLocalEndpoint(), metadata.LocalEndpoint);
@@ -307,7 +316,9 @@ public sealed class TestRoutingMetadata : BaseCluster
     [Theory]
     [InlineData("schema")]
     [InlineData("hash")]
+    [InlineData("hash-before-groups")]
     [InlineData("separator")]
+    [InlineData("group-separator")]
     [InlineData("incoherent")]
     [InlineData("uninitialized")]
     [InlineData("sequence-key")]
@@ -318,8 +329,9 @@ public sealed class TestRoutingMetadata : BaseCluster
             Initialized = true,
             Coherent = true,
             SchemaVersion = 1,
-            HashAlgorithm = "kommander.inverse-prefixed-jump-xxh32-v1",
+            HashAlgorithm = HashPlacement.AlgorithmIdentifier,
             PrefixSeparator = "/",
+            GroupSeparator = "|",
             HashPoolSize = 4,
             HashPartitionOffset = 1,
             SequenceStorageKeyFormat = "__kahuna:sequences:{0}",
@@ -330,8 +342,12 @@ public sealed class TestRoutingMetadata : BaseCluster
         switch (defect)
         {
             case "schema": metadata.SchemaVersion = 2; break;
-            case "hash": metadata.HashAlgorithm = "kommander.inverse-prefixed-jump-xxh32-v2"; break;
+            case "hash": metadata.HashAlgorithm = "kahuna.placement-group-jump-xxh32-v2"; break;
+            // The identifier a server published before placement groups existed: the same digest without
+            // the group rule, which would mis-hash exactly the keys that carry one.
+            case "hash-before-groups": metadata.HashAlgorithm = "kommander.inverse-prefixed-jump-xxh32-v1"; break;
             case "separator": metadata.PrefixSeparator = ":"; break;
+            case "group-separator": metadata.GroupSeparator = ":"; break;
             case "incoherent": metadata.Coherent = false; break;
             case "uninitialized": metadata.Initialized = false; break;
             case "sequence-key": metadata.SequenceStorageKeyFormat = "seq:{0}:record"; break;

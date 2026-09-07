@@ -1,3 +1,4 @@
+using Kahuna.Shared.Routing;
 using Kommander;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -37,12 +38,11 @@ internal sealed class DataPartitionRouter
 
     /// <summary>
     /// Resolves <paramref name="key"/> to a user partition in <c>[1, InitialPartitions]</c> by
-    /// ordinally hashing its key-space prefix (the part before the last <c>'/'</c>, matching
-    /// <see cref="KeySpaceRegistry.ExtractKeySpace"/>). Deterministic and stable for a given pool size.
+    /// hashing the placement group of its key space (<see cref="HashPlacement"/>: the key space is
+    /// the prefix before the last <c>'/'</c>, matching <see cref="KeySpaceRegistry.ExtractKeySpace"/>;
+    /// the group is the key space's prefix before its first <c>'|'</c>, or the whole key space). Key
+    /// spaces that name the same group land on the same partition, which is how a consumer keeps a
+    /// table's rows and index entries together. Deterministic and stable for a given pool size.
     /// </summary>
-    public int Locate(string key)
-    {
-        long bucket = HashUtils.InversePrefixedHash(key, '/', PoolSize);
-        return FirstUserPartitionId + (int)bucket;
-    }
+    public int Locate(string key) => FirstUserPartitionId + HashPlacement.BucketOfKey(key, PoolSize);
 }

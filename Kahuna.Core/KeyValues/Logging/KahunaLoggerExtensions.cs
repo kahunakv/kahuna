@@ -9,6 +9,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "KeyValueActor Message: {Actor} {Type} Key={Key} {Value} Expires={ExpiresMs} Flags={Flags} Revision={Revision} TxId={TransactionId} {Durability}")]
     public static partial void LogKeyValueActorEnter(this ILogger<IKahuna> logger, string actor, KeyValueRequestType type, string key, int? value, int expiresMs, KeyValueFlags flags, long revision, HLCTimestamp transactionId, KeyValueDurability durability);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "One-phase apply-time validation is {State}: a transaction whose writes and read-only point reads all sit on one locally led partition {Verb} commit in one durable barrier; the outcome tag of kahuna.durable_tx.one_phase_gate names why any finalize took two phases")]
+    public static partial void LogOnePhaseApplyTimeValidation(this ILogger<IKahuna> logger, string state, string verb);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Exported whole-partition state of partition #{PartitionId} at index {UpToIndex} ({Bytes} bytes)")]
     public static partial void LogExportedPartitionState(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes);
 

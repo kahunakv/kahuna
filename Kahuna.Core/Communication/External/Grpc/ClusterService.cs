@@ -224,6 +224,7 @@ public sealed class ClusterService : Cluster.ClusterBase
             SchemaVersion = metadata.SchemaVersion,
             HashAlgorithm = metadata.HashAlgorithm,
             PrefixSeparator = metadata.PrefixSeparator,
+            GroupSeparator = metadata.GroupSeparator,
             HashPoolSize = metadata.HashPoolSize,
             HashPartitionOffset = metadata.HashPartitionOffset,
             SequenceStorageKeyFormat = metadata.SequenceStorageKeyFormat,

@@ -198,6 +198,33 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 5. **Resolve** — materialize each committed intent into visible KV state, then settle (resolve + remove)
    the intent. **When** this runs is §8.
 
+#### 6.3.1 The one-phase bundle and its gate
+
+When the whole participant set is the locally led anchor partition, steps 1, 3 and 4 collapse into one
+durable barrier: the read set is validated up front and `[record init, prepare, commit decision]` is
+proposed as one atomic batch. With `OnePhaseApplyTimeValidation` on, the bundled commit also proves its
+read set at apply time, in log order, against the partition's replicated committed-head ledger — so a
+read-then-written base and a read-only point read *on the anchor partition* keep the bundle open in a
+multi-process cluster. What still closes it is a dependency no deterministic apply-time check exists
+for. Every finalize records its verdict on `kahuna.durable_tx.one_phase_gate{outcome}`:
+
+| outcome | meaning |
+|---|---|
+| `entered` | eligible; later counted as a one-phase commit or a fallback (`one_phase_fallbacks{reason}`) |
+| `disabled` | the node has no bundle path wired |
+| `read_set_beyond_writes`, `validated_base` | apply-time validation **off**, multi-process: a read-only dependency, or a read-then-written base |
+| `predicate_read` | apply-time validation **on**: a prefix or range lock (a predicate, not a key) |
+| `off_partition_read` | apply-time validation **on**: a read-only key routed to a partition other than the anchor |
+| `non_persistent_read` | apply-time validation **on**: a read-only key of a non-persistent durability |
+| `multi_partition`, `anchor_off_partition` | the write set spans partitions, or the anchor is not a participant |
+
+`off_partition_read` is a placement fact, not a flag fault: under hash routing it says the read's key
+space hashed to a different partition than the written key's. A consumer that reads an index entry and
+writes a row keeps the bundle open by naming the index key space in the row key space's placement group
+(the prefix before the first `|` in a key space — see the key-range sharding guide, §4). The node logs
+whether apply-time validation is enabled once at startup, so the setting can be confirmed without a
+metrics scrape.
+
 ### 6.4 The decision deadline
 
 Each finalize freezes `deadline = commitTimestamp + clamp(multiplier × observed-finalize-p99, floor,

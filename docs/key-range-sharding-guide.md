@@ -74,6 +74,11 @@ Kahuna did not throw away hashing. Routing mode is a **per-key-space property**:
 A "key space" is just a key prefix (everything before the last `/`). Each key space is
 unambiguously one mode or the other.
 
+A key space can also name a **placement group**: everything before the first `|` in the key
+space (`orders|rows` and `orders|idx:pk` both belong to group `orders`; a key space with no `|`
+is its own group). Hash routing places the *group*, so key spaces that share a group land on the
+same partition. See §4, "Placement groups".
+
 ---
 
 ## 2. The core data structure: range descriptors
@@ -229,9 +234,50 @@ the descriptor map; everything else hashes.
 
 `DataPartitionRouter.cs` is Kahuna's *own* hash assignment. Crucially, Kahuna owns this — it no
 longer delegates to Kommander's `GetPartitionKey`. It hashes a key over the user-partition pool
-`[1, InitialPartitions]` using `HashUtils.InversePrefixedHash(key, '/')`. P0 hosts the meta map
-+ coordinator and is **not** in the pool; every user partition from 1 upward carries hash data.
-Hash-mode descriptors return `Generation = 0` (no fence; hash spaces never split).
+`[1, InitialPartitions]` through `HashPlacement.BucketOfKey` (`Kahuna.Shared/Routing/HashPlacement.cs`):
+the key's key space, reduced to its placement group, digested with Kommander's jump-consistent
+`HashUtils.ConsistentHash`. P0 hosts the meta map + coordinator and is **not** in the pool; every
+user partition from 1 upward carries hash data. Hash-mode descriptors return `Generation = 0` (no
+fence; hash spaces never split).
+
+### Placement groups (co-locating hash key spaces)
+
+Hash routing spreads *key spaces*, not keys: every key in `t:r` lands on one partition, and every
+key in `t:i:pk` lands on one partition — but an unrelated one, because the two key spaces hash
+independently. A consumer that stores a table's rows in one key space and its index entries in
+another therefore gets them on the same partition only by chance (one chance in
+`InitialPartitions`). That chance decides, per table, whether a primary-key update is a
+single-partition transaction: the one-phase commit path admits a read-only dependency only when it
+sits on the anchor partition, so a table whose index landed elsewhere pays two barriers on every
+commit and reports `off_partition_read` on `kahuna.durable_tx.one_phase_gate`.
+
+The placement group closes that gap without a registry. The group of a key space is the prefix
+before its first `|`; the hash runs over the group instead of the whole key space:
+
+| key | key space (buckets, scans, descriptors) | placement group (hashed) |
+|---|---|---|
+| `t:r/0001` | `t:r` | `t:r` |
+| `t:r\|i:pk/abc` | `t:r\|i:pk` | `t:r` |
+| `orders\|rows/7` | `orders\|rows` | `orders` |
+| `mydb/meta/orders` | `mydb/meta` | `mydb/meta` |
+
+So `t:r/…` and `t:r|i:pk/…` always share a partition, while `t:r|i:pk` stays a key space of its
+own for bucket scans, prefix locks and range descriptors. The rule is a pure function of the key,
+so every node and every client computes it identically with nothing to replicate. A key space
+with no `|` places exactly as it did before the rule existed, so existing data does not move.
+
+Three consequences to keep in mind:
+
+* **Renaming moves data.** Adding or changing a group on a key space that already holds data is a
+  placement change; the old keys stay where they were hashed. Introduce a group when a key space is
+  created, not after.
+* **Key-range spaces seed by group too.** `RegisterKeyRange` seeds a new space's whole-space
+  descriptor on the partition of its group (`KeySpaceAdminService.SeedPartitionFor`), so ranged
+  rows and ranged index entries start together. Later splits move ranges independently.
+* **Clients see the rule.** The routing metadata (`GET /v1/cluster/routing`) publishes the hash
+  identifier `kahuna.placement-group-jump-xxh32-v1` together with `prefixSeparator` (`/`) and
+  `groupSeparator` (`|`); a client that does not implement exactly that stays on learned routes
+  rather than mis-hashing the keys that carry a group.
 
 ### The two routing call sites (a maintenance hazard you must respect)
 

@@ -2,6 +2,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Sequencer;
 using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.Routing;
 using Kommander;
 
 namespace Kahuna.Server.Routing;
@@ -32,15 +33,19 @@ internal sealed class RoutingMetadataService
     public const int SchemaVersion = 1;
 
     /// <summary>
-    /// Identifier of the key-to-partition hash. It names the exact function, not a family: a client
-    /// that implements a different jump-consistent hash, or the same one over a different digest,
+    /// Identifier of the key-to-partition placement function (<see cref="HashPlacement"/>). It names
+    /// the exact function, not a family: a client that implements a different jump-consistent hash,
+    /// the same one over a different digest, or the same digest without the placement-group rule,
     /// would resolve most keys correctly and a few silently to the wrong partition — which reads as
     /// intermittent extra forwarding rather than as a version mismatch.
     /// </summary>
-    public const string HashAlgorithm = "kommander.inverse-prefixed-jump-xxh32-v1";
+    public const string HashAlgorithm = HashPlacement.AlgorithmIdentifier;
 
-    /// <summary>The character whose last occurrence ends the hashed prefix.</summary>
-    public const string PrefixSeparator = "/";
+    /// <summary>The character whose last occurrence in a key ends its key space.</summary>
+    public static readonly string PrefixSeparator = HashPlacement.KeySpaceSeparator.ToString();
+
+    /// <summary>The character whose first occurrence in a key space ends its placement group.</summary>
+    public static readonly string GroupSeparator = HashPlacement.GroupSeparator.ToString();
 
     private readonly IRaft raft;
 
@@ -85,6 +90,7 @@ internal sealed class RoutingMetadataService
             SchemaVersion = SchemaVersion,
             HashAlgorithm = HashAlgorithm,
             PrefixSeparator = PrefixSeparator,
+            GroupSeparator = GroupSeparator,
             HashPoolSize = raft.Configuration.InitialPartitions,
             HashPartitionOffset = DataPartitionRouter.FirstUserPartitionId,
             SequenceStorageKeyFormat = SequenceActor.ReservedPrefix + "{0}",

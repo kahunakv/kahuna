@@ -24,11 +24,11 @@ internal sealed class RoutingMetadataSnapshot
     private const int SupportedSchemaVersion = 1;
 
     /// <summary>
-    /// The only hash this client implements, named exactly. A near-match would resolve most keys
-    /// correctly and a few silently to the wrong partition, which shows up as unexplained forwarding
-    /// rather than as the version mismatch it is.
+    /// The only placement function this client implements (<see cref="HashPlacement"/>), named
+    /// exactly. A near-match would resolve most keys correctly and a few silently to the wrong
+    /// partition, which shows up as unexplained forwarding rather than as the version mismatch it is.
     /// </summary>
-    private const string SupportedHashAlgorithm = "kommander.inverse-prefixed-jump-xxh32-v1";
+    private const string SupportedHashAlgorithm = HashPlacement.AlgorithmIdentifier;
 
     private readonly int hashPoolSize;
 
@@ -92,8 +92,11 @@ internal sealed class RoutingMetadataSnapshot
             return null;
         }
 
+        // The separators are part of the function: a server placing by another key-space or group
+        // boundary would be mis-hashed by this client for exactly the keys that contain them.
         if (!string.Equals(response.HashAlgorithm, SupportedHashAlgorithm, StringComparison.Ordinal)
-            || !string.Equals(response.PrefixSeparator, "/", StringComparison.Ordinal)
+            || response.PrefixSeparator.Length != 1 || response.PrefixSeparator[0] != HashPlacement.KeySpaceSeparator
+            || response.GroupSeparator.Length != 1 || response.GroupSeparator[0] != HashPlacement.GroupSeparator
             || response.HashPoolSize <= 0)
         {
             rejection = "unsupported_hash";
@@ -256,11 +259,12 @@ internal sealed class RoutingMetadataSnapshot
     }
 
     /// <summary>
-    /// The partition a hash-routed resource lands on. Calls the cluster's own hash rather than a
-    /// re-implementation of it, so the two cannot drift.
+    /// The partition a hash-routed resource lands on. Calls the cluster's own placement rule
+    /// (<see cref="HashPlacement"/>, shared with the server) rather than a re-implementation of it,
+    /// so the two cannot drift.
     /// </summary>
     private int HashPartition(string key) =>
-        hashPartitionOffset + (int)HashUtils.InversePrefixedHash(key, '/', hashPoolSize);
+        hashPartitionOffset + HashPlacement.BucketOfKey(key, hashPoolSize);
 
     private static bool StartAtOrBelow(string? start, string key) =>
         start is null || string.CompareOrdinal(start, key) <= 0;

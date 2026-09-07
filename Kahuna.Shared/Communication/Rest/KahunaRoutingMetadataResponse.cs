@@ -40,10 +40,19 @@ public sealed class KahunaRoutingMetadataResponse
     public string HashAlgorithm { get; set; } = "";
 
     /// <summary>
-    /// The character whose last occurrence ends the hashed prefix. A key without it is hashed whole.
+    /// The character whose last occurrence in a key ends its key space. A key without it is its own
+    /// key space.
     /// </summary>
     [JsonPropertyName("prefixSeparator")]
     public string PrefixSeparator { get; set; } = "";
+
+    /// <summary>
+    /// The character whose first occurrence in a key space ends its placement group — the string the
+    /// hash actually runs over. A key space without it is its own group. Key spaces that name the same
+    /// group hash to the same partition.
+    /// </summary>
+    [JsonPropertyName("groupSeparator")]
+    public string GroupSeparator { get; set; } = "";
 
     /// <summary>Number of buckets the hash maps onto.</summary>
     [JsonPropertyName("hashPoolSize")]

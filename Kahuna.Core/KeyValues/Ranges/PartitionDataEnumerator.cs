@@ -1,6 +1,6 @@
 
 using System.Runtime.CompilerServices;
-using Kommander;
+using Kahuna.Shared.Routing;
 
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence.Backend;
@@ -56,12 +56,12 @@ internal sealed class PartitionDataEnumerator
 
     /// <summary>
     /// The hash partition a key space maps onto: partitions <c>[1, poolSize]</c>, by the same
-    /// jump-consistent hash <see cref="DataPartitionRouter.Locate"/> applies to a key's key-space
-    /// prefix. Pure — depends only on its arguments — so the "which spaces belong to P" question
-    /// is answerable (and testable) without a backend or a live node.
+    /// placement rule <see cref="DataPartitionRouter.Locate"/> applies to a key (the key space's
+    /// placement group, <see cref="HashPlacement"/>). Pure — depends only on its arguments — so the
+    /// "which spaces belong to P" question is answerable (and testable) without a backend or a live node.
     /// </summary>
     public static int HashPartitionOfKeySpace(string keySpace, int hashPoolSize) =>
-        1 + HashUtils.ConsistentHash(keySpace, hashPoolSize);
+        1 + HashPlacement.BucketOfKeySpace(keySpace, hashPoolSize);
 
     /// <summary>
     /// The partition that owns <paramref name="key"/> under <paramref name="map"/>: the covering

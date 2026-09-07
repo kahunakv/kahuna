@@ -1089,7 +1089,7 @@ public sealed class TestDurableTransactionFinalizer
 
         DurableFinalizeOutcome readSet = await finalizer.FinalizeAsync(
             Input(Ts(3000), 1, (5, "acct/2")), Validate(true), opId: Ts(4000), CancellationToken.None,
-            readSetExtendsBeyondWrites: true);
+            readSetExclusion: OnePhaseGateOutcome.ReadSetBeyondWrites);
         Assert.Equal(DurableFinalizeResult.Committed, readSet.Result);
         Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "read_set_beyond_writes") >= 1);
 
@@ -1248,7 +1248,7 @@ public sealed class TestDurableTransactionFinalizer
             },
             opId: Ts(2000),
             CancellationToken.None,
-            readSetExtendsBeyondWrites: true);
+            readSetExclusion: OnePhaseGateOutcome.ReadSetBeyondWrites);
 
         Assert.False(onePhaseInvoked);
         Assert.True(intentVisibleDuringValidation);
