@@ -2096,6 +2096,48 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return new DurableDecisionWireReply(response.Replicated, response.Known, response.Decision, response.AbortClass);
     }
 
+    public async Task<DurableOnePhaseWireReply?> DurableOnePhase(
+        string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcDurableOnePhaseRequest request = new()
+        {
+            PartitionId = partitionId,
+            RecordInitDelta = UnsafeByteOperations.UnsafeWrap(recordInitDelta),
+            AnchorPrepareDelta = UnsafeByteOperations.UnsafeWrap(anchorPrepareDelta),
+            DecisionDelta = UnsafeByteOperations.UnsafeWrap(decisionDelta),
+            FenceKey = fenceKey ?? string.Empty,
+            FenceGeneration = fenceGeneration,
+            TransactionIdNode = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Epoch = epoch,
+            OpIdNode = opId.N,
+            OpIdPhysical = opId.L,
+            OpIdCounter = opId.C
+        };
+
+        GrpcServerBatcherResponse batchResponse;
+
+        if (cancellationToken == CancellationToken.None)
+            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
+        else
+            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        // No payload means the receiver did not answer this operation kind (an older node): the caller falls
+        // back to the two-phase flow.
+        GrpcDurableOnePhaseResponse? response = batchResponse.DurableOnePhase;
+        if (response is null)
+            return null;
+
+        return new DurableOnePhaseWireReply(
+            response.BatchCommitted, response.PrepareAcknowledged, response.PrepareRejection,
+            response.DecisionKnown, response.Decision, response.AbortClass, response.GatedVerdict);
+    }
+
     public async Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);

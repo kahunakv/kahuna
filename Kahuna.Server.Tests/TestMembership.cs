@@ -823,6 +823,8 @@ public sealed class TestMembership : BaseCluster
         public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<DurableDecisionWireReply?> DurableDecisionLocal(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
+
+        public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, HLCTimestamp opId, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();
 
         public Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();

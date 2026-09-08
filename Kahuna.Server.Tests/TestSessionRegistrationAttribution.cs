@@ -23,6 +23,9 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
 {
     private const int Partitions = 6;
 
+    /// <summary>The duration histogram of a forwarded registration, as a consumer scrapes it.</summary>
+    private const string ForwardMsInstrument = "kahuna.durable_tx.session_registration_forward_ms";
+
     private readonly ILogger<IRaft> raftLogger;
 
     private readonly ILogger<IKahuna> kahunaLogger;
@@ -341,5 +344,208 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
         {
             await LeaveCluster(rafts[0], rafts[1], rafts[2]);
         }
+    }
+
+    /// <summary>
+    /// The wall time a forwarded registration takes, which is the other half of its cost: a hop count alone
+    /// cannot say what share of a commit the registrations explain. One sample per forwarded hop, tagged by the
+    /// call it timed, and nothing at all for a registration served on the node that holds the session.
+    /// </summary>
+    [Fact]
+    public async Task ForwardedRegistrations_AreTimedPerHop_AndLocalOnesAreNot()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1);
+
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        // The clock is read only for a listened instrument, so the capture is what turns the timing on. It also
+        // reads the histogram the way a consumer does, through a real listener rather than through the counters.
+        using MetricCapture capture = new("op", ForwardMsInstrument);
+
+        try
+        {
+            (string coordinatorKey, int sessionIndex, int driverIndex) = await FindRemoteSessionPair(rafts, managers, ct);
+            KahunaManager driver = managers[driverIndex];
+            KahunaManager session = managers[sessionIndex];
+
+            TransactionHandle handle = await StartTransaction(driver, coordinatorKey, ct);
+
+            string key = $"xsrk{Guid.NewGuid():N}";
+
+            SessionRegistrationForwardDurations beforeWrite = driver.KeyValues.SessionRegistrationForwardDurations;
+            SessionRegistrationCounts countsBeforeWrite = driver.KeyValues.SessionRegistrationCounts;
+
+            SessionRegistrationForwardDurations sessionBefore = session.KeyValues.SessionRegistrationForwardDurations;
+
+            await WriteOneKey(driver, handle, key, ct);
+
+            SessionRegistrationForwardDurations afterWrite = driver.KeyValues.SessionRegistrationForwardDurations;
+
+            // Two forwarded hops per operation, so two timed samples: one for the registration that opens it,
+            // one for the completion that folds its effect.
+            Assert.Equal(1, afterWrite.BeginSamples - beforeWrite.BeginSamples);
+            Assert.Equal(1, afterWrite.CompleteSamples - beforeWrite.CompleteSamples);
+            Assert.Equal(0, afterWrite.WorkingSetSamples - beforeWrite.WorkingSetSamples);
+
+            // A call that crossed the transport consumed time; a sample stuck at zero would mean the clock was
+            // read once, or on the wrong side of the call.
+            Assert.True(afterWrite.BeginTotalMs > beforeWrite.BeginTotalMs,
+                $"a forwarded begin recorded no elapsed time: {afterWrite.BeginTotalMs} ms");
+
+            Assert.True(afterWrite.CompleteTotalMs > beforeWrite.CompleteTotalMs,
+                $"a forwarded complete recorded no elapsed time: {afterWrite.CompleteTotalMs} ms");
+
+            // A working-set query made away from the session node is one further forwarded hop, timed as well.
+            TransactionWorkingSet? workingSet = await driver.LocateAndGetTransactionWorkingSet(coordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(workingSet);
+
+            SessionRegistrationForwardDurations afterWorkingSet = driver.KeyValues.SessionRegistrationForwardDurations;
+            Assert.Equal(1, afterWorkingSet.WorkingSetSamples - afterWrite.WorkingSetSamples);
+            Assert.True(afterWorkingSet.WorkingSetTotalMs > afterWrite.WorkingSetTotalMs,
+                $"a forwarded working-set query recorded no elapsed time: {afterWorkingSet.WorkingSetTotalMs} ms");
+
+            // Every hop the counters attribute to this node has a duration behind it. The decision this feeds
+            // multiplies one by the other, so a hop counted without a sample would silently understate the cost.
+            SessionRegistrationCounts countsAfter = driver.KeyValues.SessionRegistrationCounts;
+
+            Assert.Equal(countsAfter.BeginForwarded - countsBeforeWrite.BeginForwarded, afterWorkingSet.BeginSamples - beforeWrite.BeginSamples);
+            Assert.Equal(countsAfter.CompleteForwarded - countsBeforeWrite.CompleteForwarded, afterWorkingSet.CompleteSamples - beforeWrite.CompleteSamples);
+            Assert.Equal(countsAfter.WorkingSetForwarded - countsBeforeWrite.WorkingSetForwarded, afterWorkingSet.WorkingSetSamples - beforeWrite.WorkingSetSamples);
+
+            // The node that holds the session answered all three from its own session table. A method call is
+            // not a hop, and timing it would mix a number three orders of magnitude smaller into the remote
+            // distribution.
+            SessionRegistrationForwardDurations sessionAfter = session.KeyValues.SessionRegistrationForwardDurations;
+
+            Assert.Equal(0, sessionAfter.BeginSamples - sessionBefore.BeginSamples);
+            Assert.Equal(0, sessionAfter.CompleteSamples - sessionBefore.CompleteSamples);
+            Assert.Equal(0, sessionAfter.WorkingSetSamples - sessionBefore.WorkingSetSamples);
+
+            (KeyValueResponseType commitType, _) = await driver.LocateAndCommitTransaction(handle, ct);
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+            // The same samples reach the histogram a consumer scrapes, under the op that names the call. The
+            // meter is process-wide and this project runs classes in parallel, so this asserts presence rather
+            // than an exact total; the exact counts are the per-node ones above.
+            Assert.NotEmpty(capture.Samples(ForwardMsInstrument, "begin"));
+            Assert.NotEmpty(capture.Samples(ForwardMsInstrument, "complete"));
+            Assert.NotEmpty(capture.Samples(ForwardMsInstrument, "working_set"));
+
+            foreach (double sample in capture.Samples(ForwardMsInstrument, "begin"))
+                Assert.True(sample >= 0, $"a duration sample was negative: {sample} ms");
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A forwarded registration whose transport throws is timed like any other. A forward that failed after
+    /// waiting cost its transaction that wait, and dropping it would flatter the distribution the batching
+    /// decision reads. The exception still reaches the caller unchanged.
+    /// </summary>
+    [Fact]
+    public async Task ForwardedRegistrationThatThrows_IsTimedAndStillPropagates()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1);
+
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        using MetricCapture capture = new("op", ForwardMsInstrument);
+
+        try
+        {
+            (string coordinatorKey, _, int driverIndex) = await FindRemoteSessionPair(rafts, managers, ct);
+            KahunaManager driver = managers[driverIndex];
+
+            TransactionHandle handle = await StartTransaction(driver, coordinatorKey, ct);
+
+            TransactionOperationId faultedOp = TransactionOperationId.NewRandom();
+
+            MemoryInterNodeCommmunication transport = Assert.IsType<MemoryInterNodeCommmunication>(driver.KeyValues.InterNodeCommunication);
+            transport.CompleteOperationFault = (txId, opId) => txId == handle.TransactionId && opId == faultedOp;
+
+            try
+            {
+                (OperationRegistrationOutcome beginOutcome, _, _, _, _) = await driver.LocateAndBeginOperation(
+                    handle.CoordinatorKey, handle.TransactionId, faultedOp, OperationKind.Set, [4, 5, 6], ct);
+
+                Assert.Equal(OperationRegistrationOutcome.New, beginOutcome);
+
+                SessionRegistrationForwardDurations before = driver.KeyValues.SessionRegistrationForwardDurations;
+                SessionRegistrationCounts countsBefore = driver.KeyValues.SessionRegistrationCounts;
+
+                await Assert.ThrowsAnyAsync<Exception>(async () => await driver.LocateAndCompleteOperation(
+                    handle.CoordinatorKey, handle.TransactionId, faultedOp, new OperationCompletionPayload(), ct));
+
+                SessionRegistrationForwardDurations after = driver.KeyValues.SessionRegistrationForwardDurations;
+                SessionRegistrationCounts countsAfter = driver.KeyValues.SessionRegistrationCounts;
+
+                // The failed call is one sample, exactly as the hop it is counted as.
+                Assert.Equal(1, countsAfter.Threw - countsBefore.Threw);
+                Assert.Equal(1, after.CompleteSamples - before.CompleteSamples);
+                Assert.True(after.CompleteTotalMs > before.CompleteTotalMs,
+                    $"a forwarded complete that threw recorded no elapsed time: {after.CompleteTotalMs} ms");
+            }
+            finally
+            {
+                transport.CompleteOperationFault = null;
+            }
+
+            // The faulted operation stays pending on the coordinator by construction, so the session is left for
+            // the cluster teardown rather than rolled back: a rollback would sit out the whole drain deadline
+            // waiting for a completion this test deliberately lost.
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// With nothing listening for the duration, a forwarded registration is still counted as a hop but reads no
+    /// clock at all — the instrument costs one boolean read on a path that runs on every operation of every
+    /// remote-session transaction. Attaching a listener turns the same calls into samples, which is what shows
+    /// the guard is the listener rather than a dead recording path.
+    /// </summary>
+    [Fact]
+    public void UnlistenedDurationHistogram_CountsTheHopAndReadsNoClock()
+    {
+        // The meter is process-wide, so another class holding a listener on this instrument makes the
+        // unlistened path unobservable. Better to skip than to assert something the process cannot show.
+        Assert.SkipWhen(
+            DurableTransactionMetrics.SessionRegistrationForwardMs.Enabled,
+            "another test holds a listener on the shared meter, so the unlistened path cannot be observed");
+
+        SessionRegistrationTelemetry unlistened = new();
+
+        unlistened.BeginForward(SessionRegistrationOp.Begin).Answered(true);
+        unlistened.BeginForward(SessionRegistrationOp.Complete).Threw();
+
+        SessionRegistrationCounts counts = unlistened.Snapshot;
+        Assert.Equal(1, counts.BeginForwarded);
+        Assert.Equal(1, counts.CompleteForwarded);
+        Assert.Equal(1, counts.Threw);
+
+        SessionRegistrationForwardDurations durations = unlistened.DurationSnapshot;
+        Assert.Equal(0, durations.BeginSamples);
+        Assert.Equal(0, durations.CompleteSamples);
+        Assert.True(durations.BeginTotalMs == 0d, $"an unlistened begin read the clock: {durations.BeginTotalMs} ms");
+        Assert.True(durations.CompleteTotalMs == 0d, $"an unlistened complete read the clock: {durations.CompleteTotalMs} ms");
+
+        using MetricCapture capture = new("op", ForwardMsInstrument);
+
+        SessionRegistrationTelemetry listened = new();
+        listened.BeginForward(SessionRegistrationOp.WorkingSet).Answered(true);
+
+        Assert.Equal(1, listened.DurationSnapshot.WorkingSetSamples);
+        Assert.NotEmpty(capture.Samples(ForwardMsInstrument, "working_set"));
     }
 }

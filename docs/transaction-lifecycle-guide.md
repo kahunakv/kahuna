@@ -200,9 +200,14 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 
 #### 6.3.1 The one-phase bundle and its gate
 
-When the whole participant set is the locally led anchor partition, steps 1, 3 and 4 collapse into one
-durable barrier: the read set is validated up front and `[record init, prepare, commit decision]` is
-proposed as one atomic batch. With `OnePhaseApplyTimeValidation` on, the bundled commit also proves its
+When the whole participant set is the anchor partition, steps 1, 3 and 4 collapse into one durable
+barrier: the read set is validated up front and `[record init, prepare, commit decision]` is proposed as
+one atomic batch. When another node leads the anchor partition, the bundle crosses the wire whole as one
+typed operation: the receiving leader submits the three entries as one atomic scheduler submission under
+the origin's range fence, and the reply carries the canonical outcome read from its record store after
+the ordered apply (plus the bundled-commit gate's verdict when the record stays `Undecided`) — one extra
+network hop, still one durable round. The `remote_leader` fallback reason then appears only when the
+remote leader is an older node without the typed operation. With `OnePhaseApplyTimeValidation` on, the bundled commit also proves its
 read set at apply time, in log order, against the partition's replicated committed-head ledger — so a
 read-then-written base and a read-only point read *on the anchor partition* keep the bundle open in a
 multi-process cluster. What still closes it is a dependency no deterministic apply-time check exists

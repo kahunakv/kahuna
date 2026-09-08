@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>
@@ -34,6 +36,12 @@ internal sealed class SessionRegistrationTelemetry
     private long refused;
     private long threw;
     private long unrouted;
+    private long beginForwardSamples;
+    private long beginForwardTicks;
+    private long completeForwardSamples;
+    private long completeForwardTicks;
+    private long workingSetForwardSamples;
+    private long workingSetForwardTicks;
 
     /// <summary>A registration served on this node because it holds the session.</summary>
     internal void Local(SessionRegistrationOp op, bool ok)
@@ -87,6 +95,59 @@ internal sealed class SessionRegistrationTelemetry
         DurableTransactionMetrics.SessionRegistrationUnrouted(op);
     }
 
+    /// <summary>
+    /// Opens a forwarded session-registration call and reads the clock for it. The returned value carries the
+    /// start timestamp to the call's single exit, so the count and the duration are reported together and the
+    /// caller cannot report one without the other.
+    ///
+    /// <para>The clock is read only when a listener asked for
+    /// <see cref="DurableTransactionMetrics.SessionRegistrationForwardMs"/>. With no listener the returned
+    /// value carries no timestamp, the exit records no sample, and the whole instrument costs one boolean
+    /// read on the hot path.</para>
+    /// </summary>
+    internal SessionRegistrationForward BeginForward(SessionRegistrationOp op) =>
+        new(this, op, DurableTransactionMetrics.SessionRegistrationForwardMs.Enabled ? Stopwatch.GetTimestamp() : 0);
+
+    /// <summary>
+    /// Records how long one forwarded call took, when <paramref name="startTicks"/> carries a timestamp. The
+    /// completion path of <see cref="SessionRegistrationForward"/>; call it through that type rather than
+    /// directly, so no exit can record a duration without also counting the hop.
+    /// </summary>
+    internal void RecordForwardDuration(SessionRegistrationOp op, long startTicks)
+    {
+        if (startTicks == 0)
+            return;
+
+        long elapsedTicks = Stopwatch.GetTimestamp() - startTicks;
+
+        // A monotonic clock cannot go backwards, but a zero-length sample is meaningful and a negative one is
+        // not, so a clock that surprises us is clamped rather than allowed to skew the distribution.
+        if (elapsedTicks < 0)
+            elapsedTicks = 0;
+
+        switch (op)
+        {
+            case SessionRegistrationOp.Begin:
+                Interlocked.Increment(ref beginForwardSamples);
+                Interlocked.Add(ref beginForwardTicks, elapsedTicks);
+                break;
+
+            case SessionRegistrationOp.Complete:
+                Interlocked.Increment(ref completeForwardSamples);
+                Interlocked.Add(ref completeForwardTicks, elapsedTicks);
+                break;
+
+            default:
+                Interlocked.Increment(ref workingSetForwardSamples);
+                Interlocked.Add(ref workingSetForwardTicks, elapsedTicks);
+                break;
+        }
+
+        DurableTransactionMetrics.SessionRegistrationForwardTimed(op, TicksToMs(elapsedTicks));
+    }
+
+    private static double TicksToMs(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+
     private void CountForward(SessionRegistrationOp op)
     {
         switch (op)
@@ -116,7 +177,84 @@ internal sealed class SessionRegistrationTelemetry
         Interlocked.Read(ref refused),
         Interlocked.Read(ref threw),
         Interlocked.Read(ref unrouted));
+
+    /// <summary>
+    /// The wall time this node's forwarded session-registration calls have taken so far. Empty while no
+    /// listener asked for the duration histogram, because the clock is read only for a listened instrument.
+    /// </summary>
+    internal SessionRegistrationForwardDurations DurationSnapshot => new(
+        Interlocked.Read(ref beginForwardSamples),
+        TicksToMs(Interlocked.Read(ref beginForwardTicks)),
+        Interlocked.Read(ref completeForwardSamples),
+        TicksToMs(Interlocked.Read(ref completeForwardTicks)),
+        Interlocked.Read(ref workingSetForwardSamples),
+        TicksToMs(Interlocked.Read(ref workingSetForwardTicks)));
 }
+
+/// <summary>
+/// One forwarded session-registration call in flight: which call it is, and the timestamp it started at — or
+/// zero when no listener asked for the duration, in which case no clock was read and the exit records no
+/// sample. A value type, so an in-flight call costs no allocation even on a timed path.
+///
+/// <para>Obtain it from <see cref="SessionRegistrationTelemetry.BeginForward"/> immediately before the
+/// transport call, and end it with <see cref="Answered"/> or <see cref="Threw"/> on every path out. Both exits
+/// count the hop and record its duration, so a forward can never appear in the counter without appearing in
+/// the histogram.</para>
+/// </summary>
+internal readonly struct SessionRegistrationForward
+{
+    private readonly SessionRegistrationTelemetry telemetry;
+
+    private readonly SessionRegistrationOp op;
+
+    private readonly long startTicks;
+
+    internal SessionRegistrationForward(SessionRegistrationTelemetry telemetry, SessionRegistrationOp op, long startTicks)
+    {
+        this.telemetry = telemetry;
+        this.op = op;
+        this.startTicks = startTicks;
+    }
+
+    /// <summary>The forwarded call returned an answer; <paramref name="ok"/> is false for a rejection or a
+    /// not-delivered reply, which cost the same round trip as an acceptance.</summary>
+    internal void Answered(bool ok)
+    {
+        telemetry.RecordForwardDuration(op, startTicks);
+        telemetry.Forwarded(op, ok);
+    }
+
+    /// <summary>The forwarded call's transport threw. The time it consumed is recorded, because the
+    /// transaction waited for it whether or not it produced an answer.</summary>
+    internal void Threw()
+    {
+        telemetry.RecordForwardDuration(op, startTicks);
+        telemetry.ForwardThrew(op);
+    }
+}
+
+/// <summary>
+/// The wall time one node's forwarded session-registration calls have taken, beside the process-wide
+/// histogram. An in-process test cluster shares the static meter across every node and the test project runs
+/// classes in parallel, so a deterministic per-node figure is only readable here.
+///
+/// <para>Every field is zero unless a listener asked for
+/// <see cref="DurableTransactionMetrics.SessionRegistrationForwardMs"/> while the calls ran: the clock is
+/// read only for a listened instrument, so an unlistened path records nothing here either.</para>
+/// </summary>
+/// <param name="BeginSamples">Forwarded registrations timed, answered and thrown together.</param>
+/// <param name="BeginTotalMs">Total wall time those registrations took.</param>
+/// <param name="CompleteSamples">Forwarded completions timed.</param>
+/// <param name="CompleteTotalMs">Total wall time those completions took.</param>
+/// <param name="WorkingSetSamples">Forwarded working-set queries timed.</param>
+/// <param name="WorkingSetTotalMs">Total wall time those queries took.</param>
+internal readonly record struct SessionRegistrationForwardDurations(
+    long BeginSamples,
+    double BeginTotalMs,
+    long CompleteSamples,
+    double CompleteTotalMs,
+    long WorkingSetSamples,
+    double WorkingSetTotalMs);
 
 /// <summary>
 /// Session-registration calls one node made, split the way the cost model counts them: served locally because

@@ -25,6 +25,8 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
     public virtual Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
     public virtual Task<DurableDecisionWireReply?> DurableDecisionLocal(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
+
+    public virtual Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, HLCTimestamp opId, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
     public virtual Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();
 
     public virtual Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();

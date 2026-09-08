@@ -26,6 +26,12 @@ public sealed partial class KahunaManager
         string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
         keyValues.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
 
+    public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        keyValues.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken);
+
     public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         keyValues.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
 

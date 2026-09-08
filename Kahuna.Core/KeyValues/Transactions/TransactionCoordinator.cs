@@ -1484,8 +1484,9 @@ internal sealed class TransactionCoordinator : IDisposable
         // intent inline (through the recovery path's idempotent resolution) and re-prepares immediately, instead
         // of backing off while deferred settlement catches up. Breaks the settlement-lag convoy under load.
         resolveDecidedBlockers: manager.TryResolveDecidedDurableBlockersAsync,
-        // One-phase commit: a single-participant transaction whose anchor partition is led locally decides in
-        // one durable barrier ([init + prepare + decision] in one atomic batch) instead of two.
+        // One-phase commit: a single-participant transaction decides in one durable barrier ([init + prepare +
+        // decision] in one atomic batch) instead of two — proposed locally when this node leads the anchor
+        // partition, forwarded whole to the anchor leader otherwise (one extra hop, still one durable round).
         replicateOnePhaseBundle: manager.ReplicateDurableOnePhaseBundleThroughSchedulerFenced,
         // Write-side compare-and-set before anything durable: a staged base that moved while the in-memory
         // write-intent lease lapsed aborts truthfully instead of silently discarding the other writer's commit.

@@ -1169,6 +1169,24 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    public async Task<DurableOnePhaseWireReply?> DurableOnePhase(
+        string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        if (!TypedDurableOperations)
+            return null;
+
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
     public async Task<bool> ReplicateKeyValueRangePage(string node, int partitionId, byte[] page, CancellationToken cancellationToken)
     {
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))

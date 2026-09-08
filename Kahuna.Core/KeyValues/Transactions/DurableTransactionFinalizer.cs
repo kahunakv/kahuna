@@ -144,11 +144,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken);
 
     /// <summary>Proposes [record init + anchor prepare + commit decision] as ONE atomic durable batch on the
-    /// anchor partition — the one-phase commit fast path. Returns <see langword="null"/> when the anchor is led
-    /// by a remote node (the bundle cannot cross the wire), in which case the caller falls back to standard 2PC.
-    /// Null delegate disables the fast path entirely.</summary>
-    public delegate Task<(bool BatchCommitted, bool PrepareAcknowledged)?> ReplicateOnePhaseBundleDelegate(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+    /// anchor partition — the one-phase commit fast path. When the anchor is led by a remote node the whole
+    /// bundle crosses the wire as one typed operation and the reply carries the canonical outcome read on that
+    /// leader after the ordered apply; the origin must never infer a commit from the batch signals alone,
+    /// because the commit transition is judged at apply, in log order. Returns <see langword="null"/> only when
+    /// the remote leader does not implement the typed operation (an older node), in which case the caller falls
+    /// back to standard 2PC. Null delegate disables the fast path entirely.</summary>
+    public delegate Task<Writes.DurableOnePhaseReply?> ReplicateOnePhaseBundleDelegate(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
     /// <summary>Checks every frozen intent's validated base (<see cref="PreparedIntent.BaseRevision"/> /
     /// <see cref="PreparedIntent.BaseState"/>) against the key's current committed state — the write-side
@@ -409,11 +414,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             prepareDeltas[i] = SerializePrepare(input.Partitions[i]);
 
         // ── One-phase commit fast path ──
-        // When the participant set collapses to the locally-led anchor partition, the whole transaction can
-        // decide in ONE durable barrier: validate the read set up front, then propose
-        // [record init + prepare + commit decision] as a single atomic batch. Any ineligibility (remote
-        // anchor leader, a foreign durable intent on a written key, failed validation, scheduler rejection
-        // outcome that is retryable-but-ambiguous) falls through to the standard 2PC flow below, unchanged.
+        // When the participant set collapses to the anchor partition, the whole transaction can decide in ONE
+        // durable barrier: validate the read set up front, then propose [record init + prepare + commit
+        // decision] as a single atomic batch — locally when this node leads the anchor, forwarded whole to the
+        // anchor leader otherwise (one extra hop, still one durable round). Any ineligibility (an older remote
+        // leader without the typed operation, a foreign durable intent on a written key, failed validation,
+        // scheduler rejection outcome that is retryable-but-ambiguous) falls through to the standard 2PC flow
+        // below, unchanged.
         //
         // Ineligible whenever the validated read set reaches beyond the written keys. The bundle's validation
         // runs before anything durable, and its only apply-time re-checks cover written keys (the bundled-prepare
@@ -789,8 +796,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <summary>
     /// The one-phase commit fast path body. Returns the finalize outcome, or a <see langword="null"/> outcome with
     /// the reason when this transaction must fall back to the standard 2PC flow (foreign durable intent on a
-    /// written key, failed up-front validation, or a remote anchor leader). Callable only when the participant
-    /// set is exactly the anchor partition and <see cref="replicateOnePhaseBundle"/> is wired.
+    /// written key, failed up-front validation, or an older remote anchor leader without the typed one-phase
+    /// operation). Callable only when the participant set is exactly the anchor partition and
+    /// <see cref="replicateOnePhaseBundle"/> is wired.
     /// </summary>
     private async Task<(DurableFinalizeOutcome? Outcome, OnePhaseFallbackReason Fallback)> TryOnePhaseFinalizeAsync(
         DurableFinalizeInput input,
@@ -806,11 +814,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         // Pre-flight: a foreign durable intent on any written key would reject the bundled prepare — and the
         // bundled decision, sharing the atomic batch, could not be withheld once proposed. Fall back to 2PC,
-        // whose prepare/retry/helping machinery owns that conflict. The check is race-free on the local
-        // leader: a NEW conflicting durable prepare cannot land behind it, because its producer would first
-        // need the in-memory write intents this transaction already holds (installed at PrepareMutations);
-        // the only foreign intents possible are decided-but-unsettled predecessors, which already existed
-        // when this transaction acquired its locks and are therefore visible to this check.
+        // whose prepare/retry/helping machinery owns that conflict. The check is race-free when this node
+        // leads the anchor: a NEW conflicting durable prepare cannot land behind it, because its producer
+        // would first need the in-memory write intents this transaction already holds on that leader
+        // (installed at PrepareMutations); the only foreign intents possible are decided-but-unsettled
+        // predecessors, which already existed when this transaction acquired its locks and are therefore
+        // visible to this check. With a remote anchor leader the local store sees at most a replica's view
+        // and the check is advisory only — the record store's bundled-prepare gate re-checks at apply, on
+        // the leader, and a rejected prepare rejects the bundled commit with it.
         foreach (PreparedIntent intent in partition.Intents)
         {
             PreparedIntent? holder = intentStore.Get(intent.Key);
@@ -875,53 +886,73 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 ApplyTimeValidation: applyTimeValidation,
                 BundledReadDependencies: applyTimeValidation && bundledReadDependencies is { Count: > 0 } ? bundledReadDependencies : null)]);
 
-        (bool BatchCommitted, bool PrepareAcknowledged)? proposed = await replicateOnePhaseBundle!(
+        Writes.DurableOnePhaseReply? proposed = await replicateOnePhaseBundle!(
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
+            input.TransactionId, input.Epoch, opId,
             input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
 
-        // Remote anchor leader: the atomic bundle cannot cross the wire; standard 2PC handles it.
+        // The remote anchor leader does not implement the typed one-phase operation (an older node); the
+        // standard 2PC flow handles it through the per-entry wire it does implement.
         if (proposed is null)
             return (null, OnePhaseFallbackReason.RemoteLeader);
 
+        Writes.DurableOnePhaseReply reply = proposed.Value;
+
         // Nothing durable — a clean retry, exactly as a failed 2PC record init.
-        if (!proposed.Value.BatchCommitted)
+        if (!reply.BatchCommitted)
             return (Retry(), OnePhaseFallbackReason.None);
 
         // A rejected bundled prepare (another transaction took a key while this proposal was in flight) also
-        // rejects the bundled commit through the record store's bundled-prepare gate, so the record read below
-        // reports the truthful winner: Undecided, never a Commit for a mutation that was never durably prepared.
-        if (!proposed.Value.PrepareAcknowledged)
+        // rejects the bundled commit through the record store's bundled-prepare gate, so the canonical outcome
+        // below reports the truthful winner: Undecided, never a Commit for a mutation that was never durably
+        // prepared.
+        if (!reply.PrepareAcknowledged)
             DurableTransactionMetrics.OnePhasePrepareRejections.Add(1);
 
-        // The winner is whatever the canonical record reflects after apply, exactly as in DecideAsync: the
-        // deadline gate or the bundled-prepare gate may have kept the record Undecided (late commit →
-        // presumed-abort recovery owns it; rejected prepare → the retry falls back to 2PC and aborts
-        // truthfully), and a concurrent recovery abort may have won the race in the log.
-        TransactionRecord? record = recordStore.Get(input.TransactionId, input.Epoch);
-        if (record is null)
+        // The winner is whatever the canonical record reflects after the ordered apply, exactly as in
+        // DecideAsync: the deadline gate or the bundled-prepare gate may have kept the record Undecided (late
+        // commit → presumed-abort recovery owns it; rejected prepare → 2PC drives the truthful outcome), and a
+        // concurrent recovery abort may have won the race in the log. The anchor leader read the record after
+        // it applied the batch — its own store when this node led, the typed answer otherwise — so the reply is
+        // that canonical read; an unknown decision (a record reclaimed under the read) is a clean retry.
+        if (!reply.DecisionKnown)
             return (Retry(), OnePhaseFallbackReason.None);
 
-        if (record.Decision == TransactionDecision.Undecided)
+        if (reply.Decision == TransactionDecision.Undecided)
         {
-            // The bundled commit gate withheld the commit, or the deadline gate did. This node applied the batch
-            // (it led the partition when it proposed), so the gate's verdict for this attempt is on the record
-            // store. A stale base or read is deterministic and final — heads only advance, and the transaction
-            // only grows older against the retention horizon — so a retry of the bundle would be rejected again
-            // (its own intent still holds the keys, and the pre-propose checks read that intent as valid by
-            // construction): drive the truthful conflict abort through the record CAS now, exactly as a failed
-            // pre-propose validation does, and roll the installed intent back everywhere. A missing prepare
-            // means another transaction took a key: the retry's pre-flight sees that foreign holder and falls
-            // back to 2PC, whose own prepare rejection drives the truthful outcome. No recorded verdict leaves
-            // only the deadline gate, which yields to presumed-abort recovery.
-            if (recordStore.TryTakeGatedRejectionVerdict(input.TransactionId, input.Epoch, opId, out BundledCommitVerdict verdict))
+            // The bundled commit gate withheld the commit, or the deadline gate did. The leader that applied
+            // the batch recorded the gate's verdict for this attempt and the reply carries it. A stale base or
+            // read is deterministic and final — heads only advance, and the transaction only grows older
+            // against the retention horizon — so a retry of the bundle would be rejected again (its own intent
+            // still holds the keys, and the pre-propose checks read that intent as valid by construction):
+            // drive the truthful conflict abort through the record CAS now, exactly as a failed pre-propose
+            // validation does, and roll the installed intent back everywhere. No recorded verdict leaves only
+            // the deadline gate, which yields to presumed-abort recovery.
+            switch (reply.GatedVerdict)
             {
-                if (verdict is BundledCommitVerdict.StaleBase or BundledCommitVerdict.StaleRead)
+                case BundledCommitVerdict.StaleBase or BundledCommitVerdict.StaleRead:
                     return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
 
-                return (Retry(), OnePhaseFallbackReason.None);
+                case BundledCommitVerdict.PrepareMissing:
+                {
+                    // Another transaction took a bundled key before the batch applied. When this node's own
+                    // intent store can see that holder (it applied the batch, or replicates the anchor
+                    // partition), a clean retry suffices: the retry's pre-flight sees the holder and falls back
+                    // to 2PC. A holder on a remote anchor leader is invisible to that pre-flight — a retry
+                    // would re-propose the same doomed bundle — so continue into the standard 2PC flow now,
+                    // whose prepare/retry/helping machinery consults the leader that can see it.
+                    foreach (PreparedIntent intent in partition.Intents)
+                    {
+                        PreparedIntent? holder = intentStore.Get(intent.Key);
+                        if (holder is not null && (holder.TransactionId != input.TransactionId || holder.Epoch != input.Epoch))
+                            return (Retry(), OnePhaseFallbackReason.None);
+                    }
+
+                    return (null, OnePhaseFallbackReason.ForeignIntent);
+                }
             }
 
-            if (proposed.Value.PrepareAcknowledged)
+            if (reply.PrepareAcknowledged)
             {
                 DurableTransactionMetrics.LateCommitRejections.Add(1);
                 return (LateCommitRejectedRetry(), OnePhaseFallbackReason.None);
@@ -930,7 +961,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             return (Retry(), OnePhaseFallbackReason.None);
         }
 
-        if (record.Decision == TransactionDecision.Commit)
+        if (reply.Decision == TransactionDecision.Commit)
         {
             DurableTransactionMetrics.OnePhaseCommits.Add(1);
 
@@ -956,10 +987,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             }
         }
 
-        return (record.Decision switch
+        // Both terminal reads are canonical (the anchor leader's store after the ordered apply), so the
+        // resolution may take its direction from the outcome without reading the record again.
+        return (reply.Decision switch
         {
-            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
-            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
+            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, reply.AbortClass, CanonicalDecisionRead: true),
             _ => Retry()
         }, OnePhaseFallbackReason.None);
     }

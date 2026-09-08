@@ -63,6 +63,7 @@ internal sealed class DurableReplicationGateway
     private long redirects;
     private long bundleForwards;
     private long decisionForwards;
+    private long onePhaseForwards;
 
     /// <summary>The transport calls this node's durable path has made so far (see <see cref="DurableTransportCounts"/>).</summary>
     internal DurableTransportCounts TransportCounts => new(
@@ -72,7 +73,8 @@ internal sealed class DurableReplicationGateway
         Interlocked.Read(ref recordLookupForwards),
         Interlocked.Read(ref redirects),
         Interlocked.Read(ref bundleForwards),
-        Interlocked.Read(ref decisionForwards));
+        Interlocked.Read(ref decisionForwards),
+        Interlocked.Read(ref onePhaseForwards));
 
     /// <summary>
     /// Forwards an ordered group of deltas to <paramref name="node"/> as one typed bundle. Null means the receiver
@@ -566,21 +568,131 @@ internal sealed class DurableReplicationGateway
     /// <summary>
     /// One-phase commit bundle: proposes the transaction's record init, its single (anchor-partition) prepare,
     /// and its commit decision as ONE atomic durable batch — a single barrier instead of the 2PC's
-    /// init+prepare barrier followed by the decision barrier. Local-leader only: returns <see langword="null"/>
-    /// when the anchor partition is led by another node, and the caller falls back to the standard 2PC flow
-    /// (the durable-operation wire carries one delta per call, so the atomic bundle cannot cross nodes).
+    /// init+prepare barrier followed by the decision barrier. When the anchor partition is led by another node,
+    /// the whole bundle crosses the wire as one typed operation the receiving leader submits atomically, and the
+    /// reply carries the canonical outcome read on that leader after the ordered apply (a durable batch is not a
+    /// decision — the commit transition is judged at apply, on the anchor leader, in log order). Returns
+    /// <see langword="null"/> only when the remote leader does not implement the operation (an older node), and
+    /// the caller falls back to the standard 2PC flow.
     /// The safety argument for deciding in the same batch as the prepare lives at the call site
     /// (<see cref="Transactions.DurableTransactionFinalizer"/>): the caller pre-checks that no foreign durable
-    /// intent holds any of the transaction's keys, and in-memory write intents exclude new conflicting
-    /// prepares from being proposed behind it.
+    /// intent holds any of the transaction's keys, and in-memory write intents on the anchor leader exclude new
+    /// conflicting prepares from being proposed behind it; the record store's apply-time gates re-check both on
+    /// every replica.
     /// </summary>
-    internal async Task<(bool BatchCommitted, bool PrepareAcknowledged)?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    internal async Task<DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
-            return null;
+        {
+            DurableOnePhaseReply? typed = await ForwardDurableOnePhaseAsync(
+                leader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+                transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
 
+            // Mirror a refused prepare's verdict into the local intent store, as the typed bundle forward does,
+            // so the origin's classification reads it exactly as a local refusal. Nothing is projected into the
+            // local record store: the reply already carries the canonical outcome, and a projection of a delta
+            // that lost at the anchor would diverge this node's store from the canonical record.
+            if (typed is { BatchCommitted: true, PrepareAcknowledged: false } answered)
+                preparedIntentStore.RecordPrepareRejectionsForDelta(anchorPrepareDelta, answered.Rejection);
+
+            return typed;
+        }
+
+        return await ReplicateDurableOnePhaseLocal(
+            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+            transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Forwards a one-phase bundle to the anchor partition's leader as the typed one-phase operation.
+    /// Null means the receiver does not implement it (an older node).</summary>
+    private async Task<DurableOnePhaseReply?> ForwardDurableOnePhaseAsync(
+        string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        DurableOnePhaseReply? reply;
+        try
+        {
+            DurableOnePhaseWireReply? wire = await interNodeCommunication.DurableOnePhase(
+                node, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+                transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            reply = wire is { } answeredWire ? DurableOnePhaseReply.FromWire(answeredWire) : null;
+        }
+        catch
+        {
+            Interlocked.Increment(ref onePhaseForwards);
+            DurableTransactionMetrics.DurableOnePhaseForwardThrew();
+            throw;
+        }
+
+        // Counted only when the receiver answered, as the bundle forward is; a refused attempt against an older
+        // node is followed by the standard 2PC flow, whose forwards count themselves.
+        if (reply is { } answered)
+        {
+            Interlocked.Increment(ref onePhaseForwards);
+            DurableTransactionMetrics.DurableOnePhaseForwarded(answered.BatchCommitted && answered.PrepareAcknowledged);
+        }
+
+        return reply;
+    }
+
+    /// <summary>
+    /// Runs a one-phase bundle on this node because it leads the anchor partition: the three ordered entries
+    /// enter the local scheduler as ONE atomic submission under ordinary admission and the origin's fence, and
+    /// the reply carries the canonical outcome read from this node's record store after the ordered apply.
+    /// Redirects once to the actual leader when routed here on a stale guess; null when leadership cannot be
+    /// resolved (the origin reads a not-committed batch and retries).
+    /// </summary>
+    internal async Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
+        if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+        {
+            string? actualLeader;
+            try
+            {
+                actualLeader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RaftException)
+            {
+                return NotCommittedOnePhaseReply.ToWire();
+            }
+
+            if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
+            {
+                Interlocked.Increment(ref redirects);
+                DurableTransactionMetrics.DurableOperationRedirected();
+                DurableOnePhaseReply? redirected = await ForwardDurableOnePhaseAsync(
+                    actualLeader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+                    transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                return redirected?.ToWire();
+            }
+
+            if (actualLeader is null)
+                return NotCommittedOnePhaseReply.ToWire();
+        }
+
+        DurableOnePhaseReply reply = await ReplicateDurableOnePhaseLocal(
+            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+            transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        return reply.ToWire();
+    }
+
+    /// <summary>The one-phase answer for a batch that never committed: nothing durable, a clean retry.</summary>
+    private static DurableOnePhaseReply NotCommittedOnePhaseReply => new(
+        false, false, PrepareRejectionKind.None, false, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.Admit);
+
+    private async Task<DurableOnePhaseReply> ReplicateDurableOnePhaseLocal(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         bool batchCommitted = false;
@@ -606,11 +718,33 @@ internal sealed class DurableReplicationGateway
             fenceGeneration);
 
         if (!writeAggregator.TryEnqueue(submission))
-            return (false, false);
+            return NotCommittedOnePhaseReply;
 
         using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
         bool prepareAcknowledged = await submission.Committed.ConfigureAwait(false);
-        return (batchCommitted, prepareAcknowledged);
+        if (!batchCommitted)
+            return NotCommittedOnePhaseReply;
+
+        // A committed batch with a refused prepare: name the refusal from this leader's memo, as the typed
+        // bundle answer does, so the origin classifies it exactly as a local refusal.
+        PrepareRejectionKind rejection = PrepareRejectionKind.None;
+        if (!prepareAcknowledged)
+            rejection = preparedIntentStore.TakePrepareRejectionForDelta(anchorPrepareDelta);
+
+        // The winner is whatever the canonical record reflects after the ordered apply — the deadline gate or
+        // the bundled-commit gate may have kept it Undecided, and a racing recovery abort may have won in the
+        // log. The scheduler's completion applied every entry before resolving the submission, so this read is
+        // the post-apply state. On Undecided, take (once) the verdict this leader's apply recorded for the
+        // rejected bundled commit; the default names the deadline gate (no gate rejection recorded).
+        TransactionRecord? record = transactionRecordStore.Get(transactionId, epoch);
+        if (record is null)
+            return new DurableOnePhaseReply(true, prepareAcknowledged, rejection, false, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.Admit);
+
+        BundledCommitVerdict gatedVerdict = BundledCommitVerdict.Admit;
+        if (record.Decision == TransactionDecision.Undecided)
+            transactionRecordStore.TryTakeGatedRejectionVerdict(transactionId, epoch, opId, out gatedVerdict);
+
+        return new DurableOnePhaseReply(true, prepareAcknowledged, rejection, true, record.Decision, record.AbortClass, gatedVerdict);
     }
 
     private async Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleLocal(
@@ -880,4 +1014,7 @@ internal readonly record struct DurableTransportCounts(
     // Typed multi-entry bundles (an anchor's record init + prepare in one call) and typed decisions that return
     // the canonical outcome; each replaces two of the untyped calls above.
     long BundleForwards,
-    long DecisionForwards);
+    long DecisionForwards,
+    // Typed one-phase bundles (record init + prepare + commit decision in one call, answered with the canonical
+    // outcome); each replaces a bundle forward plus a decision forward.
+    long OnePhaseForwards);

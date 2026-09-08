@@ -242,18 +242,20 @@ internal sealed class OperationRegistrar
 
             if (actualLeader is not null && actualLeader != raft.GetLocalEndpoint())
             {
+                SessionRegistrationForward forward = locator.BeginInboundCompletionRedirect();
+
                 try
                 {
                     (KeyValueResponseType outcome, string? anchor) redirected = await interNodeCommunication
                         .CompleteOperation(actualLeader, coordinatorKey, transactionId, operationId, payload, CancellationToken.None)
                         .ConfigureAwait(false);
 
-                    locator.CountInboundCompletionRedirected(redirected.outcome == KeyValueResponseType.Set);
+                    forward.Answered(redirected.outcome == KeyValueResponseType.Set);
                     return redirected;
                 }
                 catch
                 {
-                    locator.CountInboundCompletionRedirectThrew();
+                    forward.Threw();
                     throw;
                 }
             }

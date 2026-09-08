@@ -2591,6 +2591,30 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
+    internal async Task<GrpcDurableOnePhaseResponse> DurableOnePhaseInternal(GrpcDurableOnePhaseRequest request, ServerCallContext context)
+    {
+        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+        HLCTimestamp opId = new(request.OpIdNode, request.OpIdPhysical, request.OpIdCounter);
+
+        // A null reply here means the receiver could not run the bundle at all (an unresolved leadership); the
+        // origin reads a not-committed batch and retries.
+        DurableOnePhaseWireReply? reply = await keyValues.DurableOnePhaseLocal(
+            request.PartitionId, request.RecordInitDelta.ToByteArray(), request.AnchorPrepareDelta.ToByteArray(),
+            request.DecisionDelta.ToByteArray(), transactionId, request.Epoch, opId,
+            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
+
+        return new GrpcDurableOnePhaseResponse
+        {
+            BatchCommitted = reply?.BatchCommitted ?? false,
+            PrepareAcknowledged = reply?.PrepareAcknowledged ?? false,
+            PrepareRejection = reply?.PrepareRejection ?? 0,
+            DecisionKnown = reply?.DecisionKnown ?? false,
+            Decision = reply?.Decision ?? 0,
+            AbortClass = reply?.AbortClass ?? 0,
+            GatedVerdict = reply?.GatedVerdict ?? 0
+        };
+    }
+
 
 
 

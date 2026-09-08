@@ -1169,6 +1169,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcGetStagedBaseVerdictsRequest GetStagedBaseVerdicts = 54;
     GrpcDurableBundleRequest DurableBundle = 55;
     GrpcDurableDecisionRequest DurableDecision = 56;
+    GrpcDurableOnePhaseRequest DurableOnePhase = 57;
   }
 }
 
@@ -1230,6 +1231,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcGetStagedBaseVerdictsResponse GetStagedBaseVerdicts = 53;
     GrpcDurableBundleResponse DurableBundle = 54;
     GrpcDurableDecisionResponse DurableDecision = 55;
+    GrpcDurableOnePhaseResponse DurableOnePhase = 56;
   }
 }
 
@@ -1491,6 +1493,41 @@ message GrpcDurableDecisionResponse {
   int32 AbortClass = 4;
 }
 
+// Forwards a one-phase commit bundle — [record init, prepare, commit decision] of one transaction — to the
+// anchor partition's leader, which submits the three deltas as ONE atomic scheduler submission under ordinary
+// admission and the origin's range fence. The transaction identity and the attempt's operation id let the
+// receiver read the canonical record after the ordered apply and name the gate verdict of a rejected commit.
+message GrpcDurableOnePhaseRequest {
+  int32 PartitionId = 1;
+  bytes RecordInitDelta = 2;
+  bytes AnchorPrepareDelta = 3;
+  bytes DecisionDelta = 4;
+  string FenceKey = 5;        // empty = unfenced
+  int64 FenceGeneration = 6;
+  int32 TransactionIdNode = 7;
+  int64 TransactionIdPhysical = 8;
+  uint32 TransactionIdCounter = 9;
+  int64 Epoch = 10;
+  int32 OpIdNode = 11;
+  int64 OpIdPhysical = 12;
+  uint32 OpIdCounter = 13;
+}
+
+// The bundle signals (BatchCommitted / PrepareAcknowledged / PrepareRejection, as in GrpcDurableBundleResponse)
+// plus the CANONICAL outcome read from the leader's record store after the ordered apply: a durable batch is
+// not a decision — the commit transition is judged at apply, in log order. When the record stays Undecided,
+// GatedVerdict names the bundled-commit gate's rejection (Kahuna's BundledCommitVerdict values; 0 = no gate
+// rejection recorded, so the deadline gate withheld the commit).
+message GrpcDurableOnePhaseResponse {
+  bool BatchCommitted = 1;
+  bool PrepareAcknowledged = 2;
+  int32 PrepareRejection = 3;
+  bool DecisionKnown = 4;
+  int32 Decision = 5;
+  int32 AbortClass = 6;
+  int32 GatedVerdict = 7;
+}
+
 message GrpcLookupTransactionRecordRequest {
   int32 PartitionId = 1;
   int32 TransactionIdNode = 2;
@@ -1578,6 +1615,7 @@ enum GrpcServerBatchType {
   SERVER_GET_STAGED_BASE_VERDICTS = 52;
   SERVER_DURABLE_BUNDLE = 53;
   SERVER_DURABLE_DECISION = 54;
+  SERVER_DURABLE_ONE_PHASE = 55;
 }
 
 enum GrpcRangeLockMode {

@@ -116,6 +116,14 @@ public interface IKahuna
         int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
         string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
+    /// <summary>Runs a forwarded one-phase commit bundle ([record init, prepare, commit decision]) on this node
+    /// because it leads the anchor partition: one atomic scheduler submission, answered with the bundle signals
+    /// plus the canonical outcome read after the ordered apply. Redirects once on a stale leader guess.</summary>
+    public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+
     /// <summary>Serves a canonical transaction-record lookup routed here because this node is the record's anchor
     /// partition leader. Returns the serialized record, or null when no record exists locally.</summary>
     public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken);

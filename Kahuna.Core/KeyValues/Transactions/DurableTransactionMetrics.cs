@@ -897,6 +897,7 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> KindRollback = new("kind", "rollback");
     private static readonly KeyValuePair<string, object?> KindBundle = new("kind", "bundle");
     private static readonly KeyValuePair<string, object?> KindDecision = new("kind", "decision");
+    private static readonly KeyValuePair<string, object?> KindOnePhase = new("kind", "one_phase");
     private static readonly KeyValuePair<string, object?> KindOther = new("kind", "other");
 
     /// <summary>A typed multi-entry bundle forward (one call carrying an anchor's record init and prepare).</summary>
@@ -912,6 +913,14 @@ internal static class DurableTransactionMetrics
 
     internal static void DurableDecisionForwardThrew() =>
         DurableOperationForwards.Add(1, KindDecision, ResultThrew);
+
+    /// <summary>A typed one-phase bundle forward (record init + prepare + commit decision in one call), answered
+    /// with the canonical outcome read on the anchor leader after the ordered apply.</summary>
+    internal static void DurableOnePhaseForwarded(bool ok) =>
+        DurableOperationForwards.Add(1, KindOnePhase, ok ? ResultOk : ResultRefused);
+
+    internal static void DurableOnePhaseForwardThrew() =>
+        DurableOperationForwards.Add(1, KindOnePhase, ResultThrew);
     private static readonly KeyValuePair<string, object?> ResultOk = new("result", "ok");
     private static readonly KeyValuePair<string, object?> ResultRefused = new("result", "refused");
     private static readonly KeyValuePair<string, object?> ResultThrew = new("result", "threw");
@@ -1000,6 +1009,46 @@ internal static class DurableTransactionMetrics
     /// </summary>
     internal static void SessionRegistrationUnrouted(SessionRegistrationOp op) =>
         SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ResultUnrouted);
+
+    /// <summary>
+    /// Bucket boundaries for <see cref="SessionRegistrationForwardMs"/>, in milliseconds. The default
+    /// OpenTelemetry boundaries start at 0, 5, 10 ms, which drops every forwarded registration into the first
+    /// bucket and answers nothing: a container-to-container round trip is a small fraction of a millisecond,
+    /// and the question this histogram exists to settle — whether registration hops explain a material share
+    /// of commit latency — turns on values near a quarter of a millisecond. These boundaries resolve that
+    /// region and still separate a stalled forward from a slow one.
+    /// </summary>
+    private static readonly InstrumentAdvice<double> SessionRegistrationForwardAdvice = new()
+    {
+        HistogramBucketBoundaries = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100]
+    };
+
+    /// <summary>
+    /// Wall time of a session-registration call this node forwarded to the session owner, from the sender's
+    /// call to the answer it came back with, tagged by <c>op</c> (<c>begin</c>, <c>complete</c>,
+    /// <c>working_set</c>). The batcher wait is inside it deliberately: what a consumer needs is the cost a
+    /// forwarded registration adds to its transaction, which includes queueing behind the coalescing window,
+    /// not just the wire.
+    ///
+    /// <para>Only the forwarded branch is timed. The local branch is a method call on this node's own session
+    /// table, and timing it would mix a number three orders of magnitude smaller into a distribution whose
+    /// whole purpose is the remote cost; the <c>route</c> tag of
+    /// <see cref="SessionRegistrationForwards"/> already separates the two populations.</para>
+    ///
+    /// <para>A forward whose transport threw is recorded with the time it consumed. A forward that failed
+    /// after 40 ms cost its transaction 40 ms, and dropping it would flatter the distribution.</para>
+    /// </summary>
+    internal static readonly Histogram<double> SessionRegistrationForwardMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.session_registration_forward_ms",
+            unit: "ms",
+            description: "Duration of a forwarded session-registration call, tagged by op.",
+            tags: null,
+            advice: SessionRegistrationForwardAdvice);
+
+    /// <summary>Records the wall time one forwarded session-registration call took.</summary>
+    internal static void SessionRegistrationForwardTimed(SessionRegistrationOp op, double elapsedMs) =>
+        SessionRegistrationForwardMs.Record(elapsedMs, OpTag(op));
 
     /// <summary>
     /// Number of tracked read-set keys a finalize validated. Interpreted together with

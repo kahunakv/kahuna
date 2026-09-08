@@ -1004,7 +1004,7 @@ public sealed class TestDurableTransactionFinalizer
     // intents that excluded them are gone (killed node, expired lease, a stall outliving the locks).
     private static DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate OnePhase(
         TransactionRecordStore records, PreparedIntentStore intents, Action? beforeApply = null) =>
-        (partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct) =>
+        (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct) =>
         {
             beforeApply?.Invoke();
 
@@ -1012,8 +1012,24 @@ public sealed class TestDurableTransactionFinalizer
             bool prepareAck = intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
             records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = decisionDelta });
 
-            return Task.FromResult<(bool BatchCommitted, bool PrepareAcknowledged)?>((true, prepareAck));
+            return Task.FromResult<DurableOnePhaseReply?>(ReadOnePhaseOutcome(records, transactionId, epoch, opId, prepareAck));
         };
+
+    // Mirrors the production post-apply read: the canonical record names the winner, and an Undecided record
+    // surrenders the gate verdict this apply recorded for the attempt.
+    private static DurableOnePhaseReply ReadOnePhaseOutcome(
+        TransactionRecordStore records, HLCTimestamp transactionId, long epoch, HLCTimestamp opId, bool prepareAck)
+    {
+        TransactionRecord? record = records.Get(transactionId, epoch);
+        if (record is null)
+            return new(true, prepareAck, PrepareRejectionKind.None, false, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.Admit);
+
+        BundledCommitVerdict verdict = BundledCommitVerdict.Admit;
+        if (record.Decision == TransactionDecision.Undecided)
+            records.TryTakeGatedRejectionVerdict(transactionId, epoch, opId, out verdict);
+
+        return new(true, prepareAck, PrepareRejectionKind.None, true, record.Decision, record.AbortClass, verdict);
+    }
 
     private static (TransactionRecordStore Records, PreparedIntentStore Intents) StoresWithProbe()
     {
@@ -1076,7 +1092,7 @@ public sealed class TestDurableTransactionFinalizer
 
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _) => Task.FromResult<(bool BatchCommitted, bool PrepareAcknowledged)?>(null));
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
 
         using MetricCapture gate = new("outcome", "kahuna.durable_tx.one_phase_gate");
         using MetricCapture fallback = new("reason", "kahuna.durable_tx.one_phase_fallbacks");
@@ -1148,9 +1164,9 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate once = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct) =>
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct) =>
             {
-                (bool BatchCommitted, bool PrepareAcknowledged)? first = await once(partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct);
+                DurableOnePhaseReply? first = await once(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct);
                 // The duplicate: the same three entries replayed in order against the already-applied stores.
                 records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
                 intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
@@ -1233,10 +1249,10 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate onePhaseSeam = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct) =>
+            replicateOnePhaseBundle: (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct) =>
             {
                 onePhaseInvoked = true;
-                return onePhaseSeam(partitionId, initDelta, prepareDelta, decisionDelta, fenceKey, fenceGeneration, ct);
+                return onePhaseSeam(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct);
             });
 
         DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(

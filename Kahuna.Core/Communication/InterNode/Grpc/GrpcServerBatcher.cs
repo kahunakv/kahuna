@@ -503,6 +503,15 @@ internal sealed class GrpcServerBatcher
         return TryProcessQueue(grpcBatcherItem, promise);
     }
 
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcDurableOnePhaseRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
+
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcReplicateKeyValueRangePageRequest message)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1102,6 +1111,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerDurableDecision;
             batchRequest.DurableDecision = itemRequest.DurableDecision;
         }
+        else if (itemRequest.DurableOnePhase is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerDurableOnePhase;
+            batchRequest.DurableOnePhase = itemRequest.DurableOnePhase;
+        }
         else if (itemRequest.LookupTransactionRecord is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerLookupTransactionRecord;
@@ -1401,6 +1415,10 @@ internal sealed class GrpcServerBatcher
 
                     case GrpcServerBatchType.ServerDurableDecision:
                         item.Promise.TrySetResult(new(response.DurableDecision));
+                        break;
+
+                    case GrpcServerBatchType.ServerDurableOnePhase:
+                        item.Promise.TrySetResult(new(response.DurableOnePhase));
                         break;
 
                     case GrpcServerBatchType.ServerLookupTransactionRecord:

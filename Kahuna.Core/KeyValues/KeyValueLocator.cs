@@ -2421,17 +2421,19 @@ internal sealed class KeyValueLocator
             return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null);
         }
 
+        SessionRegistrationForward forward = sessionRegistration.BeginForward(SessionRegistrationOp.Begin);
+
         try
         {
             (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) forwarded =
                 await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
-            sessionRegistration.Forwarded(SessionRegistrationOp.Begin, IsRegistrationAccepted(forwarded.outcome));
+            forward.Answered(IsRegistrationAccepted(forwarded.outcome));
             return forwarded;
         }
         catch
         {
-            sessionRegistration.ForwardThrew(SessionRegistrationOp.Begin);
+            forward.Threw();
             throw;
         }
     }
@@ -2442,6 +2444,10 @@ internal sealed class KeyValueLocator
     /// <summary>The session-registration calls this node has made so far (per node, for tests and diagnostics).</summary>
     internal SessionRegistrationCounts SessionRegistrationCounts => sessionRegistration.Snapshot;
 
+    /// <summary>The wall time this node's forwarded session-registration calls have taken so far (per node, for
+    /// tests and diagnostics). Zero unless a listener asked for the duration histogram.</summary>
+    internal SessionRegistrationForwardDurations SessionRegistrationForwardDurations => sessionRegistration.DurationSnapshot;
+
     /// <summary>
     /// A completion that arrived here and was folded into this node's own session table. The inbound landing
     /// point does not route through <see cref="LocateAndCompleteOperation"/>, so it reports the local service
@@ -2451,14 +2457,13 @@ internal sealed class KeyValueLocator
     internal void CountInboundCompletionServedLocally() => sessionRegistration.Local(SessionRegistrationOp.Complete, true);
 
     /// <summary>
-    /// A completion this node forwarded as a receiver, after finding that the sender routed it to a replica
-    /// that does not lead the coordinator partition. It is a second hop the sender's routing did not predict,
-    /// and it is counted on the node that actually sends it.
+    /// Opens a completion this node forwards as a receiver, after finding that the sender routed it to a
+    /// replica that does not lead the coordinator partition. It is a second hop the sender's routing did not
+    /// predict, so it is counted and timed on the node that actually sends it, through the same telemetry the
+    /// routed exits use.
     /// </summary>
-    internal void CountInboundCompletionRedirected(bool ok) => sessionRegistration.Forwarded(SessionRegistrationOp.Complete, ok);
-
-    /// <summary>The same completion forward, when its transport threw.</summary>
-    internal void CountInboundCompletionRedirectThrew() => sessionRegistration.ForwardThrew(SessionRegistrationOp.Complete);
+    internal SessionRegistrationForward BeginInboundCompletionRedirect() =>
+        sessionRegistration.BeginForward(SessionRegistrationOp.Complete);
 
     /// <summary>
     /// True when a registration outcome is an answer from a live session (fresh, already pending, or already
@@ -2494,17 +2499,19 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, null);
         }
 
+        SessionRegistrationForward forward = sessionRegistration.BeginForward(SessionRegistrationOp.Complete);
+
         try
         {
             (KeyValueResponseType outcome, string? anchor) forwarded =
                 await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, payload, cancellationToken);
 
-            sessionRegistration.Forwarded(SessionRegistrationOp.Complete, forwarded.outcome == KeyValueResponseType.Set);
+            forward.Answered(forwarded.outcome == KeyValueResponseType.Set);
             return forwarded;
         }
         catch
         {
-            sessionRegistration.ForwardThrew(SessionRegistrationOp.Complete);
+            forward.Threw();
             throw;
         }
     }
@@ -2532,17 +2539,19 @@ internal sealed class KeyValueLocator
             return null;
         }
 
+        SessionRegistrationForward forward = sessionRegistration.BeginForward(SessionRegistrationOp.WorkingSet);
+
         try
         {
             TransactionWorkingSet? forwarded =
                 await interNodeCommunication.GetTransactionWorkingSet(leader, coordinatorKey, transactionId, cancellationToken);
 
-            sessionRegistration.Forwarded(SessionRegistrationOp.WorkingSet, forwarded is not null);
+            forward.Answered(forwarded is not null);
             return forwarded;
         }
         catch
         {
-            sessionRegistration.ForwardThrew(SessionRegistrationOp.WorkingSet);
+            forward.Threw();
             throw;
         }
     }

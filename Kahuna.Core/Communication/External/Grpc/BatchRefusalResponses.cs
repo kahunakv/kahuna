@@ -194,6 +194,7 @@ internal static class BatchRefusalResponses
             case GrpcServerBatchType.ServerDurableOperation:
             case GrpcServerBatchType.ServerDurableBundle:
             case GrpcServerBatchType.ServerDurableDecision:
+            case GrpcServerBatchType.ServerDurableOnePhase:
             case GrpcServerBatchType.ServerLookupTransactionRecord:
             case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
             case GrpcServerBatchType.ServerBeginOperation:

@@ -317,10 +317,14 @@ internal sealed partial class KeyValuesManager : IDisposable
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableBundleThroughSchedulerFenced(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken);
 
-    /// <summary>One-phase bundled commit. Null when the bundle could not be attempted at all.</summary>
-    internal Task<(bool BatchCommitted, bool PrepareAcknowledged)?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        durableReplication.ReplicateDurableOnePhaseBundleThroughSchedulerFenced(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, fenceKey, fenceGeneration, cancellationToken);
+    /// <summary>One-phase bundled commit, run locally or forwarded whole to a remote anchor leader. Null when
+    /// the remote leader does not implement the typed operation (an older node).</summary>
+    internal Task<Writes.DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        durableReplication.ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
+            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken);
 
     /// <summary>Executes a durable operation on this node (the inbound leg of a routed durable call).</summary>
     internal Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>
@@ -331,6 +335,14 @@ internal sealed partial class KeyValuesManager : IDisposable
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
         bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
         durableReplication.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+
+    /// <summary>Runs a forwarded one-phase bundle on this node as one atomic scheduler submission and answers
+    /// the bundle signals plus the canonical outcome.</summary>
+    internal Task<Writes.DurableOnePhaseWireReply?> DurableOnePhaseLocal(
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
+        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        durableReplication.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken);
 
     /// <summary>Replicates a forwarded terminal decision on this node and answers the canonical outcome.</summary>
     internal Task<Writes.DurableDecisionWireReply?> DurableDecisionLocal(
@@ -355,6 +367,14 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// forwarded to the node that does.
     /// </summary>
     internal Transactions.SessionRegistrationCounts SessionRegistrationCounts => locator.SessionRegistrationCounts;
+
+    /// <summary>
+    /// The wall time this node's forwarded session-registration calls have taken so far (per node, for tests
+    /// and diagnostics). The counts above say how many hops a transaction pays; these say what one hop costs,
+    /// which is the half that turns a hop count into a share of commit latency. Zero unless a listener asked
+    /// for the duration histogram.
+    /// </summary>
+    internal Transactions.SessionRegistrationForwardDurations SessionRegistrationForwardDurations => locator.SessionRegistrationForwardDurations;
 
     /// <summary>The node's shared bound on concurrent leader-local applies of committed intents.</summary>
     internal SemaphoreSlim DurableLocalApplyGate => runtime.DurableLocalApplyGate;

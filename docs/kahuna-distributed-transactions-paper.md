@@ -275,7 +275,7 @@ This is a liveness/safety trade-off. A very short window increases aborts during
 
 ## Single-partition fast path
 
-If all persistent participants and the anchor are on one locally led partition, Kahuna can place record initialization, all prepares, and the commit decision in one atomic Raft proposal. Preflight checks foreign intents and validates reads; a late staged-base check narrows the last race before submission. After commitment, the leader installs the committed intent view before replying.
+If all persistent participants and the anchor are on one partition, Kahuna can place record initialization, all prepares, and the commit decision in one atomic Raft proposal. Preflight checks foreign intents and validates reads; a late staged-base check narrows the last race before submission. When the coordinator leads the anchor partition it proposes the bundle locally; otherwise it forwards the whole bundle to the anchor leader as one typed operation, which submits it atomically and answers with the canonical outcome read after the ordered apply — one extra network hop, still one durable round. After commitment, the leader installs the committed intent view before replying.
 
 The fast path is disqualified in a multi-process Raft group when the transaction has a read dependency beyond its written keys, or when a write carries a validated base whose safety would otherwise rely on a check performed before a potentially stalled proposal. This conservative rule prevents a queued atomic bundle from applying after a conflicting update that occurred following validation. A single-process Raft group can safely relax some of these constraints because there is no remote replica divergence or inter-node proposal delay.
 

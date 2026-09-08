@@ -208,6 +208,10 @@ internal sealed class KeyValueServerBatcher
                 _ = DurableBundleDelayed(semaphore, request, responseStream, context, drain);
                 break;
 
+            case GrpcServerBatchType.ServerDurableOnePhase:
+                _ = DurableOnePhaseDelayed(semaphore, request, responseStream, context, drain);
+                break;
+
             case GrpcServerBatchType.ServerDurableDecision:
                 _ = DurableDecisionDelayed(semaphore, request, responseStream, context, drain);
                 break;
@@ -1183,6 +1187,42 @@ internal sealed class KeyValueServerBatcher
                     Type = GrpcServerBatchType.ServerDurableBundle,
                     RequestId = request.RequestId,
                     DurableBundle = resp
+                });
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            await ObserveFault(semaphore, request, responseStream, context, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
+    }
+
+    private async Task DurableOnePhaseDelayed(
+        SemaphoreSlim semaphore,
+        GrpcBatchServerKeyValueRequest request,
+        IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        try
+        {
+            await semaphore.WaitAsync(context.CancellationToken);
+            try
+            {
+                GrpcDurableOnePhaseResponse resp = await service.DurableOnePhaseInternal(request.DurableOnePhase, context);
+                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
+                {
+                    Type = GrpcServerBatchType.ServerDurableOnePhase,
+                    RequestId = request.RequestId,
+                    DurableOnePhase = resp
                 });
             }
             finally

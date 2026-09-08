@@ -41,9 +41,35 @@ internal readonly record struct DurableDecisionReply(bool Replicated, bool Known
         new(wire.Replicated, wire.Known, (TransactionDecision)wire.Decision, (TransactionAbortClass)wire.AbortClass);
 }
 
+/// <summary>The anchor leader's answer to a one-phase bundle ([record init, prepare, commit decision] as one
+/// atomic batch): the bundle signals of <see cref="DurableBundleReply"/>, plus the CANONICAL outcome read from
+/// the leader's record store after the ordered apply — the batch is durable but the commit transition is judged
+/// at apply, so the batch signals alone can never name the winner. When the record stays Undecided,
+/// <paramref name="GatedVerdict"/> names the bundled-commit gate's rejection (<see cref="BundledCommitVerdict.Admit"/>
+/// when the gate recorded none — the deadline gate withheld the commit instead).</summary>
+internal readonly record struct DurableOnePhaseReply(
+    bool BatchCommitted, bool PrepareAcknowledged, PrepareRejectionKind Rejection,
+    bool DecisionKnown, TransactionDecision Decision, TransactionAbortClass AbortClass, BundledCommitVerdict GatedVerdict)
+{
+    public DurableOnePhaseWireReply ToWire() =>
+        new(BatchCommitted, PrepareAcknowledged, (int)Rejection, DecisionKnown, (int)Decision, (int)AbortClass, (int)GatedVerdict);
+
+    public static DurableOnePhaseReply FromWire(DurableOnePhaseWireReply wire) => new(
+        wire.BatchCommitted, wire.PrepareAcknowledged, (PrepareRejectionKind)wire.PrepareRejection,
+        wire.DecisionKnown, (TransactionDecision)wire.Decision, (TransactionAbortClass)wire.AbortClass,
+        (BundledCommitVerdict)wire.GatedVerdict);
+}
+
 /// <summary>The public wire shape of <see cref="DurableBundleReply"/>, for the node and transport contracts:
 /// <paramref name="PrepareRejection"/> is 0 none, 1 a foreign intent holds the key, 2 the validated base moved.</summary>
 public readonly record struct DurableBundleWireReply(bool BatchCommitted, bool PrepareAcknowledged, int PrepareRejection);
+
+/// <summary>The public wire shape of <see cref="DurableOnePhaseReply"/>, for the node and transport contracts:
+/// <paramref name="Decision"/>, <paramref name="AbortClass"/> and <paramref name="GatedVerdict"/> carry the
+/// internal enum values (<paramref name="GatedVerdict"/> 0 = no gate rejection recorded).</summary>
+public readonly record struct DurableOnePhaseWireReply(
+    bool BatchCommitted, bool PrepareAcknowledged, int PrepareRejection,
+    bool DecisionKnown, int Decision, int AbortClass, int GatedVerdict);
 
 /// <summary>The public wire shape of <see cref="DurableDecisionReply"/>, for the node and transport contracts:
 /// <paramref name="Decision"/> and <paramref name="AbortClass"/> carry the internal enum values.</summary>

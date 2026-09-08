@@ -528,6 +528,85 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
         }
     }
 
+    /// <summary>A coordinator key routed to a partition whose leader is <paramref name="nodeIndex"/>, so the
+    /// transaction's session — and its finalize — runs on that node.</summary>
+    private static async Task<string> KeyLedBy(Cluster cluster, string prefix, int nodeIndex, CancellationToken ct)
+    {
+        string random = Guid.NewGuid().ToString("N")[..8];
+        for (int i = 0; i < 4_096; i++)
+        {
+            string candidate = $"{prefix}{i}/{random}";
+            if (await cluster.LeaderIndexOf(PartitionOf(cluster.Managers[0], candidate), ct) == nodeIndex)
+                return candidate;
+        }
+
+        throw new InvalidOperationException($"no key space under {prefix} routes to a partition led by node {nodeIndex}");
+    }
+
+    /// <summary>
+    /// The session node does not lead the anchor partition: the one-phase bundle crosses the wire whole as one
+    /// typed forward, the receiving leader proposes [record init, prepare, decision] as one atomic batch, and the
+    /// canonical Commit comes back in the reply — no two-phase fallback, no separate decision call, no record
+    /// lookup, and the committed value is readable from the session node when the commit returns.
+    /// </summary>
+    [Fact]
+    public async Task ReadModifyWrite_RemoteAnchorLeader_CommitsThroughTheForwardedOnePhaseBundle()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Cluster cluster = await Assemble(applyTimeValidation: true);
+
+        try
+        {
+            await RunUnderStableLeadership(cluster.Rafts[0], Partitions, async () =>
+            {
+                string key = "atv-remote/" + Guid.NewGuid().ToString("N")[..8];
+                await SeedDurable(cluster, key, "100");
+                int partition = PartitionOf(cluster.Managers[0], key);
+                int leader = await cluster.LeaderIndexOf(partition, ct);
+
+                // The session lives on a node that does not lead the written key's partition.
+                int sessionIndex = (leader + 1) % 3;
+                KahunaManager session = cluster.Managers[sessionIndex];
+                Assert.False(await cluster.Rafts[sessionIndex].AmILeaderIfHosted(partition, ct));
+                string coordinatorKey = await KeyLedBy(cluster, "atv-remote-coord", sessionIndex, ct);
+
+                cluster.Taps[leader].ResetCounts();
+                DurableTransportCounts before = session.KeyValues.DurableTransportCounts;
+
+                (TransactionHandle handle, long baseRevision) = await StartAndRead(session, coordinatorKey, key, ct);
+                await Write(session, handle, key, "150", ct);
+
+                (KeyValueResponseType commitType, _) = await session.LocateAndCommitTransaction(handle, ct);
+                Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+                DurableTransportCounts after = session.KeyValues.DurableTransportCounts;
+
+                // One typed one-phase forward replaced the bundle forward and the decision forward; the
+                // canonical outcome came back with it, so no record lookup was needed.
+                Assert.Equal(1, after.OnePhaseForwards - before.OnePhaseForwards);
+                Assert.Equal(0, after.BundleForwards - before.BundleForwards);
+                Assert.Equal(0, after.DecisionForwards - before.DecisionForwards);
+                Assert.Equal(0, after.RecordLookupForwards - before.RecordLookupForwards);
+
+                // The receiving leader proposed the forwarded entries as one one-phase bundle.
+                Assert.True(cluster.Taps[leader].OnePhaseBundles >= 1, "the forwarded one-phase bundle must be proposed as one atomic batch on the anchor leader");
+                Assert.Equal(0, cluster.Taps[leader].TwoPhaseAnchorBundles);
+
+                await AssertRecordOnEveryReplica(cluster, handle, TransactionDecision.Commit, rejectedBundles: 0);
+
+                foreach (KahunaManager manager in cluster.Managers)
+                    await WaitUntilAsync(() =>
+                        manager.DurablePreparedIntentStore.TryGetLedgerHead(partition, key, out long head, out _, out _) && head == baseRevision + 1);
+
+                Assert.Equal("150", await ReadValue(session, key, ct));
+            });
+        }
+        finally
+        {
+            await cluster.Leave();
+        }
+    }
+
     [Fact]
     public async Task ReadModifyWrite_WithoutTheOption_TakesTwoPhase()
     {
