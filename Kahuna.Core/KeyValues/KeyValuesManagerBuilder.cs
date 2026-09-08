@@ -177,6 +177,12 @@ internal sealed class KeyValuesManagerBuilder
         // store's contract), before the node serves anything.
         preparedIntentStore.ConfigureOnePhaseApplyTimeValidation(configuration.OnePhaseApplyTimeValidation);
 
+        // Said once at startup so an operator can confirm the setting the node runs with without scraping the
+        // gate metric; the metric's outcome tag is what names each exclusion afterwards.
+        logger.LogOnePhaseApplyTimeValidation(
+            configuration.OnePhaseApplyTimeValidation ? "enabled" : "disabled",
+            configuration.OnePhaseApplyTimeValidation ? "can" : "cannot");
+
         // Whole-partition state transfer: seeds a replica whose needed log entries were compacted.
         // Drains the background writer before exporting so the physical-family scan reflects every
         // applied entry (the export contract requires at least everything applied at the boundary).

@@ -322,5 +322,13 @@ public sealed class TestClusterReadiness : IDisposable
         public bool HostsPartition(int partitionId) => throw new NotImplementedException();
 
         public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
+
+        public IDisposable HoldCommittedProposalRepliesForTesting(int partitionId, Action<HeldProposalReply> onHeld) => throw new NotImplementedException();
+
+        public IDisposable SetSnapshotInstallGateForTesting(int partitionId, SnapshotInstallPhase phase, Func<SnapshotInstallSignal, ValueTask> gate) => throw new NotImplementedException();
+
+        public Task<RaftOperationStatus> HoldConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+
+        public Task<RaftOperationStatus> ResumeConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
     }
 }

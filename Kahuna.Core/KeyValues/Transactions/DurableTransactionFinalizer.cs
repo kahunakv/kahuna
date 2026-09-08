@@ -323,9 +323,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
     /// deadline check and the recorded winner). Must be less than or equal to the frozen decision deadline for a
     /// commit to be authorized.</param>
-    /// <param name="readSetExtendsBeyondWrites">Whether the validated read set carries a dependency the one-phase
-    /// bundle cannot re-check at apply time (see the call site in TransactionCoordinator); true keeps the
-    /// bundle closed and runs the standard 2PC flow.</param>
+    /// <param name="readSetExclusion">The read-set shape that keeps the one-phase bundle closed, when there is
+    /// one (see <c>TransactionCoordinator.ComputeOnePhaseEligibility</c>): a dependency the bundle cannot re-check
+    /// at apply time. Recorded verbatim as the gate verdict and runs the standard 2PC flow; null admits the read
+    /// set and leaves the partition-shape checks to decide.</param>
     /// <param name="applyTimeValidation">Whether a one-phase bundled commit must be validated at apply time, in log
     /// order, against the partition's replicated committed-head ledger — every co-bundled validated base and every
     /// entry of <paramref name="bundledReadDependencies"/>. Set only when every node in the group applies that
@@ -337,7 +338,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         Func<CancellationToken, Task<bool>> validateReadSet,
         HLCTimestamp opId,
         CancellationToken cancellationToken,
-        bool readSetExtendsBeyondWrites = false,
+        OnePhaseGateOutcome? readSetExclusion = null,
         bool applyTimeValidation = false,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null)
     {
@@ -424,8 +425,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // validators abort instead of committing around it.
         //
         // Without apply-time validation, validated-base (read-modify-write) transactions are also routed away
-        // from the bundle in multi-process clusters — the caller folds that condition into
-        // readSetExtendsBeyondWrites (see the call site in TransactionCoordinator). On the 2PC path a moved base
+        // from the bundle in multi-process clusters — the caller reports that condition as a read-set exclusion
+        // (see ComputeOnePhaseEligibility in TransactionCoordinator). On the 2PC path a moved base
         // is caught at prepare-apply time by the intent store's staged-base fence (the acknowledgement is
         // refused and the coordinator aborts truthfully), but the bundle's decision shares the prepare's atomic
         // batch, so a refused acknowledgement arrives with the decision already durable — the fence cannot
@@ -446,10 +447,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // reads). The pre-propose validations below stay: they avoid proposing bundles that will be rejected;
         // the apply-time check is the backstop for the stall window, not their replacement.
         // Every finalize records its gate verdict, so excluded transactions are visible beside the entered ones
-        // that later commit or fall back.
+        // that later commit or fall back. The caller's read-set exclusion is recorded as it was classified — the
+        // shape that closed the bundle (a predicate, an off-partition read, ...) is what an operator needs to act
+        // on, and a single coarse tag would make a workload the bundle cannot serve look like a flag that did
+        // not take effect.
         OnePhaseGateOutcome gate =
             replicateOnePhaseBundle is null ? OnePhaseGateOutcome.Disabled
-            : readSetExtendsBeyondWrites ? OnePhaseGateOutcome.ReadSetBeyondWrites
+            : readSetExclusion is { } excluded ? excluded
             : input.Partitions.Count != 1 ? OnePhaseGateOutcome.MultiPartition
             : input.Partitions[0].PartitionId != input.AnchorPartitionId ? OnePhaseGateOutcome.AnchorOffPartition
             : OnePhaseGateOutcome.Entered;

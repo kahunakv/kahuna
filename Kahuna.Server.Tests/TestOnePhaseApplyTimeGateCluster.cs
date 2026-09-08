@@ -621,6 +621,99 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
         }
     }
 
+    /// <summary>
+    /// The accounts shape: a primary-key update reads the index entry (read-only), then reads and writes the
+    /// row. Whether the bundle opens is decided by where the index key space was placed relative to the row key
+    /// space — an independent hash draw when the spaces are named apart, so the same workload took one phase on
+    /// some clusters and two on others. An index space named in the row space's placement group is on the anchor
+    /// partition on every cluster, and the bundle opens; an index space named apart, when it draws another
+    /// partition, is reported for what it is (<c>off_partition_read</c>), never as a flag that did not take effect.
+    /// </summary>
+    [Fact]
+    public async Task IndexReadInTheRowGroup_EntersTheBundle_AndEveryExclusionIsNamed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Cluster cluster = await Assemble(applyTimeValidation: true);
+
+        try
+        {
+            await RunUnderStableLeadership(cluster.Rafts[0], Partitions, async () =>
+            {
+                string table = "atv-tbl" + Guid.NewGuid().ToString("N")[..8];
+                string id = Guid.NewGuid().ToString("N")[..8];
+                string row = $"{table}:r/{id}";
+                string groupedIndex = $"{table}:r|i:pk/{id}";
+                int partition = PartitionOf(cluster.Managers[0], row);
+                Assert.Equal(partition, PartitionOf(cluster.Managers[0], groupedIndex));
+
+                // The same index named apart from its rows: pick a table id whose index space draws another partition.
+                string apartIndex = $"{table}:i:pk/{id}";
+                for (int i = 0; PartitionOf(cluster.Managers[0], apartIndex) == partition; i++)
+                    apartIndex = $"{table}{i}:i:pk/{id}";
+
+                await SeedDurable(cluster, row, "100");
+                await SeedDurable(cluster, groupedIndex, id);
+                await SeedDurable(cluster, apartIndex, id);
+
+                int leader = await cluster.LeaderIndexOf(partition, ct);
+                KahunaManager coordinator = cluster.Managers[leader];
+                string coordinatorKey = KeyRoutedTo(coordinator, "atv-coord", partition);
+
+                using MetricCapture gate = new("outcome", "kahuna.durable_tx.one_phase_gate");
+
+                // Index lookup in the row group, then read-modify-write of the row: one partition, one barrier.
+                cluster.Taps[leader].ResetCounts();
+                (TransactionHandle grouped, _) = await StartAndRead(coordinator, coordinatorKey, groupedIndex, ct);
+                await ReadInTransaction(coordinator, grouped, row, ct);
+                await Write(coordinator, grouped, row, "101", ct);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(grouped, ct)).Item1);
+                Assert.True(cluster.Taps[leader].OnePhaseBundles >= 1, "an index read placed with its rows must keep the bundle open");
+                Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "entered") >= 1);
+
+                // The same lookup through an index placed apart: two phases, and the verdict says why.
+                double offPartitionBefore = gate.Total("kahuna.durable_tx.one_phase_gate", "off_partition_read");
+                cluster.Taps[leader].ResetCounts();
+                (TransactionHandle apart, _) = await StartAndRead(coordinator, coordinatorKey, apartIndex, ct);
+                await ReadInTransaction(coordinator, apart, row, ct);
+                await Write(coordinator, apart, row, "102", ct);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(apart, ct)).Item1);
+                Assert.Equal(0, cluster.Taps[leader].OnePhaseBundles);
+                Assert.True(cluster.Taps[leader].TwoPhaseAnchorBundles >= 1);
+                Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "off_partition_read") > offPartitionBefore);
+                Assert.Equal(0, gate.Total("kahuna.durable_tx.one_phase_gate", "read_set_beyond_writes"));
+
+                // A range lock is a predicate: named as one.
+                double predicateBefore = gate.Total("kahuna.durable_tx.one_phase_gate", "predicate_read");
+                cluster.Taps[leader].ResetCounts();
+                (TransactionHandle ranged, _) = await StartAndRead(coordinator, coordinatorKey, row, ct);
+                (KeyValueResponseType lockType, _) = await coordinator.LocateAndTryAcquireRangeLock(
+                    ranged.TransactionId, $"{table}:r", row, true, row + "~", false, 60_000,
+                    KeyValueDurability.Persistent, RangeLockMode.Shared, ct,
+                    coordinatorKey: ranged.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+                Assert.Equal(KeyValueResponseType.Locked, lockType);
+                await Write(coordinator, ranged, row, "103", ct);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(ranged, ct)).Item1);
+                Assert.Equal(0, cluster.Taps[leader].OnePhaseBundles);
+                Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "predicate_read") > predicateBefore);
+
+                Assert.Equal("103", await ReadValue(cluster.Managers[0], row, ct));
+            });
+        }
+        finally
+        {
+            await cluster.Leave();
+        }
+    }
+
+    /// <summary>A further point read inside an open transaction (a validated base once the key is written).</summary>
+    private static async Task ReadInTransaction(KahunaManager coordinator, TransactionHandle handle, string key, CancellationToken ct)
+    {
+        (KeyValueResponseType readType, _) = await coordinator.LocateAndTryGetValue(
+            handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Get, readType);
+    }
+
     // ── the stall interleavings ───────────────────────────────────────────────────
 
     /// <summary>Stalls the coordinator's next record-carrying proposal and returns the tap that holds it.</summary>

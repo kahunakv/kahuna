@@ -197,8 +197,10 @@ started loading serves the operations after it. Concurrent misses coalesce onto 
 
 The payload carries, separately:
 
-* the hash rule for hash-routed key spaces — algorithm identifier, prefix separator, pool size and
-  partition offset;
+* the hash rule for hash-routed key spaces — algorithm identifier
+  (`kahuna.placement-group-jump-xxh32-v1`), the key-space separator (`/`, last occurrence in a key),
+  the placement-group separator (`|`, first occurrence in a key space; key spaces that share a group
+  hash together), pool size and partition offset;
 * the storage-key rule for sequences and the reserved key prefix;
 * per key space, the routing mode and, for a key-range space, its descriptor intervals with their
   generations;
@@ -207,9 +209,9 @@ The payload carries, separately:
 Ownership and leadership are separate lists on purpose: a leader election replaces entries in one, a
 split, merge or move replaces entries in the other.
 
-The client refuses rather than approximates. An unrecognised schema version, a hash algorithm it does
-not implement exactly, a map the answering node could not read coherently, or a node that has not
-finished initializing all leave the client on learned routes. A key space that routes by range with a
+The client refuses rather than approximates. An unrecognised schema version, a hash algorithm or a
+separator it does not implement exactly, a map the answering node could not read coherently, or a
+node that has not finished initializing all leave the client on learned routes. A key space that routes by range with a
 gap over the key, and a partition with no known leader, resolve to nothing rather than to a guess.
 
 The routing modes a node reports are its own and are not replicated, so two nodes may legitimately

@@ -10,6 +10,7 @@ using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 
@@ -39,6 +40,11 @@ internal sealed class KeyValueLocator
     private readonly ClientEndpointAdvertiser advertiser;
 
     private readonly ILogger<IKahuna> logger;
+
+    // Instance-owned session-registration counts, beside the process-wide meter counters: in-process test
+    // clusters share the static meter across every node, so a per-node figure (how many registration calls ONE
+    // node made for ONE transaction) is only readable here.
+    private readonly SessionRegistrationTelemetry sessionRegistration = new();
 
     public KeyValueLocator(
         KeyValuesManager manager,
@@ -2400,17 +2406,69 @@ internal sealed class KeyValueLocator
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
-            return manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
+        {
+            (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) local =
+                manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
+
+            sessionRegistration.Local(SessionRegistrationOp.Begin, IsRegistrationAccepted(local.outcome));
+            return local;
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
+        {
+            sessionRegistration.Unrouted(SessionRegistrationOp.Begin);
             return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null);
+        }
 
-        return await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+        try
+        {
+            (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) forwarded =
+                await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+
+            sessionRegistration.Forwarded(SessionRegistrationOp.Begin, IsRegistrationAccepted(forwarded.outcome));
+            return forwarded;
+        }
+        catch
+        {
+            sessionRegistration.ForwardThrew(SessionRegistrationOp.Begin);
+            throw;
+        }
     }
 
     /// <summary>Returns the partition id that owns the coordinator session for <paramref name="coordinatorKey"/>.</summary>
     public int LocatePartition(string coordinatorKey) => dataPartitionRouter.Locate(coordinatorKey);
+
+    /// <summary>The session-registration calls this node has made so far (per node, for tests and diagnostics).</summary>
+    internal SessionRegistrationCounts SessionRegistrationCounts => sessionRegistration.Snapshot;
+
+    /// <summary>
+    /// A completion that arrived here and was folded into this node's own session table. The inbound landing
+    /// point does not route through <see cref="LocateAndCompleteOperation"/>, so it reports the local service
+    /// here; without it the local count would miss every completion a peer sent to this node, and the remote
+    /// share computed from these counters would be wrong.
+    /// </summary>
+    internal void CountInboundCompletionServedLocally() => sessionRegistration.Local(SessionRegistrationOp.Complete, true);
+
+    /// <summary>
+    /// A completion this node forwarded as a receiver, after finding that the sender routed it to a replica
+    /// that does not lead the coordinator partition. It is a second hop the sender's routing did not predict,
+    /// and it is counted on the node that actually sends it.
+    /// </summary>
+    internal void CountInboundCompletionRedirected(bool ok) => sessionRegistration.Forwarded(SessionRegistrationOp.Complete, ok);
+
+    /// <summary>The same completion forward, when its transport threw.</summary>
+    internal void CountInboundCompletionRedirectThrew() => sessionRegistration.ForwardThrew(SessionRegistrationOp.Complete);
+
+    /// <summary>
+    /// True when a registration outcome is an answer from a live session (fresh, already pending, or already
+    /// completed) rather than a rejection. Only rejections count as refused: an idempotent re-registration is
+    /// a served call, and the counters measure transport cost, not logical operations.
+    /// </summary>
+    private static bool IsRegistrationAccepted(OperationRegistrationOutcome outcome) =>
+        outcome is OperationRegistrationOutcome.New
+            or OperationRegistrationOutcome.AlreadyPending
+            or OperationRegistrationOutcome.AlreadyCompleted;
 
     /// <summary>Routes an operation completion to the coordinator-partition leader for <paramref name="coordinatorKey"/>. Returns the acknowledged outcome and the record anchor after the fold, or MustRetry when routing did not deliver the completion.</summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
@@ -2422,13 +2480,33 @@ internal sealed class KeyValueLocator
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
-            return (KeyValueResponseType.Set, manager.CompleteOperation(transactionId, operationId, payload));
+        {
+            string? localAnchor = manager.CompleteOperation(transactionId, operationId, payload);
+
+            sessionRegistration.Local(SessionRegistrationOp.Complete, true);
+            return (KeyValueResponseType.Set, localAnchor);
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
+        {
+            sessionRegistration.Unrouted(SessionRegistrationOp.Complete);
             return (KeyValueResponseType.MustRetry, null);
+        }
 
-        return await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, payload, cancellationToken);
+        try
+        {
+            (KeyValueResponseType outcome, string? anchor) forwarded =
+                await interNodeCommunication.CompleteOperation(leader, coordinatorKey, transactionId, operationId, payload, cancellationToken);
+
+            sessionRegistration.Forwarded(SessionRegistrationOp.Complete, forwarded.outcome == KeyValueResponseType.Set);
+            return forwarded;
+        }
+        catch
+        {
+            sessionRegistration.ForwardThrew(SessionRegistrationOp.Complete);
+            throw;
+        }
     }
 
     /// <summary>Routes a working-set query to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>
@@ -2440,13 +2518,33 @@ internal sealed class KeyValueLocator
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
-            return manager.GetTransactionWorkingSet(transactionId);
+        {
+            TransactionWorkingSet? local = manager.GetTransactionWorkingSet(transactionId);
+
+            sessionRegistration.Local(SessionRegistrationOp.WorkingSet, local is not null);
+            return local;
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
+        {
+            sessionRegistration.Unrouted(SessionRegistrationOp.WorkingSet);
             return null;
+        }
 
-        return await interNodeCommunication.GetTransactionWorkingSet(leader, coordinatorKey, transactionId, cancellationToken);
+        try
+        {
+            TransactionWorkingSet? forwarded =
+                await interNodeCommunication.GetTransactionWorkingSet(leader, coordinatorKey, transactionId, cancellationToken);
+
+            sessionRegistration.Forwarded(SessionRegistrationOp.WorkingSet, forwarded is not null);
+            return forwarded;
+        }
+        catch
+        {
+            sessionRegistration.ForwardThrew(SessionRegistrationOp.WorkingSet);
+            throw;
+        }
     }
 
     /// <summary>Routes a close-and-snapshot to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>

@@ -53,7 +53,8 @@ message GrpcGetRoutingMetadataResponse {
   // Identifier of the hash algorithm the server applies to hash-routed key spaces. A client that
   // does not implement exactly this identifier must fall back.
   string HashAlgorithm = 3;
-  // The character whose LAST occurrence ends the hashed prefix. A key without it is hashed whole.
+  // The character whose LAST occurrence in a key ends its key space. A key without it is its own
+  // key space.
   string PrefixSeparator = 4;
   // Number of buckets the hash maps onto.
   int32 HashPoolSize = 5;
@@ -75,6 +76,10 @@ message GrpcGetRoutingMetadataResponse {
   bool Coherent = 11;
   repeated GrpcRoutingKeySpace KeySpaces = 12;
   repeated GrpcPartitionLeader Leaders = 13;
+  // The character whose FIRST occurrence in a key space ends its placement group — the string the
+  // hash runs over. A key space without it is its own group. Key spaces naming the same group hash
+  // to the same partition.
+  string GroupSeparator = 14;
 }
 
 message GrpcRoutingKeySpace {

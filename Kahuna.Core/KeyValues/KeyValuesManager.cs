@@ -349,6 +349,13 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>The inter-node calls this node's durable path has made so far (per node, for tests and diagnostics).</summary>
     internal Writes.DurableTransportCounts DurableTransportCounts => durableReplication.TransportCounts;
 
+    /// <summary>
+    /// The session-registration calls this node has made so far (per node, for tests and diagnostics): the
+    /// begin, complete and working-set calls it served itself because it holds the session, and the ones it
+    /// forwarded to the node that does.
+    /// </summary>
+    internal Transactions.SessionRegistrationCounts SessionRegistrationCounts => locator.SessionRegistrationCounts;
+
     /// <summary>The node's shared bound on concurrent leader-local applies of committed intents.</summary>
     internal SemaphoreSlim DurableLocalApplyGate => runtime.DurableLocalApplyGate;
 

@@ -7,6 +7,7 @@ using Kommander.Time;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Routing;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -264,7 +265,12 @@ internal sealed class KeySpaceAdminService
                 $"Key-range space '{keySpace}' requires at least {RangeMapStore.FirstDataPartitionId} partition(s) " +
                 $"(InitialPartitions={poolSize}); key-range data cannot live on the reserved partition 0.");
 
-        int offset = (int)(HashUtils.SimpleHash(keySpace) % (ulong)dataPartitions);
+        // Seed by the key space's placement group (the prefix before its first '|', or the whole key
+        // space), so key-range spaces that name one group start on the same partition — as their
+        // hash-routed counterparts would. Later splits move ranges independently; the seed is only
+        // the starting point. A key space with no group separator seeds exactly where it always did.
+        string group = HashPlacement.GroupOf(keySpace);
+        int offset = (int)(HashUtils.SimpleHash(group) % (ulong)dataPartitions);
         return RangeMapStore.FirstDataPartitionId + offset;
     }
 

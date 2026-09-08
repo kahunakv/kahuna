@@ -374,6 +374,10 @@ public sealed class TestClusterLeave : BaseCluster
 
         public bool HostsPartition(int partitionId) => throw new NotImplementedException();
         public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
+        public IDisposable HoldCommittedProposalRepliesForTesting(int partitionId, Action<HeldProposalReply> onHeld) => throw new NotImplementedException();
+        public IDisposable SetSnapshotInstallGateForTesting(int partitionId, SnapshotInstallPhase phase, Func<SnapshotInstallSignal, ValueTask> gate) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> HoldConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftOperationStatus> ResumeConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public long GetCommitIndex(int partitionId) => throw new NotImplementedException();
         public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => throw new NotImplementedException();
         public int GetPartitionKey(string partitionKey) => throw new NotImplementedException();

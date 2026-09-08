@@ -142,4 +142,9 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
 
     public bool HostsPartition(int partitionId) => inner.HostsPartition(partitionId);
     public string? GetPartitionLeaderHint(int partitionId) => inner.GetPartitionLeaderHint(partitionId);
+
+    public IDisposable HoldCommittedProposalRepliesForTesting(int partitionId, Action<HeldProposalReply> onHeld) => inner.HoldCommittedProposalRepliesForTesting(partitionId, onHeld);
+    public IDisposable SetSnapshotInstallGateForTesting(int partitionId, SnapshotInstallPhase phase, Func<SnapshotInstallSignal, ValueTask> gate) => inner.SetSnapshotInstallGateForTesting(partitionId, phase, gate);
+    public Task<RaftOperationStatus> HoldConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => inner.HoldConsumerAppliesForTesting(partitionId, cancellationToken);
+    public Task<RaftOperationStatus> ResumeConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => inner.ResumeConsumerAppliesForTesting(partitionId, cancellationToken);
 }

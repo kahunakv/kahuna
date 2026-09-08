@@ -24,12 +24,37 @@ internal enum PrepareRetryLoopOutcome
 
 /// <summary>What the one-phase eligibility gate decided for a finalize; the tag of
 /// <see cref="DurableTransactionMetrics.OnePhaseGateDecisions"/>. Only <see cref="Entered"/> attempts can
-/// later count as a commit or a fallback.</summary>
+/// later count as a commit or a fallback. Every exclusion names the shape that closed the bundle, so an
+/// operator can tell a workload the bundle cannot serve from a flag that did not take effect.</summary>
 internal enum OnePhaseGateOutcome
 {
     Entered,
+
+    /// <summary>The node has no bundle path at all (no one-phase replicator was wired).</summary>
     Disabled,
+
+    /// <summary>Apply-time validation off, multi-process group: a read-only dependency (a point read of an
+    /// unwritten key, or a prefix/range lock) that nothing would re-check at apply.</summary>
     ReadSetBeyondWrites,
+
+    /// <summary>Apply-time validation off, multi-process group: a read-then-written key whose validated base
+    /// the bundle could not fence at apply.</summary>
+    ValidatedBase,
+
+    /// <summary>Apply-time validation on, multi-process group: a prefix or range lock — a predicate, not a
+    /// key, so no deterministic apply-time check exists for it.</summary>
+    PredicateRead,
+
+    /// <summary>Apply-time validation on, multi-process group: a read-only key that routes to a partition
+    /// other than the anchor — no cross-partition state exists at apply. Under hash routing this is the
+    /// placement of the read's key space relative to the written key's; co-locate them (a shared placement
+    /// group) to open the bundle.</summary>
+    OffPartitionRead,
+
+    /// <summary>Apply-time validation on, multi-process group: a read-only key of a non-persistent durability,
+    /// whose writes never feed the committed-head ledger.</summary>
+    NonPersistentRead,
+
     MultiPartition,
     AnchorOffPartition
 }
@@ -484,10 +509,12 @@ internal static class DurableTransactionMetrics
 
     /// <summary>
     /// Every finalize's one-phase eligibility verdict, tagged by <c>outcome</c>: <c>entered</c>, or the reason
-    /// the gate kept it on the two-phase path (<c>disabled</c>, <c>read_set_beyond_writes</c>,
-    /// <c>multi_partition</c>, <c>anchor_off_partition</c>). Together with <see cref="OnePhaseCommits"/> and
-    /// <see cref="OnePhaseFallbacks"/> this closes the accounting: every finalize is exactly one of excluded,
-    /// fell back, or committed one-phase.
+    /// the gate kept it on the two-phase path — <c>disabled</c>; with apply-time validation off,
+    /// <c>read_set_beyond_writes</c> or <c>validated_base</c>; with it on, <c>predicate_read</c>,
+    /// <c>off_partition_read</c> or <c>non_persistent_read</c>; and for any mode <c>multi_partition</c> or
+    /// <c>anchor_off_partition</c> (see <see cref="OnePhaseGateOutcome"/> for what each names). Together with
+    /// <see cref="OnePhaseCommits"/> and <see cref="OnePhaseFallbacks"/> this closes the accounting: every
+    /// finalize is exactly one of excluded, fell back, or committed one-phase.
     /// </summary>
     internal static readonly Counter<long> OnePhaseGateDecisions =
         Meter.CreateCounter<long>(
@@ -497,6 +524,10 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> GateEntered = new("outcome", "entered");
     private static readonly KeyValuePair<string, object?> GateDisabled = new("outcome", "disabled");
     private static readonly KeyValuePair<string, object?> GateReadSet = new("outcome", "read_set_beyond_writes");
+    private static readonly KeyValuePair<string, object?> GateValidatedBase = new("outcome", "validated_base");
+    private static readonly KeyValuePair<string, object?> GatePredicateRead = new("outcome", "predicate_read");
+    private static readonly KeyValuePair<string, object?> GateOffPartitionRead = new("outcome", "off_partition_read");
+    private static readonly KeyValuePair<string, object?> GateNonPersistentRead = new("outcome", "non_persistent_read");
     private static readonly KeyValuePair<string, object?> GateMultiPartition = new("outcome", "multi_partition");
     private static readonly KeyValuePair<string, object?> GateAnchorOff = new("outcome", "anchor_off_partition");
     private static readonly KeyValuePair<string, object?> FallbackForeignIntent = new("reason", "foreign_intent");
@@ -510,6 +541,10 @@ internal static class DurableTransactionMetrics
             OnePhaseGateOutcome.Entered => GateEntered,
             OnePhaseGateOutcome.Disabled => GateDisabled,
             OnePhaseGateOutcome.ReadSetBeyondWrites => GateReadSet,
+            OnePhaseGateOutcome.ValidatedBase => GateValidatedBase,
+            OnePhaseGateOutcome.PredicateRead => GatePredicateRead,
+            OnePhaseGateOutcome.OffPartitionRead => GateOffPartitionRead,
+            OnePhaseGateOutcome.NonPersistentRead => GateNonPersistentRead,
             OnePhaseGateOutcome.MultiPartition => GateMultiPartition,
             _ => GateAnchorOff
         });
@@ -914,6 +949,57 @@ internal static class DurableTransactionMetrics
     internal static void DurableOperationRedirected() => ForwardRedirects.Add(1, OpDurableOperation);
 
     internal static void RecordLookupRedirected() => ForwardRedirects.Add(1, OpRecordLookup);
+
+    /// <summary>
+    /// Session-registration calls this node made for a transaction whose session lives on the node that leads
+    /// the coordinator partition, tagged by <c>op</c> (<c>begin</c>, <c>complete</c>, <c>working_set</c>),
+    /// <c>route</c> (<c>local</c> when this node holds the session, <c>forwarded</c> when the call left the
+    /// node) and <c>result</c> (<c>ok</c>, <c>refused</c> for a rejection or a not-delivered answer,
+    /// <c>threw</c>, <c>unrouted</c> for an attempt that found no reachable session leader and so never left
+    /// the node). An operation executed away from its session node costs one <c>begin</c> and one
+    /// <c>complete</c> forward; a working-set query made away from the session node costs one
+    /// <c>working_set</c> forward. The forwarded count per committed transaction is the registration cost that
+    /// a session-local transaction never pays, and the local count is the denominator that turns it into a
+    /// share.
+    /// </summary>
+    internal static readonly Counter<long> SessionRegistrationForwards =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.session_registration_forwards",
+            description: "Session-registration calls, tagged by op, route and result.");
+
+    private static readonly KeyValuePair<string, object?> OpBegin = new("op", "begin");
+    private static readonly KeyValuePair<string, object?> OpComplete = new("op", "complete");
+    private static readonly KeyValuePair<string, object?> OpWorkingSet = new("op", "working_set");
+    private static readonly KeyValuePair<string, object?> RouteLocal = new("route", "local");
+    private static readonly KeyValuePair<string, object?> RouteForwarded = new("route", "forwarded");
+    private static readonly KeyValuePair<string, object?> ResultUnrouted = new("result", "unrouted");
+
+    private static KeyValuePair<string, object?> OpTag(SessionRegistrationOp op) => op switch
+    {
+        SessionRegistrationOp.Begin => OpBegin,
+        SessionRegistrationOp.Complete => OpComplete,
+        _ => OpWorkingSet
+    };
+
+    /// <summary>A registration served on this node because it holds the session.</summary>
+    internal static void SessionRegistrationLocal(SessionRegistrationOp op, bool ok) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteLocal, ok ? ResultOk : ResultRefused);
+
+    /// <summary>A registration this node sent to the session owner, and the answer it came back with.</summary>
+    internal static void SessionRegistrationForwarded(SessionRegistrationOp op, bool ok) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ok ? ResultOk : ResultRefused);
+
+    /// <summary>A registration this node sent to the session owner whose transport threw.</summary>
+    internal static void SessionRegistrationForwardThrew(SessionRegistrationOp op) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ResultThrew);
+
+    /// <summary>
+    /// A registration that had to be forwarded but found no session leader to forward it to, so no call left
+    /// the node. Counted apart from the forwards, because a hop that never happened must not inflate the hop
+    /// count a batching decision divides by.
+    /// </summary>
+    internal static void SessionRegistrationUnrouted(SessionRegistrationOp op) =>
+        SessionRegistrationForwards.Add(1, OpTag(op), RouteForwarded, ResultUnrouted);
 
     /// <summary>
     /// Number of tracked read-set keys a finalize validated. Interpreted together with

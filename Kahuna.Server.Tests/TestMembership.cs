@@ -645,6 +645,11 @@ public sealed class TestMembership : BaseCluster
         public bool HostsPartition(int partitionId) => true;
         public string? GetPartitionLeaderHint(int partitionId) => null;
         public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
+
+        public IDisposable HoldCommittedProposalRepliesForTesting(int partitionId, Action<HeldProposalReply> onHeld) => NoopDisposable.Instance;
+        public IDisposable SetSnapshotInstallGateForTesting(int partitionId, SnapshotInstallPhase phase, Func<SnapshotInstallSignal, ValueTask> gate) => NoopDisposable.Instance;
+        public Task<RaftOperationStatus> HoldConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => Task.FromResult(RaftOperationStatus.Errored);
+        public Task<RaftOperationStatus> ResumeConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => Task.FromResult(RaftOperationStatus.Errored);
     }
 
     private sealed class CaptureLogger : ILogger<IRaft>
@@ -755,6 +760,11 @@ public sealed class TestMembership : BaseCluster
         public bool HostsPartition(int partitionId) => true;
         public string? GetPartitionLeaderHint(int partitionId) => null;
         public void RegisterPartitionStateTransfer(IRaftPartitionStateTransfer? transfer) { }
+
+        public IDisposable HoldCommittedProposalRepliesForTesting(int partitionId, Action<HeldProposalReply> onHeld) => NoopDisposable.Instance;
+        public IDisposable SetSnapshotInstallGateForTesting(int partitionId, SnapshotInstallPhase phase, Func<SnapshotInstallSignal, ValueTask> gate) => NoopDisposable.Instance;
+        public Task<RaftOperationStatus> HoldConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => Task.FromResult(RaftOperationStatus.Errored);
+        public Task<RaftOperationStatus> ResumeConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => Task.FromResult(RaftOperationStatus.Errored);
     }
 
     private sealed class StubKahunaForE5 : IKahuna
