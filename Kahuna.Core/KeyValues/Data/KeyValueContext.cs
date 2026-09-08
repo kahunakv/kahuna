@@ -152,6 +152,16 @@ internal sealed class KeyValueContext
     /// </summary>
     internal Dictionary<(string Prefix, HLCTimestamp ReadTimestamp, bool IncludeTombstones), Handlers.ReadContinuation> PendingSnapshotPrefixScans { get; } = new();
 
+    /// <summary>
+    /// Per-actor map of in-flight snapshot point reads (TryGet / TryExists with a read timestamp that
+    /// need the persisted history), keyed by <c>(key, readTimestamp, isExists)</c>. Kept apart from
+    /// <see cref="PendingReads"/> for the same reason as the snapshot scans: the answer depends on the
+    /// timestamp. Registration puts them in reach of the deadline sweep.
+    /// Stage 1 registers; stage 3 (or the sweep) removes before resolving all waiters.
+    /// Mutated only on the actor thread — no synchronisation required.
+    /// </summary>
+    internal Dictionary<(string Key, HLCTimestamp ReadTimestamp, bool IsExists), Handlers.ReadContinuation> PendingSnapshotReads { get; } = new();
+
     public KahunaConfiguration Configuration  { get; }
 
     /// <summary>

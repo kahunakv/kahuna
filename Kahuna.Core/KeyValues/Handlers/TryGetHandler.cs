@@ -183,71 +183,42 @@ internal sealed class TryGetHandler : BaseHandler
         }
 
         // ── Snapshot visibility: serve the revision at-or-before readTimestamp ──────────
-        // If the entry is not resident and we have a snapshot timestamp, we need the disk
-        // value to apply snapshot logic (PointReadContinuation carries no snapshot state),
-        // so load synchronously in this case.
-        if (!inCache && message.Durability == KeyValueDurability.Persistent
-            && !message.ReadTimestamp.IsNull())
+        // Anything the snapshot needs from the persisted history — the head on a cache miss, or the
+        // archived revision the in-memory archive no longer holds — is read off the actor via
+        // SnapshotReadContinuation. The history read walks a chain that grows with every write to
+        // the key; done inline it parked every key on this actor behind one cold read.
+        if (!message.ReadTimestamp.IsNull())
         {
-            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
-                ResolvePartition(message.Key),
-                message.Key,
-                context.PointReadExecutor);
+            if (!inCache && message.Durability == KeyValueDurability.Persistent)
+                return await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: true, asOfCeiling: -1);
 
-            // A snapshot read resolves at-or-before against the hydrated head; a head below the
-            // committed-head memory is missing newer revisions and can resolve the wrong as-of
-            // version. Refuse and let the convergence repair land before the retry.
-            if (HydratedRowProvablyStale(message.Key, diskEntry))
-                return KeyValueStaticResponses.MustRetryResponse;
-
-            if (diskEntry is not null)
+            if (entry is not null && entry.LastModified > message.ReadTimestamp)
             {
-                diskEntry.FlushedRevision = diskEntry.Revision;
-                diskEntry.LastUsed = currentTime;
-                context.InsertStoreEntry(message.Key, diskEntry);
-                entry = diskEntry;
-            }
-        }
+                if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
+                        out long snapRevision, out KeyValueRevisionEntry snapshot))
+                {
+                    // A head jump skipped revisions this entry never archived, and their flush
+                    // requests may still be queued: the persisted history cannot answer for the
+                    // skipped window yet. Fail closed — MustRetry is safe to retry and the window
+                    // closes when the queued flushes are acknowledged.
+                    if (entry.SnapshotAtRiskFromUnflushedGap(message.ReadTimestamp))
+                        return KeyValueStaticResponses.MustRetryResponse;
 
-        if (!message.ReadTimestamp.IsNull() && entry is not null
-            && entry.LastModified > message.ReadTimestamp)
-        {
-            if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
-                    out long snapRevision, out KeyValueRevisionEntry snapshot))
-            {
-                // A head jump skipped revisions this entry never archived, and their flush
-                // requests may still be queued: the persisted history cannot answer for the
-                // skipped window yet. Fail closed — MustRetry is safe to retry and the window
-                // closes when the queued flushes are acknowledged.
-                if (entry.SnapshotAtRiskFromUnflushedGap(message.ReadTimestamp))
-                    return KeyValueStaticResponses.MustRetryResponse;
+                    // In-memory archive trimmed the as-of revision; the persisted revision history
+                    // answers. Correct because trimming drops the lowest revision numbers, so an
+                    // in-memory miss means the true as-of answer (if any) is older and only on disk.
+                    return await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: false, asOfCeiling: entry.Revision - 1);
+                }
 
-                // In-memory archive trimmed the as-of revision; fall back to the persisted
-                // revision history. This is correct because trimming drops the lowest revision
-                // numbers, so an in-memory miss means the true as-of answer (if any) is older
-                // and only on disk.
-                KeyValueEntry? diskSnapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
-                    message.Key, entry.Revision - 1, message.ReadTimestamp);
-
-                if (diskSnapshot is null
-                    || diskSnapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
-                    || (diskSnapshot.Expires != HLCTimestamp.Zero
-                        && diskSnapshot.Expires - currentTime < TimeSpan.Zero))
+                if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
+                    || (snapshot.Expires != HLCTimestamp.Zero
+                        && snapshot.Expires - currentTime < TimeSpan.Zero))
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
                 return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
-                    diskSnapshot.Value, diskSnapshot.Revision, diskSnapshot.Expires,
-                    currentTime, diskSnapshot.LastModified, diskSnapshot.State));
+                    snapshot.Value, snapRevision, snapshot.Expires,
+                    currentTime, snapshot.LastModified, snapshot.State));
             }
-
-            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
-                || (snapshot.Expires != HLCTimestamp.Zero
-                    && snapshot.Expires - currentTime < TimeSpan.Zero))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
-                snapshot.Value, snapRevision, snapshot.Expires,
-                currentTime, snapshot.LastModified, snapshot.State));
         }
 
         // ── Non-transactional persistent cache miss → detach or coalesce ────────────────────

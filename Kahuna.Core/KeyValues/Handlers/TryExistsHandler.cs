@@ -176,66 +176,38 @@ internal sealed class TryExistsHandler : BaseHandler
                 mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
         }
 
-        // ── Snapshot visibility: load synchronously if not cached, then serve as-of view ─────
-        if (!inCache && message.Durability == KeyValueDurability.Persistent
-            && !message.ReadTimestamp.IsNull())
+        // ── Snapshot visibility: serve the revision at-or-before readTimestamp ──────────────
+        // Mirrors TryGetHandler: the head on a cache miss and the archived revision the in-memory
+        // archive no longer holds are both read off the actor via SnapshotReadContinuation.
+        if (!message.ReadTimestamp.IsNull())
         {
-            KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
-                ResolvePartition(message.Key),
-                message.Key,
-                context.PointReadExecutor);
+            if (!inCache && message.Durability == KeyValueDurability.Persistent)
+                return await DispatchSnapshotRead(message, KeyValueResponseType.Exists, currentTime, hydrate: true, asOfCeiling: -1);
 
-            // A stale head resolves the wrong as-of version for the snapshot read; refuse and let
-            // the convergence repair land before the retry.
-            if (HydratedRowProvablyStale(message.Key, diskEntry))
-                return KeyValueStaticResponses.MustRetryResponse;
-
-            if (diskEntry is not null)
+            if (entry is not null && entry.LastModified > message.ReadTimestamp)
             {
-                diskEntry.FlushedRevision = diskEntry.Revision;
-                diskEntry.LastUsed = currentTime;
-                context.InsertStoreEntry(message.Key, diskEntry);
-                entry = diskEntry;
-            }
-        }
+                if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
+                        out long snapRevision, out KeyValueRevisionEntry snapshot))
+                {
+                    // A head jump skipped revisions this entry never archived, and their flush
+                    // requests may still be queued: the persisted history cannot answer for the
+                    // skipped window yet. Fail closed — MustRetry is safe to retry and the window
+                    // closes when the queued flushes are acknowledged.
+                    if (entry.SnapshotAtRiskFromUnflushedGap(message.ReadTimestamp))
+                        return KeyValueStaticResponses.MustRetryResponse;
 
-        if (!message.ReadTimestamp.IsNull() && entry is not null
-            && entry.LastModified > message.ReadTimestamp)
-        {
-            if (!entry.TryGetRevisionAtOrBefore(message.ReadTimestamp,
-                    out long snapRevision, out KeyValueRevisionEntry snapshot))
-            {
-                // A head jump skipped revisions this entry never archived, and their flush
-                // requests may still be queued: the persisted history cannot answer for the
-                // skipped window yet. Fail closed — MustRetry is safe to retry and the window
-                // closes when the queued flushes are acknowledged.
-                if (entry.SnapshotAtRiskFromUnflushedGap(message.ReadTimestamp))
-                    return KeyValueStaticResponses.MustRetryResponse;
+                    return await DispatchSnapshotRead(message, KeyValueResponseType.Exists, currentTime, hydrate: false, asOfCeiling: entry.Revision - 1);
+                }
 
-                // In-memory archive trimmed the as-of revision; fall back to the persisted
-                // revision history. Mirrors TryGetHandler's fallback — same reasoning applies.
-                KeyValueEntry? diskSnapshot = context.PersistenceBackend.GetKeyValueRevisionAtOrBefore(
-                    message.Key, entry.Revision - 1, message.ReadTimestamp);
-
-                if (diskSnapshot is null
-                    || diskSnapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
-                    || (diskSnapshot.Expires != HLCTimestamp.Zero
-                        && diskSnapshot.Expires - currentTime < TimeSpan.Zero))
+                if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
+                    || (snapshot.Expires != HLCTimestamp.Zero
+                        && snapshot.Expires - currentTime < TimeSpan.Zero))
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
                 return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
-                    null, diskSnapshot.Revision, diskSnapshot.Expires,
-                    currentTime, diskSnapshot.LastModified, diskSnapshot.State));
+                    null, snapRevision, snapshot.Expires,
+                    currentTime, snapshot.LastModified, snapshot.State));
             }
-
-            if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
-                || (snapshot.Expires != HLCTimestamp.Zero
-                    && snapshot.Expires - currentTime < TimeSpan.Zero))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
-                null, snapRevision, snapshot.Expires,
-                currentTime, snapshot.LastModified, snapshot.State));
         }
 
         // ── Non-transactional persistent cache miss → detach or coalesce ─────────────────────

@@ -156,6 +156,28 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return inner.GetKeyValueRevision(keyName, revision);
     }
 
+    public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions)
+    {
+        KeyValueHydration hydration = inner.GetKeyValueWithRecentRevisions(keyName, recentRevisions);
+
+        if (!unflushedWrites.TryGet(keyName, out UnflushedKeyValueWrite queued)
+            || (hydration.Head is not null && IsInnerNewer(hydration.Head, queued)))
+            return hydration;
+
+        // The queued write is the newest head. The inner head, if it holds a revision, becomes the
+        // newest archived revision — the same shape a flush would leave behind. A no-revision queued
+        // write retains no history, so the inner head is dropped rather than archived.
+        KeyValueEntry queuedHead = Materialize(queued);
+        List<KeyValueEntry> recent = new(hydration.RecentRevisions.Count + 1);
+        if (hydration.Head is not null && !queued.NoRevision && hydration.Head.Revision < queuedHead.Revision)
+            recent.Add(hydration.Head);
+        recent.AddRange(hydration.RecentRevisions);
+        if (recent.Count > recentRevisions)
+            recent.RemoveRange(recentRevisions, recent.Count - recentRevisions);
+
+        return new KeyValueHydration(queuedHead, recent);
+    }
+
     public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
         KeyValueEntry? best = inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);

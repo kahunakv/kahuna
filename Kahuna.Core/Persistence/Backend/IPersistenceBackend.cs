@@ -99,6 +99,36 @@ internal interface IPersistenceBackend
     /// </summary>
     public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp);
 
+    /// <summary>
+    /// Hydration read: the current head of <paramref name="keyName"/> together with its newest
+    /// <paramref name="recentRevisions"/> archived revisions (<c>head.Revision - 1</c> downward),
+    /// newest first. A key whose head is absent returns a null head and an empty list. The default
+    /// composes <see cref="GetKeyValue"/> and <see cref="GetKeyValueRevision"/>; backends with a
+    /// native multi-key read override it to serve the whole group in one storage call.
+    /// <para>
+    /// Why the actor wants both at once: a head installed on a cache miss carries no in-memory
+    /// revision archive, so the first as-of-timestamp read against it is guaranteed to miss the
+    /// archive and consult the persisted history. Bringing the newest revisions in with the head
+    /// makes that read an in-memory hit for any snapshot no older than the archive window.
+    /// </para>
+    /// </summary>
+    public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions)
+    {
+        KeyValueEntry? head = GetKeyValue(keyName);
+        if (head is null || recentRevisions <= 0 || head.Revision <= 0)
+            return new KeyValueHydration(head, []);
+
+        List<KeyValueEntry> recent = new(Math.Min(recentRevisions, (int)Math.Min(int.MaxValue, head.Revision)));
+        for (long revision = head.Revision - 1; revision >= 0 && head.Revision - revision <= recentRevisions; revision--)
+        {
+            KeyValueEntry? row = GetKeyValueRevision(keyName, revision);
+            if (row is not null)
+                recent.Add(row);
+        }
+
+        return new KeyValueHydration(head, recent);
+    }
+
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName);
 
     /// <summary>

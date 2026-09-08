@@ -1404,19 +1404,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             if (value is null)
                 return null;
 
-            RocksDbKeyValueMessage message = UnserializeKeyValueMessageThreadCached(value);
-
-            byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
-
-            return new()
-            {
-                Value = messageValue,
-                Revision = message.Revision,
-                Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-                LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-                LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-                State = (KeyValueState)message.State,
-            };
+            return DecodeRevisionRow(value);
         }
         finally
         {
@@ -1425,11 +1413,110 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
     }
 
+    /// <summary>Decodes one <c>keyName~{revision}</c> row. Shared by the exact-revision read and the batched revision probe.</summary>
+    private static KeyValueEntry DecodeRevisionRow(ReadOnlySpan<byte> value)
+    {
+        RocksDbKeyValueMessage message = UnserializeKeyValueMessageThreadCached(value);
+
+        byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
+
+        return new()
+        {
+            Value = messageValue,
+            Revision = message.Revision,
+            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+            LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+            State = (KeyValueState)message.State,
+        };
+    }
+
     /// <summary>
-    /// Scans the <c>keyName~{decimal}</c> revision rows for <paramref name="keyName"/> in one
-    /// forward pass and returns the entry with the highest revision that satisfies both
-    /// <c>revision ≤ maxRevision</c> and <c>LastModified ≤ readTimestamp</c>.
-    /// Returns <c>null</c> when no qualifying retained revision exists.
+    /// Batched exact-revision lookup: one <c>MultiGet</c> over <c>keyName~{revision}</c> for every
+    /// number in <paramref name="revisions"/>, index-aligned, null where no such row exists. Exact
+    /// keys are what the whole-key bloom filter answers, so an absent revision costs a filter probe
+    /// per SST rather than a block read. Must run under the swap fence.
+    /// </summary>
+    private KeyValueEntry?[] GetKeyValueRevisionsFenced(string keyName, ReadOnlySpan<long> revisions)
+    {
+        int keyLen = Encoding.UTF8.GetByteCount(keyName);
+        byte[][] keys = new byte[revisions.Length][];
+
+        Span<byte> digits = stackalloc byte[20];
+        for (int i = 0; i < revisions.Length; i++)
+        {
+            bool formatted = Utf8Formatter.TryFormat(revisions[i], digits, out int revLen);
+            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision lookup key");
+
+            byte[] key = new byte[keyLen + 1 + revLen];
+            Encoding.UTF8.GetBytes(keyName.AsSpan(), key);
+            key[keyLen] = (byte)'~';
+            digits[..revLen].CopyTo(key.AsSpan(keyLen + 1));
+            keys[i] = key;
+        }
+
+        ColumnFamilyHandle[] families = new ColumnFamilyHandle[keys.Length];
+        Array.Fill(families, columnFamilyKeys);
+
+        KeyValuePair<byte[], byte[]>[] values = db.MultiGet(keys, families);
+
+        KeyValueEntry?[] results = new KeyValueEntry?[revisions.Length];
+        for (int i = 0; i < values.Length; i++)
+        {
+            if (values[i].Value is not null)
+                results[i] = DecodeRevisionRow(values[i].Value);
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Revisions probed per <c>MultiGet</c> by <see cref="GetKeyValueRevisionAtOrBeforeFenced"/>, and
+    /// how many such batches it issues before handing the remainder to the forward walk. 64 revisions
+    /// covers every snapshot a read-committed transaction can hold on a key written ~once a second for
+    /// a minute; an older snapshot pays the walk, which is the shape it always had.
+    /// </summary>
+    private const int RevisionProbeBatch = 16;
+    private const int RevisionProbeMaxBatches = 4;
+
+    /// <summary>
+    /// Head plus its newest <paramref name="recentRevisions"/> archived revisions in two storage calls:
+    /// the current row, then one <c>MultiGet</c> over the exact revision keys below it.
+    /// </summary>
+    public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions)
+    {
+        EnterDbFence();
+        try
+        {
+            KeyValueEntry? head = GetKeyValueFenced(keyName);
+            if (head is null || recentRevisions <= 0 || head.Revision <= 0)
+                return new KeyValueHydration(head, []);
+
+            int count = (int)Math.Min(recentRevisions, head.Revision);
+            long[] revisions = new long[count];
+            for (int i = 0; i < count; i++)
+                revisions[i] = head.Revision - 1 - i;
+
+            KeyValueEntry?[] rows = GetKeyValueRevisionsFenced(keyName, revisions);
+
+            List<KeyValueEntry> recent = new(count);
+            foreach (KeyValueEntry? row in rows)
+                if (row is not null)
+                    recent.Add(row);
+
+            return new KeyValueHydration(head, recent);
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    /// <summary>
+    /// Returns the entry with the highest revision of <paramref name="keyName"/> that satisfies both
+    /// <c>revision ≤ maxRevision</c> and <c>LastModified ≤ readTimestamp</c>, or <c>null</c> when no
+    /// qualifying retained revision exists. Probes exact revision keys downward from
+    /// <paramref name="maxRevision"/> first and walks the key's revision rows only past the probe window.
     /// </summary>
     public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
@@ -1445,7 +1532,68 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
+    //
+    // Two phases. The revision suffix is unpadded decimal, so the rows of one key are NOT in numeric
+    // order and a forward scan cannot stop early: it walks — and deserialises — every revision the key
+    // has ever had. Under a write-heavy load with revision pruning off that chain grows without bound,
+    // and this read sat on the key/value actor's mailbox thread (CamusDB feature 80af367a: leader reads
+    // went from 1 ms to 40-50 ms). The answer, though, is almost always a few revisions below the head:
+    // a snapshot read lags the head by the writes that landed since the reader's timestamp. So probe
+    // exact revision keys downward from maxRevision in MultiGet batches — each an O(1) bloom-filtered
+    // point lookup — and return the first (highest) row whose LastModified is at-or-before the
+    // snapshot. Every revision number in (lowestProbed, maxRevision] has then been examined, so the
+    // walk, when still needed, runs with its ceiling lowered to lowestProbed - 1 and finds exactly what
+    // the unprobed version would have. A batch with no rows at all means the chain ended or has a hole
+    // (pruning, a head jump); the walk resolves both, so the probe stops there rather than guessing.
     private KeyValueEntry? GetKeyValueRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    {
+        if (maxRevision < 0)
+            return null;
+
+        long walkCeiling = maxRevision;
+
+        // A caller asking from the top of the number space (no head to anchor on) gets the walk directly.
+        if (maxRevision < long.MaxValue - RevisionProbeBatch * RevisionProbeMaxBatches)
+        {
+            Span<long> probe = stackalloc long[RevisionProbeBatch];
+            long next = maxRevision;
+
+            for (int batch = 0; batch < RevisionProbeMaxBatches && next >= 0; batch++)
+            {
+                int count = 0;
+                while (count < RevisionProbeBatch && next >= 0)
+                    probe[count++] = next--;
+
+                KeyValueEntry?[] rows = GetKeyValueRevisionsFenced(keyName, probe[..count]);
+
+                bool anyPresent = false;
+                for (int i = 0; i < count; i++)
+                {
+                    KeyValueEntry? row = rows[i];
+                    if (row is null)
+                        continue;
+
+                    anyPresent = true;
+                    if (row.LastModified.CompareTo(readTimestamp) <= 0)
+                        return row;
+                }
+
+                walkCeiling = probe[count - 1] - 1;
+
+                if (!anyPresent)
+                    break;
+            }
+
+            if (walkCeiling < 0)
+                return null;
+        }
+
+        return WalkRevisionAtOrBeforeFenced(keyName, walkCeiling, readTimestamp);
+    }
+
+    // Forward scan over every revision row of keyName — the pre-probe algorithm, kept as the exact
+    // backstop for snapshots older than the probe window and for chains with holes. O(revisions).
+    private KeyValueEntry? WalkRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
         int keyLen = Encoding.UTF8.GetByteCount(keyName);
         int prefixLen = keyLen + 1; // keyName + '~'

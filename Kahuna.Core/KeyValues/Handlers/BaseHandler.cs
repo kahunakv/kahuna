@@ -131,6 +131,100 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Stage 1 of a snapshot point read that needs the persisted history: registers a
+    /// <see cref="SnapshotReadContinuation"/> (coalescing onto an in-flight one for the same
+    /// <c>(key, readTimestamp, shape)</c>), dispatches its backend work to the read scheduler, and
+    /// defers the reply. Two shapes: <paramref name="hydrate"/> loads the head with its newest
+    /// archived revisions (cache miss); otherwise only the history below
+    /// <paramref name="asOfCeiling"/> is read (resident head, archive miss). Neither runs on the actor
+    /// thread — the history read walks a chain that grows with every write to the key.
+    /// </summary>
+    protected async ValueTask<KeyValueResponse> DispatchSnapshotRead(
+        KeyValueRequest message,
+        KeyValueResponseType responseType,
+        HLCTimestamp currentTime,
+        bool hydrate,
+        long asOfCeiling)
+    {
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse>? actorContext = context.ActorContext;
+
+        // No actor context to defer the reply through (a handler driven outside its actor, as the
+        // handler-level tests do): run the same two stages inline — stage 2 still on the read
+        // scheduler, never this thread — and return the reconciled response directly.
+        if (actorContext is null)
+        {
+            SnapshotReadContinuation inline = new(message.Key, message.ReadTimestamp, responseType, hydrate, asOfCeiling, default);
+            Persistence.Backend.IPersistenceBackend inlineBackend = context.PersistenceBackend;
+            int inlineRecent = context.Configuration.RevisionRetention;
+            if (context.BackendReadScheduler is null)
+                inline.Load(inlineBackend, inlineRecent);   // no scheduler either: the harness's synchronous shape
+            else
+                await context.BackendReadScheduler.EnqueueTask(ResolvePartition(message.Key), () =>
+                {
+                    inline.Load(inlineBackend, inlineRecent);
+                    return true;
+                });
+            return inline.Reconcile(context);
+        }
+
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        KeyValueReplyRef promise = KeyValueReplyRef.From(actorContext.Reply.Value);
+        bool isExists = responseType == KeyValueResponseType.Exists;
+        (string, HLCTimestamp, bool) slot = (message.Key, message.ReadTimestamp, isExists);
+
+        if (context.PendingSnapshotReads.TryGetValue(slot, out ReadContinuation? inflight))
+        {
+            if (!inflight.AddWaiter(promise))
+                return KeyValueStaticResponses.MustRetryResponse;
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
+        }
+
+        SnapshotReadContinuation cont = new(message.Key, message.ReadTimestamp, responseType, hydrate, asOfCeiling, promise);
+        ArmReadDeadline(cont, currentTime);
+        context.PendingSnapshotReads[slot] = cont;
+
+        int partitionId = ResolvePartition(message.Key);
+        Persistence.Backend.IPersistenceBackend backend = context.PersistenceBackend;
+        int recentRevisions = context.Configuration.RevisionRetention;
+
+        Task<bool> readTask;
+        try
+        {
+            readTask = context.BackendReadScheduler.EnqueueTask(partitionId, () =>
+            {
+                cont.Load(backend, recentRevisions);
+                return true;
+            });
+        }
+        catch (Exception ex)
+        {
+            context.PendingSnapshotReads.Remove(slot);
+            context.Logger.LogWarning(
+                "KeyValueActor/SnapshotRead: read scheduler rejected enqueue for key {Key}: {Ex}",
+                message.Key, ex.Message);
+            cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.MustRetryResponse;
+        }
+
+        _ = readTask.ContinueWith(t =>
+        {
+            // Runs on a thread-pool thread: only the continuation's own stage-2 fields are touched;
+            // every actor-owned mutation waits for the ResumeRead message.
+            if (!t.IsCompletedSuccessfully)
+                cont.SetFaulted();
+            actorContext.Self.Send(
+                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+        }, TaskScheduler.Default);
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
+
+    /// <summary>
     /// Resolves <paramref name="key"/> to its owning partition id. Key-range spaces look up the
     /// live descriptor; hash spaces use <see cref="DataPartitionRouter"/> over the user partitions
     /// <c>[1, InitialPartitions]</c>. Both routing call sites (locator and handlers) must call

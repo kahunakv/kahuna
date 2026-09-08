@@ -258,6 +258,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
 
     internal int PendingReadsCount => kvContext?.PendingReads.Count ?? 0;
 
+    internal int PendingSnapshotReadsCount => kvContext?.PendingSnapshotReads.Count ?? 0;
+
     /// <summary>
     /// Constructor
     /// </summary>
