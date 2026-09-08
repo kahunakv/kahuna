@@ -148,8 +148,10 @@ internal sealed class KeySpaceAdminService
                 {
                     long deadline = Environment.TickCount64 + 10_000;
                     while (Environment.TickCount64 < deadline && rangeMapStore.Current.FindAll(keySpace).Count == 0)
+                    {
                         Transactions.DurableTransactionMetrics.AddKvRetryWait("EnsureKeyRangeSeededAsync_1005");
                         await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+                    }
                 }
                 return forwarded;
             }

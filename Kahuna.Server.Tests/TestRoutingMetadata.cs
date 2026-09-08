@@ -253,6 +253,19 @@ public sealed class TestRoutingMetadata : BaseCluster
 
             Assert.True(split.Success, split.Status + ": " + split.Reason);
 
+            // The split commits on the meta-partition leader; every other node applies the new map
+            // through replication. The agreement check below reads metadata and route hints from
+            // this node, so both answers come from its applied map. Wait until this node has
+            // applied the split, because a comparison over a half-replicated map is meaningless.
+            await WaitUntilAsync(async () =>
+            {
+                KahunaRoutingMetadataResponse published = await kahuna1.GetRoutingMetadata(keySpace);
+
+                return published.Coherent
+                    && published.KeySpaces.Count == 1
+                    && published.KeySpaces[0].Ranges.Count == 2;
+            });
+
             await AssertClientAgreesWithServer(kahuna1, keyValues, lower, upper, expectSame: false);
         }
         finally
