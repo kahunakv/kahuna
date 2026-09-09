@@ -68,6 +68,7 @@ public static class EmbeddedOptionsFactory
         CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
         CacheEntriesToRemove = opts.CacheEntriesToRemove,
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
+        KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,
         KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
         KeyValueWriteMaxInFlightBatchesPerPartition = opts.KeyValueWriteMaxInFlightBatchesPerPartition,
         KeyValueWriteMaxBatchBytes = opts.KeyValueWriteMaxBatchBytes,

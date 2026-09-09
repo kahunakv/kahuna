@@ -224,6 +224,7 @@ internal sealed class KeyValuesManagerBuilder
             new Writes.PartitionWriteAggregatorOptions
             {
                 LingerMs = configuration.KeyValueWriteLingerMs,
+                PostCompletionHoldMs = configuration.KeyValueWritePostCompletionHoldMs,
                 MaxBatchItems = configuration.KeyValueWriteMaxBatchItems,
                 MaxInFlightBatchesPerPartition = configuration.KeyValueWriteMaxInFlightBatchesPerPartition,
                 MaxBatchBytes = configuration.KeyValueWriteMaxBatchBytes,

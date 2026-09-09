@@ -193,6 +193,14 @@ public static class ConfigurationValidator
         if (configuration.KeyValueWriteLingerMs > configuration.KeyValueWriteMaxQueueDelayMs)
             configuration.KeyValueWriteLingerMs = configuration.KeyValueWriteMaxQueueDelayMs;
 
+        // The post-completion hold may be zero (immediate re-dispatch on completion) but never negative, and —
+        // like the linger — must not reach past the queue-age deadline, or a held buffer's items could only
+        // ever be released as expired instead of dispatched. Clamp down.
+        if (configuration.KeyValueWritePostCompletionHoldMs < 0)
+            configuration.KeyValueWritePostCompletionHoldMs = 0;
+        if (configuration.KeyValueWritePostCompletionHoldMs > configuration.KeyValueWriteMaxQueueDelayMs)
+            configuration.KeyValueWritePostCompletionHoldMs = configuration.KeyValueWriteMaxQueueDelayMs;
+
         // A batch can never select more than a partition is allowed to hold.
         if (configuration.KeyValueWriteMaxBatchItems > configuration.KeyValueWriteMaxQueuedItemsPerPartition)
             configuration.KeyValueWriteMaxBatchItems = configuration.KeyValueWriteMaxQueuedItemsPerPartition;

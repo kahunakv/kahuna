@@ -250,6 +250,7 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 | Setting | Default | Meaning |
 |---|---:|---|
 | `KeyValueWriteLingerMs` | `1` | Delay from the oldest queued item before a partition batch is proposed. `0` dispatches an idle partition immediately (still batching work that accumulates behind an in-flight batch). |
+| `KeyValueWritePostCompletionHoldMs` | `0` | Hold after each batch completion before the next sub-threshold batch may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches at once, and queue-age releases are unaffected. `0` re-dispatches on completion immediately. |
 | `KeyValueWriteMaxBatchItems` | `512` | Maximum log entries per Raft call. |
 | `KeyValueWriteMaxBatchBytes` | `4 MiB` | Target serialized bytes per Raft call; an oversized single item dispatches alone. |
 | `KeyValueWriteMaxQueuedItemsPerPartition` | `8192` | Maximum admitted items per partition, including those in flight. |
@@ -260,9 +261,10 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 The number of lanes is derived from the key/value worker count; there is no separate knob, because
 lane count does not limit Raft concurrency (detached work is per partition).
 
-Validation normalizes non-positive capacities to their defaults, clamps a negative linger to zero,
-clamps the batch limits so a batch can never select more than a partition may hold, and **rejects** a
-queue-delay that is not comfortably below the write-intent lease.
+Validation normalizes non-positive capacities to their defaults, clamps a negative linger or
+post-completion hold to zero (and both down to the queue-delay bound), clamps the batch limits so a
+batch can never select more than a partition may hold, and **rejects** a queue-delay that is not
+comfortably below the write-intent lease.
 
 ### Choosing linger
 
@@ -272,6 +274,17 @@ concurrent same-partition writes accumulate before dispatch, which is where the 
 saving comes from. There is no benefit to a large linger unless writes arrive faster than the disk can
 flush; a rising queue-delay with batch sizes near one usually indicates a routing, leader, or
 partition-health problem rather than a linger that is too short.
+
+### Choosing the post-completion hold
+
+Under sustained load the linger stops mattering: a completed batch immediately re-dispatches whatever
+queued behind it, so every batch carries only what arrived during the previous Raft round and the
+linger window never elapses. When each Raft round has a large fixed cost per batch, that pins the
+partition at a low entries-per-second ceiling. A small post-completion hold (a few milliseconds,
+comparable to the round time) lets the buffer grow past one round's arrivals before the next
+dispatch, which raises entries per batch at the cost of up to the hold in extra write latency. The
+hold never delays a full batch and never extends the queue-age release deadline. Keep it `0` unless a
+measured workload shows batch sizes pinned well below the caps at a saturated round rate.
 
 ### Key layout matters
 

@@ -126,10 +126,11 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         // Never dispatch while the partition's in-flight pipeline is at capacity; the buffer behind it is
         // re-driven on BatchComplete. ShouldFlushNow already encodes the capacity check; the linger-disabled
-        // fast path must guard it too. Otherwise schedule a wake so the buffer flushes at its linger deadline
-        // and its items are released no later than their queue-age deadline — even while the pipeline is full
-        // (the at-capacity case schedules an age-only wake).
-        if (result.ShouldFlushNow || (result.OpenedBuffer && options.LingerMs <= 0 && state.HasDispatchCapacity))
+        // fast path must guard it too, and also honor an active post-completion hold (a full batch — the
+        // ShouldFlushNow case — always overrides the hold). Otherwise schedule a wake so the buffer flushes at
+        // its flush deadline and its items are released no later than their queue-age deadline — even while
+        // the pipeline is full (the at-capacity case schedules an age-only wake).
+        if (result.ShouldFlushNow || (result.OpenedBuffer && options.LingerMs <= 0 && state.HasDispatchCapacity && state.HoldElapsed(NowMs())))
             Dispatch(item.PartitionId, state);
         else
             ScheduleWake(item.PartitionId, state);
@@ -141,6 +142,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             return;
 
         state.ClearArmedWake();
+
+        // Drop an elapsed post-completion hold before recomputing deadlines, so the wake chain cannot re-arm
+        // forever on a hold deadline that already passed.
+        state.ExpireHoldIfElapsed(NowMs());
 
         // Release over-age items first (idempotent; front-of-queue is oldest), then flush if the oldest item's
         // linger window has elapsed and in-flight capacity remains. Finally re-arm for whatever remains — the
@@ -192,8 +197,19 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // Re-drive the buffer that accumulated behind the just-completed batch, then re-arm a wake so any
         // items now in flight behind this re-dispatch (or still waiting) are released at their queue-age
         // deadline. Completion re-dispatches because it frees an in-flight slot a full pipeline was holding.
-        if (!stopping && state.PendingCount > 0)
-            Dispatch(message.PartitionId, state);
+        // With a post-completion hold configured, a sub-threshold buffer is instead held for up to the hold
+        // window so the next batch grows denser — under sustained load the immediate re-dispatch would keep
+        // every batch at "what arrived during the previous Raft round" and the linger would never engage. A
+        // buffered full batch still dispatches at once (the threshold always overrides the hold), and held
+        // items remain bounded by their queue-age deadline via the wake below.
+        if (!stopping)
+        {
+            if (options.PostCompletionHoldMs > 0)
+                state.ArmDispatchHold(NowMs(), options.PostCompletionHoldMs);
+
+            if (state.PendingCount > 0 && (options.PostCompletionHoldMs <= 0 || state.HasFullBatchBuffered(options.MaxBatchItems, options.MaxBatchBytes)))
+                Dispatch(message.PartitionId, state);
+        }
 
         ScheduleWake(message.PartitionId, state);
         PruneIfIdle(message.PartitionId, state);
@@ -496,13 +512,16 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         return state;
     }
 
-    /// <summary>Drops a fully idle partition's state (nothing pending, no in-flight batch, so no armed wake) so
-    /// historical and split-churned partitions do not accumulate for the lane's lifetime; a later write to the
-    /// partition re-creates it. Safe against a stale pending wake — its <see cref="OnTimerWake"/> just no-ops on
+    /// <summary>Drops a fully idle partition's state (nothing pending, no in-flight batch) so historical and
+    /// split-churned partitions do not accumulate for the lane's lifetime; a later write to the partition
+    /// re-creates it. A state carrying a still-active post-completion hold is retained — its hold-end wake is
+    /// already armed by the caller's <see cref="ScheduleWake"/> and prunes it once the hold passes — because a
+    /// Submit overtaken by the priority BatchComplete would otherwise re-create a fresh, hold-free state and
+    /// slip past the hold. Safe against a stale pending wake — its <see cref="OnTimerWake"/> just no-ops on
     /// the missing state.</summary>
     private void PruneIfIdle(int partitionId, PartitionWriteState state)
     {
-        if (state.PendingCount == 0 && !state.InFlight)
+        if (state.PendingCount == 0 && !state.InFlight && (!state.HoldArmed || state.HoldElapsed(NowMs())))
             states.Remove(partitionId);
     }
 

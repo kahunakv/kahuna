@@ -19,6 +19,12 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// oldest item's deadlines do not move. Count/byte thresholds still flush immediately without waiting for a
 /// timer. Because linger ≤ queue-age (enforced by configuration), the earliest armed timer always fires no
 /// later than any deadline that could come due, so the chain re-arms itself and never misses an expiry.</para>
+///
+/// <para>An optional post-completion hold (armed by the actor via <see cref="ArmDispatchHold"/> when a batch
+/// settles) delays the next sub-threshold flush so arrivals accumulate into a denser batch. Under sustained
+/// load a completion otherwise re-dispatches immediately and every batch carries only what arrived during the
+/// previous Raft round, so the linger never engages. The hold extends the flush deadline, never the age
+/// deadline: a full batch still flushes at once, and over-age items are still released on time.</para>
 /// </summary>
 internal sealed class PartitionWriteState
 {
@@ -33,6 +39,12 @@ internal sealed class PartitionWriteState
     private long armedWakeDeadline = NoWake;
 
     private int inFlightBatches;
+
+    // Post-completion hold deadline (ms tick): until it elapses, a sub-threshold buffer must not dispatch, so
+    // arrivals accumulate into a denser batch instead of the completion re-dispatching whatever queued behind
+    // the previous Raft round. A full batch (count/byte threshold) is never gated by it, and queue-age
+    // releases are unaffected. long.MinValue = never armed (always elapsed).
+    private long holdUntil = long.MinValue;
 
     public PartitionWriteState(int maxInFlightBatches = 1)
     {
@@ -85,12 +97,21 @@ internal sealed class PartitionWriteState
     /// </summary>
     public long NextWakeDeadline(int lingerMs, int maxQueueDelayMs)
     {
+        // Nothing to flush — but an armed hold still needs a wake at its end, so an empty, settled partition
+        // can be pruned once the hold passes, and a write landing during the hold flushes on that same wake.
         if (PendingCount == 0)
-            return NoWake;
+            return HoldArmed ? holdUntil : NoWake;
 
         long oldest = OldestPendingTicks;
         long ageDeadline = oldest + maxQueueDelayMs;
-        return HasDispatchCapacity ? Math.Min(oldest + lingerMs, ageDeadline) : ageDeadline;
+        if (!HasDispatchCapacity)
+            return ageDeadline;
+
+        // A flush waits for both the linger window and any post-completion hold, so the flush deadline is the
+        // later of the two; the age deadline still bounds the wake so an item whose hold reaches past its
+        // release deadline is released on time instead of dispatched late.
+        long flushDeadline = Math.Max(oldest + lingerMs, holdUntil);
+        return Math.Min(flushDeadline, ageDeadline);
     }
 
     /// <summary>Arms a wake for <paramref name="deadline"/> only if it is earlier than the one already armed,
@@ -108,11 +129,45 @@ internal sealed class PartitionWriteState
     /// <summary>Clears the armed-wake marker when its timer fires, so the next schedule can re-arm.</summary>
     public void ClearArmedWake() => armedWakeDeadline = NoWake;
 
-    /// <summary>True when the linger window of the oldest pending item has elapsed at <paramref name="nowMs"/>
-    /// and a flush is possible (in-flight capacity remains) — the point at which a coalescing buffer is
-    /// dispatched.</summary>
+    /// <summary>True when the linger window of the oldest pending item has elapsed at <paramref name="nowMs"/>,
+    /// no post-completion hold is still active, and a flush is possible (in-flight capacity remains) — the
+    /// point at which a coalescing buffer is dispatched.</summary>
     public bool LingerElapsed(long nowMs, int lingerMs) =>
-        HasDispatchCapacity && PendingCount > 0 && nowMs - OldestPendingTicks >= lingerMs;
+        HasDispatchCapacity && PendingCount > 0 && nowMs - OldestPendingTicks >= lingerMs && nowMs >= holdUntil;
+
+    /// <summary>Arms the post-completion hold: until <paramref name="nowMs"/> + <paramref name="holdMs"/> a
+    /// sub-threshold buffer must not dispatch, so arrivals accumulate into a denser next batch instead of the
+    /// completion re-dispatching whatever queued behind the previous Raft round. A full batch always overrides
+    /// the hold, and queue-age releases are unaffected. A non-positive <paramref name="holdMs"/> arms nothing.</summary>
+    public void ArmDispatchHold(long nowMs, int holdMs)
+    {
+        if (holdMs > 0)
+            holdUntil = nowMs + holdMs;
+    }
+
+    /// <summary>True when no post-completion hold is active at <paramref name="nowMs"/> (never armed, or its
+    /// window has passed), so a sub-threshold flush may start.</summary>
+    public bool HoldElapsed(long nowMs) => nowMs >= holdUntil;
+
+    /// <summary>True while a post-completion hold has been armed and not yet reset by
+    /// <see cref="ExpireHoldIfElapsed"/> — the condition under which an otherwise-idle state must be kept
+    /// (and woken at the hold's end) instead of pruned.</summary>
+    public bool HoldArmed => holdUntil != long.MinValue;
+
+    /// <summary>Resets an elapsed hold to the never-armed sentinel so <see cref="NextWakeDeadline"/> stops
+    /// scheduling wakes for it — otherwise the wake chain would re-arm forever on a deadline already in the
+    /// past. A hold still in its window is untouched.</summary>
+    public void ExpireHoldIfElapsed(long nowMs)
+    {
+        if (holdUntil != long.MinValue && nowMs >= holdUntil)
+            holdUntil = long.MinValue;
+    }
+
+    /// <summary>True while the buffered backlog already fills a batch by count or bytes — the condition that
+    /// dispatches immediately and overrides the post-completion hold. Mirrors the flush-now threshold of
+    /// <see cref="Enqueue"/>.</summary>
+    public bool HasFullBatchBuffered(int maxItems, long maxBytes) =>
+        PendingCount >= maxItems || QueuedBytes >= maxBytes;
 
     /// <summary>
     /// Selects the next FIFO batch up to the item and byte caps and counts it in flight. The first

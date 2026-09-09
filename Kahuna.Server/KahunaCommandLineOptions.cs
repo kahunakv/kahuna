@@ -519,6 +519,9 @@ public sealed class KahunaCommandLineOptions
     [Option("kv-write-linger-ms", Required = false, HelpText = "Delay from the oldest queued direct write before its partition batch is proposed; 0 = immediate (low-latency escape hatch)", Default = 1)]
     public int KeyValueWriteLingerMs { get; set; } = 1;
 
+    [Option("kv-write-post-completion-hold-ms", Required = false, HelpText = "Hold after each partition batch completion before the next sub-threshold batch dispatches, so arrivals accumulate into denser batches; a full batch always dispatches at once; 0 = immediate re-dispatch", Default = 0)]
+    public int KeyValueWritePostCompletionHoldMs { get; set; }
+
     [Option("kv-write-max-batch-items", Required = false, HelpText = "Maximum log entries per aggregator Raft call", Default = 512)]
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 

@@ -272,6 +272,11 @@ public sealed class EmbeddedKahunaOptions
 
     public int KeyValueWriteLingerMs { get; set; } = 1;
 
+    /// <summary>Hold after each aggregator batch completion before the next sub-threshold batch for that
+    /// partition may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches
+    /// immediately; 0 (the default) keeps the immediate re-dispatch on completion.</summary>
+    public int KeyValueWritePostCompletionHoldMs { get; set; }
+
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 
     /// <summary>Maximum aggregator batches a single partition may have awaiting their Raft result at once;

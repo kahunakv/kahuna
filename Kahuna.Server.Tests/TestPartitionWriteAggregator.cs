@@ -284,6 +284,82 @@ public sealed class TestPartitionWriteAggregator
         Assert.False(state.LingerElapsed(nowMs: 100_000, lingerMs: 50));
     }
 
+    [Fact]
+    public void State_PostCompletionHold_GatesSubThresholdFlush_UntilElapsed()
+    {
+        PartitionWriteState state = new();
+        IProposalSubmission it = Item(1, 1);
+        it.EnqueueTicks = 1000;
+        state.Enqueue(it, maxItems: 512, maxBytes: 4096);
+
+        Assert.True(state.HoldElapsed(1000)); // never armed → always elapsed
+        state.ArmDispatchHold(nowMs: 1100, holdMs: 50);
+
+        // The linger window elapsed long ago, but the hold gates the flush until it passes.
+        Assert.False(state.LingerElapsed(nowMs: 1120, lingerMs: 50));
+        Assert.False(state.HoldElapsed(1149));
+        Assert.True(state.LingerElapsed(nowMs: 1150, lingerMs: 50));
+        Assert.True(state.HoldElapsed(1150));
+
+        // A non-positive hold arms nothing.
+        state.ArmDispatchHold(nowMs: 5000, holdMs: 0);
+        Assert.True(state.HoldElapsed(5000));
+    }
+
+    [Fact]
+    public void State_HasFullBatchBuffered_MirrorsEnqueueThreshold()
+    {
+        PartitionWriteState state = new();
+        state.Enqueue(Item(1, 1), maxItems: 2, maxBytes: 4096);
+        Assert.False(state.HasFullBatchBuffered(maxItems: 2, maxBytes: 4096));
+
+        state.Enqueue(Item(1, 2), maxItems: 2, maxBytes: 4096);
+        Assert.True(state.HasFullBatchBuffered(maxItems: 2, maxBytes: 4096)); // item threshold
+
+        PartitionWriteState byBytes = new();
+        byBytes.Enqueue(Item(1, 3, bytes: 5000), maxItems: 512, maxBytes: 4096);
+        Assert.True(byBytes.HasFullBatchBuffered(maxItems: 512, maxBytes: 4096)); // byte threshold
+    }
+
+    [Fact]
+    public void State_EmptyPendingWithArmedHold_SchedulesHoldWake_UntilExpired()
+    {
+        // An empty state with an armed hold still schedules a wake at the hold's end — that wake prunes the
+        // idle state (or flushes writes that landed during the hold) — and an expired hold resets so the wake
+        // chain cannot re-arm on a deadline already in the past.
+        PartitionWriteState state = new();
+        Assert.False(state.HoldArmed);
+        Assert.Equal(PartitionWriteState.NoWake, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+
+        state.ArmDispatchHold(nowMs: 1000, holdMs: 50);
+        Assert.True(state.HoldArmed);
+        Assert.Equal(1050, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+
+        state.ExpireHoldIfElapsed(1049); // not yet elapsed → untouched
+        Assert.True(state.HoldArmed);
+
+        state.ExpireHoldIfElapsed(1050); // elapsed → reset
+        Assert.False(state.HoldArmed);
+        Assert.Equal(PartitionWriteState.NoWake, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+    }
+
+    [Fact]
+    public void State_NextWakeDeadline_HoldExtendsFlushDeadline_AgeStillBounds()
+    {
+        PartitionWriteState state = new();
+        IProposalSubmission it = Item(1, 1);
+        it.EnqueueTicks = 1000;
+        state.Enqueue(it, maxItems: 512, maxBytes: 4096);
+
+        // The hold reaches past the linger deadline (1050) → the wake moves out to the hold's end.
+        state.ArmDispatchHold(nowMs: 1100, holdMs: 100);
+        Assert.Equal(1200, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+
+        // A hold past the age deadline (1500) never delays the wake beyond it — the item is released on time.
+        state.ArmDispatchHold(nowMs: 1100, holdMs: 600);
+        Assert.Equal(1500, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+    }
+
     // ── recording doubles ──────────────────────────────────────────────────────
 
     private sealed class RecordingExecutor : IPartitionBatchExecutor
@@ -791,6 +867,171 @@ public sealed class TestPartitionWriteAggregator
         await WaitUntil(() => agg.ReservedItems(6) == 0);
     }
 
+    // ── post-completion hold (batch densification) ──────────────────────────────
+
+    [Fact]
+    public async Task Aggregator_PostCompletionHold_DefersRedispatch_AccumulatesDenserBatch()
+    {
+        // Under load a completion re-dispatches whatever queued behind the previous round, so batch density is
+        // pinned to one round's arrivals. With a hold, the sub-threshold backlog waits and later arrivals join
+        // it, and the eventual flush carries all of them in one denser batch.
+        ManualTimeProvider time = new();
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(9);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            PostCompletionHoldMs = 50,
+            MaxQueueDelayMs = 60_000,
+            MaxQueuedItemsPerPartition = 1024
+        }, timeProvider: time);
+
+        Assert.True(agg.TryEnqueue(Item(9, 1, sink: router))); // linger 0 → dispatched immediately, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+
+        for (int i = 2; i <= 4; i++)
+            Assert.True(agg.TryEnqueue(Item(9, i, sink: router))); // queued behind the in-flight batch
+
+        exec.Release(9); // batch 1 settles → the hold arms; the sub-threshold backlog must NOT re-dispatch
+        await WaitUntil(() => router.Completed.ContainsKey(1));
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exec.Calls.Count); // held: no second call while the hold is active
+
+        for (int i = 5; i <= 6; i++)
+            Assert.True(agg.TryEnqueue(Item(9, i, sink: router))); // arrivals during the hold join the buffer
+
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exec.Calls.Count);
+
+        // Advancing past the hold fires the wake; one batch carries all five accumulated items.
+        await AdvanceUntil(time, () => router.Completed.Count == 6, stepMs: 60);
+        Assert.Equal(2, exec.Calls.Count);
+        Assert.Equal(5, exec.Calls.Last().Count);
+        await WaitUntil(() => agg.ReservedItems(9) == 0);
+    }
+
+    [Fact]
+    public async Task Aggregator_PostCompletionHold_FullBatchArrival_DispatchesWithoutWaiting()
+    {
+        // The hold never delays a full batch: an arrival that fills the buffer to the item threshold flushes
+        // immediately even while the hold is active.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(10);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 2,
+            LingerMs = 0,
+            PostCompletionHoldMs = 60_000, // far longer than the test — only the threshold can dispatch
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(10, 1, sink: router))); // dispatched immediately, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(10, 2, sink: router))); // queued behind the in-flight batch
+
+        exec.Release(10); // completes → the hold arms; one sub-threshold item is held
+        await WaitUntil(() => router.Completed.ContainsKey(1));
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exec.Calls.Count);
+
+        Assert.True(agg.TryEnqueue(Item(10, 3, sink: router))); // fills the batch → the threshold overrides the hold
+        await WaitUntil(() => router.Completed.Count == 3);
+        Assert.Equal(2, exec.Calls.Count);
+        Assert.Equal(2, exec.Calls.Last().Count);
+    }
+
+    [Fact]
+    public async Task Aggregator_PostCompletionHold_FullBacklogAtCompletion_DispatchesImmediately()
+    {
+        // A backlog that already fills a batch at completion time is never held — the hold only densifies
+        // sub-threshold buffers, so a saturated partition drains at full speed.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(11);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 2,
+            LingerMs = 0,
+            PostCompletionHoldMs = 60_000,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(11, 1, sink: router))); // dispatched, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        for (int i = 2; i <= 5; i++)
+            Assert.True(agg.TryEnqueue(Item(11, i, sink: router))); // two full batches buffered behind
+
+        exec.Release(11);
+        await WaitUntil(() => router.Completed.Count == 5); // both full batches drained with no time advance
+        Assert.Equal(3, exec.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Aggregator_PostCompletionHold_AgeDeadlineStillReleasesHeldItems()
+    {
+        // The hold extends only the flush deadline, never the age deadline: a held item whose hold reaches past
+        // its queue-age deadline is released retryably on time, never stranded or dispatched late.
+        ManualTimeProvider time = new();
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(12);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 8,
+            LingerMs = 0,
+            PostCompletionHoldMs = 5_000, // reaches past the 500 ms age deadline (options are raw; the clamp is config-level)
+            MaxQueueDelayMs = 500,
+            MaxQueuedItemsPerPartition = 1024
+        }, timeProvider: time);
+
+        Assert.True(agg.TryEnqueue(Item(12, 1, sink: router))); // dispatched, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(12, 2, sink: router))); // queued behind
+
+        exec.Release(12);
+        await WaitUntil(() => router.Completed.ContainsKey(1)); // the hold arms; item 2 is held
+
+        await AdvanceUntil(time, () => router.Released.ContainsKey(2), stepMs: 600);
+        Assert.True(router.Released[2]);          // released retryably at its age deadline
+        Assert.Equal(1, exec.Calls.Count);        // it was never dispatched
+        await WaitUntil(() => agg.ReservedItems(12) == 0);
+    }
+
+    [Fact]
+    public async Task Aggregator_DefaultNoHold_CompletionRedispatchesSubThresholdImmediately()
+    {
+        // Pins the default (hold 0 = immediate re-dispatch): a sub-threshold item queued behind an in-flight
+        // batch re-dispatches on that batch's completion at once — no wake, no time advance.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(13);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 8,
+            LingerMs = 0,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(13, 1, sink: router))); // dispatched immediately, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(13, 2, sink: router))); // queued behind the in-flight batch
+
+        exec.Release(13);
+        await WaitUntil(() => router.Completed.Count == 2); // only the completion re-dispatch can flush item 2
+        Assert.Equal(2, exec.Calls.Count);
+    }
+
     // ── hardening ───────────────────────────────────────────────────────────────
 
     [Fact]
@@ -1251,6 +1492,20 @@ public sealed class TestPartitionWriteAggregator
         ConfigurationValidator.Validate(c);
         Assert.Equal(1_000, c.KeyValueWriteLingerMs);
         Assert.True(c.KeyValueWriteLingerMs <= c.KeyValueWriteMaxQueueDelayMs);
+    }
+
+    [Fact]
+    public void Config_NormalizesAndClampsPostCompletionHold()
+    {
+        // Negative → 0 (the immediate-re-dispatch default).
+        KahunaConfiguration negative = new() { KeyValueWritePostCompletionHoldMs = -3 };
+        ConfigurationValidator.Validate(negative);
+        Assert.Equal(0, negative.KeyValueWritePostCompletionHoldMs);
+
+        // A hold past the queue-age deadline could only ever expire held items; the validator clamps it down.
+        KahunaConfiguration above = new() { KeyValueWritePostCompletionHoldMs = 5_000, KeyValueWriteMaxQueueDelayMs = 1_000 };
+        ConfigurationValidator.Validate(above);
+        Assert.Equal(1_000, above.KeyValueWritePostCompletionHoldMs);
     }
 
     [Fact]

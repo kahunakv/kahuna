@@ -223,6 +223,60 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
         });
     }
 
+    // ── post-completion hold through the real entry point ────────────────────────
+
+    [Fact]
+    public async Task PostCompletionHold_HoldsFollowerWrite_ThenFlushesAndCommits()
+    {
+        // The hold is plumbed from the embedded options to the aggregator: a sub-threshold write queued
+        // behind an in-flight batch is not re-dispatched on that batch's completion but on the hold-end
+        // wake — and still commits and reads back through real Raft.
+        EmbeddedKahunaOptions options = MemoryNode(lingerMs: 0);
+        options.KeyValueWritePostCompletionHoldMs = 1000;
+        options.KeyValueWriteMaxQueueDelayMs = 8000; // the held write must not age out while gated/held
+
+        await WithRecorder(options, async (node, recorder, ct) =>
+        {
+            // Warm-up resolves the partition of the "hold/" key-space so the gate targets the right one.
+            (KeyValueResponseType warm, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "hold/warm", Encoding.UTF8.GetBytes("w"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, warm);
+            int partition = recorder.Calls.First().Partition;
+            int PartitionCalls() => recorder.Calls.Count(c => c.Partition == partition);
+            int baseline = PartitionCalls();
+
+            recorder.Gate(partition);
+            Task<(KeyValueResponseType, long, HLCTimestamp)> first = node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "hold/k1", Encoding.UTF8.GetBytes("v1"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            Assert.True(await WaitUntil(() => PartitionCalls() == baseline + 1)); // dispatched, gated
+
+            Task<(KeyValueResponseType, long, HLCTimestamp)> second = node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "hold/k2", Encoding.UTF8.GetBytes("v2"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            await Task.Delay(100, ct); // let the second submit reach the lane before the gate releases
+
+            recorder.Release(partition);
+            (KeyValueResponseType t1, _, _) = await first;
+            Assert.Equal(KeyValueResponseType.Set, t1);
+
+            // The follower write is held: no further Raft call right after the completion.
+            await Task.Delay(200, ct);
+            Assert.Equal(baseline + 1, PartitionCalls());
+
+            // The hold elapses → the wake dispatches the held write, which commits and reads back.
+            (KeyValueResponseType t2, _, _) = await second;
+            Assert.Equal(KeyValueResponseType.Set, t2);
+            Assert.Equal(baseline + 2, PartitionCalls());
+
+            (KeyValueResponseType g, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, "hold/k2", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, g);
+            Assert.Equal("v2", Encoding.UTF8.GetString(entry!.Value!));
+        });
+    }
+
     // ── 7. per-partition queue saturation → MustRetry, then writable ─────────────
 
     [Fact]

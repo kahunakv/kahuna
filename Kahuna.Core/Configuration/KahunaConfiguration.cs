@@ -269,6 +269,14 @@ public sealed class KahunaConfiguration
     /// coalescing. Zero is the low-latency escape hatch. Must not be negative.</summary>
     public int KeyValueWriteLingerMs { get; set; } = 1;
 
+    /// <summary>Hold, after each aggregator batch completes, before the next sub-threshold batch for that
+    /// partition may dispatch. Under sustained load a completion otherwise re-dispatches immediately, so every
+    /// batch carries only what arrived during the previous Raft round and the linger never engages; the hold
+    /// lets arrivals accumulate into a denser batch at the cost of up to the hold in extra write latency. A
+    /// full batch (item/byte threshold) always dispatches immediately, and queue-age releases are unaffected.
+    /// 0 (the default) keeps the immediate re-dispatch.</summary>
+    public int KeyValueWritePostCompletionHoldMs { get; set; }
+
     /// <summary>Maximum log entries selected for one aggregator Raft call.</summary>
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 

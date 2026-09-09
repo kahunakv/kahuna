@@ -9,6 +9,14 @@ internal sealed record PartitionWriteAggregatorOptions
 {
     public int LingerMs { get; init; } = 1;
 
+    /// <summary>Hold after each batch completion before the next sub-threshold batch for the partition may
+    /// dispatch, so arrivals accumulate into a denser batch. Under sustained load a completion otherwise
+    /// re-dispatches immediately — every batch carries only what arrived during the previous Raft round and
+    /// the linger never engages. A full batch (item/byte threshold) always dispatches immediately and
+    /// overrides the hold; queue-age releases are unaffected. 0 (the default) keeps the immediate
+    /// re-dispatch. Trades up to the hold in extra write latency for fewer, larger Raft rounds.</summary>
+    public int PostCompletionHoldMs { get; init; }
+
     /// <summary>Maximum batches a single partition may have awaiting their Raft result at once. 1 keeps the
     /// classic serial pipeline (one round trip at a time); a higher value overlaps the rounds' quorum waits so
     /// the round latency is no longer paid serially per batch. Dispatch order stays FIFO regardless, so
