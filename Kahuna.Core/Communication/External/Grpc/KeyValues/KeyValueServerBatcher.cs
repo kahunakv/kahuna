@@ -48,6 +48,43 @@ internal sealed class KeyValueServerBatcher
     }
 
     /// <summary>
+    /// Per-stream FIFO for the order-sensitive placement/replication handlers. The read loop
+    /// allocates turns in arrival order; each handler waits for its predecessor's turn before it
+    /// executes. Those handlers therefore run serialized per stream, in arrival order, without
+    /// holding the response-write semaphore across the service call — a slow maintenance call must
+    /// not block the write of an already-completed unrelated response on the same stream. A turn
+    /// always completes (in the handler's finally), so a faulted or cancelled handler never wedges
+    /// its successors.
+    /// </summary>
+    private sealed class OrderedLane
+    {
+        private Task tail = Task.CompletedTask;
+
+        /// <summary>
+        /// Allocates the next turn. Called only from the stream's read loop, which dispatches
+        /// requests one at a time, so the tail needs no synchronization.
+        /// </summary>
+        public LaneTurn Next()
+        {
+            Task previous = tail;
+            TaskCompletionSource turn = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            tail = turn.Task;
+            return new LaneTurn(previous, turn);
+        }
+    }
+
+    /// <summary>
+    /// One position in a stream's ordered lane: await <see cref="PreviousCompleted"/>, execute,
+    /// then call <see cref="Complete"/> unconditionally so the successors can run.
+    /// </summary>
+    private readonly struct LaneTurn(Task previous, TaskCompletionSource turn)
+    {
+        public Task PreviousCompleted => previous;
+
+        public void Complete() => turn.TrySetResult();
+    }
+
+    /// <summary>
     /// Processes and handles batch server key-value requests received via gRPC streams.
     /// </summary>
     /// <param name="requestStream">The asynchronous stream of incoming key-value requests.</param>
@@ -62,6 +99,8 @@ internal sealed class KeyValueServerBatcher
     {
         StreamDrain drain = new();
 
+        OrderedLane lane = new();
+
         using SemaphoreSlim semaphore = new(1, 1);
 
         try
@@ -75,7 +114,7 @@ internal sealed class KeyValueServerBatcher
                 // handler captures the marker when it is created inside the scope; the next
                 // request on this shared stream may carry a different count.
                 using (Kahuna.Server.ForwardedRequestScope.EnterAt(request.ForwardHops))
-                    DispatchServerRequest(semaphore, request, responseStream, context, drain);
+                    DispatchServerRequest(semaphore, lane, request, responseStream, context, drain);
             }
         }
         catch (IOException ex)
@@ -96,6 +135,7 @@ internal sealed class KeyValueServerBatcher
     /// </summary>
     private void DispatchServerRequest(
         SemaphoreSlim semaphore,
+        OrderedLane lane,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -181,51 +221,51 @@ internal sealed class KeyValueServerBatcher
                 break;
 
             case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
-                _ = EnsureKeyRangeSeededDelayed(semaphore, request, responseStream, context, drain);
+                _ = EnsureKeyRangeSeededDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
-                _ = EnsureKeyRangeRemovedDelayed(semaphore, request, responseStream, context, drain);
+                _ = EnsureKeyRangeRemovedDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerTryGetRangeLocks:
-                _ = GetRangeLocksDelayed(semaphore, request, responseStream, context, drain);
+                _ = GetRangeLocksDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerTryImportRangeLocks:
-                _ = ImportRangeLocksDelayed(semaphore, request, responseStream, context, drain);
+                _ = ImportRangeLocksDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerImportCompletionReceipts:
-                _ = ImportCompletionReceiptsDelayed(semaphore, request, responseStream, context, drain);
+                _ = ImportCompletionReceiptsDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableOperation:
-                _ = DurableOperationDelayed(semaphore, request, responseStream, context, drain);
+                _ = DurableOperationDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableBundle:
-                _ = DurableBundleDelayed(semaphore, request, responseStream, context, drain);
+                _ = DurableBundleDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableOnePhase:
-                _ = DurableOnePhaseDelayed(semaphore, request, responseStream, context, drain);
+                _ = DurableOnePhaseDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableDecision:
-                _ = DurableDecisionDelayed(semaphore, request, responseStream, context, drain);
+                _ = DurableDecisionDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerLookupTransactionRecord:
-                _ = LookupTransactionRecordDelayed(semaphore, request, responseStream, context, drain);
+                _ = LookupTransactionRecordDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
-                _ = ReplicateKeyValueRangePageDelayed(semaphore, request, responseStream, context, drain);
+                _ = ReplicateKeyValueRangePageDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerGetRangeTransactionState:
-                _ = GetRangeTransactionStateDelayed(semaphore, request, responseStream, context, drain);
+                _ = GetRangeTransactionStateDelayed(semaphore, lane.Next(), request, responseStream, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
@@ -947,13 +987,17 @@ internal sealed class KeyValueServerBatcher
         }
     }
 
-    // The handlers below hold the write semaphore across the whole service call, not just the
-    // response write, so these placement/replication operations execute serialized per stream in
-    // arrival order. Keep that shape: their effects are order-sensitive (seed before import,
-    // import before receipts).
+    // The handlers below run on the stream's ordered lane: the read loop assigns each a turn in
+    // arrival order and a handler waits for its predecessor's turn before executing, so these
+    // placement/replication operations stay serialized per stream in arrival order. Keep that
+    // shape: their effects are order-sensitive (seed before import, import before receipts). The
+    // lane deliberately does not involve the response-write semaphore during execution — holding
+    // that across a slow service call would block the write of every already-completed unrelated
+    // response on this shared stream. The semaphore is taken only for the write itself.
 
     private async Task EnsureKeyRangeSeededDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -962,21 +1006,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcEnsureKeyRangeSeededResponse resp = await service.EnsureKeyRangeSeededInternal(request.EnsureKeyRangeSeeded, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcEnsureKeyRangeSeededResponse resp = await service.EnsureKeyRangeSeededInternal(request.EnsureKeyRangeSeeded, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded,
-                    RequestId = request.RequestId,
-                    EnsureKeyRangeSeeded = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded,
+                RequestId = request.RequestId,
+                EnsureKeyRangeSeeded = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -984,12 +1024,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task EnsureKeyRangeRemovedDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -998,21 +1040,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcEnsureKeyRangeRemovedResponse resp = await service.EnsureKeyRangeRemovedInternal(request.EnsureKeyRangeRemoved, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcEnsureKeyRangeRemovedResponse resp = await service.EnsureKeyRangeRemovedInternal(request.EnsureKeyRangeRemoved, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved,
-                    RequestId = request.RequestId,
-                    EnsureKeyRangeRemoved = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved,
+                RequestId = request.RequestId,
+                EnsureKeyRangeRemoved = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1020,12 +1058,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task GetRangeLocksDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1034,21 +1074,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcGetRangeLocksResponse resp = await service.GetRangeLocksInternal(request.GetRangeLocks, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcGetRangeLocksResponse resp = await service.GetRangeLocksInternal(request.GetRangeLocks, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerTryGetRangeLocks,
-                    RequestId = request.RequestId,
-                    GetRangeLocks = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerTryGetRangeLocks,
+                RequestId = request.RequestId,
+                GetRangeLocks = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1056,12 +1092,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task ImportRangeLocksDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1070,21 +1108,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcImportRangeLocksResponse resp = await service.ImportRangeLocksInternal(request.ImportRangeLocks, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcImportRangeLocksResponse resp = await service.ImportRangeLocksInternal(request.ImportRangeLocks, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerTryImportRangeLocks,
-                    RequestId = request.RequestId,
-                    ImportRangeLocks = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerTryImportRangeLocks,
+                RequestId = request.RequestId,
+                ImportRangeLocks = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1092,12 +1126,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task ImportCompletionReceiptsDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1106,21 +1142,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcImportCompletionReceiptsResponse resp = await service.ImportCompletionReceiptsInternal(request.ImportCompletionReceipts, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcImportCompletionReceiptsResponse resp = await service.ImportCompletionReceiptsInternal(request.ImportCompletionReceipts, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerImportCompletionReceipts,
-                    RequestId = request.RequestId,
-                    ImportCompletionReceipts = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerImportCompletionReceipts,
+                RequestId = request.RequestId,
+                ImportCompletionReceipts = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1128,12 +1160,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableOperationDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1142,21 +1176,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcDurableOperationResponse resp = await service.DurableOperationInternal(request.DurableOperation, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcDurableOperationResponse resp = await service.DurableOperationInternal(request.DurableOperation, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerDurableOperation,
-                    RequestId = request.RequestId,
-                    DurableOperation = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerDurableOperation,
+                RequestId = request.RequestId,
+                DurableOperation = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1164,12 +1194,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableBundleDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1178,21 +1210,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcDurableBundleResponse resp = await service.DurableBundleInternal(request.DurableBundle, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcDurableBundleResponse resp = await service.DurableBundleInternal(request.DurableBundle, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerDurableBundle,
-                    RequestId = request.RequestId,
-                    DurableBundle = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerDurableBundle,
+                RequestId = request.RequestId,
+                DurableBundle = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1200,12 +1228,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableOnePhaseDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1214,21 +1244,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcDurableOnePhaseResponse resp = await service.DurableOnePhaseInternal(request.DurableOnePhase, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcDurableOnePhaseResponse resp = await service.DurableOnePhaseInternal(request.DurableOnePhase, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerDurableOnePhase,
-                    RequestId = request.RequestId,
-                    DurableOnePhase = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerDurableOnePhase,
+                RequestId = request.RequestId,
+                DurableOnePhase = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1236,12 +1262,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableDecisionDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1250,21 +1278,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcDurableDecisionResponse resp = await service.DurableDecisionInternal(request.DurableDecision, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcDurableDecisionResponse resp = await service.DurableDecisionInternal(request.DurableDecision, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerDurableDecision,
-                    RequestId = request.RequestId,
-                    DurableDecision = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerDurableDecision,
+                RequestId = request.RequestId,
+                DurableDecision = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1272,12 +1296,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task ReplicateKeyValueRangePageDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1286,21 +1312,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcReplicateKeyValueRangePageResponse resp = await service.ReplicateKeyValueRangePageInternal(request.ReplicateKeyValueRangePage, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcReplicateKeyValueRangePageResponse resp = await service.ReplicateKeyValueRangePageInternal(request.ReplicateKeyValueRangePage, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerReplicateKeyValueRangePage,
-                    RequestId = request.RequestId,
-                    ReplicateKeyValueRangePage = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerReplicateKeyValueRangePage,
+                RequestId = request.RequestId,
+                ReplicateKeyValueRangePage = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1308,12 +1330,14 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task GetRangeTransactionStateDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1322,21 +1346,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcGetRangeTransactionStateResponse resp = await service.GetRangeTransactionStateInternal(request.GetRangeTransactionState, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcGetRangeTransactionStateResponse resp = await service.GetRangeTransactionStateInternal(request.GetRangeTransactionState, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerGetRangeTransactionState,
-                    RequestId = request.RequestId,
-                    GetRangeTransactionState = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerGetRangeTransactionState,
+                RequestId = request.RequestId,
+                GetRangeTransactionState = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1344,6 +1364,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
@@ -1384,6 +1405,7 @@ internal sealed class KeyValueServerBatcher
 
     private async Task LookupTransactionRecordDelayed(
         SemaphoreSlim semaphore,
+        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
         ServerCallContext context,
@@ -1392,21 +1414,17 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await semaphore.WaitAsync(context.CancellationToken);
-            try
+            await turn.PreviousCompleted;
+            context.CancellationToken.ThrowIfCancellationRequested();
+
+            GrpcLookupTransactionRecordResponse resp = await service.LookupTransactionRecordInternal(request.LookupTransactionRecord, context);
+
+            await WriteResponseToStream(semaphore, responseStream, new GrpcBatchServerKeyValueResponse
             {
-                GrpcLookupTransactionRecordResponse resp = await service.LookupTransactionRecordInternal(request.LookupTransactionRecord, context);
-                await responseStream.WriteAsync(new GrpcBatchServerKeyValueResponse
-                {
-                    Type = GrpcServerBatchType.ServerLookupTransactionRecord,
-                    RequestId = request.RequestId,
-                    LookupTransactionRecord = resp
-                });
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+                Type = GrpcServerBatchType.ServerLookupTransactionRecord,
+                RequestId = request.RequestId,
+                LookupTransactionRecord = resp
+            }, context);
         }
         catch (Exception ex)
         {
@@ -1414,6 +1432,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            turn.Complete();
             drain.Exit();
         }
     }
@@ -2069,6 +2088,9 @@ internal sealed class KeyValueServerBatcher
         }
     }
 
+    /// <summary>Serializes one write onto the shared inter-node response stream: gRPC allows only
+    /// one write at a time, and handlers complete out of order. The semaphore is a write gate
+    /// only — never hold it across a service call.</summary>
     private static async Task WriteResponseToStream(
         SemaphoreSlim semaphore,
         IServerStreamWriter<GrpcBatchServerKeyValueResponse> responseStream,
