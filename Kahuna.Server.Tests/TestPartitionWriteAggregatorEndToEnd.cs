@@ -283,6 +283,105 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
         });
     }
 
+    // ── pipelined dispatch (in-flight capacity > 1) through the real write path ──
+
+    [Fact]
+    public async Task PipelinedPartition_TwoBatchesOverlapInFlight_AllWritesCommitAndReadBack()
+    {
+        // With two in-flight batches allowed per partition, a gated executor must observe TWO concurrent
+        // ReplicateAsync calls for one partition; releasing them drives both through real (in-memory) Raft —
+        // proving the Raft layer accepts overlapped per-partition proposals — and every write lands readable.
+        EmbeddedKahunaOptions options = MemoryNode(batchItems: 4, lingerMs: 25);
+        options.KeyValueWriteMaxInFlightBatchesPerPartition = 2;
+        options.KeyValueWriteMaxQueueDelayMs = 8000; // queued items must not age out while the gate is held
+
+        await WithRecorder(options, async (node, recorder, ct) =>
+        {
+            // Warm-up resolves the partition (its own batch dispatches at the linger), then gate it.
+            (KeyValueResponseType warm, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "pipe/warm", Encoding.UTF8.GetBytes("w"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, warm);
+            int partition = recorder.Calls.First().Partition;
+            int callsBefore = recorder.Calls.Count(c => c.Partition == partition);
+            recorder.Gate(partition);
+
+            Task<(KeyValueResponseType, long, HLCTimestamp)>[] writes = new Task<(KeyValueResponseType, long, HLCTimestamp)>[8];
+            for (int i = 0; i < 8; i++)
+            {
+                int idx = i;
+                writes[i] = node.Kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, $"pipe/k{idx}", Encoding.UTF8.GetBytes("v" + idx),
+                    null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            }
+
+            // Two batches enter the (gated) executor together: neither call can return while gated, so two
+            // additional calls prove the overlap the one-in-flight rule used to forbid.
+            Assert.True(await WaitUntil(() => recorder.Calls.Count(c => c.Partition == partition) >= callsBefore + 2));
+            recorder.Release(partition);
+
+            (KeyValueResponseType, long, HLCTimestamp)[] results = await Task.WhenAll(writes);
+            Assert.All(results, r => Assert.Equal(KeyValueResponseType.Set, r.Item1));
+
+            for (int i = 0; i < 8; i++)
+            {
+                (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, $"pipe/k{i}", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+                Assert.Equal(KeyValueResponseType.Get, type);
+                Assert.Equal("v" + i, Encoding.UTF8.GetString(entry!.Value!));
+            }
+        });
+    }
+
+    [Fact]
+    public async Task SameKeyWrite_DefersWhileFirstInFlight_EvenWithPipelineCapacityFree()
+    {
+        // The pipelined aggregator must never carry two proposals for the SAME key in flight at once. The
+        // guard is the key actor's replication intent: with capacity free (2 allowed, 1 used), a second write
+        // to the same key is refused (MustRetry) instead of dispatched, and no second executor call appears.
+        EmbeddedKahunaOptions options = MemoryNode(batchItems: 1, lingerMs: 0);
+        options.KeyValueWriteMaxInFlightBatchesPerPartition = 2;
+
+        await WithRecorder(options, async (node, recorder, ct) =>
+        {
+            (KeyValueResponseType warm, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "dup/warm", Encoding.UTF8.GetBytes("w"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, warm);
+            int partition = recorder.Calls.First().Partition;
+            recorder.Gate(partition);
+
+            Task<(KeyValueResponseType, long, HLCTimestamp)> first = node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "dup/k", Encoding.UTF8.GetBytes("v1"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+
+            int callsWithFirst = 0;
+            Assert.True(await WaitUntil(() => (callsWithFirst = recorder.Calls.Count(c => c.Partition == partition)) >= 2));
+
+            // The same-key write is refused while the first proposal's intent is live — never a second
+            // in-flight proposal for the key, even though an in-flight slot is free.
+            (KeyValueResponseType second, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "dup/k", Encoding.UTF8.GetBytes("v2"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, second);
+            Assert.Equal(callsWithFirst, recorder.Calls.Count(c => c.Partition == partition));
+
+            recorder.Release(partition);
+            (KeyValueResponseType firstResult, _, _) = await first;
+            Assert.Equal(KeyValueResponseType.Set, firstResult);
+
+            // After the intent clears, the retried write proceeds and its value wins.
+            (KeyValueResponseType retried, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "dup/k", Encoding.UTF8.GetBytes("v2"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, retried);
+
+            (_, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, "dup/k", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal("v2", Encoding.UTF8.GetString(entry!.Value!));
+        });
+    }
+
     // 2PC separation (an interactive/multi-key transaction never merges into an auto-commit aggregator batch)
     // is guaranteed by construction and pinned by the direct-write completeness audit: the aggregator executor
     // is the only direct auto-commit ReplicationTypes.KeyValues route; the 2PC coordinator proposes through

@@ -211,6 +211,79 @@ public sealed class TestPartitionWriteAggregator
         Assert.False(state.LingerElapsed(nowMs: 100_000, lingerMs: 50)); // in flight suppresses flush
     }
 
+    [Fact]
+    public void State_MaxInFlight2_SecondBatchSelectableWhileFirstInFlight()
+    {
+        PartitionWriteState state = new(maxInFlightBatches: 2);
+        for (int i = 0; i < 4; i++)
+            state.Enqueue(Item(1, i), maxItems: 2, maxBytes: 4096);
+
+        List<IProposalSubmission> first = state.SelectBatch(maxItems: 2, maxBytes: 4096);
+        Assert.Equal(2, first.Count);
+        Assert.Equal(1, state.InFlightBatches);
+        Assert.True(state.HasDispatchCapacity);
+
+        // FIFO order across overlapped batches: the second selection carries the next items in admission order.
+        List<IProposalSubmission> second = state.SelectBatch(maxItems: 2, maxBytes: 4096);
+        Assert.Equal([2, 3], second.Select(s => ((RecordingSubmission)s).ProposalId).ToArray());
+        Assert.Equal(2, state.InFlightBatches);
+        Assert.False(state.HasDispatchCapacity);
+
+        state.OnBatchComplete();
+        Assert.Equal(1, state.InFlightBatches);
+        Assert.True(state.HasDispatchCapacity);
+        state.OnBatchComplete();
+        Assert.False(state.InFlight);
+    }
+
+    [Fact]
+    public void State_MaxInFlight2_FlushSignaledWhileOneBatchInFlight_SuppressedAtCapacity()
+    {
+        PartitionWriteState state = new(maxInFlightBatches: 2);
+        state.Enqueue(Item(1, 1), maxItems: 2, maxBytes: 4096);
+        state.Enqueue(Item(1, 2), maxItems: 2, maxBytes: 4096);
+        state.SelectBatch(maxItems: 2, maxBytes: 4096); // one slot used, one free
+
+        state.Enqueue(Item(1, 3), maxItems: 2, maxBytes: 4096);
+        PartitionWriteState.EnqueueResult belowCapacity = state.Enqueue(Item(1, 4), maxItems: 2, maxBytes: 4096);
+        Assert.True(belowCapacity.ShouldFlushNow); // capacity remains → the threshold flush fires
+
+        state.SelectBatch(maxItems: 2, maxBytes: 4096); // both slots used
+
+        state.Enqueue(Item(1, 5), maxItems: 2, maxBytes: 4096);
+        PartitionWriteState.EnqueueResult atCapacity = state.Enqueue(Item(1, 6), maxItems: 2, maxBytes: 4096);
+        Assert.False(atCapacity.ShouldFlushNow); // pipeline full → wait for a completion
+    }
+
+    [Fact]
+    public void State_MaxInFlight2_WakeAndLinger_FollowCapacityNotFirstBatch()
+    {
+        PartitionWriteState state = new(maxInFlightBatches: 2);
+        IProposalSubmission first = Item(1, 1);
+        first.EnqueueTicks = 1000;
+        state.Enqueue(first, maxItems: 512, maxBytes: 4096);
+        state.SelectBatch(maxItems: 512, maxBytes: 4096); // one slot used, one free
+
+        IProposalSubmission behind = Item(1, 2);
+        behind.EnqueueTicks = 1200;
+        state.Enqueue(behind, maxItems: 512, maxBytes: 4096);
+
+        // Below capacity a flush can still start, so the linger deadline (not age-only) is scheduled and the
+        // linger window can elapse.
+        Assert.Equal(1200 + 50, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+        Assert.True(state.LingerElapsed(nowMs: 1250, lingerMs: 50));
+
+        state.SelectBatch(maxItems: 512, maxBytes: 4096); // both slots used
+
+        IProposalSubmission last = Item(1, 3);
+        last.EnqueueTicks = 1300;
+        state.Enqueue(last, maxItems: 512, maxBytes: 4096);
+
+        // At capacity only the age deadline matters and a flush is suppressed — the classic in-flight rule.
+        Assert.Equal(1300 + 500, state.NextWakeDeadline(lingerMs: 50, maxQueueDelayMs: 500));
+        Assert.False(state.LingerElapsed(nowMs: 100_000, lingerMs: 50));
+    }
+
     // ── recording doubles ──────────────────────────────────────────────────────
 
     private sealed class RecordingExecutor : IPartitionBatchExecutor
@@ -226,6 +299,10 @@ public sealed class TestPartitionWriteAggregator
         // whole succeeds (the per-entry-fence shape), so a test can drive partial-entry completion.
         public readonly HashSet<int> FailEntryIndices = [];
         public RaftOperationStatus FailEntryStatus = RaftOperationStatus.PartitionMoved;
+        // Per-call scripted failure, consumed in call-arrival (= dispatch) order: the k-th arriving call fails
+        // with the k-th queued status; a null entry (or an exhausted queue) leaves the call on the default
+        // result path. Lets a pipelined test fail batch k while its overlapped sibling k+1 commits.
+        public readonly ConcurrentQueue<RaftOperationStatus?> ScriptedCallStatuses = new();
 
         public void Gate(int partition) => gates[partition] = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Release(int partition) { if (gates.TryRemove(partition, out TaskCompletionSource? g)) g.TrySetResult(); }
@@ -234,11 +311,21 @@ public sealed class TestPartitionWriteAggregator
         {
             Calls.Enqueue((partitionId, entries.Count));
             CallSignatures.Enqueue([.. entries.Select(e => e.Data.Length > 0 ? e.Data[0] : -1)]);
+            // Consume the scripted status at arrival so it maps to the dispatch order even when calls overlap.
+            ScriptedCallStatuses.TryDequeue(out RaftOperationStatus? scripted);
             if (gates.TryGetValue(partitionId, out TaskCompletionSource? gate))
                 // Honor the scheduler's execution-deadline/shutdown token so a gated ("hung") batch can be cancelled.
                 await gate.Task.WaitAsync(cancellationToken);
             if (ThrowOnReplicate)
                 throw new InvalidOperationException("simulated Raft round-trip failure");
+
+            if (scripted is { } scriptedStatus)
+            {
+                List<RaftEntryResult> scriptedResults = new(entries.Count);
+                for (int i = 0; i < entries.Count; i++)
+                    scriptedResults.Add(new RaftEntryResult(scriptedStatus, -1, HLCTimestamp.Zero));
+                return new RaftBatchReplicationResult(false, scriptedStatus, HLCTimestamp.Zero, scriptedResults);
+            }
 
             // Index-aligned per-entry result: a batch-level success reports Success for every entry; a batch-level
             // failure reports the chosen status with LogIndex -1 for every entry (nothing appended). A per-entry
@@ -543,6 +630,165 @@ public sealed class TestPartitionWriteAggregator
         exec.Release(5);
         await WaitUntil(() => router.Completed.ContainsKey(500) && router.Completed.ContainsKey(501));
         Assert.True(agg.TryEnqueue(Item(5, 503, sink: router))); // capacity freed after completion
+    }
+
+    // ── pipelined dispatch (in-flight capacity > 1) ─────────────────────────────
+
+    [Fact]
+    public async Task Aggregator_MaxInFlight2_TwoBatchesOverlap_ThirdWaits_AllSettle()
+    {
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(3); // hold every dispatched batch so the overlap is observable
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 4,
+            MaxInFlightBatchesPerPartition = 2,
+            LingerMs = 10_000,
+            MaxQueueDelayMs = 10_000, // items must not age out while the gate is held
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        // Two full batches dispatch and overlap in flight; the third full batch must wait at capacity.
+        for (int i = 0; i < 12; i++)
+            Assert.True(agg.TryEnqueue(Item(3, i, sink: router)));
+
+        await WaitUntil(() => exec.Calls.Count == 2);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+        Assert.Equal(2, exec.Calls.Count); // the third batch stayed queued while the pipeline was full
+
+        // Releasing the gate settles both overlapped batches; the freed capacity dispatches the third.
+        exec.Release(3);
+        await WaitUntil(() => router.Completed.Count == 12);
+
+        Assert.Equal(3, exec.Calls.Count);
+        Assert.All(exec.Calls, c => Assert.Equal(4, c.Count));
+
+        Assert.Empty(router.Released);
+        await WaitUntil(() => agg.ReservedItems(3) == 0); // admission counters balance at zero after drain
+    }
+
+    [Fact]
+    public async Task Aggregator_MaxInFlight2_DispatchOrderStaysFifoAcrossOverlappedBatches()
+    {
+        // Overlapped batches must still leave the lane in admission order — per-partition log ids stay
+        // monotone because the executor is called batch k before batch k+1. Markers pin the exact split.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(7);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 2,
+            MaxInFlightBatchesPerPartition = 2,
+            LingerMs = 10_000,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        for (byte m = 1; m <= 4; m++)
+            Assert.True(agg.TryEnqueue(new BundleSubmission(router, 7, m, m)));
+
+        await WaitUntil(() => exec.Calls.Count == 2);
+        exec.Release(7);
+        await WaitUntil(() => router.Completed.Count == 4);
+
+        Assert.True(exec.CallSignatures.TryDequeue(out int[]? first));
+        Assert.True(exec.CallSignatures.TryDequeue(out int[]? second));
+        Assert.Equal([1, 2], first);  // batch k carries the first two admissions...
+        Assert.Equal([3, 4], second); // ...and batch k+1 the next two, in order
+    }
+
+    [Fact]
+    public async Task Aggregator_DefaultCapacity_SecondFullBatchWaitsForCompletion()
+    {
+        // Pins the default (capacity 1): a second full batch never dispatches while one is in flight.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(4);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 4,
+            LingerMs = 10_000,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        for (int i = 0; i < 8; i++)
+            Assert.True(agg.TryEnqueue(Item(4, i, sink: router)));
+
+        await WaitUntil(() => exec.Calls.Count == 1);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+        Assert.Single(exec.Calls); // serial: the second batch waits for the first completion
+
+        exec.Release(4);
+        await WaitUntil(() => router.Completed.Count == 8);
+        Assert.Equal(2, exec.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Aggregator_MaxInFlight2_FailedFirstBatch_ReleasesOnlyItsItems_SecondCommits()
+    {
+        // Two overlapped batches settle independently: the first fails retryably, the second commits. Only the
+        // first batch's items are released; the second batch's items complete, and no reservation leaks.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(5);
+        exec.ScriptedCallStatuses.Enqueue(RaftOperationStatus.NodeIsNotLeader); // call 1 (batch k) fails transiently
+        exec.ScriptedCallStatuses.Enqueue(null);                                // call 2 (batch k+1) succeeds
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 2,
+            MaxInFlightBatchesPerPartition = 2,
+            LingerMs = 10_000,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        for (int i = 0; i < 4; i++)
+            Assert.True(agg.TryEnqueue(Item(5, 900 + i, sink: router)));
+
+        await WaitUntil(() => exec.Calls.Count == 2); // both batches in flight together
+        exec.Release(5);
+
+        await WaitUntil(() => router.Completed.Count == 2 && router.Released.Count == 2);
+
+        Assert.True(router.Released[900] && router.Released[901]); // batch k's items released retryably
+        Assert.True(router.Completed.ContainsKey(902) && router.Completed.ContainsKey(903)); // batch k+1 committed
+        await WaitUntil(() => agg.ReservedItems(5) == 0);
+    }
+
+    [Fact]
+    public async Task Aggregator_MaxInFlight2_CompletionTopsUpPipelineFromBacklog()
+    {
+        // A backlog accumulated behind a full pipeline drains at pipeline speed: each completion re-dispatches,
+        // and the in-loop top-up fills the freed capacity with further full batches without waiting for a wake.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(6);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 2,
+            MaxInFlightBatchesPerPartition = 2,
+            LingerMs = 10_000,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        for (int i = 0; i < 10; i++)
+            Assert.True(agg.TryEnqueue(Item(6, i, sink: router)));
+
+        await WaitUntil(() => exec.Calls.Count == 2); // pipeline full, 3 full batches buffered behind it
+        exec.Release(6);                              // completions release; every later call passes the gate
+
+        await WaitUntil(() => router.Completed.Count == 10);
+        Assert.Equal(5, exec.Calls.Count);
+        Assert.All(exec.Calls, c => Assert.Equal(2, c.Count));
+        await WaitUntil(() => agg.ReservedItems(6) == 0);
     }
 
     // ── hardening ───────────────────────────────────────────────────────────────

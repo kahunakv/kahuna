@@ -124,12 +124,12 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         PartitionWriteState state = GetState(item.PartitionId);
         PartitionWriteState.EnqueueResult result = state.Enqueue(item, options.MaxBatchItems, options.MaxBatchBytes);
 
-        // Never dispatch while a batch is already in flight for this partition (one-in-flight invariant); the
-        // buffer behind it is re-driven on BatchComplete. ShouldFlushNow already encodes !InFlight; the
-        // linger-disabled fast path must guard it too. Otherwise schedule a wake so the buffer flushes at its
-        // linger deadline and its items are released no later than their queue-age deadline — even while a
-        // batch is in flight (the in-flight case schedules an age-only wake).
-        if (result.ShouldFlushNow || (result.OpenedBuffer && options.LingerMs <= 0 && !state.InFlight))
+        // Never dispatch while the partition's in-flight pipeline is at capacity; the buffer behind it is
+        // re-driven on BatchComplete. ShouldFlushNow already encodes the capacity check; the linger-disabled
+        // fast path must guard it too. Otherwise schedule a wake so the buffer flushes at its linger deadline
+        // and its items are released no later than their queue-age deadline — even while the pipeline is full
+        // (the at-capacity case schedules an age-only wake).
+        if (result.ShouldFlushNow || (result.OpenedBuffer && options.LingerMs <= 0 && state.HasDispatchCapacity))
             Dispatch(item.PartitionId, state);
         else
             ScheduleWake(item.PartitionId, state);
@@ -143,8 +143,8 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         state.ClearArmedWake();
 
         // Release over-age items first (idempotent; front-of-queue is oldest), then flush if the oldest item's
-        // linger window has elapsed and nothing is in flight. Finally re-arm for whatever remains — the age
-        // deadline of a buffer retained behind an in-flight batch, or a still-future linger deadline.
+        // linger window has elapsed and in-flight capacity remains. Finally re-arm for whatever remains — the
+        // age deadline of a buffer retained behind a full pipeline, or a still-future linger deadline.
         SweepExpired(partitionId, state);
 
         if (state.LingerElapsed(NowMs(), options.LingerMs))
@@ -191,7 +191,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         // Re-drive the buffer that accumulated behind the just-completed batch, then re-arm a wake so any
         // items now in flight behind this re-dispatch (or still waiting) are released at their queue-age
-        // deadline. Completion is the point that re-dispatches, since a wake while in flight only swept.
+        // deadline. Completion re-dispatches because it frees an in-flight slot a full pipeline was holding.
         if (!stopping && state.PendingCount > 0)
             Dispatch(message.PartitionId, state);
 
@@ -224,13 +224,18 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     {
         // Loop over the all-released case iteratively rather than recursing: with a small MaxBatchItems and a
         // full queue of expired/stale items, one recursive frame per selected item would overflow the stack.
-        // Each pass selects a batch; if every item is released, clear the in-flight marker and select the next.
-        // The first pass with a proposable item dispatches it (one in-flight batch) and returns. Cleanup is
-        // bounded per invocation so one all-stale partition cannot monopolize a lane shared with others.
+        // Each pass selects a batch; if every item is released, free the in-flight slot and select the next.
+        // A pass with a proposable item dispatches it, then keeps selecting while in-flight capacity remains
+        // and another full batch is already buffered — a sub-threshold remainder waits for its linger wake or
+        // the next completion, exactly as an arrival would. Cleanup is bounded per invocation so one all-stale
+        // partition cannot monopolize a lane shared with others.
         int released = 0;
 
         while (true)
         {
+            if (!state.HasDispatchCapacity)
+                return;
+
             List<IProposalSubmission> selected = state.SelectBatch(options.MaxBatchItems, options.MaxBatchBytes);
             if (selected.Count == 0)
                 return;
@@ -258,8 +263,8 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 }
             }
 
-            // Every selected item was released — nothing to propose. Clear the in-flight marker that
-            // SelectBatch set and, if the partition still has queued work and we are not stopping, select the
+            // Every selected item was released — nothing to propose. Free the in-flight slot that
+            // SelectBatch took and, if the partition still has queued work and we are not stopping, select the
             // next batch — but yield the lane after a bounded amount of cleanup so this partition cannot starve
             // others; the re-posted wake resumes the drain on a fresh mailbox turn.
             if (valid.Count == 0)
@@ -310,7 +315,15 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             admission.IncInFlight();
 
             _ = RunBatch(partitionId, valid, entries);
-            return;
+
+            // Top up the pipeline: while another full batch is already buffered and in-flight capacity
+            // remains, dispatch it now instead of waiting for a completion or a wake. A sub-threshold
+            // remainder keeps its linger window. With the default capacity of 1 this never loops.
+            if (stopping || !state.HasDispatchCapacity)
+                return;
+
+            if (state.PendingCount < options.MaxBatchItems && state.QueuedBytes < options.MaxBatchBytes)
+                return;
         }
     }
 
@@ -478,7 +491,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     private PartitionWriteState GetState(int partitionId)
     {
         if (!states.TryGetValue(partitionId, out PartitionWriteState? state))
-            states[partitionId] = state = new PartitionWriteState();
+            states[partitionId] = state = new PartitionWriteState(options.MaxInFlightBatchesPerPartition);
 
         return state;
     }

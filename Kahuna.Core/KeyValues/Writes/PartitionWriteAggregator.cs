@@ -167,7 +167,7 @@ internal sealed class PartitionWriteAggregator : IDisposable
         // timeout. Only if the deadline elapses with work still in flight do we cancel it — a stuck executor must
         // not hang shutdown forever, but a batch that would settle promptly should not be aborted early.
         long deadlineTicks = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
-        while ((admission.TotalReservedItems() != 0 || admission.InFlightPartitions != 0)
+        while ((admission.TotalReservedItems() != 0 || admission.InFlightBatches != 0)
                && Environment.TickCount64 < deadlineTicks)
             await Task.Delay(10).ConfigureAwait(false);
 

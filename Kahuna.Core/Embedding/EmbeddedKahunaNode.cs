@@ -377,6 +377,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             CollectBatchMax = options.CollectBatchMax,
             KeyValueWriteLingerMs = options.KeyValueWriteLingerMs,
             KeyValueWriteMaxBatchItems = options.KeyValueWriteMaxBatchItems,
+            KeyValueWriteMaxInFlightBatchesPerPartition = options.KeyValueWriteMaxInFlightBatchesPerPartition,
             KeyValueWriteMaxBatchBytes = options.KeyValueWriteMaxBatchBytes,
             KeyValueWriteMaxQueuedItemsPerPartition = options.KeyValueWriteMaxQueuedItemsPerPartition,
             KeyValueWriteMaxQueuedBytesPerPartition = options.KeyValueWriteMaxQueuedBytesPerPartition,

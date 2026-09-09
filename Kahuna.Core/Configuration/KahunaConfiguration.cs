@@ -272,6 +272,12 @@ public sealed class KahunaConfiguration
     /// <summary>Maximum log entries selected for one aggregator Raft call.</summary>
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 
+    /// <summary>Maximum aggregator batches a single partition may have awaiting their Raft result at once.
+    /// 1 (the default) keeps the serial pipeline: one Raft round trip at a time per partition. A higher value
+    /// overlaps the rounds' quorum waits so round latency is no longer paid serially per batch; dispatch stays
+    /// FIFO, so per-partition log order is unchanged. Values below 1 are treated as 1.</summary>
+    public int KeyValueWriteMaxInFlightBatchesPerPartition { get; set; } = 1;
+
     /// <summary>Target serialized payload bytes per aggregator Raft call; an oversized single item dispatches
     /// alone regardless.</summary>
     public int KeyValueWriteMaxBatchBytes { get; set; } = 4 * 1024 * 1024;

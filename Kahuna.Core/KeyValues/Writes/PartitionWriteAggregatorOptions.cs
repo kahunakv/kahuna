@@ -9,6 +9,12 @@ internal sealed record PartitionWriteAggregatorOptions
 {
     public int LingerMs { get; init; } = 1;
 
+    /// <summary>Maximum batches a single partition may have awaiting their Raft result at once. 1 keeps the
+    /// classic serial pipeline (one round trip at a time); a higher value overlaps the rounds' quorum waits so
+    /// the round latency is no longer paid serially per batch. Dispatch order stays FIFO regardless, so
+    /// per-partition log ids remain monotone. Values below 1 are treated as 1.</summary>
+    public int MaxInFlightBatchesPerPartition { get; init; } = 1;
+
     public int MaxBatchItems { get; init; } = 512;
 
     public int MaxBatchBytes { get; init; } = 4 * 1024 * 1024;

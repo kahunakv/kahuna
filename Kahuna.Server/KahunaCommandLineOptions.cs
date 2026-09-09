@@ -522,6 +522,9 @@ public sealed class KahunaCommandLineOptions
     [Option("kv-write-max-batch-items", Required = false, HelpText = "Maximum log entries per aggregator Raft call", Default = 512)]
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 
+    [Option("kv-write-max-in-flight-batches", Required = false, HelpText = "Maximum aggregator batches a partition may have awaiting their Raft result at once; 1 = serial (one round trip at a time)", Default = 1)]
+    public int KeyValueWriteMaxInFlightBatchesPerPartition { get; set; } = 1;
+
     [Option("kv-write-max-batch-bytes", Required = false, HelpText = "Target serialized bytes per aggregator Raft call", Default = 4 * 1024 * 1024)]
     public int KeyValueWriteMaxBatchBytes { get; set; } = 4 * 1024 * 1024;
 

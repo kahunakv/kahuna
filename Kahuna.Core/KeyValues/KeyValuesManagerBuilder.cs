@@ -225,6 +225,7 @@ internal sealed class KeyValuesManagerBuilder
             {
                 LingerMs = configuration.KeyValueWriteLingerMs,
                 MaxBatchItems = configuration.KeyValueWriteMaxBatchItems,
+                MaxInFlightBatchesPerPartition = configuration.KeyValueWriteMaxInFlightBatchesPerPartition,
                 MaxBatchBytes = configuration.KeyValueWriteMaxBatchBytes,
                 MaxQueuedItemsPerPartition = configuration.KeyValueWriteMaxQueuedItemsPerPartition,
                 MaxQueuedBytesPerPartition = configuration.KeyValueWriteMaxQueuedBytesPerPartition,

@@ -165,7 +165,7 @@ internal static class PartitionWriteAggregatorMetrics
         Meter gaugeMeter = new("Kahuna", "1.0");
         gaugeMeter.CreateObservableGauge("kahuna.kv.write.queued_items", admission.TotalReservedItems, description: "Items admitted but not yet completed, across partitions.");
         gaugeMeter.CreateObservableGauge("kahuna.kv.write.queued_bytes", admission.TotalReservedBytes, unit: "By", description: "Serialized bytes admitted but not yet completed.");
-        gaugeMeter.CreateObservableGauge("kahuna.kv.write.in_flight_partitions", () => (long)admission.InFlightPartitions, description: "Partitions with a batch awaiting its Raft result.");
+        gaugeMeter.CreateObservableGauge("kahuna.kv.write.in_flight_partitions", () => (long)admission.InFlightBatches, description: "Batches awaiting their Raft result across all partitions; equals partitions-with-a-batch-in-flight at the default one-batch-per-partition cap.");
         return gaugeMeter;
     }
 }

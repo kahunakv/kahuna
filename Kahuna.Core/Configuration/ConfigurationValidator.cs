@@ -172,6 +172,10 @@ public static class ConfigurationValidator
         if (configuration.KeyValueWriteMaxBatchItems <= 0)
             configuration.KeyValueWriteMaxBatchItems = 512;
 
+        // At least one batch must be dispatchable per partition or nothing ever flushes.
+        if (configuration.KeyValueWriteMaxInFlightBatchesPerPartition < 1)
+            configuration.KeyValueWriteMaxInFlightBatchesPerPartition = 1;
+
         if (configuration.KeyValueWriteMaxBatchBytes <= 0)
             configuration.KeyValueWriteMaxBatchBytes = 4 * 1024 * 1024;
 

@@ -3,32 +3,53 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// <summary>
 /// Pure, single-threaded FIFO state for one partition's pending direct writes. The lane actor owns one of
 /// these per partition and drives it from its (single-threaded) message loop; keeping the ordering, batching,
-/// one-in-flight, and wake-scheduling logic here — with no actors, timers, or Raft — makes it deterministically
-/// testable.
+/// in-flight accounting, and wake-scheduling logic here — with no actors, timers, or Raft — makes it
+/// deterministically testable.
+///
+/// <para>Up to <c>maxInFlightBatches</c> batches may await their Raft result concurrently. Batches are always
+/// selected and dispatched in FIFO submission order from the single-threaded lane, so per-partition log ids
+/// stay monotone; the Raft layer overlaps the rounds' quorum waits. The default of 1 keeps the classic
+/// one-batch-at-a-time pipeline. A flush can start only while in-flight capacity remains; items that arrive
+/// with the pipeline full wait, still bounded by their queue-age deadline.</para>
 ///
 /// <para>Wakes are scheduled by deadline (a millisecond tick), not by a clock the state reads. The actor asks
 /// for <see cref="NextWakeDeadline"/> — the earlier of the oldest item's linger-flush and queue-age-expiry
-/// deadlines (only the age deadline while a batch is in flight, since a flush cannot start then) — and arms a
-/// single timer for it via <see cref="TryArmWake"/>. A steady arrival stream does not re-arm because the oldest
-/// item's deadlines do not move. Count/byte thresholds still flush immediately without waiting for a timer.
-/// Because linger ≤ queue-age (enforced by configuration), the earliest armed timer always fires no later than
-/// any deadline that could come due, so the chain re-arms itself and never misses an expiry.</para>
+/// deadlines (only the age deadline while the pipeline is at capacity, since a flush cannot start then) — and
+/// arms a single timer for it via <see cref="TryArmWake"/>. A steady arrival stream does not re-arm because the
+/// oldest item's deadlines do not move. Count/byte thresholds still flush immediately without waiting for a
+/// timer. Because linger ≤ queue-age (enforced by configuration), the earliest armed timer always fires no
+/// later than any deadline that could come due, so the chain re-arms itself and never misses an expiry.</para>
 /// </summary>
 internal sealed class PartitionWriteState
 {
     /// <summary>Sentinel deadline meaning "no wake needed / none armed".</summary>
     public const long NoWake = long.MaxValue;
 
+    private readonly int maxInFlightBatches;
+
     private readonly List<IProposalSubmission> pending = [];
     private int head;
 
     private long armedWakeDeadline = NoWake;
 
+    private int inFlightBatches;
+
+    public PartitionWriteState(int maxInFlightBatches = 1)
+    {
+        this.maxInFlightBatches = Math.Max(1, maxInFlightBatches);
+    }
+
     /// <summary>Serialized bytes of the items still waiting (not yet selected into a batch).</summary>
     public long QueuedBytes { get; private set; }
 
-    /// <summary>True while a batch for this partition is awaiting its Raft result.</summary>
-    public bool InFlight { get; private set; }
+    /// <summary>True while at least one batch for this partition is awaiting its Raft result.</summary>
+    public bool InFlight => inFlightBatches > 0;
+
+    /// <summary>Batches for this partition currently awaiting their Raft result.</summary>
+    public int InFlightBatches => inFlightBatches;
+
+    /// <summary>True while another batch may be dispatched (the in-flight count is below the cap).</summary>
+    public bool HasDispatchCapacity => inFlightBatches < maxInFlightBatches;
 
     /// <summary>Items waiting behind the consumed head (excludes any already selected into an in-flight batch).</summary>
     public int PendingCount => pending.Count - head;
@@ -40,10 +61,10 @@ internal sealed class PartitionWriteState
     public readonly record struct EnqueueResult(bool ShouldFlushNow, bool OpenedBuffer);
 
     /// <summary>
-    /// Appends an item. Signals whether it should flush now (count/byte threshold met and nothing in flight)
-    /// and whether it opened a previously-empty buffer (the actor schedules a wake for the new coalescing
-    /// window). A single item that already exceeds the byte target opens and immediately flushes so it
-    /// dispatches alone.
+    /// Appends an item. Signals whether it should flush now (count/byte threshold met and in-flight capacity
+    /// remains) and whether it opened a previously-empty buffer (the actor schedules a wake for the new
+    /// coalescing window). A single item that already exceeds the byte target opens and immediately flushes so
+    /// it dispatches alone.
     /// </summary>
     public EnqueueResult Enqueue(IProposalSubmission item, int maxItems, long maxBytes)
     {
@@ -52,13 +73,13 @@ internal sealed class PartitionWriteState
         pending.Add(item);
         QueuedBytes += item.ByteLength;
 
-        bool flushNow = !InFlight && (PendingCount >= maxItems || QueuedBytes >= maxBytes);
+        bool flushNow = HasDispatchCapacity && (PendingCount >= maxItems || QueuedBytes >= maxBytes);
         return new EnqueueResult(flushNow, opened);
     }
 
     /// <summary>
     /// The next wake deadline (ms) for this partition's pending work, or <see cref="NoWake"/> if nothing is
-    /// pending. While a batch is in flight only the age-expiry deadline matters (a flush cannot start);
+    /// pending. While the pipeline is at capacity only the age-expiry deadline matters (a flush cannot start);
     /// otherwise it is the earlier of the linger-flush and age-expiry deadlines, both anchored to the oldest
     /// pending item.
     /// </summary>
@@ -69,7 +90,7 @@ internal sealed class PartitionWriteState
 
         long oldest = OldestPendingTicks;
         long ageDeadline = oldest + maxQueueDelayMs;
-        return InFlight ? ageDeadline : Math.Min(oldest + lingerMs, ageDeadline);
+        return HasDispatchCapacity ? Math.Min(oldest + lingerMs, ageDeadline) : ageDeadline;
     }
 
     /// <summary>Arms a wake for <paramref name="deadline"/> only if it is earlier than the one already armed,
@@ -88,12 +109,13 @@ internal sealed class PartitionWriteState
     public void ClearArmedWake() => armedWakeDeadline = NoWake;
 
     /// <summary>True when the linger window of the oldest pending item has elapsed at <paramref name="nowMs"/>
-    /// and a flush is possible (nothing in flight) — the point at which a coalescing buffer is dispatched.</summary>
+    /// and a flush is possible (in-flight capacity remains) — the point at which a coalescing buffer is
+    /// dispatched.</summary>
     public bool LingerElapsed(long nowMs, int lingerMs) =>
-        !InFlight && PendingCount > 0 && nowMs - OldestPendingTicks >= lingerMs;
+        HasDispatchCapacity && PendingCount > 0 && nowMs - OldestPendingTicks >= lingerMs;
 
     /// <summary>
-    /// Selects the next FIFO batch up to the item and byte caps and marks the partition in flight. The first
+    /// Selects the next FIFO batch up to the item and byte caps and counts it in flight. The first
     /// item is always included even if it alone exceeds the byte cap (an oversized item dispatches alone; the
     /// cap is a batching target, not a value-size limit). Returns the selected items in admission order.
     /// </summary>
@@ -115,13 +137,17 @@ internal sealed class PartitionWriteState
         }
 
         Compact();
-        InFlight = true;
+
+        // An empty selection dispatches nothing, so it must not consume an in-flight slot.
+        if (batch.Count > 0)
+            inFlightBatches++;
+
         return batch;
     }
 
-    /// <summary>Clears the in-flight marker once a batch settled; the caller decides whether to re-dispatch the
+    /// <summary>Releases one in-flight slot once a batch settled; the caller decides whether to re-dispatch the
     /// buffer behind it.</summary>
-    public void OnBatchComplete() => InFlight = false;
+    public void OnBatchComplete() => inFlightBatches--;
 
     /// <summary>
     /// Pops and returns the oldest pending items whose age (<paramref name="nowTicks"/> − enqueue tick)

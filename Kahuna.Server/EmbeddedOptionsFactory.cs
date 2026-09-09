@@ -69,6 +69,7 @@ public static class EmbeddedOptionsFactory
         CacheEntriesToRemove = opts.CacheEntriesToRemove,
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
         KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
+        KeyValueWriteMaxInFlightBatchesPerPartition = opts.KeyValueWriteMaxInFlightBatchesPerPartition,
         KeyValueWriteMaxBatchBytes = opts.KeyValueWriteMaxBatchBytes,
         KeyValueWriteMaxQueuedItemsPerPartition = opts.KeyValueWriteMaxQueuedItemsPerPartition,
         KeyValueWriteMaxQueuedBytesPerPartition = opts.KeyValueWriteMaxQueuedBytesPerPartition,

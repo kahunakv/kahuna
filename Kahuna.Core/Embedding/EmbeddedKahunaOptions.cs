@@ -274,6 +274,10 @@ public sealed class EmbeddedKahunaOptions
 
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 
+    /// <summary>Maximum aggregator batches a single partition may have awaiting their Raft result at once;
+    /// 1 keeps the serial one-round-at-a-time pipeline. Dispatch stays FIFO regardless.</summary>
+    public int KeyValueWriteMaxInFlightBatchesPerPartition { get; set; } = 1;
+
     public int KeyValueWriteMaxBatchBytes { get; set; } = 4 * 1024 * 1024;
 
     public int KeyValueWriteMaxQueuedItemsPerPartition { get; set; } = 8_192;

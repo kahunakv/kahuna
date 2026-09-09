@@ -213,11 +213,14 @@ internal sealed class PartitionAdmissionRegistry
             return globalBytes;
     }
 
-    private int inFlightPartitions;
+    private int inFlightBatches;
 
-    public void IncInFlight() => Interlocked.Increment(ref inFlightPartitions);
+    public void IncInFlight() => Interlocked.Increment(ref inFlightBatches);
 
-    public void DecInFlight() => Interlocked.Decrement(ref inFlightPartitions);
+    public void DecInFlight() => Interlocked.Decrement(ref inFlightBatches);
 
-    public int InFlightPartitions => Volatile.Read(ref inFlightPartitions);
+    /// <summary>Batches currently awaiting their Raft result across all partitions. With the default of one
+    /// in-flight batch per partition this equals the number of partitions with a batch in flight; a higher
+    /// per-partition cap counts each overlapped batch.</summary>
+    public int InFlightBatches => Volatile.Read(ref inFlightBatches);
 }
