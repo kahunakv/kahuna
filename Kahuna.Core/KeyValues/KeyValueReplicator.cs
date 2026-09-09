@@ -228,6 +228,12 @@ internal sealed class KeyValueReplicator
     /// base entry. The returned acknowledgement means the actor has
     /// completed that work; routing/enqueueing alone is not sufficient to settle the durable intent.
     ///
+    /// <para>A true return attests the RESIDENT entry only, never local durability: the actor answers
+    /// Committed for a head it already applied even when nothing was persisted for it (the leader's own
+    /// one-phase materialization advances the resident head and deliberately persists nothing, trusting the
+    /// replicator's durable apply — which may have been skipped). A caller that needs the mutation durable
+    /// must verify durable state itself, as the commit-repair drive does.</para>
+    ///
     /// <para>Two-step hydration: the actor's message loop never performs backend I/O, so when the key is not
     /// resident the first ask answers MustRetry, the persisted row is read HERE — off the actor, on the queued
     /// read scheduler — and a second ask hands the result in. The resident hot path stays a single ask with no
@@ -491,6 +497,11 @@ internal sealed class KeyValueReplicator
     /// still cannot confirm, the parked mutation stays armed and the fence's refusal-streak hook re-drives it
     /// (<see cref="RetryPendingCommitRepair"/>) for as long as the key keeps refusing. Without this, a repair
     /// lost in the same pause window that caused the skip left the key read-only to run end.</para>
+    ///
+    /// <para>"Confirmed" means verified durable — the overlay or the hydrated backend row at or above the
+    /// intent's revision — never the actor's Committed answer, which attests only the resident entry. A
+    /// drive the actor confirmed but verification did not re-promotes the mutation from the parked intent
+    /// through the persistence path itself; the intent is released only once verification passes.</para>
     /// </summary>
     public void ScheduleDurableCommitRepair(int partitionId, PreparedIntent intent)
     {
@@ -576,10 +587,10 @@ internal sealed class KeyValueReplicator
                 // laddered actor asks per minute (the run-V seed collapse). The off-actor verification read
                 // separates "flushed" from "missing" without touching the actor, so the common false miss
                 // resolves silently; only a verified-missing row warns, counts, and drives. Verification is
-                // also what CONFIRMS a drive: it reads state the drive's apply actually updates (the
-                // confirmed-commit apply records the overlay before enqueueing the flush), so confirmation
-                // never depends on the actor's archival-proof answer, which can be MustRetry forever for an
-                // already-converged entry.
+                // also the ONLY thing that CONFIRMS a drive: it reads durable state, which the actor's
+                // answer never attests (Committed can mean "resident head already applied, nothing
+                // persisted", and MustRetry can repeat forever for an already-converged entry). A drive the
+                // actor confirmed but verification did not re-promotes the mutation itself, below.
                 bool verifiedMissing = false;
 
                 foreach (TimeSpan delay in CommitRepairBackoff)
@@ -602,17 +613,49 @@ internal sealed class KeyValueReplicator
                             intent.Key, intent.TransactionId);
                     }
 
-                    bool confirmed;
+                    bool actorCommitted;
                     try
                     {
-                        confirmed = await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
+                        actorCommitted = await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
                     }
                     catch
                     {
-                        confirmed = false;
+                        actorCommitted = false;
                     }
 
-                    if (confirmed)
+                    if (!actorCommitted)
+                        continue;
+
+                    // The actor's Committed answer is a hint, never the confirmation. The actor judges
+                    // only its RESIDENT entry: when the leader's own one-phase commit already advanced
+                    // the resident head (ApplyOwnCommittedMaterialization, which by design persists
+                    // nothing), the actor answers Committed for the exact state this repair exists to
+                    // heal — head applied, durable apply skipped. Discarding the parked intent on that
+                    // word alone permanently lost an acknowledged commit: the intent is the node's last
+                    // copy of the mutation, no retained history exists to recover from, and the key
+                    // stayed read-only to run end. Only re-verified durability releases the intent.
+                    if (await VerifyLocallyDurableAsync(partitionId, intent).ConfigureAwait(false))
+                    {
+                        DiscardPendingCommitRepair(intent.Key, intent.Revision);
+                        return;
+                    }
+
+                    // Actor says applied, durable state says missing: the actor cannot persist (its
+                    // message loop does no I/O) and its head guards no-op the re-apply, so the drive
+                    // itself must re-promote the mutation through the persistence path — exactly what
+                    // the coherence recovery does with a history row, here from the parked intent that
+                    // carries the full mutation. Overlay record and backend advance are both monotonic
+                    // by (revision, commit HLC), so a racing newer write is never regressed. Safe only
+                    // AFTER an actor-confirmed apply: a false/errored answer may mean the abort fence
+                    // refused, and promoting then would materialize an aborted transaction's leg.
+                    Transactions.DurableTransactionMetrics.MaterializationRepairRepromotions.Add(1);
+                    logger.LogWarning(
+                        "Materialization repair for key {Key} of transaction {TransactionId}: the actor reports the commit applied but revision {Revision} is still missing from durable state; re-promoting it from the parked mutation",
+                        intent.Key, intent.TransactionId, intent.Revision);
+
+                    RepromoteParkedMutation(partitionId, intent);
+
+                    if (await VerifyLocallyDurableAsync(partitionId, intent).ConfigureAwait(false))
                     {
                         DiscardPendingCommitRepair(intent.Key, intent.Revision);
                         return;
@@ -665,6 +708,43 @@ internal sealed class KeyValueReplicator
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Re-promotes a parked commit repair's mutation through the persistence path: the overlay record makes
+    /// the committed value visible to the durable read path immediately, and the queued backend write
+    /// advances the durable current row when the flush lands — the same two steps
+    /// <see cref="RecoverCommittedHeadFromHistoryAsync"/> performs with a recovered history row. Called only
+    /// after the owning actor confirmed the commit applied while verification still reads the durable state
+    /// below the intent's revision: the replicator's own durable apply for the commit's log entry never ran
+    /// on this node, and the parked intent is the last copy of the mutation. Idempotent — overlay and
+    /// backend both keep the newest head by (revision, commit HLC). The timestamps mirror the commit-apply
+    /// ask: the commit timestamp is both last-used and last-modified.
+    /// </summary>
+    private void RepromoteParkedMutation(int partitionId, PreparedIntent intent)
+    {
+        unflushedWrites?.Record(
+            intent.Key,
+            intent.Value,
+            intent.Revision,
+            intent.Expires,
+            intent.CommitTimestamp,
+            intent.CommitTimestamp,
+            intent.State,
+            intent.NoRevision);
+
+        // Null only in bare unit-test constructions; production wiring always has the writer.
+        backgroundWriter?.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
+            partitionId,
+            intent.Key,
+            intent.Value,
+            intent.Revision,
+            intent.Expires,
+            intent.CommitTimestamp,
+            intent.CommitTimestamp,
+            (int)intent.State,
+            intent.NoRevision));
     }
 
     /// <summary>

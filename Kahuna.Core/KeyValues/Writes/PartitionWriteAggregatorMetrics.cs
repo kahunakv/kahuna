@@ -45,12 +45,15 @@ internal static class PartitionWriteAggregatorMetrics
     internal static readonly Histogram<long> QueueAgeMs =
         Meter.CreateHistogram<long>("kahuna.kv.write.queue_age", unit: "ms", description: "Age of the oldest item in a dispatched batch, tagged by its admission class.");
 
-    /// <summary>Per-submission time from admission to dispatch, tagged by admission class and by the log type of
-    /// the submission's first entry (<c>kv</c>, <c>record</c>, <c>intent</c>, <c>other</c>). One sample per
-    /// submission, so a decision (a terminal record) that waited behind a materialization window (terminal kv)
-    /// shows up on its own series even when it was not the oldest item of its batch.</summary>
+    /// <summary>Per-submission time from admission to dispatch, tagged by admission class, by the log type of
+    /// the submission's first entry (<c>kv</c>, <c>record</c>, <c>intent</c>, <c>other</c>), and by the stage
+    /// that produced the submission (<c>one_phase</c>, <c>record_init</c>, <c>prepare</c>, <c>re_prepare</c>,
+    /// <c>decision</c>, <c>materialize</c>, <c>settle</c>, <c>other</c>). One sample per submission, so a
+    /// decision that waited behind a materialization window shows up on its own series even when it was not the
+    /// oldest item of its batch. The stage tag stays off <see cref="RaftDurationMs"/> and
+    /// <see cref="CompletionDelayMs"/> deliberately: those record once per batch, and a batch mixes stages.</summary>
     internal static readonly Histogram<long> SubmissionQueueDelayMs =
-        Meter.CreateHistogram<long>("kahuna.kv.write.submission_queue_delay", unit: "ms", description: "Per-submission admission-to-dispatch delay, tagged by admission class and log type.");
+        Meter.CreateHistogram<long>("kahuna.kv.write.submission_queue_delay", unit: "ms", description: "Per-submission admission-to-dispatch delay, tagged by admission class, log type, and producing stage.");
 
     private static readonly KeyValuePair<string, object?> TypeKv = new("type", "kv");
     private static readonly KeyValuePair<string, object?> TypeRecord = new("type", "record");
@@ -62,6 +65,27 @@ internal static class PartitionWriteAggregatorMetrics
         : logType == ReplicationTypes.TransactionRecord ? TypeRecord
         : logType == ReplicationTypes.PreparedIntent ? TypeIntent
         : TypeOther;
+
+    private static readonly KeyValuePair<string, object?> StageOnePhase = new("stage", "one_phase");
+    private static readonly KeyValuePair<string, object?> StageRecordInit = new("stage", "record_init");
+    private static readonly KeyValuePair<string, object?> StagePrepare = new("stage", "prepare");
+    private static readonly KeyValuePair<string, object?> StageRePrepare = new("stage", "re_prepare");
+    private static readonly KeyValuePair<string, object?> StageDecision = new("stage", "decision");
+    private static readonly KeyValuePair<string, object?> StageMaterialize = new("stage", "materialize");
+    private static readonly KeyValuePair<string, object?> StageSettle = new("stage", "settle");
+    private static readonly KeyValuePair<string, object?> StageOther = new("stage", "other");
+
+    private static KeyValuePair<string, object?> StageTag(WriteSubmissionStage stage) => stage switch
+    {
+        WriteSubmissionStage.OnePhase => StageOnePhase,
+        WriteSubmissionStage.RecordInit => StageRecordInit,
+        WriteSubmissionStage.Prepare => StagePrepare,
+        WriteSubmissionStage.RePrepare => StageRePrepare,
+        WriteSubmissionStage.Decision => StageDecision,
+        WriteSubmissionStage.Materialize => StageMaterialize,
+        WriteSubmissionStage.Settle => StageSettle,
+        _ => StageOther
+    };
 
     /// <summary>Duration of the detached Raft round trip only. It stops when the executor returns, before the
     /// completion message reaches the lane mailbox and the submissions are applied and completed — that tail
@@ -101,9 +125,10 @@ internal static class PartitionWriteAggregatorMetrics
 
     internal static void Admitted(WriteAdmissionClass cls) => AdmittedItems.Add(1, ClassTag(cls));
 
-    /// <summary>One submission selected into a batch: its admission-to-dispatch delay, by class and log type.</summary>
-    internal static void SubmissionDispatched(long queueDelayMs, WriteAdmissionClass cls, string firstEntryLogType) =>
-        SubmissionQueueDelayMs.Record(queueDelayMs, ClassTag(cls), TypeTag(firstEntryLogType));
+    /// <summary>One submission selected into a batch: its admission-to-dispatch delay, by class, log type, and
+    /// the stage the submission carried from its creation site.</summary>
+    internal static void SubmissionDispatched(long queueDelayMs, WriteAdmissionClass cls, string firstEntryLogType, WriteSubmissionStage stage) =>
+        SubmissionQueueDelayMs.Record(queueDelayMs, ClassTag(cls), TypeTag(firstEntryLogType), StageTag(stage));
 
     internal static void BatchDispatched(int ordinaryEntries, int terminalEntries, long bytes, long oldestAgeMs, WriteAdmissionClass oldestClass)
     {

@@ -41,6 +41,7 @@ public sealed class TestPartitionWriteAggregator
         public int ProposalId { get; }
         public int PartitionId { get; }
         public WriteAdmissionClass AdmissionClass { get; }
+        public WriteSubmissionStage Stage => WriteSubmissionStage.Other;
         public int ByteLength { get; }
         public IReadOnlyList<RaftProposalEntry> Entries { get; }
         public long EnqueueTicks { get; set; }
@@ -70,6 +71,7 @@ public sealed class TestPartitionWriteAggregator
         public int ProposalId { get; }
         public int PartitionId { get; }
         public WriteAdmissionClass AdmissionClass => WriteAdmissionClass.Ordinary;
+        public WriteSubmissionStage Stage => WriteSubmissionStage.Other;
         public int ByteLength { get; }
         public IReadOnlyList<RaftProposalEntry> Entries { get; }
         public long EnqueueTicks { get; set; }

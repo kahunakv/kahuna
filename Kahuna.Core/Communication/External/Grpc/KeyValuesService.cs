@@ -175,6 +175,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             return null;
 
         GrpcTrySetManyKeyValueResponse response = new();
+        ReserveItemCapacity(response.Items, request.Items.Count);
         foreach (GrpcTrySetManyKeyValueRequestItem item in request.Items)
             response.Items.Add(new GrpcTrySetManyKeyValueResponseItem
             {
@@ -205,6 +206,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             return null;
 
         GrpcTryDeleteManyKeyValueResponse response = new();
+        ReserveItemCapacity(response.Items, request.Items.Count);
         foreach (GrpcTryDeleteManyKeyValueRequestItem item in request.Items)
             response.Items.Add(new GrpcTryDeleteManyKeyValueResponseItem
             {
@@ -239,13 +241,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         RouteHintWriter.Table routes = new(capture);
 
-        response.Items.AddRange(GetResponseSetManyItems(responses, routes));
+        AddResponseSetManyItems(response.Items, responses, routes);
 
         if (routes.HasRoutes)
-            response.Routes.AddRange(routes.ToGrpc());
+            routes.WriteGrpc(response.Routes);
 
         return response;
-    }    
+    }
 
     private static List<KahunaSetKeyValueRequestItem> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
     {                 
@@ -275,11 +277,30 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return requestItems;
     }
     
-    private static IEnumerable<GrpcTrySetManyKeyValueResponseItem> GetResponseSetManyItems(List<KahunaSetKeyValueResponseItem> responses, RouteHintWriter.Table routes)
+    /// <summary>
+    /// Reserves room for a batch of known size before its items are added one by one. Without the
+    /// reservation the repeated field grows its backing array several times per batch.
+    /// </summary>
+    private static void ReserveItemCapacity<T>(RepeatedField<T> target, int count)
     {
+        if (count == 0)
+            return;
+
+        // The field is empty at every current call site, but a later caller may append to a
+        // populated one, so the existing items are part of the requirement.
+        int required = checked(target.Count + count);
+
+        if (required > target.Capacity)
+            target.Capacity = required;
+    }
+
+    private static void AddResponseSetManyItems(RepeatedField<GrpcTrySetManyKeyValueResponseItem> target, List<KahunaSetKeyValueResponseItem> responses, RouteHintWriter.Table routes)
+    {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach (KahunaSetKeyValueResponseItem response in responses)
         {
-            yield return new()
+            target.Add(new GrpcTrySetManyKeyValueResponseItem
             {
                 Type = (GrpcKeyValueResponseType)response.Type,
                 Key = response.Key,
@@ -289,7 +310,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 LastModifiedCounter = response.LastModified.C,
                 Durability = (GrpcKeyValueDurability)response.Durability,
                 RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? "")
-            };
+            });
         }
     }
 
@@ -318,10 +339,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         RouteHintWriter.Table routes = new(capture);
 
-        response.Items.AddRange(GetResponseDeleteManyItems(responses, routes));
+        AddResponseDeleteManyItems(response.Items, responses, routes);
 
         if (routes.HasRoutes)
-            response.Routes.AddRange(routes.ToGrpc());
+            routes.WriteGrpc(response.Routes);
 
         return response;
     }
@@ -343,11 +364,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return requestItems;
     }
 
-    private static IEnumerable<GrpcTryDeleteManyKeyValueResponseItem> GetResponseDeleteManyItems(List<KahunaDeleteKeyValueResponseItem> responses, RouteHintWriter.Table routes)
+    private static void AddResponseDeleteManyItems(RepeatedField<GrpcTryDeleteManyKeyValueResponseItem> target, List<KahunaDeleteKeyValueResponseItem> responses, RouteHintWriter.Table routes)
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
         {
-            yield return new()
+            target.Add(new GrpcTryDeleteManyKeyValueResponseItem
             {
                 Type = (GrpcKeyValueResponseType)response.Type,
                 Key = response.Key,
@@ -357,7 +380,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 LastModifiedCounter = response.LastModified.C,
                 Durability = (GrpcKeyValueDurability)response.Durability,
                 RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? "")
-            };
+            });
         }
     }
 
@@ -493,6 +516,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         if (request.TransactionIdNode != 0 || request.TransactionIdPhysical != 0 || request.TransactionIdCounter != 0)
         {
             GrpcTryGetManyValuesResponse rejected = new();
+            ReserveItemCapacity(rejected.Items, request.Items.Count);
             foreach (GrpcTryManyValuesRequestItem item in request.Items)
                 rejected.Items.Add(new GrpcTryGetManyValuesResponseItem
                 {
@@ -520,10 +544,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         GrpcTryGetManyValuesResponse response = new();
         RouteHintWriter.Table routes = new(capture);
-        response.Items.Add(GetResponseGetManyValuesItems(responses, routes));
+        AddResponseGetManyValuesItems(response.Items, responses, routes);
 
         if (routes.HasRoutes)
-            response.Routes.AddRange(routes.ToGrpc());
+            routes.WriteGrpc(response.Routes);
 
         return response;
     }
@@ -617,7 +641,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryGetManyValuesResponse response = new();
-        response.Items.Add(GetResponseGetManyValuesItems(responses));
+        AddResponseGetManyValuesItems(response.Items, responses);
         return response;
     }
 
@@ -642,6 +666,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         if (request.TransactionIdNode != 0 || request.TransactionIdPhysical != 0 || request.TransactionIdCounter != 0)
         {
             GrpcTryExistsManyValuesResponse rejected = new();
+            ReserveItemCapacity(rejected.Items, request.Items.Count);
             foreach (GrpcTryManyValuesRequestItem item in request.Items)
                 rejected.Items.Add(new GrpcTryExistsManyValuesResponseItem
                 {
@@ -665,10 +690,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         GrpcTryExistsManyValuesResponse response = new();
         RouteHintWriter.Table routes = new(capture);
-        response.Items.Add(GetResponseExistsManyValuesItems(responses, routes));
+        AddResponseExistsManyValuesItems(response.Items, responses, routes);
 
         if (routes.HasRoutes)
-            response.Routes.AddRange(routes.ToGrpc());
+            routes.WriteGrpc(response.Routes);
 
         return response;
     }
@@ -756,7 +781,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryExistsManyValuesResponse response = new();
-        response.Items.Add(GetResponseExistsManyValuesItems(responses));
+        AddResponseExistsManyValuesItems(response.Items, responses);
         return response;
     }
 
@@ -772,11 +797,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return rItems;
     }
 
-    private static IEnumerable<GrpcTryGetManyValuesResponseItem> GetResponseGetManyValuesItems(
+    private static void AddResponseGetManyValuesItems(
+        RepeatedField<GrpcTryGetManyValuesResponseItem> target,
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
         RouteHintWriter.Table? routes = null
     )
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
         {
             GrpcTryGetManyValuesResponseItem item = new()
@@ -807,15 +835,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             if (routes is not null)
                 item.RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, key);
 
-            yield return item;
+            target.Add(item);
         }
     }
 
-    private static IEnumerable<GrpcTryExistsManyValuesResponseItem> GetResponseExistsManyValuesItems(
+    private static void AddResponseExistsManyValuesItems(
+        RepeatedField<GrpcTryExistsManyValuesResponseItem> target,
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
         RouteHintWriter.Table? routes = null
     )
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
         {
             GrpcTryExistsManyValuesResponseItem item = new()
@@ -843,7 +874,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             if (routes is not null)
                 item.RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, key);
 
-            yield return item;
+            target.Add(item);
         }
     }
 
@@ -1006,8 +1037,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryAcquireManyExclusiveLocksResponse response = new();
-        
-        response.Items.Add(GetResponseLocksItems(responses));
+
+        AddResponseLocksItems(response.Items, responses);
 
         return response;
     }
@@ -1036,12 +1067,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     /// <param name="responses">A list of tuples containing the key-value response type, key, and durability information.</param>
     /// <returns>An enumerable collection of gRPC response items corresponding to the provided key-value responses.</returns>
-    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksResponseItem> GetResponseLocksItems(
+    private static void AddResponseLocksItems(
+        RepeatedField<GrpcTryAcquireManyExclusiveLocksResponseItem> target,
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses
     )
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType response, string key, KeyValueDurability durability, HLCTimestamp holder) in responses)
-            yield return new()
+            target.Add(new GrpcTryAcquireManyExclusiveLocksResponseItem
             {
                 Type = (GrpcKeyValueResponseType)response,
                 Key = key,
@@ -1049,7 +1083,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 HolderTransactionIdNode     = holder.N,
                 HolderTransactionIdPhysical = holder.L,
                 HolderTransactionIdCounter  = holder.C
-            };
+            });
     }
 
     /// <summary>
@@ -1251,8 +1285,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryReleaseManyExclusiveLocksResponse response = new();
-        
-        response.Items.Add(GetResponseReleaseItems(responses));
+
+        AddResponseReleaseItems(response.Items, responses);
 
         return response;
     }
@@ -1272,15 +1306,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return rItems;
     }
     
-    private static IEnumerable<GrpcTryReleaseManyExclusiveLocksResponseItem> GetResponseReleaseItems(List<(KeyValueResponseType, string, KeyValueDurability)> responses)
+    private static void AddResponseReleaseItems(RepeatedField<GrpcTryReleaseManyExclusiveLocksResponseItem> target, List<(KeyValueResponseType, string, KeyValueDurability)> responses)
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType response, string key, KeyValueDurability durability) in responses)
-            yield return new()
+            target.Add(new GrpcTryReleaseManyExclusiveLocksResponseItem
             {
                 Type = (GrpcKeyValueResponseType)response,
                 Key = key,
                 Durability = (GrpcKeyValueDurability)durability
-            };
+            });
     }
 
     /// <summary>
@@ -1355,8 +1391,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryPrepareManyMutationsResponse response = new();
-        
-        response.Items.Add(GetResponsePrepareItems(responses));
+
+        AddResponsePrepareItems(response.Items, responses);
 
         return response;
     }
@@ -1381,18 +1417,20 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     /// <param name="responses">The list of tuples containing response details, including response type, ticket ID, key, and durability.</param>
     /// <returns>A collection of <see cref="GrpcTryPrepareManyMutationsResponseItem"/> objects representing the prepared response items.</returns>
-    private static IEnumerable<GrpcTryPrepareManyMutationsResponseItem> GetResponsePrepareItems(List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses)
+    private static void AddResponsePrepareItems(RepeatedField<GrpcTryPrepareManyMutationsResponseItem> target, List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses)
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability) in responses)
-            yield return new()
+            target.Add(new GrpcTryPrepareManyMutationsResponseItem
             {
                 Type = (GrpcKeyValueResponseType)type,
                 ProposalTicketNode = ticketId.N,
-                ProposalTicketPhysical = ticketId.L, 
-                ProposalTicketCounter = ticketId.C, 
+                ProposalTicketPhysical = ticketId.L,
+                ProposalTicketCounter = ticketId.C,
                 Key = key,
                 Durability = (GrpcKeyValueDurability)durability
-            };
+            });
     }
 
     /// <summary>
@@ -1461,8 +1499,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryCommitManyMutationsResponse response = new();
-        
-        response.Items.Add(GetResponseCommitItems(responses));
+
+        AddResponseCommitItems(response.Items, responses);
 
         return response;
     }
@@ -1491,16 +1529,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     /// <param name="responses">A list of tuples containing the response type, key, proposal index, and durability information.</param>
     /// <returns>An enumerable collection of GrpcTryCommitManyMutationsResponseItem objects.</returns>
-    private static IEnumerable<GrpcTryCommitManyMutationsResponseItem> GetResponseCommitItems(List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
+    private static void AddResponseCommitItems(RepeatedField<GrpcTryCommitManyMutationsResponseItem> target, List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) in responses)
-            yield return new()
+            target.Add(new GrpcTryCommitManyMutationsResponseItem
             {
                 Type = (GrpcKeyValueResponseType)type,
                 Key = key,
                 ProposalIndex = proposalIndex,
                 Durability = (GrpcKeyValueDurability)durability
-            };
+            });
     }
     
     /// <summary>
@@ -1569,8 +1609,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         );
 
         GrpcTryRollbackManyMutationsResponse response = new();
-        
-        response.Items.Add(GetResponseRollbackItems(responses));
+
+        AddResponseRollbackItems(response.Items, responses);
 
         return response;
     }
@@ -1606,16 +1646,18 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// An enumerable collection of gRPC response items
     /// represented as <see cref="GrpcTryRollbackManyMutationsResponseItem"/>.
     /// </returns>
-    private static IEnumerable<GrpcTryRollbackManyMutationsResponseItem> GetResponseRollbackItems(List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
+    private static void AddResponseRollbackItems(RepeatedField<GrpcTryRollbackManyMutationsResponseItem> target, List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
     {
+        ReserveItemCapacity(target, responses.Count);
+
         foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) in responses)
-            yield return new()
+            target.Add(new GrpcTryRollbackManyMutationsResponseItem
             {
                 Type = (GrpcKeyValueResponseType)type,
                 Key = key,
                 ProposalIndex = proposalIndex,
                 Durability = (GrpcKeyValueDurability)durability
-            };
+            });
     }
 
     /// <summary>
@@ -1738,7 +1780,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = (GrpcKeyValueResponseType)result.Type
         };
         
-        response.Items.Add(GetKeyValueItems(result.Items));
+        AddKeyValueItems(response.Items, result.Items);
         
         return response;
     }
@@ -1785,7 +1827,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             if (result.NextCursor is not null)
                 pageResponse.NextCursor = result.NextCursor;
 
-            pageResponse.Items.AddRange(GetKeyValueItems(result.Items));
+            AddKeyValueItems(pageResponse.Items, result.Items);
 
             await responseStream.WriteAsync(pageResponse);
 
@@ -1839,7 +1881,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         if (result.NextCursor is not null)
             response.NextCursor = result.NextCursor;
 
-        response.Items.AddRange(GetKeyValueItems(result.Items));
+        AddKeyValueItems(response.Items, result.Items);
 
         return response;
     }
@@ -1878,7 +1920,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Type = GrpcKeyValueResponseType.TypeGot,
         };
         
-        response.Items.Add(GetKeyValueItems(result.Items));
+        AddKeyValueItems(response.Items, result.Items);
         
         return response;
     }
@@ -1920,7 +1962,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
         
         if (result.Items.Count > 0)
-            response.Items.Add(GetKeyValueItems(result.Items));
+            AddKeyValueItems(response.Items, result.Items);
         
         return response;
     }
@@ -2242,8 +2284,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// </summary>
     /// <param name="resultItems">A list containing key-value pairs and their associated context.</param>
     /// <returns>A collection of gRPC key-value prefix item responses.</returns>
-    private static IEnumerable<GrpcKeyValueByPrefixItemResponse> GetKeyValueItems(List<(string, ReadOnlyKeyValueEntry)> resultItems)
+    private static void AddKeyValueItems(RepeatedField<GrpcKeyValueByPrefixItemResponse> target, List<(string, ReadOnlyKeyValueEntry)> resultItems)
     {
+        ReserveItemCapacity(target, resultItems.Count);
+
         foreach ((string key, ReadOnlyKeyValueEntry context) in resultItems)
         {
             GrpcKeyValueByPrefixItemResponse response = new()
@@ -2264,8 +2308,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             
             if (context.Value is not null)
                 response.Value = UnsafeByteOperations.UnsafeWrap(context.Value);
-            
-            yield return response;
+
+            target.Add(response);
         }
     }
 
@@ -2561,7 +2605,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             entries[i] = (request.Entries[i].LogType, request.Entries[i].Payload.ToByteArray());
 
         DurableBundleWireReply? reply = await keyValues.DurableBundleLocal(
-            request.PartitionId, entries, terminal: request.AdmissionClass == 1,
+            request.PartitionId, entries, terminal: request.AdmissionClass == 1, stage: request.Stage,
             string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
 
         // A null reply here means the receiver could not run the bundle at all (an unresolved leadership); the
@@ -2611,7 +2655,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             DecisionKnown = reply?.DecisionKnown ?? false,
             Decision = reply?.Decision ?? 0,
             AbortClass = reply?.AbortClass ?? 0,
-            GatedVerdict = reply?.GatedVerdict ?? 0
+            GatedVerdict = reply?.GatedVerdict ?? 0,
+            BundleMs = reply?.BundleMs ?? -1
         };
     }
 

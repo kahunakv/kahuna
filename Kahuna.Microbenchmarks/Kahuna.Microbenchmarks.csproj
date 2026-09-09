@@ -18,4 +18,15 @@
         <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     </ItemGroup>
 
+    <ItemGroup>
+        <!-- The batch-read decode benchmark measures the production message, the production payload
+             helper and the production entry type rather than a stand-in for them. -->
+        <ProjectReference Include="..\Kahuna.Core\Kahuna.Core.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The stream-write benchmark hosts a real Kestrel gRPC echo server in-process. -->
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
 </Project>

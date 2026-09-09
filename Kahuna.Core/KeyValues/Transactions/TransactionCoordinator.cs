@@ -1502,7 +1502,7 @@ internal sealed class TransactionCoordinator : IDisposable
         replicateDecision: (partitionId, delta, fenceKey, fenceGeneration, cancellationToken) =>
             manager.ReplicateDurableThroughSchedulerFenced(
                 partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration,
-                Writes.WriteAdmissionClass.Terminal, cancellationToken, projectRecordLocally: false),
+                Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken, projectRecordLocally: false),
         // The decision winner and the resolution direction read the CANONICAL record: locally exactly when
         // this node leads the anchor partition, routed to the anchor leader otherwise.
         lookupRecordRouted: manager.LookupDurableRecordRouted,
@@ -1560,13 +1560,13 @@ internal sealed class TransactionCoordinator : IDisposable
     // transactions' records to the same partition coalesce into one ReplicateEntries proposal (cross-transaction
     // batching). The finalizer applies committed record/intent deltas to its local stores, and the resolution's
     // committed value to the leader's KV state via ApplyDurableCommitLocally.
-    private Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
-        manager.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
+    private Task<bool> ReplicateDurableAsync(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, stage, cancellationToken);
 
     // Fenced variant for the pre-decision record/prepare path: re-resolves the partition against the frozen
     // generation at dispatch (local aggregator path) so a topology change since freeze releases it retryably.
-    private Task<bool> ReplicateDurableFencedAsync(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
-        manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken);
+    private Task<bool> ReplicateDurableFencedAsync(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
+        manager.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, stage, cancellationToken);
 
     // Bundles the anchor partition's [record init, prepare] into one fenced proposal, removing a pre-decision
     // barrier. Returns the record-durable and prepare-acknowledged signals separately so the finalizer can tell a

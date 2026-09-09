@@ -6,6 +6,7 @@
  */
 
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Google.Protobuf;
@@ -21,6 +22,8 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Server.Communication.Internode;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
@@ -46,6 +49,9 @@ namespace Kahuna.Server.Tests;
 ///   • the committed Raft log record survives the same round trip, so a follower applies what the leader
 ///     holds rather than an empty array in its place;
 ///   • a read of a value-less key answers with an absent field, which is what makes the client return null;
+///   • a routed batch read decodes each item exactly as a point read does, and borrows the parsed bytes
+///     instead of copying them a second time;
+///   • the client's own batch, scan and transaction decoders keep the same distinction the point read keeps;
 ///   • the JSON wire writes an absent payload as null and an empty one as an empty string, in requests and
 ///     in responses, and every payload property on that wire carries the converter that guarantees it.
 /// </summary>
@@ -231,6 +237,152 @@ public sealed class TestKeyValuePayloadPresence
             new GrpcTryGetKeyValueRequest { Key = "k", Revision = -1 }, Context());
 
         return GrpcTryGetKeyValueResponse.Parser.ParseFrom(response.ToByteArray());
+    }
+
+    // ── Batch and scan reads ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The inter-node batch read is the leg that lagged behind the point read: it read the value field without
+    /// its presence flag, so a key holding zero bytes answered null as soon as the read crossed a node boundary,
+    /// while the same key answered an empty array when its partition happened to be led locally.
+    /// </summary>
+    [Fact]
+    public async Task BatchRead_KeepsAValuelessEntryApartFromAnEmptyOneAcrossTheInterNodeWire()
+    {
+        HLCTimestamp stamp = new(1, 900, 0);
+
+        GrpcTryGetManyValuesResponse onWire = await BatchRead(
+        [
+            (KeyValueResponseType.Get, "null-value", new ReadOnlyKeyValueEntry(null, 11, stamp, stamp, stamp, KeyValueState.Set)),
+            (KeyValueResponseType.Get, "empty-value", new ReadOnlyKeyValueEntry([], 12, stamp, stamp, stamp, KeyValueState.Set)),
+            (KeyValueResponseType.Get, "bytes", new ReadOnlyKeyValueEntry([1, 2, 3], 13, stamp, stamp, stamp, KeyValueState.Set)),
+            (KeyValueResponseType.MustRetry, "unresolved", null)
+        ]);
+
+        Assert.Equal(4, onWire.Items.Count);
+
+        // What the sender put on the wire: absent for the value-less key, present for the other two.
+        Assert.False(onWire.Items[0].HasValue);
+        Assert.True(onWire.Items[1].HasValue);
+        Assert.True(onWire.Items[2].HasValue);
+
+        ReadOnlyKeyValueEntry? valueless = GrpcInterNodeCommunication.GetReadOnlyKeyValueEntry(onWire.Items[0]);
+        ReadOnlyKeyValueEntry? empty = GrpcInterNodeCommunication.GetReadOnlyKeyValueEntry(onWire.Items[1]);
+        ReadOnlyKeyValueEntry? bytes = GrpcInterNodeCommunication.GetReadOnlyKeyValueEntry(onWire.Items[2]);
+
+        Assert.NotNull(valueless);
+        Assert.Null(valueless!.Value);
+        Assert.Equal(11, valueless.Revision);
+        Assert.Equal(stamp, valueless.LastModified);
+        Assert.Equal(KeyValueState.Set, valueless.State);
+
+        Assert.NotNull(empty);
+        Assert.NotNull(empty!.Value);
+        Assert.Empty(empty.Value!);
+        Assert.Equal(12, empty.Revision);
+
+        Assert.NotNull(bytes);
+        Assert.Equal([1, 2, 3], bytes!.Value);
+        Assert.Equal(13, bytes.Revision);
+
+        // A key the leader could not answer carries no entry at all, whatever its value field says.
+        Assert.Null(GrpcInterNodeCommunication.GetReadOnlyKeyValueEntry(onWire.Items[3]));
+
+        // The payload is borrowed from the parsed message. A second array here is the allocation the decode
+        // used to make for every non-empty value in every batch.
+        Assert.True(MemoryMarshal.TryGetArray(onWire.Items[2].Value.Memory, out ArraySegment<byte> parsed));
+        Assert.Same(parsed.Array, bytes.Value);
+    }
+
+    /// <summary>
+    /// Runs the production encoder for a non-locating batch read, puts its response on the wire, and hands the
+    /// parsed message back for the inter-node decoder to read.
+    /// </summary>
+    private static async Task<GrpcTryGetManyValuesResponse> BatchRead(
+        List<(KeyValueResponseType type, string key, ReadOnlyKeyValueEntry? entry)> results)
+    {
+        GrpcTryGetManyValuesRequest request = new();
+
+        foreach ((KeyValueResponseType _, string key, ReadOnlyKeyValueEntry? _) in results)
+            request.Items.Add(new GrpcTryManyValuesRequestItem { Key = key, Revision = -1 });
+
+        KeyValuesService service = new(new FixedBatchGetKahuna(results), NullLogger<IKahuna>.Instance);
+
+        GrpcTryGetManyValuesResponse response = await service.TryGetManyValuesInternal(
+            GrpcTryGetManyValuesRequest.Parser.ParseFrom(request.ToByteArray()), Context());
+
+        return GrpcTryGetManyValuesResponse.Parser.ParseFrom(response.ToByteArray());
+    }
+
+    /// <summary>
+    /// The borrow the decoders rely on, and the copy that keeps it honest. A ByteString that owns its whole
+    /// backing array hands that array over as it is; one that views a slice of a larger buffer must copy, or a
+    /// caller would read the bytes around the payload.
+    /// </summary>
+    [Fact]
+    public void PayloadDecoder_BorrowsAWholeBackingArrayAndCopiesASlice()
+    {
+        byte[] whole = [1, 2, 3];
+        Assert.Same(whole, ByteStringPayload.GetArrayOrNull(true, UnsafeByteOperations.UnsafeWrap(whole)));
+
+        byte[] backing = [9, 1, 2, 9];
+        byte[]? slice = ByteStringPayload.GetArrayOrNull(
+            true, UnsafeByteOperations.UnsafeWrap(new ReadOnlyMemory<byte>(backing, 1, 2)));
+
+        Assert.NotSame(backing, slice);
+        Assert.Equal([1, 2], slice);
+
+        // An absent field stays absent whatever bytes the generated getter substitutes for it.
+        Assert.Null(ByteStringPayload.GetArrayOrNull(false, ByteString.Empty));
+    }
+
+    /// <summary>
+    /// The client's own gRPC decoders read the same presence-tracked fields. A batch read already carried the
+    /// distinction; the scan and the script-transaction reads did not, and each answered an empty array for a
+    /// key that holds no value — the opposite of what the REST transport returns for the same key.
+    /// </summary>
+    [Fact]
+    public void ClientGrpcReads_KeepAValuelessItemApartFromAnEmptyOne()
+    {
+        GrpcTryGetManyValuesResponse batch = new();
+        batch.Items.Add(new GrpcTryGetManyValuesResponseItem { Key = "null-value" });
+        batch.Items.Add(new GrpcTryGetManyValuesResponseItem { Key = "empty-value", Value = ByteString.Empty });
+        batch.Items.Add(new GrpcTryGetManyValuesResponseItem { Key = "bytes", Value = ByteString.CopyFrom(1, 2) });
+
+        List<KahunaGetManyKeyValuesResponseItem> read = GrpcCommunication.GetGetManyKeyValuesResponseItems(
+            GrpcTryGetManyValuesResponse.Parser.ParseFrom(batch.ToByteArray()).Items);
+
+        AssertPayloadTriple(read[0].Value, read[1].Value, read[2].Value);
+
+        GrpcGetByBucketResponse scan = new();
+        scan.Items.Add(new GrpcKeyValueByPrefixItemResponse { Key = "null-value" });
+        scan.Items.Add(new GrpcKeyValueByPrefixItemResponse { Key = "empty-value", Value = ByteString.Empty });
+        scan.Items.Add(new GrpcKeyValueByPrefixItemResponse { Key = "bytes", Value = ByteString.CopyFrom(1, 2) });
+
+        List<KeyValueGetByBucketItem> scanned = GrpcCommunication.GetByPrefixResponseItems(
+            GrpcGetByBucketResponse.Parser.ParseFrom(scan.ToByteArray()).Items);
+
+        AssertPayloadTriple(scanned[0].Value, scanned[1].Value, scanned[2].Value);
+
+        GrpcTryExecuteTransactionScriptResponse script = new();
+        script.Values.Add(new GrpcTryExecuteTransactionResponseValue { Key = "null-value" });
+        script.Values.Add(new GrpcTryExecuteTransactionResponseValue { Key = "empty-value", Value = ByteString.Empty });
+        script.Values.Add(new GrpcTryExecuteTransactionResponseValue { Key = "bytes", Value = ByteString.CopyFrom(1, 2) });
+
+        List<Kahuna.Client.KahunaKeyValueTransactionResultValue> values = GrpcCommunication.GetTransactionValues(
+            GrpcTryExecuteTransactionScriptResponse.Parser.ParseFrom(script.ToByteArray()).Values);
+
+        AssertPayloadTriple(values[0].Value, values[1].Value, values[2].Value);
+    }
+
+    private static void AssertPayloadTriple(byte[]? valueless, byte[]? empty, byte[]? bytes)
+    {
+        Assert.Null(valueless);
+
+        Assert.NotNull(empty);
+        Assert.Empty(empty!);
+
+        Assert.Equal([1, 2], bytes);
     }
 
     // ── The JSON wire ───────────────────────────────────────────────────────────────────────────
@@ -477,6 +629,27 @@ public sealed class TestKeyValuePayloadPresence
             KeyValueDurability durability, CancellationToken cancellationToken,
             string coordinatorKey = "", TransactionOperationId operationId = default)
             => Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.Get, entry));
+    }
+
+    /// <summary>Answers the non-locating batch read with one fixed result per requested key.</summary>
+    private sealed class FixedBatchGetKahuna : FakeKahunaBase
+    {
+        private readonly List<(KeyValueResponseType type, string key, ReadOnlyKeyValueEntry? entry)> results;
+
+        public FixedBatchGetKahuna(List<(KeyValueResponseType type, string key, ReadOnlyKeyValueEntry? entry)> results)
+            => this.results = results;
+
+        public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
+            HLCTimestamp transactionId, HLCTimestamp readTimestamp,
+            List<(string key, long revision, KeyValueDurability durability)> keys)
+        {
+            List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(results.Count);
+
+            foreach ((KeyValueResponseType type, string key, ReadOnlyKeyValueEntry? entry) in results)
+                responses.Add((type, key, KeyValueDurability.Persistent, entry));
+
+            return Task.FromResult(responses);
+        }
     }
 
     private sealed class StubServerCallContext : ServerCallContext

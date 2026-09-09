@@ -13,6 +13,7 @@ using Kommander.Communication.Memory;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
+using Kommander.WAL.IO;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nixie;
 
@@ -769,5 +770,157 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         intents.Apply(new ResolveIntentCommand(aborted.TransactionId, 1, "obs/abort", Commit: false));
         intents.Apply(new RemoveIntentCommand(aborted.TransactionId, 1, "obs/abort"));
         Assert.Empty(observed);
+    }
+
+    /// <summary>
+    /// The lost-commit kernel from the learned-routing bank soak: the leader's own one-phase commit
+    /// advanced the RESIDENT head (LastAppliedTransactionId records the transaction; nothing was
+    /// persisted for it — that is ApplyOwnCommittedMaterialization's contract), while the replicator's
+    /// durable apply for the same log entry never ran, so the durable state still stands at the base
+    /// revision. The settle-time repair then asks the actor, the actor truthfully answers Committed
+    /// for its resident entry, and the old drive took that word as confirmation: it discarded the
+    /// parked intent — the node's last copy of the mutation — and the acknowledged commit was durably
+    /// lost, with the key read-only to run end.
+    ///
+    /// The drive must instead treat the actor's answer as a hint: re-verify durability, re-promote the
+    /// mutation from the parked intent through the persistence path (overlay record + queued backend
+    /// write), and release the parked intent only once verification passes. The durable row itself
+    /// must end at the intent's revision.
+    /// </summary>
+    [Fact]
+    public async Task ScheduledRepair_RepromotesFromParkedIntent_WhenActorConfirmsAnApplyDurableStateDoesNotHold()
+    {
+        using IDisposable lifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+
+        const string key = "repromote/k";
+        HLCTimestamp tx = Ts(1_000);
+        HLCTimestamp commitTs = Ts(6_000);
+
+        MemoryPersistenceBackend backend = new();
+        KahunaConfiguration config = BuildConfig();
+        config.DirtyObjectsWriterDelay = 100;
+
+        // The writer's flush runs its store call through this scheduler; it must be started for
+        // the queued backend write to ever land.
+        using FairReadScheduler writerScheduler = new(NullLogger<IRaft>.Instance, 1, 1024);
+        writerScheduler.Start();
+
+        RaftManager writerRaft = BuildRaft("inv-repromote-writer");
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> writer =
+            actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+                "inv-repromote-bg", writerRaft, writerScheduler, backend,
+                null!, null!, new TransactionRecordStore(), new PreparedIntentStore(),
+                config, NullLogger<IKahuna>.Instance, new FlushNotificationSink(), null!);
+
+        RaftManager actorRaft = BuildRaft("inv-repromote-actor");
+        IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+            actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                "inv-repromote-kv", null!, null!, backend, actorRaft,
+                actorRaft.ReadScheduler, new KeySpaceRegistry(),
+                new RangeMapStore(actorRaft, null, null, NullLogger<IKahuna>.Instance),
+                config, NullLogger<IKahuna>.Instance);
+
+        KeyValueActor? actorInstance = null;
+        for (int i = 0; i < 500 && actorInstance is null; i++)
+        {
+            actorInstance = ((ActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>)actorRef).Runner.Actor as KeyValueActor;
+            if (actorInstance is null)
+                await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+        Assert.NotNull(actorInstance);
+
+        // The leader's resident state after its own one-phase commit: head applied by the actor for
+        // this transaction, FlushedRevision still at the base, and nothing in overlay or backend.
+        actorInstance!.GetContext().InsertStoreEntry(key, new KeyValueEntry
+        {
+            Bucket = null,
+            Value = "v6"u8.ToArray(),
+            Revision = 6,
+            FlushedRevision = 5,
+            Expires = HLCTimestamp.Zero,
+            LastModified = commitTs,
+            State = KeyValueState.Set,
+            LastAppliedTransactionId = tx,
+            CachedBytes = 100_000
+        });
+
+        UnflushedKeyValueWritesIndex overlay = new();
+        KeyValueReplicator replicator = new(
+            writer, new KeyValueActorRing([actorRef]), null!, null!, null!, null!,
+            NullLogger<IKahuna>.Instance,
+            unflushedWrites: overlay,
+            // The durable read path this node actually has: the real backend, which holds nothing for
+            // the key — the replicator's durable apply for the commit's log entry never ran here.
+            hydrateFromBackend: (_, k) => Task.FromResult(backend.GetKeyValue(k)));
+
+        replicator.ScheduleDurableCommitRepair(1, new PreparedIntent(
+            TransactionId: tx, Epoch: 1, Key: key,
+            ManifestHash: 0, RecordAnchorKey: key,
+            CommitTimestamp: commitTs,
+            State: KeyValueState.Set, Value: "v6"u8.ToArray(), Bucket: null,
+            Revision: 6, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 5, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending));
+
+        // Released only once the durable read path serves the mutation — never on the actor's word.
+        await WaitUntilUnparked(replicator, key);
+
+        Assert.True(overlay.TryGet(key, out UnflushedKeyValueWrite promoted),
+            "the re-promoted mutation must be visible to the durable read path through the overlay");
+        Assert.Equal(6, promoted.Revision);
+        Assert.Equal("v6"u8.ToArray(), promoted.Value);
+
+        // The queued backend write must land the durable row itself at the intent's revision.
+        long deadline = Environment.TickCount64 + 10_000;
+        KeyValueEntry? durableRow = backend.GetKeyValue(key);
+        while (durableRow is null || durableRow.Revision < 6)
+        {
+            if (Environment.TickCount64 >= deadline)
+                Assert.Fail("the re-promoted mutation was never flushed to the backend");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+            durableRow = backend.GetKeyValue(key);
+        }
+
+        Assert.Equal(6, durableRow.Revision);
+        Assert.Equal("v6"u8.ToArray(), durableRow.Value);
+
+        writerScheduler.Stop();
+    }
+
+    /// <summary>
+    /// The re-promotion must never run for a transaction whose local Abort is definitive: a false (or
+    /// errored) commit-apply answer can mean the abort fence refused it, and promoting the parked
+    /// mutation then would durably materialize an aborted transaction's leg — the conserved-total
+    /// drift signature. The mutation stays armed (the recovery sweep, which reads the canonical
+    /// record, owns discarding it) and nothing reaches the durable read path.
+    /// </summary>
+    [Fact]
+    public async Task ScheduledRepair_NeverRepromotesAnAbortFencedTransaction()
+    {
+        const string key = "repromote/aborted";
+        UnflushedKeyValueWritesIndex overlay = new();
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
+            unflushedWrites: overlay,
+            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(null),
+            transactionLocallyAborted: (_, _) => true);
+
+        replicator.ScheduleDurableCommitRepair(1, new PreparedIntent(
+            TransactionId: Ts(1_000), Epoch: 1, Key: key,
+            ManifestHash: 0, RecordAnchorKey: key,
+            CommitTimestamp: Ts(6_000),
+            State: KeyValueState.Set, Value: "v6"u8.ToArray(), Bucket: null,
+            Revision: 6, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: 5, BaseState: KeyValueState.Set,
+            RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending));
+
+        // Give the drive's first rungs time to run: each apply is refused by the abort fence, so the
+        // mutation must stay parked and the durable read path must never see it.
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+
+        Assert.False(overlay.TryGet(key, out _),
+            "an abort-fenced transaction's mutation must never be promoted to the durable read path");
+        Assert.NotNull(replicator.TryGetPendingCommitRepair(key));
     }
 }

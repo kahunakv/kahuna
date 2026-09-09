@@ -50,7 +50,9 @@ public sealed class TestGrpcServerBatcherLiveness
             new GrpcServerBatcherRequest(new GrpcLookupTransactionRecordRequest()),
             promise);
 
-        RequestRefs()[requestId] = item;
+        // Seed through the real admission path so the pending-request accounting stays balanced
+        // when the sweep (or the test's cleanup) later removes the request.
+        Assert.True(GrpcServerBatcher.TryAdmit(item));
         RequestStreamRefs()[requestId] = streamId;
 
         return promise;
@@ -93,8 +95,8 @@ public sealed class TestGrpcServerBatcherLiveness
         }
         finally
         {
-            RequestRefs().TryRemove(oldRequest, out _);
-            RequestRefs().TryRemove(freshRequest, out _);
+            GrpcServerBatcher.TryTakeRequest(oldRequest, out _);
+            GrpcServerBatcher.TryTakeRequest(freshRequest, out _);
             RequestStreamRefs().TryRemove(oldRequest, out _);
             RequestStreamRefs().TryRemove(freshRequest, out _);
             old.TrySetCanceled(TestContext.Current.CancellationToken);
@@ -127,7 +129,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
         try
         {
-            await streaming.Semaphore.WaitAsync(TestContext.Current.CancellationToken);     // the stuck previous writer
+            await streaming.KeyValueWriteSemaphore.WaitAsync(TestContext.Current.CancellationToken);     // the stuck previous writer
 
             RpcException failure = await Assert.ThrowsAsync<RpcException>(() =>
                 InvokeWriteBounded(url, streaming, new GrpcBatchServerKeyValueRequest()));
@@ -141,7 +143,7 @@ public sealed class TestGrpcServerBatcherLiveness
         {
             GrpcServerBatcher.WriteTimeout = savedTimeout;
             Streamings().TryRemove(url, out _);
-            RequestRefs().TryRemove(requestId, out _);
+            GrpcServerBatcher.TryTakeRequest(requestId, out _);
             RequestStreamRefs().TryRemove(requestId, out _);
             pending.TrySetCanceled(TestContext.Current.CancellationToken);
         }
@@ -172,8 +174,8 @@ public sealed class TestGrpcServerBatcherLiveness
             Assert.False(Streamings().ContainsKey(url));
 
             // The semaphore was released on the failure path: the pipeline is not wedged.
-            Assert.True(await streaming.Semaphore.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
-            streaming.Semaphore.Release();
+            Assert.True(await streaming.KeyValueWriteSemaphore.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+            streaming.KeyValueWriteSemaphore.Release();
         }
         finally
         {
@@ -221,7 +223,369 @@ public sealed class TestGrpcServerBatcherLiveness
         }
     }
 
+    // ── deadline coverage of the queue ───────────────────────────────────────
+
+    /// <summary>
+    /// A request is registered for the deadline when it is admitted, not when it is written to
+    /// the stream. The reaper must therefore also fail a request that never reached a send —
+    /// here the second request, queued behind a first write that hangs on a stalled stream.
+    /// Before that registration moved to admission time, only the sent request was visible to
+    /// the sweep and the queued one waited on the much later write-timeout cascade.
+    /// </summary>
+    [Fact]
+    public async Task Reaper_FailsRequestsQueuedBehindABlockedWrite()
+    {
+        const string url = "test://queued-behind-blocked-write";
+        const long streamId = 9_800_004;
+
+        (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(streamId, new HangingClientStreamWriter<GrpcBatchServerKeyValueRequest>());
+        Streamings()[url] = CreatedLazy(streaming);
+
+        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+
+        try
+        {
+            Task<GrpcServerBatcherResponse> first = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
+            Task<GrpcServerBatcherResponse> second = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
+
+            long farFuture = Environment.TickCount64 + (long)GrpcServerBatcher.RequestDeadline.TotalMilliseconds + 1_000;
+            GrpcServerBatcher.SweepExpiredRequests(farFuture, NullLogger.Instance);
+
+            // The sweep settles both promises synchronously: both requests were admitted into
+            // requestRefs before Enqueue returned, whether or not either reached a write.
+            Assert.True(first.IsFaulted);
+            Assert.True(second.IsFaulted);
+
+            RpcException firstFailure = await Assert.ThrowsAsync<RpcException>(() => first);
+            RpcException secondFailure = await Assert.ThrowsAsync<RpcException>(() => second);
+            Assert.Equal(StatusCode.Unavailable, firstFailure.StatusCode);
+            Assert.Equal(StatusCode.Unavailable, secondFailure.StatusCode);
+        }
+        finally
+        {
+            Streamings().TryRemove(url, out _);
+        }
+    }
+
+    /// <summary>
+    /// A request the reaper already failed while it waited in the inbox must not be written to
+    /// the stream: nobody listens to its promise, and the peer's answer would arrive as an
+    /// orphan response. The batch loop must skip it and send only the live request.
+    /// </summary>
+    [Fact]
+    public async Task RunBatch_SkipsRequestsTheReaperAlreadyFailed()
+    {
+        const string url = "test://run-batch-skips-settled";
+        const long streamId = 9_800_005;
+        const int settledId = 9_950_101;
+        const int liveId = 9_950_102;
+
+        RecordingClientStreamWriter<GrpcBatchServerKeyValueRequest> writer = new();
+        (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(streamId, writer);
+        Streamings()[url] = CreatedLazy(streaming);
+
+        TaskCompletionSource<GrpcServerBatcherResponse> settledPromise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        GrpcServerBatcherItem settledItem = new(
+            GrpcServerBatcherItemType.KeyValues, settledId,
+            new GrpcServerBatcherRequest(new GrpcLookupTransactionRecordRequest()), settledPromise);
+
+        TaskCompletionSource<GrpcServerBatcherResponse> livePromise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        GrpcServerBatcherItem liveItem = new(
+            GrpcServerBatcherItemType.KeyValues, liveId,
+            new GrpcServerBatcherRequest(new GrpcLookupTransactionRecordRequest()), livePromise);
+
+        // The reaper failed the first request before the batch loop reached it: its promise is
+        // settled and its requestRefs entry is gone.
+        settledPromise.TrySetException(new RpcException(new(StatusCode.Unavailable, "expired before dispatch")));
+        Assert.True(GrpcServerBatcher.TryAdmit(liveItem));
+
+        try
+        {
+            await InvokeRunBatch(url, [settledItem, liveItem]);
+
+            GrpcBatchServerKeyValueRequest written = Assert.Single(writer.Written);
+            Assert.Equal(liveId, written.RequestId);
+
+            Assert.False(RequestStreamRefs().ContainsKey(settledId));
+            Assert.True(RequestStreamRefs().ContainsKey(liveId));
+        }
+        finally
+        {
+            Streamings().TryRemove(url, out _);
+            GrpcServerBatcher.TryTakeRequest(liveId, out _);
+            RequestStreamRefs().TryRemove(liveId, out _);
+            livePromise.TrySetCanceled(TestContext.Current.CancellationToken);
+        }
+    }
+
+    // ── dispatch buffer ownership ────────────────────────────────────────────
+
+    /// <summary>
+    /// The dispatch loop hands <c>RunBatch</c> the buffer it reuses for the next drain.
+    /// <c>RunBatch</c> must leave that list exactly as it found it: no clear, no reuse, and no
+    /// release to a pool the loop knows nothing about.
+    /// </summary>
+    [Fact]
+    public async Task RunBatch_LeavesTheCallersListUntouched()
+    {
+        const string url = "test://run-batch-list-ownership";
+        const long streamId = 9_800_010;
+        const int firstId = 9_950_301;
+        const int secondId = 9_950_302;
+
+        RecordingClientStreamWriter<GrpcBatchServerKeyValueRequest> writer = new();
+        (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(streamId, writer);
+        Streamings()[url] = CreatedLazy(streaming);
+
+        // Both promises are settled, so RunBatch skips both items and writes nothing. What
+        // matters here is only what it does to the list it was handed.
+        TaskCompletionSource<GrpcServerBatcherResponse> firstPromise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        firstPromise.TrySetCanceled(TestContext.Current.CancellationToken);
+        TaskCompletionSource<GrpcServerBatcherResponse> secondPromise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        secondPromise.TrySetCanceled(TestContext.Current.CancellationToken);
+
+        List<GrpcServerBatcherItem> requests =
+        [
+            new(GrpcServerBatcherItemType.KeyValues, firstId, new(new GrpcLookupTransactionRecordRequest()), firstPromise),
+            new(GrpcServerBatcherItemType.KeyValues, secondId, new(new GrpcLookupTransactionRecordRequest()), secondPromise)
+        ];
+
+        try
+        {
+            await InvokeRunBatch(url, requests);
+
+            Assert.Empty(writer.Written);
+            Assert.Equal(2, requests.Count);
+            Assert.Equal(firstId, requests[0].RequestId);
+            Assert.Equal(secondId, requests[1].RequestId);
+        }
+        finally
+        {
+            Streamings().TryRemove(url, out _);
+        }
+    }
+
+    /// <summary>
+    /// A backlog larger than one drain must reach the wire completely, exactly once per request,
+    /// through drains that reuse one buffer. Afterwards the buffer must be empty — an idle
+    /// batcher pins no payloads and no promises — and its backing array must not have grown past
+    /// the drain bound, because the bound exists so one burst cannot leave a backlog-sized array
+    /// attached to the batcher for its whole life.
+    /// </summary>
+    [Fact]
+    public async Task DispatchLoop_BoundsTheDrainAndReusesTheBuffer()
+    {
+        const string url = "test://dispatch-buffer-bound";
+        const long streamId = 9_800_011;
+
+        // Larger than one drain, so the loop needs more than one round for the backlog.
+        const int backlog = GrpcServerBatcher.MaxItemsPerDrain + 476;
+
+        GatedRecordingClientStreamWriter<GrpcBatchServerKeyValueRequest> writer = new();
+        (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(streamId, writer);
+        Streamings()[url] = CreatedLazy(streaming);
+
+        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        List<Task<GrpcServerBatcherResponse>> pending = new(backlog + 1);
+
+        try
+        {
+            // The first request starts the dispatch loop; its write parks on the writer's gate,
+            // so the backlog below lands in the inbox while the loop is mid-batch.
+            pending.Add(batcher.Enqueue(new GrpcLookupTransactionRecordRequest()));
+            await writer.FirstWriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            for (int i = 0; i < backlog; i++)
+                pending.Add(batcher.Enqueue(new GrpcLookupTransactionRecordRequest()));
+
+            writer.Release();
+
+            // Queued key-value work travels in coalesced envelopes, so the wire carries fewer
+            // messages than requests; count the operations inside the carriers.
+            static IEnumerable<GrpcBatchServerKeyValueRequest> Operations(IReadOnlyList<GrpcBatchServerKeyValueRequest> messages)
+                => messages.SelectMany(static m => m.Type == GrpcServerBatchType.ServerCoalesced
+                    ? m.Coalesced
+                    : (IEnumerable<GrpcBatchServerKeyValueRequest>)[m]);
+
+            await WaitUntilAsync(() => Operations(writer.Written).Count() == backlog + 1, TimeSpan.FromSeconds(10));
+
+            IReadOnlyList<GrpcBatchServerKeyValueRequest> written = writer.Written;
+            Assert.Equal(backlog + 1, Operations(written).Count());
+            Assert.Equal(backlog + 1, Operations(written).Select(static w => w.RequestId).Distinct().Count());
+
+            // The loop clears the buffer after the final drain; wait out that last step.
+            await WaitUntilAsync(() => DispatchBuffer(batcher) is { Count: 0 }, TimeSpan.FromSeconds(5));
+
+            List<GrpcServerBatcherItem>? buffer = DispatchBuffer(batcher);
+            Assert.NotNull(buffer);
+            Assert.True(buffer.Capacity <= GrpcServerBatcher.MaxItemsPerDrain,
+                $"Dispatch buffer capacity {buffer.Capacity} exceeds the drain bound {GrpcServerBatcher.MaxItemsPerDrain}.");
+        }
+        finally
+        {
+            Streamings().TryRemove(url, out _);
+
+            // No peer ever answers the recorded writes, so release each admission and settle each
+            // promise here instead of leaving them to the deadline reaper.
+            HashSet<Task> mine = new(pending.Count);
+            foreach (Task<GrpcServerBatcherResponse> task in pending)
+                mine.Add(task);
+
+            foreach (KeyValuePair<int, GrpcServerBatcherItem> entry in RequestRefs().ToArray())
+            {
+                if (!mine.Contains(entry.Value.Promise.Task))
+                    continue;
+
+                GrpcServerBatcher.TryTakeRequest(entry.Key, out _);
+                RequestStreamRefs().TryRemove(entry.Key, out _);
+                entry.Value.Promise.TrySetCanceled(TestContext.Current.CancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A transport failure fails the drained requests, and the loop must keep working: a later
+    /// round drains fresh requests into the same reused buffer. A buffer whose lifetime was wrong
+    /// — cleared by the batch path, or handed to a pool on the failure path — would show up here
+    /// as a request that never completes.
+    /// </summary>
+    [Fact]
+    public async Task DispatchLoop_KeepsWorkingAcrossTransportFailures()
+    {
+        const string url = "test://dispatch-buffer-failures";
+        const long streamIdBase = 9_800_020;
+
+        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+
+        try
+        {
+            for (int round = 0; round < 3; round++)
+            {
+                // Each failed write evicts the URL's streams, so every round injects a fresh one.
+                (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(
+                    streamIdBase + round, new ThrowingClientStreamWriter<GrpcBatchServerKeyValueRequest>());
+                Streamings()[url] = CreatedLazy(streaming);
+
+                // One request per round: a failed write evicts the URL's streams, and a second
+                // in-flight request would rebuild them through the real channel factory, which
+                // cannot serve a test:// URL.
+                Task<GrpcServerBatcherResponse> request = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
+
+                RpcException failure = await Assert.ThrowsAsync<RpcException>(() => request);
+                Assert.Equal(StatusCode.Unavailable, failure.StatusCode);
+            }
+        }
+        finally
+        {
+            Streamings().TryRemove(url, out _);
+        }
+    }
+
+    // ── admission ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When the pending item limit is reached, an enqueue must fail immediately with a retryable
+    /// Unavailable — before the request enters the inbox or the tracking dictionaries — so
+    /// sustained overload sheds new work instead of growing the pending set without bound.
+    /// </summary>
+    [Fact]
+    public void Enqueue_PendingItemLimitReached_FailsRetryablyBeforeQueueing()
+    {
+        int savedMax = GrpcServerBatcher.MaxPendingRequests;
+        GrpcServerBatcher.MaxPendingRequests = 0;
+
+        try
+        {
+            GrpcServerBatcher batcher = new("test://admission-item-limit", NullLogger.Instance);
+            Task<GrpcServerBatcherResponse> task = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
+
+            Assert.True(task.IsFaulted);
+            RpcException failure = Assert.IsType<RpcException>(task.Exception!.InnerException);
+            Assert.Equal(StatusCode.Unavailable, failure.StatusCode);
+        }
+        finally
+        {
+            GrpcServerBatcher.MaxPendingRequests = savedMax;
+        }
+    }
+
+    /// <summary>
+    /// The byte limit sheds work the same way as the item limit, so a burst of few but large
+    /// requests cannot hold unbounded memory while it waits out the deadline.
+    /// </summary>
+    [Fact]
+    public void Enqueue_PendingByteLimitReached_FailsRetryablyBeforeQueueing()
+    {
+        long savedMax = GrpcServerBatcher.MaxPendingRequestBytes;
+        GrpcServerBatcher.MaxPendingRequestBytes = 0;
+
+        try
+        {
+            GrpcServerBatcher batcher = new("test://admission-byte-limit", NullLogger.Instance);
+            Task<GrpcServerBatcherResponse> task = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
+
+            Assert.True(task.IsFaulted);
+            RpcException failure = Assert.IsType<RpcException>(task.Exception!.InnerException);
+            Assert.Equal(StatusCode.Unavailable, failure.StatusCode);
+        }
+        finally
+        {
+            GrpcServerBatcher.MaxPendingRequestBytes = savedMax;
+        }
+    }
+
+    /// <summary>
+    /// One admission releases exactly once: the first take wins and returns the item with its
+    /// payload accounting; a second take must lose, so no settle path can release the same
+    /// admission twice.
+    /// </summary>
+    [Fact]
+    public void AdmitAndTake_ReleasesTheAdmissionExactlyOnce()
+    {
+        const int requestId = 9_950_201;
+
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        GrpcServerBatcherItem item = new(
+            GrpcServerBatcherItemType.KeyValues, requestId,
+            new GrpcServerBatcherRequest(new GrpcLookupTransactionRecordRequest { AnchorKey = "accounting-anchor" }), promise);
+
+        Assert.True(item.PayloadBytes > 0);
+
+        try
+        {
+            Assert.True(GrpcServerBatcher.TryAdmit(item));
+            Assert.True(RequestRefs().ContainsKey(requestId));
+
+            Assert.True(GrpcServerBatcher.TryTakeRequest(requestId, out GrpcServerBatcherItem taken));
+            Assert.Equal(item.PayloadBytes, taken.PayloadBytes);
+
+            Assert.False(GrpcServerBatcher.TryTakeRequest(requestId, out _));
+            Assert.False(RequestRefs().ContainsKey(requestId));
+        }
+        finally
+        {
+            GrpcServerBatcher.TryTakeRequest(requestId, out _);
+            promise.TrySetCanceled(TestContext.Current.CancellationToken);
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    private static List<GrpcServerBatcherItem>? DispatchBuffer(GrpcServerBatcher batcher)
+        => (List<GrpcServerBatcherItem>?)BatcherType
+            .GetField("dispatchBuffer", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(batcher);
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+
+        while (!condition())
+        {
+            Assert.True(Environment.TickCount64 < deadline, "The condition was not reached within the timeout.");
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+    }
 
     private sealed class DisposeCounter
     {
@@ -261,6 +625,22 @@ public sealed class TestGrpcServerBatcherLiveness
         return lazy;
     }
 
+    private static Task InvokeRunBatch(string url, List<GrpcServerBatcherItem> requests)
+    {
+        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+
+        MethodInfo method = BatcherType.GetMethod("RunBatch", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        try
+        {
+            return (Task)method.Invoke(batcher, [requests])!;
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            return Task.FromException(ex.InnerException);
+        }
+    }
+
     private static Task InvokeWriteBounded(string url, GrpcServerSharedStreaming streaming, GrpcBatchServerKeyValueRequest request)
     {
         GrpcServerBatcher batcher = new(url, NullLogger.Instance);
@@ -271,7 +651,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
         try
         {
-            return (Task)method.Invoke(batcher, [streaming, streaming.KeyValueStreaming.RequestStream, request])!;
+            return (Task)method.Invoke(batcher, [streaming, streaming.KeyValueWriteSemaphore, streaming.KeyValueStreaming.RequestStream, request])!;
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
@@ -298,6 +678,59 @@ public sealed class TestGrpcServerBatcherLiveness
         public WriteOptions? WriteOptions { get; set; }
         public Task CompleteAsync() => Task.CompletedTask;
         public Task WriteAsync(T message) => Task.CompletedTask;
+    }
+
+    /// <summary>Accepts every write immediately and records it for assertions.</summary>
+    private sealed class RecordingClientStreamWriter<T> : IClientStreamWriter<T>
+    {
+        private readonly ConcurrentQueue<T> written = new();
+        public IReadOnlyList<T> Written => written.ToArray();
+        public WriteOptions? WriteOptions { get; set; }
+        public Task CompleteAsync() => Task.CompletedTask;
+
+        public Task WriteAsync(T message)
+        {
+            written.Enqueue(message);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// Records every write; the first write parks on a gate until the test releases it, so the
+    /// test can build an inbox backlog while the dispatch loop is mid-batch.
+    /// </summary>
+    private sealed class GatedRecordingClientStreamWriter<T> : IClientStreamWriter<T>
+    {
+        private readonly TaskCompletionSource gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentQueue<T> written = new();
+        private int firstWrite = 1;
+
+        public TaskCompletionSource FirstWriteStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public IReadOnlyList<T> Written => written.ToArray();
+        public WriteOptions? WriteOptions { get; set; }
+        public Task CompleteAsync() => Task.CompletedTask;
+        public void Release() => gate.TrySetResult();
+
+        public async Task WriteAsync(T message)
+        {
+            if (1 == Interlocked.Exchange(ref firstWrite, 0))
+            {
+                FirstWriteStarted.TrySetResult();
+                await gate.Task;
+            }
+
+            written.Enqueue(message);
+        }
+    }
+
+    /// <summary>Fails every write retryably — a stream whose transport is gone.</summary>
+    private sealed class ThrowingClientStreamWriter<T> : IClientStreamWriter<T>
+    {
+        public WriteOptions? WriteOptions { get; set; }
+        public Task CompleteAsync() => Task.CompletedTask;
+
+        public Task WriteAsync(T message)
+            => Task.FromException(new RpcException(new(StatusCode.Unavailable, "The transport failed.")));
     }
 
     /// <summary>A write onto a stalled HTTP/2 session: accepted, never completed.</summary>

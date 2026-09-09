@@ -85,7 +85,7 @@ internal static class DurableMaterializationWindow
             // applies it separately through its owning actor after the durable record is acknowledged. This is
             // post-decision materialization — terminal work — so it draws on reserve capacity and is never
             // starved by an ordinary-write burst.
-            return await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+            return await replicate(partitionId, ReplicationTypes.KeyValues, kvRecord, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Materialize, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

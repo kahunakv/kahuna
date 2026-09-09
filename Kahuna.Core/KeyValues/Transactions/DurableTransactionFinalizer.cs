@@ -99,15 +99,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// local store on success (idempotent with the replication-callback apply on every replica). The
     /// <paramref name="admissionClass"/> tells the shared write scheduler whether this is ordinary work
     /// (record init, prepare) or terminal work that finishes an already-prepared transaction (decision, settle,
-    /// materialize) — terminal work draws on reserve capacity so an ordinary-write burst cannot starve it.</summary>
-    public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken);
+    /// materialize) — terminal work draws on reserve capacity so an ordinary-write burst cannot starve it. The
+    /// <paramref name="stage"/> names what the caller is replicating, so the scheduler's queue-delay attribution
+    /// carries the producing stage instead of inferring it from the delta's log type.</summary>
+    public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken);
 
     /// <summary>Like <see cref="ReplicateDelegate"/> but re-fences the submission at dispatch against the range
     /// descriptor <paramref name="fenceKey"/> was resolved to at freeze (<paramref name="fenceGeneration"/>): a
     /// split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
     /// Used for the pre-decision record initialization, prepare, and decision; null falls back to the unfenced
     /// replicate (protocol tests, and the post-decision settle/materialize which recovery backstops).</summary>
-    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken);
+    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken);
 
     /// <summary>Replicates the anchor partition's record initialization and its own prepared-intent group as one
     /// atomic ordered proposal (removing a pre-decision barrier), fenced against the anchor descriptor. Returns two
@@ -466,6 +468,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             : OnePhaseGateOutcome.Entered;
         DurableTransactionMetrics.OnePhaseGateDecided(gate);
 
+        // The 2PC prepare stage's clock. When a one-phase attempt runs first and falls back, the clock restarts
+        // at the fallback: the attempt's time is already recorded as one_phase_pre_bundle_ms, and charging the
+        // same wall time to finalize_prepare_ms again would double-count it across sibling stage series.
+        long prepareStageStart = startTicks;
+
         if (gate == OnePhaseGateOutcome.Entered)
         {
             (DurableFinalizeOutcome? onePhase, OnePhaseFallbackReason fallback) = await TryOnePhaseFinalizeAsync(
@@ -479,6 +486,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             }
 
             DurableTransactionMetrics.OnePhaseFellBack(fallback);
+            prepareStageStart = Stopwatch.GetTimestamp();
         }
 
         // The first barrier alone is timed separately from the whole prepare stage, so the retry loop's share
@@ -519,7 +527,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     continue;
 
                 DurablePartitionPrepare partition = input.Partitions[i];
-                otherPrepareTaskList.Add(ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken));
+                otherPrepareTaskList.Add(ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.Prepare, cancellationToken));
             }
 
             Task<bool>[] otherPrepareTasks = otherPrepareTaskList.ToArray();
@@ -549,7 +557,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             // Nothing to bundle (anchor key routes outside the participant partitions, or no bundle seam): keep the
             // original init-then-prepare sequence. Nothing is durable if the init fails, so it is a clean retry.
-            if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Ordinary, cancellationToken).ConfigureAwait(false))
+            if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Ordinary, Writes.WriteSubmissionStage.RecordInit, cancellationToken).ConfigureAwait(false))
                 return Retry();
 
             // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
@@ -559,7 +567,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             for (int i = 0; i < input.Partitions.Count; i++)
             {
                 DurablePartitionPrepare partition = input.Partitions[i];
-                prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
+                prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.Prepare, cancellationToken);
             }
             bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
             for (int i = 0; i < prepareResults.Length; i++)
@@ -679,7 +687,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             {
                 int i = unacknowledged[k];
                 DurablePartitionPrepare partition = input.Partitions[i];
-                retryTasks[k] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, cancellationToken);
+                retryTasks[k] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.RePrepare, cancellationToken);
             }
 
             bool[] retryResults = await Task.WhenAll(retryTasks).ConfigureAwait(false);
@@ -704,7 +712,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 : PrepareRetryLoopOutcome.Exhausted);
         }
 
-        DurableTransactionMetrics.FinalizePrepareMs.Record(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+        DurableTransactionMetrics.FinalizePrepareMs.Record(Stopwatch.GetElapsedTime(prepareStageStart).TotalMilliseconds);
 
         // The range a refused participant was frozen against moved: this input can never prepare there. Nothing
         // decided is durable (the record is Undecided and the acknowledged intents stay recoverable), so a clean
@@ -810,6 +818,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
         CancellationToken cancellationToken)
     {
+        // Every admitted attempt records its pre-submission wall time exactly once: at a pre-propose exit
+        // (route local — nothing left this node), or after the propose answers (the reply's leader-measured
+        // bundle round subtracted, so the forwarded route's wire time lands on the pre-bundle side).
+        long attemptStart = Stopwatch.GetTimestamp();
+
         DurablePartitionPrepare partition = input.Partitions[0];
 
         // Pre-flight: a foreign durable intent on any written key would reject the bundled prepare — and the
@@ -826,7 +839,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             PreparedIntent? holder = intentStore.Get(intent.Key);
             if (holder is not null && (holder.TransactionId != input.TransactionId || holder.Epoch != input.Epoch))
+            {
+                DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
                 return (null, OnePhaseFallbackReason.ForeignIntent);
+            }
         }
 
         // Validation runs BEFORE anything durable — unlike 2PC's post-prepare validation. Safe for the same
@@ -838,7 +854,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool validated = await validateReadSet(cancellationToken).ConfigureAwait(false);
         DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
         if (!validated)
+        {
+            DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
             return (null, OnePhaseFallbackReason.ValidationFailed);
+        }
 
         // Late staged-base re-validation, as close to the propose as the bundle allows. The bundle decides in
         // the same atomic batch as its prepare, so the prepare-apply staged-base fence cannot withhold its
@@ -855,9 +874,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             switch (await validateStagedBases(input, cancellationToken).ConfigureAwait(false))
             {
                 case StagedBaseValidation.Conflict:
+                    // Recorded before the abort's decide round, so that round is never folded into the
+                    // pre-submission time of a bundle that was never proposed.
+                    DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
                     return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case StagedBaseValidation.Unknown:
+                    DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
                     return (Retry(), OnePhaseFallbackReason.None);
             }
         }
@@ -890,6 +913,23 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
             input.TransactionId, input.Epoch, opId,
             input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+
+        // Record the attempt's decomposition from the reply: the bundle's durable round is the leader's own
+        // enqueue-to-acknowledgement measurement, and everything else since the attempt began — including both
+        // wire directions of a forward — is pre-submission time on the route the reply names. A reply without a
+        // measured round (never enqueued, or an older remote leader without the field) records no bundle sample:
+        // the whole span is honest pre-submission time rather than a fabricated zero-length round.
+        double attemptMs = Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;
+        if (proposed is { BundleMs: > 0 } measured)
+        {
+            DurableTransactionMetrics.OnePhaseBundleMs.Record(measured.BundleMs);
+            DurableTransactionMetrics.OnePhasePreBundle(attemptMs - measured.BundleMs, measured.Forwarded);
+        }
+        else
+        {
+            // A null reply comes only from the forward path (an older remote anchor leader).
+            DurableTransactionMetrics.OnePhasePreBundle(attemptMs, proposed?.Forwarded ?? true);
+        }
 
         // The remote anchor leader does not implement the typed one-phase operation (an older node); the
         // standard 2PC flow handles it through the per-entry wire it does implement.
@@ -1051,7 +1091,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             replicated = replicateDecision is not null
                 ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
-                : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+                : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionReplicateMs.Record(Stopwatch.GetElapsedTime(replicateStart).TotalMilliseconds);
 
@@ -1409,23 +1449,25 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // between freeze and dispatch releases it retryably instead of landing on a retired partition.
     // The record initialize is ordinary work; the decision is terminal work that finishes an already-prepared
     // transaction. The caller passes the class so the decision draws on reserve capacity and can never be
-    // rejected by an ordinary-write burst on the anchor partition.
-    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
+    // rejected by an ordinary-write burst on the anchor partition. The caller also passes the stage — the same
+    // record log type carries both an init and a decision, and only the call site knows which it is sending.
+    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
         replicateFenced is not null
-            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration, admissionClass, cancellationToken)
-            : replicate(partitionId, ReplicationTypes.TransactionRecord, delta, admissionClass, cancellationToken);
+            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration, admissionClass, stage, cancellationToken)
+            : replicate(partitionId, ReplicationTypes.TransactionRecord, delta, admissionClass, stage, cancellationToken);
 
     // Pre-decision prepare: fenced against the partition group's frozen descriptor. A rejected prepare surfaces as
-    // a failed replicate (the seam folds in prepare acknowledgement) and drives an abort. Ordinary work.
-    private Task<bool> ReplicatePrepareAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+    // a failed replicate (the seam folds in prepare acknowledgement) and drives an abort. Ordinary work. The
+    // stage separates the first barrier's prepares from the retry loop's re-proposals.
+    private Task<bool> ReplicatePrepareAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
         replicateFenced is not null
-            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fenceKey, fenceGeneration, Writes.WriteAdmissionClass.Ordinary, cancellationToken)
-            : replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Ordinary, cancellationToken);
+            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fenceKey, fenceGeneration, Writes.WriteAdmissionClass.Ordinary, stage, cancellationToken)
+            : replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Ordinary, stage, cancellationToken);
 
     // Post-decision settle: unfenced and terminal. The decision is already durable; a split at this point is
     // resolved by the recovery sweep, and re-fencing would only strand the settle.
     private Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
-        replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken);
+        replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Settle, cancellationToken);
 
     /// <summary>Encodes one partition's frozen intent set as a single prepare delta.</summary>
     private static byte[] SerializePrepare(DurablePartitionPrepare partition)

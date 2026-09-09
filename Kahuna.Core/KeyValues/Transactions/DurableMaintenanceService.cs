@@ -108,8 +108,8 @@ internal sealed class DurableMaintenanceService
         int sourcePartitionId, string? startKey, string? endKey, CancellationToken cancellationToken) =>
         rangeStateTransfer.GetRangeTransactionStateFromPartitionLeaderAsync(sourcePartitionId, startKey, endKey, KeyValueRangeStateKinds.Intents, cancellationToken);
 
-    private Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
-        durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
+    private Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
+        durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, stage, cancellationToken);
 
     private Task<TransactionRecord?> LookupDurableRecordRouted(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         durableReplication.LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken);
@@ -411,7 +411,7 @@ internal sealed class DurableMaintenanceService
             {
                 byte[] delta = TransactionRecordStore.SerializeDelta(purges);
                 await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.TransactionRecord, delta,
-                    Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+                    Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Other, cancellationToken).ConfigureAwait(false);
                 DurableTransactionMetrics.RecordsReclaimed(purges.Count);
             }
             catch (Exception ex)
@@ -723,7 +723,7 @@ internal sealed class DurableMaintenanceService
         // A recovery-driven abort is terminal work resolving an already-prepared transaction — admit as Terminal.
         await durableReplication.ReplicateDurableThroughScheduler(
             anchorPartition, ReplicationTypes.TransactionRecord, delta, Writes.WriteAdmissionClass.Terminal,
-            cancellationToken, projectRecordLocally: false).ConfigureAwait(false);
+            Writes.WriteSubmissionStage.Decision, cancellationToken, projectRecordLocally: false).ConfigureAwait(false);
 
         // Read back the winner — never assume the abort won. The local store is authoritative only when this
         // node leads the anchor partition; otherwise ask the anchor leader.

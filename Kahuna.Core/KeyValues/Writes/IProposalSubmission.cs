@@ -26,6 +26,11 @@ internal interface IProposalSubmission
     /// ordinary-write burst.</summary>
     WriteAdmissionClass AdmissionClass { get; }
 
+    /// <summary>The transaction stage (or non-transactional producer) that created this submission, chosen at
+    /// the creation site and carried to dispatch, where it tags the per-submission queue-delay histogram. Never
+    /// inferred from the entries' log types — several stages share the same shape.</summary>
+    WriteSubmissionStage Stage { get; }
+
     /// <summary>Serialized byte cost (sum over <see cref="Entries"/>), for byte-budgeted batching and admission.</summary>
     int ByteLength { get; }
 

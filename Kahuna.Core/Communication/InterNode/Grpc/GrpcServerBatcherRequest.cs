@@ -1,4 +1,6 @@
 
+using Google.Protobuf;
+
 namespace Kahuna.Server.Communication.Internode.Grpc;
 
 /// <summary>
@@ -10,6 +12,12 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 internal readonly struct GrpcServerBatcherRequest
 {
     private readonly object? payload;
+
+    /// <summary>
+    /// Serialized size of the wrapped protobuf payload, in bytes. The batcher charges this amount
+    /// against its byte admission limit for the request's whole pending lifetime.
+    /// </summary>
+    public int PayloadSize => payload is IMessage message ? message.CalculateSize() : 0;
 
     public GrpcServerBatcherRequest(GrpcTryLockRequest tryLock) => payload = tryLock;
 

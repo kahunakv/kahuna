@@ -28,6 +28,9 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
     /// base admission budget.</summary>
     public WriteAdmissionClass AdmissionClass => WriteAdmissionClass.Ordinary;
 
+    /// <summary>A direct write belongs to no transaction stage.</summary>
+    public WriteSubmissionStage Stage => WriteSubmissionStage.Other;
+
     public int ProposalId { get; }
 
     public KeyValueDurability Durability { get; }

@@ -89,8 +89,9 @@ internal sealed class RangeStateTransferService
 
     private KvStateMachineTransfer kvStateMachineTransfer => manager.KvStateMachineTransfer;
 
+    // Topology-transfer imports belong to no transaction stage.
     private Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
-        runtime.DurableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
+        runtime.DurableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, Writes.WriteSubmissionStage.Other, cancellationToken);
 
     private Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) =>
         manager.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
@@ -691,6 +692,7 @@ internal sealed class RangeStateTransferService
             entries,
             completion,
             Writes.WriteAdmissionClass.Terminal,
+            Writes.WriteSubmissionStage.Other,
             durableReplication.ApplyDurableEntriesOnCommit,
             fenceKey: null,
             fenceGeneration: 0);

@@ -104,11 +104,13 @@ public interface IKahuna
     public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
 
     /// <summary>Runs a forwarded durable bundle on this node because it leads the partition: the ordered entries
-    /// enter the local scheduler as one atomic submission under the origin's admission class and range fence.
-    /// Redirects once to the actual leader when routed here on a stale guess.</summary>
+    /// enter the local scheduler as one atomic submission under the origin's admission class, producing stage
+    /// (a <see cref="Kahuna.Server.KeyValues.Writes.WriteSubmissionStage"/> value; 0 from an older sender that
+    /// does not carry it), and range fence. Redirects once to the actual leader when routed here on a stale
+    /// guess.</summary>
     public Task<DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
     /// <summary>Replicates a forwarded terminal decision on this node because it leads the anchor partition and
     /// answers the canonical outcome read from its record store after the ordered apply.</summary>

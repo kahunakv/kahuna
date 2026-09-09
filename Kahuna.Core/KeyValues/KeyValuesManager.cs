@@ -299,12 +299,12 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal (int PartitionId, long Generation) LocateDurablePartition(string key) => durableReplication.LocateDurablePartition(key);
 
     /// <summary>Replicates a durable entry through the partition write scheduler.</summary>
-    internal Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken) =>
-        durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, cancellationToken);
+    internal Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
+        durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, stage, cancellationToken);
 
     /// <summary>Replicates a durable entry fenced on a range lock's key and generation.</summary>
-    internal Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, CancellationToken cancellationToken, bool projectRecordLocally = true) =>
-        durableReplication.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, cancellationToken, projectRecordLocally);
+    internal Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken, bool projectRecordLocally = true) =>
+        durableReplication.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, stage, cancellationToken, projectRecordLocally);
 
     /// <summary>Replicates an anchor's init+prepare as one atomic batch. Reports batch commit and prepare
     /// acknowledgement independently.</summary>
@@ -333,8 +333,8 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Runs a forwarded durable bundle on this node as one atomic scheduler submission.</summary>
     internal Task<Writes.DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        durableReplication.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        durableReplication.DurableBundleLocal(partitionId, entries, terminal, stage, fenceKey, fenceGeneration, cancellationToken);
 
     /// <summary>Runs a forwarded one-phase bundle on this node as one atomic scheduler submission and answers
     /// the bundle signals plus the canonical outcome.</summary>

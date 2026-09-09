@@ -44,6 +44,13 @@ internal readonly struct GrpcServerBatcherItem
     public int ForwardHops { get; }
 
     /// <summary>
+    /// Serialized size of the request payload, in bytes. Computed once at enqueue time and held
+    /// here so the batcher can release the same amount from its byte admission accounting when
+    /// the request settles, without a second size computation.
+    /// </summary>
+    public int PayloadBytes { get; }
+
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
@@ -63,5 +70,6 @@ internal readonly struct GrpcServerBatcherItem
         Promise = promise;
         EnqueuedAtTicks = Environment.TickCount64;
         ForwardHops = ForwardedRequestScope.ChainedHops;
+        PayloadBytes = request.PayloadSize;
     }
 }

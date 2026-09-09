@@ -144,7 +144,7 @@ public class TestManyValuesReadTimestampGrpc
         // ── Unreachable in these tests ────────────────────────────────────────────
         public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
-        public Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<DurableDecisionWireReply?> DurableDecisionLocal(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
 
         public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, HLCTimestamp opId, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();

@@ -268,8 +268,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     )
     {
         GrpcTrySetManyKeyValueRequest request = new();
-            
-        request.Items.Add(GetSetManyRequestItems(items));
+
+        AddSetManyRequestItems(request.Items, items);
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
@@ -300,7 +300,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     {
         GrpcTryDeleteManyKeyValueRequest request = new();
 
-        request.Items.Add(GetDeleteManyRequestItems(items));
+        AddDeleteManyRequestItems(request.Items, items);
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -322,12 +322,26 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     }
 
     /// <summary>
-    /// 
+    /// Reserves room for a batch of known size before its items are added one by one. Without the
+    /// reservation the repeated field grows its backing array several times per batch.
     /// </summary>
-    /// <param name="items"></param>
-    /// <returns></returns>
-    private static IEnumerable<GrpcTrySetManyKeyValueRequestItem> GetSetManyRequestItems(List<KahunaSetKeyValueRequestItem> items)
+    private static void ReserveItemCapacity<T>(RepeatedField<T> target, int count)
     {
+        if (count == 0)
+            return;
+
+        // The field is empty at every current call site, but a later caller may append to a
+        // populated one, so the existing items are part of the requirement.
+        int required = checked(target.Count + count);
+
+        if (required > target.Capacity)
+            target.Capacity = required;
+    }
+
+    internal static void AddSetManyRequestItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> target, List<KahunaSetKeyValueRequestItem> items)
+    {
+        ReserveItemCapacity(target, items.Count);
+
         foreach (KahunaSetKeyValueRequestItem item in items)
         {
             GrpcTrySetManyKeyValueRequestItem grpcItem = new()
@@ -349,22 +363,24 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             if (item.CompareValue is not null)
                 grpcItem.CompareValue = UnsafeByteOperations.UnsafeWrap(item.CompareValue);
 
-            yield return grpcItem;
+            target.Add(grpcItem);
         }
     }
 
-    private static IEnumerable<GrpcTryDeleteManyKeyValueRequestItem> GetDeleteManyRequestItems(List<KahunaDeleteKeyValueRequestItem> items)
+    internal static void AddDeleteManyRequestItems(RepeatedField<GrpcTryDeleteManyKeyValueRequestItem> target, List<KahunaDeleteKeyValueRequestItem> items)
     {
+        ReserveItemCapacity(target, items.Count);
+
         foreach (KahunaDeleteKeyValueRequestItem item in items)
         {
-            yield return new()
+            target.Add(new GrpcTryDeleteManyKeyValueRequestItem
             {
                 TransactionIdNode = item.TransactionId.N,
                 TransactionIdPhysical = item.TransactionId.L,
                 TransactionIdCounter = item.TransactionId.C,
                 Key = item.Key,
                 Durability = (GrpcKeyValueDurability)item.Durability
-            };
+            });
         }
     }
 
@@ -573,7 +589,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampCounter = readTimestamp.C
         };
 
-        request.Items.Add(GetTryManyValuesRequestItems(keys));
+        AddTryManyValuesRequestItems(request.Items, keys);
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryGetManyValuesResponse remoteResponse = response.TryGetManyValues!;
@@ -607,7 +623,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampCounter = readTimestamp.C
         };
 
-        request.Items.Add(GetTryManyValuesRequestItems(keys));
+        AddTryManyValuesRequestItems(request.Items, keys);
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryExistsManyValuesResponse remoteResponse = response.TryExistsManyValues!;
@@ -619,28 +635,37 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
 
-    private static IEnumerable<GrpcTryManyValuesRequestItem> GetTryManyValuesRequestItems(
+    internal static void AddTryManyValuesRequestItems(
+        RepeatedField<GrpcTryManyValuesRequestItem> target,
         List<(string key, long revision, KeyValueDurability durability)> keys
     )
     {
+        ReserveItemCapacity(target, keys.Count);
+
         foreach ((string key, long revision, KeyValueDurability durability) item in keys)
         {
-            yield return new()
+            target.Add(new GrpcTryManyValuesRequestItem
             {
                 Key = item.key,
                 Revision = item.revision,
                 Durability = (GrpcKeyValueDurability)item.durability
-            };
+            });
         }
     }
 
-    private static ReadOnlyKeyValueEntry? GetReadOnlyKeyValueEntry(GrpcTryGetManyValuesResponseItem item)
+    /// <summary>
+    /// Decodes one item of a routed batch read. The remote leader leaves the value field unset for a key that
+    /// holds no value and writes a present, empty field for a key that holds zero bytes, so a decoder that reads
+    /// the field alone reports null where a local read of the same key reports an empty array. The bytes are
+    /// borrowed from the parsed message instead of copied, which is the contract the point read above follows.
+    /// </summary>
+    internal static ReadOnlyKeyValueEntry? GetReadOnlyKeyValueEntry(GrpcTryGetManyValuesResponseItem item)
     {
         if ((KeyValueResponseType)item.Type is not (KeyValueResponseType.Get or KeyValueResponseType.Exists))
             return null;
 
         return new(
-            item.Value.IsEmpty ? null : item.Value.ToByteArray(),
+            ByteStringPayload.GetArrayOrNull(item.HasValue, item.Value),
             item.Revision,
             new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
             new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
@@ -649,6 +674,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// Decodes one item of a routed batch existence probe. An existence probe carries no payload, so the entry
+    /// holds a null value for every item, the same as the point probe above.
+    /// </summary>
     private static ReadOnlyKeyValueEntry? GetReadOnlyKeyValueEntry(GrpcTryExistsManyValuesResponseItem item)
     {
         if ((KeyValueResponseType)item.Type is not (KeyValueResponseType.Get or KeyValueResponseType.Exists))
@@ -840,7 +869,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
 
-        request.Items.Add(GetAcquireLockRequestItems(xkeys));
+        AddAcquireLockRequestItems(request.Items, xkeys);
 
         GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
         GrpcTryAcquireManyExclusiveLocksResponse remoteResponse = response.TryAcquireManyExclusiveLocks!;
@@ -855,15 +884,17 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
     
-    private static IEnumerable<GrpcTryAcquireManyExclusiveLocksRequestItem> GetAcquireLockRequestItems(List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
+    internal static void AddAcquireLockRequestItems(RepeatedField<GrpcTryAcquireManyExclusiveLocksRequestItem> target, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
     {
+        ReserveItemCapacity(target, xkeys.Count);
+
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in xkeys)
-            yield return new()
+            target.Add(new GrpcTryAcquireManyExclusiveLocksRequestItem
             {
                 Key = key.key,
                 ExpiresMs = key.expiresMs,
                 Durability = (GrpcKeyValueDurability)key.durability
-            };
+            });
     }
 
     public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(
@@ -1035,7 +1066,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
             
-        request.Items.Add(GetReleaseLockRequestItems(xkeys));
+        AddReleaseLockRequestItems(request.Items, xkeys);
         
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryReleaseManyExclusiveLocksResponse remoteResponse = response.TryReleaseManyExclusiveLocks!;
@@ -1047,14 +1078,16 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
     
-    private static IEnumerable<GrpcTryReleaseManyExclusiveLocksRequestItem> GetReleaseLockRequestItems(List<(string key, KeyValueDurability durability)> xkeys)
+    internal static void AddReleaseLockRequestItems(RepeatedField<GrpcTryReleaseManyExclusiveLocksRequestItem> target, List<(string key, KeyValueDurability durability)> xkeys)
     {
+        ReserveItemCapacity(target, xkeys.Count);
+
         foreach ((string key, KeyValueDurability durability) key in xkeys)
-            yield return new()
+            target.Add(new GrpcTryReleaseManyExclusiveLocksRequestItem
             {
                 Key = key.key,
                 Durability = (GrpcKeyValueDurability)key.durability
-            };
+            });
     }
     
     public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
@@ -1126,7 +1159,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (recordAnchorKey is not null)
             request.RecordAnchorKey = recordAnchorKey;
 
-        request.Items.Add(GetPrepareRequestItems(xkeys));
+        AddPrepareRequestItems(request.Items, xkeys);
         
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryPrepareManyMutationsResponse remoteResponse = response.TryPrepareManyMutations!;
@@ -1143,14 +1176,16 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
     
-    private static IEnumerable<GrpcTryPrepareManyMutationsRequestItem> GetPrepareRequestItems(List<(string key, KeyValueDurability durability)> xkeys)
+    internal static void AddPrepareRequestItems(RepeatedField<GrpcTryPrepareManyMutationsRequestItem> target, List<(string key, KeyValueDurability durability)> xkeys)
     {
+        ReserveItemCapacity(target, xkeys.Count);
+
         foreach ((string key, KeyValueDurability durability) key in xkeys)
-            yield return new()
+            target.Add(new GrpcTryPrepareManyMutationsRequestItem
             {
                 Key = key.key,
                 Durability = (GrpcKeyValueDurability)key.durability
-            };
+            });
     }
 
     public async Task<(KeyValueResponseType, long)> TryCommitMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
@@ -1187,7 +1222,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
             
-        request.Items.Add(GetCommitRequestItems(xkeys));
+        AddCommitRequestItems(request.Items, xkeys);
             
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryCommitManyMutationsResponse remoteResponse = response.TryCommitManyMutations!;
@@ -1199,17 +1234,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
     
-    private static IEnumerable<GrpcTryCommitManyMutationsRequestItem> GetCommitRequestItems(List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
+    internal static void AddCommitRequestItems(RepeatedField<GrpcTryCommitManyMutationsRequestItem> target, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
     {
+        ReserveItemCapacity(target, xkeys.Count);
+
         foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in xkeys)
-            yield return new()
+            target.Add(new GrpcTryCommitManyMutationsRequestItem
             {
                 Key = key.key,
                 ProposalTicketNode = key.ticketId.N,
                 ProposalTicketPhysical = key.ticketId.L,
                 ProposalTicketCounter = key.ticketId.C,
                 Durability = (GrpcKeyValueDurability)key.durability
-            };
+            });
     }
 
     public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
@@ -1246,7 +1283,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
             
-        request.Items.Add(GetRollbackRequestItems(xkeys));
+        AddRollbackRequestItems(request.Items, xkeys);
             
         GrpcServerBatcherResponse response = await batcher.Enqueue(request);
         GrpcTryRollbackManyMutationsResponse remoteResponse = response.TryRollbackManyMutations!;
@@ -1258,17 +1295,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
     
-    private static IEnumerable<GrpcTryRollbackManyMutationsRequestItem> GetRollbackRequestItems(List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
+    internal static void AddRollbackRequestItems(RepeatedField<GrpcTryRollbackManyMutationsRequestItem> target, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys)
     {
+        ReserveItemCapacity(target, xkeys.Count);
+
         foreach ((string key, HLCTimestamp ticketId, KeyValueDurability durability) key in xkeys)
-            yield return new()
+            target.Add(new GrpcTryRollbackManyMutationsRequestItem
             {
                 Key = key.key,
                 ProposalTicketNode = key.ticketId.N,
                 ProposalTicketPhysical = key.ticketId.L,
                 ProposalTicketCounter = key.ticketId.C,
                 Durability = (GrpcKeyValueDurability)key.durability
-            };
+            });
     }
     
     /// <summary>
@@ -1606,13 +1645,32 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (payload.ReleasedRangeLock is { } releasedRange) request.ReleasedRangeLock = ToGrpcRangeLock(releasedRange, RangeLockMode.Exclusive);
         if (payload.Read is not null) request.Read = ToGrpcReadKey(payload.Read);
         if (payload.ReadObservations is not null)
-            request.ReadObservations.AddRange(payload.ReadObservations.Select(ToGrpcReadKey));
+        {
+            ReserveItemCapacity(request.ReadObservations, payload.ReadObservations.Count);
+            foreach (KeyValueTransactionReadKey read in payload.ReadObservations)
+                request.ReadObservations.Add(ToGrpcReadKey(read));
+        }
+
         if (payload.ModifiedKeys is not null)
-            request.ModifiedKeys.AddRange(payload.ModifiedKeys.Select(m => new GrpcTransactionModifiedKey { Key = m.Key, Durability = (GrpcKeyValueDurability)m.Durability }));
+        {
+            ReserveItemCapacity(request.ModifiedKeys, payload.ModifiedKeys.Count);
+            foreach ((string Key, KeyValueDurability Durability) m in payload.ModifiedKeys)
+                request.ModifiedKeys.Add(new GrpcTransactionModifiedKey { Key = m.Key, Durability = (GrpcKeyValueDurability)m.Durability });
+        }
+
         if (payload.StagedMutations is not null)
-            request.StagedMutations.AddRange(payload.StagedMutations.Select(ToGrpcStagedMutation));
+        {
+            ReserveItemCapacity(request.StagedMutations, payload.StagedMutations.Count);
+            foreach (StagedMutationEffect effect in payload.StagedMutations)
+                request.StagedMutations.Add(ToGrpcStagedMutation(effect));
+        }
+
         if (payload.AcquiredPointLocks is not null)
-            request.AcquiredPointLocks.AddRange(payload.AcquiredPointLocks.Select(l => new GrpcTransactionModifiedKey { Key = l.Key, Durability = (GrpcKeyValueDurability)l.Durability }));
+        {
+            ReserveItemCapacity(request.AcquiredPointLocks, payload.AcquiredPointLocks.Count);
+            foreach ((string Key, KeyValueDurability Durability) l in payload.AcquiredPointLocks)
+                request.AcquiredPointLocks.Add(new GrpcTransactionModifiedKey { Key = l.Key, Durability = (GrpcKeyValueDurability)l.Durability });
+        }
 
         return request;
     }
@@ -2033,7 +2091,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<DurableBundleWireReply?> DurableBundle(
         string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2041,6 +2099,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             PartitionId = partitionId,
             AdmissionClass = terminal ? 1 : 0,
+            Stage = stage,
             FenceKey = fenceKey ?? string.Empty,
             FenceGeneration = fenceGeneration
         };
@@ -2135,7 +2194,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         return new DurableOnePhaseWireReply(
             response.BatchCommitted, response.PrepareAcknowledged, response.PrepareRejection,
-            response.DecisionKnown, response.Decision, response.AbortClass, response.GatedVerdict);
+            response.DecisionKnown, response.Decision, response.AbortClass, response.GatedVerdict,
+            response.BundleMs);
     }
 
     public async Task<byte[]?> LookupTransactionRecord(string node, int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken)

@@ -507,15 +507,17 @@ internal sealed class GrpcBatcher
     }
 
     /// <summary>
-    /// It retrieves a message from the inbox and invokes the actor by passing one message 
-    /// at a time until the pending message list is cleared.
+    /// It retrieves a message from the inbox and invokes the actor by passing one message
+    /// at a time until the pending message list is cleared. A drain failure is logged, never
+    /// propagated: the handoff below must always run, because a dispatcher that exits with the
+    /// flag still claimed leaves every later enqueue unable to start a replacement.
     /// </summary>
     /// <returns></returns>
     private async Task DeliverMessages()
     {
-        try
+        while (true)
         {
-            do
+            try
             {
                 do
                 {
@@ -546,13 +548,35 @@ internal sealed class GrpcBatcher
                     }
 
                 } while (!inbox.IsEmpty);
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "GrpcBatcher ({Url}): unexpected exception in batch dispatch loop", url);
+            }
 
-            } while (Interlocked.CompareExchange(ref processing, 1, 0) != 0);
+            if (TryReleaseDispatch())
+                return;
         }
-        catch (Exception ex)
-        {
-            logger?.LogError(ex, "GrpcBatcher ({Url}): unexpected exception in batch dispatch loop", url);
-        }
+    }
+
+    /// <summary>
+    /// Hands dispatch ownership back and decides whether this dispatcher may exit. The release
+    /// must come before the final emptiness decision: a producer that enqueued between the drain
+    /// loop's empty check and this release observed a claimed flag and started no dispatcher, so
+    /// without the recheck its item would wait in the inbox until unrelated later traffic arrived
+    /// — or, on a quiet batcher, until its deadline or cancellation abandoned it. Returns true
+    /// when the inbox is empty after the release, or when a racing producer already claimed
+    /// ownership and its dispatcher now owns the queue. Returns false when this dispatcher
+    /// reclaimed ownership and must keep the drain loop running.
+    /// </summary>
+    internal bool TryReleaseDispatch()
+    {
+        Interlocked.Exchange(ref processing, 1);
+
+        if (inbox.IsEmpty)
+            return true;
+
+        return Interlocked.Exchange(ref processing, 0) != 1;
     }
 
     private async Task Receive(List<GrpcBatcherItem> requests)

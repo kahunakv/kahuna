@@ -40,7 +40,7 @@ public sealed class TestDurableTransactionFinalizer
         // Marker log type recorded in Calls for a bundled anchor [init, prepare] submission.
         public const string BundleType = "bundle";
 
-        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken ct)
+        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
             if (Fail is not null && Fail(partitionId, logType))
@@ -237,7 +237,7 @@ public sealed class TestDurableTransactionFinalizer
         TaskCompletionSource releasePrepares = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int preparesStarted = 0;
 
-        async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
+        async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken cancellationToken)
         {
             if (logType == ReplicationTypes.PreparedIntent && Interlocked.Increment(ref preparesStarted) == 2)
                 preparedStarted.TrySetResult();
@@ -245,7 +245,7 @@ public sealed class TestDurableTransactionFinalizer
             if (logType == ReplicationTypes.PreparedIntent)
                 await releasePrepares.Task.WaitAsync(cancellationToken);
 
-            return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
+            return await seam.Replicate(partitionId, logType, data, admissionClass, stage, cancellationToken);
         }
 
         DurableTransactionFinalizer finalizer = new(records, intents, Replicate);
@@ -271,7 +271,7 @@ public sealed class TestDurableTransactionFinalizer
         TaskCompletionSource releaseFirstWindow = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int materializationsStarted = 0;
 
-        async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken cancellationToken)
+        async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken cancellationToken)
         {
             if (logType == ReplicationTypes.KeyValues)
             {
@@ -283,7 +283,7 @@ public sealed class TestDurableTransactionFinalizer
                     await releaseFirstWindow.Task.WaitAsync(cancellationToken);
             }
 
-            return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
+            return await seam.Replicate(partitionId, logType, data, admissionClass, stage, cancellationToken);
         }
 
         using DurableTransactionFinalizer finalizer = new(
@@ -320,10 +320,11 @@ public sealed class TestDurableTransactionFinalizer
             string logType,
             byte[] data,
             WriteAdmissionClass admissionClass,
+            WriteSubmissionStage stage,
             CancellationToken cancellationToken)
         {
             if (logType != ReplicationTypes.KeyValues)
-                return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
+                return await seam.Replicate(partitionId, logType, data, admissionClass, stage, cancellationToken);
 
             Interlocked.Increment(ref materializations);
             int active = Interlocked.Increment(ref activeMaterializations);
@@ -331,7 +332,7 @@ public sealed class TestDurableTransactionFinalizer
             try
             {
                 await Task.Delay(10, cancellationToken);
-                return await seam.Replicate(partitionId, logType, data, admissionClass, cancellationToken);
+                return await seam.Replicate(partitionId, logType, data, admissionClass, stage, cancellationToken);
             }
             finally
             {
@@ -1037,6 +1038,143 @@ public sealed class TestDurableTransactionFinalizer
         PreparedIntentStore intents = new();
         records.AttachBundledCommitJudge(intents.JudgeBundledCommit);
         return (records, intents);
+    }
+
+    /// <summary>
+    /// A locally-led one-phase commit records the stage decomposition: one bundle-time sample carrying the
+    /// leader's own enqueue-to-acknowledgement measurement (an exact sentinel here, so the sample is
+    /// unmistakably this attempt's among a parallel test run's), and one <c>route=local</c> pre-bundle sample
+    /// covering the rest of the attempt — at least the injected pre-propose work, and no more than the commit's
+    /// observed total, which is the reconciliation-within-tolerance contract.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_LocalCommit_RecordsBundleAndPreBundleDecomposition()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        const double bundleSentinelMs = 3.25;
+        DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct) =>
+            {
+                // Models in-flight time ahead of the aggregator hand-off, so the attempt's pre-bundle share has
+                // a floor this test can assert on.
+                await Task.Delay(20, ct);
+                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct);
+                return reply!.Value with { BundleMs = bundleSentinelMs };
+            });
+
+        using MetricCapture capture = new("route",
+            "kahuna.durable_tx.one_phase_bundle_ms", "kahuna.durable_tx.one_phase_pre_bundle_ms");
+
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        double totalMs = System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Contains(bundleSentinelMs, capture.Samples("kahuna.durable_tx.one_phase_bundle_ms"));
+
+        // This attempt's pre-bundle sample: at least the injected 20 ms minus the sentinel, at most the
+        // observed commit total (both spans lie inside the finalize).
+        Assert.Contains(capture.Samples("kahuna.durable_tx.one_phase_pre_bundle_ms", "local"),
+            s => s >= 15 && s <= totalMs + 1);
+    }
+
+    /// <summary>
+    /// A one-phase commit whose bundle crossed to a remote anchor leader records its pre-bundle time on the
+    /// <c>route=forwarded</c> series, and that sample carries the wire time (the injected round trip here) —
+    /// measurably larger than a co-located attempt's — while the bundle sample still carries the remote
+    /// leader's own measurement.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_ForwardedCommit_PreBundleLandsOnForwardedRoute()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        const double bundleSentinelMs = 2.5;
+        DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct) =>
+            {
+                // Models both wire directions of the forward to a remote anchor leader.
+                await Task.Delay(60, ct);
+                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, ct);
+                return reply!.Value with { BundleMs = bundleSentinelMs, Forwarded = true };
+            });
+
+        using MetricCapture capture = new("route",
+            "kahuna.durable_tx.one_phase_bundle_ms", "kahuna.durable_tx.one_phase_pre_bundle_ms");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Contains(bundleSentinelMs, capture.Samples("kahuna.durable_tx.one_phase_bundle_ms"));
+        Assert.Contains(capture.Samples("kahuna.durable_tx.one_phase_pre_bundle_ms", "forwarded"), s => s >= 50);
+    }
+
+    /// <summary>
+    /// The no-double-count contract of a fallback: an attempt that fails its up-front validation records its
+    /// pre-bundle time once (route local — nothing left this node), proposes no bundle, and the 2PC prepare
+    /// stage it falls into restarts its clock — the attempt's wall time must not be charged to
+    /// <c>finalize_prepare_ms</c> a second time. The injected validation delay is far above any real prepare
+    /// stage in this window, so a prepare sample carrying it would be unmistakable.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_ValidationFallback_RecordsPreBundleOnceWithoutChargingPrepare()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        const int validationDelayMs = 1200;
+        bool proposed = false;
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) =>
+            {
+                proposed = true;
+                return Task.FromResult<DurableOnePhaseReply?>(null);
+            });
+
+        async Task<bool> SlowFailingValidate(CancellationToken ct)
+        {
+            await Task.Delay(validationDelayMs, ct);
+            return false;
+        }
+
+        using MetricCapture capture = new("route",
+            "kahuna.durable_tx.one_phase_bundle_ms", "kahuna.durable_tx.one_phase_pre_bundle_ms",
+            "kahuna.durable_tx.finalize_prepare_ms");
+        using MetricCapture fallbacks = new("reason", "kahuna.durable_tx.one_phase_fallbacks");
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1")), SlowFailingValidate, opId: Ts(2000), CancellationToken.None);
+
+        // The 2PC flow re-validates, fails again, and drives the truthful conflict abort — as today.
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.False(proposed);
+        Assert.True(fallbacks.Total("kahuna.durable_tx.one_phase_fallbacks", "validation_failed") >= 1);
+
+        // Pre-bundle carries the attempt (validation delay included), on the local route.
+        Assert.Contains(capture.Samples("kahuna.durable_tx.one_phase_pre_bundle_ms", "local"),
+            s => s >= validationDelayMs - 50);
+
+        // No bundle was proposed, so no sample can carry the attempt's span.
+        Assert.DoesNotContain(capture.Samples("kahuna.durable_tx.one_phase_bundle_ms"),
+            s => s >= validationDelayMs - 50);
+
+        // The prepare stage restarted its clock at the fallback: no prepare sample in this window carries the
+        // attempt's delay.
+        Assert.DoesNotContain(capture.Samples("kahuna.durable_tx.finalize_prepare_ms"),
+            s => s >= validationDelayMs);
     }
 
     /// <summary>

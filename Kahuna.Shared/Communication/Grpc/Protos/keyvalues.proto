@@ -1171,6 +1171,10 @@ message GrpcBatchServerKeyValueRequest {
     GrpcDurableDecisionRequest DurableDecision = 56;
     GrpcDurableOnePhaseRequest DurableOnePhase = 57;
   }
+  // Set only when Type is SERVER_COALESCED: independent single-operation envelopes that share
+  // this one stream message. Each inner envelope carries its own RequestId, Type, ForwardHops
+  // and payload; the carrier's own RequestId and payload stay empty. Inner envelopes never nest.
+  repeated GrpcBatchServerKeyValueRequest Coalesced = 58;
 }
 
 message GrpcBatchServerKeyValueResponse
@@ -1233,6 +1237,9 @@ message GrpcBatchServerKeyValueResponse
     GrpcDurableDecisionResponse DurableDecision = 55;
     GrpcDurableOnePhaseResponse DurableOnePhase = 56;
   }
+  // Set only when Type is SERVER_COALESCED: independent single-operation responses that share
+  // this one stream message.
+  repeated GrpcBatchServerKeyValueResponse Coalesced = 57;
 }
 
 message GrpcRegisterKeyRangeRequest {
@@ -1458,6 +1465,7 @@ message GrpcDurableBundleRequest {
   int32 AdmissionClass = 3;   // 0 ordinary, 1 terminal (Kahuna's WriteAdmissionClass)
   string FenceKey = 4;        // empty = unfenced
   int64 FenceGeneration = 5;
+  int32 Stage = 6;            // the origin's WriteSubmissionStage; 0 (other) from an older sender
 }
 
 // The two signals of a bundle stay separate: BatchCommitted (the proposal reached Raft; the record is durable)
@@ -1526,6 +1534,8 @@ message GrpcDurableOnePhaseResponse {
   int32 Decision = 5;
   int32 AbortClass = 6;
   int32 GatedVerdict = 7;
+  double BundleMs = 8;        // leader-measured enqueue-to-acknowledgement wall time of the bundled
+                              // submission; <= 0 when it was never enqueued or the leader predates this field
 }
 
 message GrpcLookupTransactionRecordRequest {
@@ -1616,6 +1626,9 @@ enum GrpcServerBatchType {
   SERVER_DURABLE_BUNDLE = 53;
   SERVER_DURABLE_DECISION = 54;
   SERVER_DURABLE_ONE_PHASE = 55;
+  // The envelope carries no payload of its own: the Coalesced field holds the real requests
+  // (or responses).
+  SERVER_COALESCED = 56;
 }
 
 enum GrpcRangeLockMode {

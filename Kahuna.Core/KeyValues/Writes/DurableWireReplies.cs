@@ -46,18 +46,30 @@ internal readonly record struct DurableDecisionReply(bool Replicated, bool Known
 /// the leader's record store after the ordered apply — the batch is durable but the commit transition is judged
 /// at apply, so the batch signals alone can never name the winner. When the record stays Undecided,
 /// <paramref name="GatedVerdict"/> names the bundled-commit gate's rejection (<see cref="BundledCommitVerdict.Admit"/>
-/// when the gate recorded none — the deadline gate withheld the commit instead).</summary>
+/// when the gate recorded none — the deadline gate withheld the commit instead).
+/// <para><paramref name="BundleMs"/> is the wall time from the bundle's scheduler enqueue to its completed
+/// acknowledgement, measured on the leader that enqueued it (this node, or the remote anchor leader, carried
+/// back on the wire); a non-positive value means the bundle was never enqueued or an older leader did not
+/// measure it, and the caller must not record a bundle-time sample. <paramref name="Forwarded"/> is set by the
+/// origin's gateway — never carried on the wire — and says whether the bundle crossed to a remote leader, so the
+/// pre-submission time can be attributed to its route.</para></summary>
 internal readonly record struct DurableOnePhaseReply(
     bool BatchCommitted, bool PrepareAcknowledged, PrepareRejectionKind Rejection,
-    bool DecisionKnown, TransactionDecision Decision, TransactionAbortClass AbortClass, BundledCommitVerdict GatedVerdict)
+    bool DecisionKnown, TransactionDecision Decision, TransactionAbortClass AbortClass, BundledCommitVerdict GatedVerdict,
+    double BundleMs = -1, bool Forwarded = false)
 {
     public DurableOnePhaseWireReply ToWire() =>
-        new(BatchCommitted, PrepareAcknowledged, (int)Rejection, DecisionKnown, (int)Decision, (int)AbortClass, (int)GatedVerdict);
+        new(BatchCommitted, PrepareAcknowledged, (int)Rejection, DecisionKnown, (int)Decision, (int)AbortClass, (int)GatedVerdict, BundleMs);
 
     public static DurableOnePhaseReply FromWire(DurableOnePhaseWireReply wire) => new(
         wire.BatchCommitted, wire.PrepareAcknowledged, (PrepareRejectionKind)wire.PrepareRejection,
         wire.DecisionKnown, (TransactionDecision)wire.Decision, (TransactionAbortClass)wire.AbortClass,
-        (BundledCommitVerdict)wire.GatedVerdict);
+        (BundledCommitVerdict)wire.GatedVerdict,
+        // An older remote leader answers 0 for the field it does not know; normalize to "unmeasured" so a
+        // caller never records a fabricated zero-length bundle time.
+        wire.BundleMs > 0 ? wire.BundleMs : -1,
+        // FromWire runs only on the node that sent the bundle across the wire.
+        Forwarded: true);
 }
 
 /// <summary>The public wire shape of <see cref="DurableBundleReply"/>, for the node and transport contracts:
@@ -66,10 +78,12 @@ public readonly record struct DurableBundleWireReply(bool BatchCommitted, bool P
 
 /// <summary>The public wire shape of <see cref="DurableOnePhaseReply"/>, for the node and transport contracts:
 /// <paramref name="Decision"/>, <paramref name="AbortClass"/> and <paramref name="GatedVerdict"/> carry the
-/// internal enum values (<paramref name="GatedVerdict"/> 0 = no gate rejection recorded).</summary>
+/// internal enum values (<paramref name="GatedVerdict"/> 0 = no gate rejection recorded).
+/// <paramref name="BundleMs"/> is the leader-measured enqueue-to-acknowledgement wall time of the bundled
+/// submission; non-positive when it was never enqueued or the leader predates the field.</summary>
 public readonly record struct DurableOnePhaseWireReply(
     bool BatchCommitted, bool PrepareAcknowledged, int PrepareRejection,
-    bool DecisionKnown, int Decision, int AbortClass, int GatedVerdict);
+    bool DecisionKnown, int Decision, int AbortClass, int GatedVerdict, double BundleMs = -1);
 
 /// <summary>The public wire shape of <see cref="DurableDecisionReply"/>, for the node and transport contracts:
 /// <paramref name="Decision"/> and <paramref name="AbortClass"/> carry the internal enum values.</summary>

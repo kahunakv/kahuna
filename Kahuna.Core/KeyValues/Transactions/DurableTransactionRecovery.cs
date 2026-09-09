@@ -467,7 +467,7 @@ internal sealed class DurableTransactionRecovery
         bool settled;
         try
         {
-            settled = await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false);
+            settled = await replicate(partitionId, ReplicationTypes.PreparedIntent, resolveDelta, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Settle, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

@@ -18,8 +18,8 @@ public sealed partial class KahunaManager
 
     public Task<DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        keyValues.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
+        keyValues.DurableBundleLocal(partitionId, entries, terminal, stage, fenceKey, fenceGeneration, cancellationToken);
 
     public Task<DurableDecisionWireReply?> DurableDecisionLocal(
         int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,

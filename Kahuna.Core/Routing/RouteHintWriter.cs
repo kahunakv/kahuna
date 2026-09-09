@@ -1,3 +1,4 @@
+using Google.Protobuf.Collections;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.Routing;
 
@@ -85,20 +86,24 @@ internal static class RouteHintWriter
             return index;
         }
 
-        /// <summary>The accumulated table as gRPC hints, in index order.</summary>
-        public IEnumerable<GrpcRouteHint> ToGrpc()
+        /// <summary>Appends the accumulated table to <paramref name="target"/> as gRPC hints, in index order.</summary>
+        public void WriteGrpc(RepeatedField<GrpcRouteHint> target)
         {
             if (records is null)
-                yield break;
+                return;
+
+            int required = checked(target.Count + records.Count);
+            if (required > target.Capacity)
+                target.Capacity = required;
 
             foreach (RouteRecord record in records)
-                yield return new GrpcRouteHint
+                target.Add(new GrpcRouteHint
                 {
                     PartitionId = record.PartitionId,
                     Endpoint = record.Endpoint,
                     Provenance = (GrpcRouteProvenance)record.Provenance,
                     Generation = record.Generation
-                };
+                });
         }
 
         /// <summary>The accumulated table as REST hints, in index order.</summary>

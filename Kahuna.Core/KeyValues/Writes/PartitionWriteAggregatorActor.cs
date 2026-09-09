@@ -301,7 +301,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
                 // Per-submission queue delay by class: the batch's oldest-item age below cannot tell whether a
                 // decision waited behind background terminal work, this can.
-                PartitionWriteAggregatorMetrics.SubmissionDispatched(now - item.EnqueueTicks, item.AdmissionClass, item.Entries.Count > 0 ? item.Entries[0].Type : string.Empty);
+                PartitionWriteAggregatorMetrics.SubmissionDispatched(now - item.EnqueueTicks, item.AdmissionClass, item.Entries.Count > 0 ? item.Entries[0].Type : string.Empty, item.Stage);
             }
 
             RaftProposalEntry[] entries = [.. entryList];

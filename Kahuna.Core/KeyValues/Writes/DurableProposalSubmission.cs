@@ -38,6 +38,10 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 
     public WriteAdmissionClass AdmissionClass { get; }
 
+    /// <summary>The stage that produced this record, fixed at the creation site (or carried over the wire from
+    /// the origin for a forwarded bundle); dispatch tags the queue-delay histogram with it.</summary>
+    public WriteSubmissionStage Stage { get; }
+
     public int ByteLength { get; }
 
     public IReadOnlyList<RaftProposalEntry> Entries { get; }
@@ -49,12 +53,14 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         IReadOnlyList<RaftProposalEntry> entries,
         TaskCompletionSource<bool> completion,
         WriteAdmissionClass admissionClass,
+        WriteSubmissionStage stage,
         Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, bool>? applyOnCommit = null,
         string? fenceKey = null,
         long fenceGeneration = 0)
     {
         PartitionId = partitionId;
         AdmissionClass = admissionClass;
+        Stage = stage;
         Entries = entries;
         this.completion = completion;
         this.applyOnCommit = applyOnCommit;

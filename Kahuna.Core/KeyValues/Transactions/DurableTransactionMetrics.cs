@@ -335,6 +335,20 @@ internal static class DurableTransactionMetrics
             description: "Committed mutations verified missing from local durable state at settlement and re-driven.");
 
     /// <summary>
+    /// Commit-repair drives where the owning actor answered Committed while verification still read the
+    /// durable state below the intent's revision, so the drive re-promoted the mutation from the parked
+    /// intent through the persistence path itself. This is the resident-head-applied / durable-apply-skipped
+    /// state (the leader's own one-phase materialization persists nothing and the replicator's durable apply
+    /// for the log entry never ran): before the re-promotion existed, the actor's word discarded the parked
+    /// intent — the node's last copy of the mutation — and one acknowledged commit was durably lost. Zero on
+    /// a healthy node; each tick is that loss being healed instead.
+    /// </summary>
+    internal static readonly Counter<long> MaterializationRepairRepromotions =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.materialization_repair_repromotions",
+            description: "Commit repairs re-promoted from the parked mutation after the actor confirmed an apply the durable state does not hold.");
+
+    /// <summary>
     /// Coherence reconciles scheduled by the fence-wedge repair: a refusal streak at a frozen
     /// (validated base, committed head) pair re-drove the key's resident entry from this node's own durable
     /// row. Each one is a dropped coherence notification being repaired; a sustained rate on the same key
@@ -557,6 +571,44 @@ internal static class DurableTransactionMetrics
             OnePhaseFallbackReason.RemoteLeader => FallbackRemoteLeader,
             _ => FallbackOther
         });
+
+    /// <summary>
+    /// Wall time of a one-phase commit's bundled proposal: from the bundle's hand-off to the partition write
+    /// aggregator to its completed acknowledgement — measured on the leader that enqueued it (this node, or the
+    /// remote anchor leader, whose measurement travels back on the typed reply) and recorded at the origin. The
+    /// one-phase equivalent of <see cref="FinalizeFirstPrepareMs"/>: the single durable round that replaces
+    /// prepare + decision. Recorded once per one-phase attempt whose bundle was enqueued, whatever the outcome;
+    /// an attempt that fell back before proposing records no sample here.
+    /// </summary>
+    internal static readonly Histogram<double> OnePhaseBundleMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.one_phase_bundle_ms", unit: "ms",
+            description: "One-phase bundled proposal wall time (submission to committed acknowledgement).");
+
+    /// <summary>
+    /// Wall time a one-phase attempt spent before its bundle reached an aggregator: the pre-flight foreign-intent
+    /// check, up-front read-set validation, the late staged-base re-validation, decision-delta construction,
+    /// anchor leader resolution, and — on the <c>route=forwarded</c> series — both wire directions of the forward
+    /// to a remote anchor leader. Recorded once per attempt the gate admitted, including attempts that fall back
+    /// (their time must not also be charged to the 2PC <c>finalize_*</c> stages, which restart their clocks at
+    /// the fallback).
+    /// <para>Reconciliation: for an attempt whose bundle was enqueued, this sample plus the matching
+    /// <see cref="OnePhaseBundleMs"/> sample equals the attempt's span from its entry to the acknowledged reply,
+    /// by construction. The residual outside both, against the commit's total finalize latency, is the shared
+    /// pre-gate work (the staged-base preflight of <see cref="FinalizePreflightMs"/> and the prepare-delta
+    /// serialization) plus the post-acknowledgement leader-local apply and verdict handling.</para>
+    /// </summary>
+    internal static readonly Histogram<double> OnePhasePreBundleMs =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.one_phase_pre_bundle_ms", unit: "ms",
+            description: "One-phase pre-submission wall time (eligibility, bundle construction, anchor routing), tagged by route.");
+
+    /// <summary>One one-phase attempt's pre-submission time, on the series of the route it took (the shared
+    /// <c>route</c> tag values defined beside <see cref="SessionRegistrationForwards"/>). An attempt that fell
+    /// back before resolving the anchor route is local by construction: every measured moment ran on this
+    /// node.</summary>
+    internal static void OnePhasePreBundle(double milliseconds, bool forwarded) =>
+        OnePhasePreBundleMs.Record(milliseconds < 0 ? 0 : milliseconds, forwarded ? RouteForwarded : RouteLocal);
 
     /// <summary>
     /// Committed intents whose value was materialized (its key/value record replicated), tagged by

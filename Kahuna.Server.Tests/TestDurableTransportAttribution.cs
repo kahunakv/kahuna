@@ -282,7 +282,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             // ── Key held by a live foreign intent: the gate withholds the commit and names the verdict ──
             string heldKey = key + "/1p-held";
             HLCTimestamp holder = new(now.N, now.L - 3_000, now.C);
-            DurableBundleWireReply? held = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, null, 0, ct);
+            DurableBundleWireReply? held = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, stage: 0, null, 0, ct);
             Assert.True(held!.Value.PrepareAcknowledged);
 
             HLCTimestamp loser = new(now.N, now.L - 2_000, now.C);
@@ -350,12 +350,12 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             HLCTimestamp holder = new(now.N, now.L - 3_000, now.C);
             HLCTimestamp loser = new(now.N, now.L - 2_000, now.C);
 
-            DurableBundleWireReply? first = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, null, 0, ct);
+            DurableBundleWireReply? first = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, stage: 0, null, 0, ct);
             Assert.NotNull(first);
             Assert.True(first!.Value.BatchCommitted);
             Assert.True(first.Value.PrepareAcknowledged);
 
-            DurableBundleWireReply? second = await leader.DurableBundleLocal(partition, RawBundle(loser, heldKey, now, 0), terminal: false, null, 0, ct);
+            DurableBundleWireReply? second = await leader.DurableBundleLocal(partition, RawBundle(loser, heldKey, now, 0), terminal: false, stage: 0, null, 0, ct);
             Assert.NotNull(second);
             Assert.True(second!.Value.BatchCommitted);          // the record is durable...
             Assert.False(second.Value.PrepareAcknowledged);     // ...the prepare is not
@@ -371,7 +371,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             }
 
             HLCTimestamp stale = new(now.N, now.L - 1_000, now.C);
-            DurableBundleWireReply? staleReply = await leader.DurableBundleLocal(partition, RawBundle(stale, key, now, 0), terminal: false, null, 0, ct);
+            DurableBundleWireReply? staleReply = await leader.DurableBundleLocal(partition, RawBundle(stale, key, now, 0), terminal: false, stage: 0, null, 0, ct);
             Assert.NotNull(staleReply);
             Assert.True(staleReply!.Value.BatchCommitted);
             Assert.False(staleReply.Value.PrepareAcknowledged);

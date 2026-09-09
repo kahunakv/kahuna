@@ -41,7 +41,7 @@ public sealed class TestDurableTransactionRecovery
         // seam. Key/value materialization records are recorded but not applied here (they are a different store).
         public PreparedIntentStore? Store;
 
-        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken ct)
+        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
             int ordinal = callsByType.AddOrUpdate(logType, 1, static (_, n) => n + 1);
@@ -471,7 +471,7 @@ public sealed class TestDurableTransactionRecovery
         public int DelayMs = 5;
         public PreparedIntentStore? Store;
 
-        public async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, CancellationToken ct)
+        public async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken ct)
         {
             if (logType == ReplicationTypes.KeyValues)
             {

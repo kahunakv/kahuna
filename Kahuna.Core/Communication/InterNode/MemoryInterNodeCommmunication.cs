@@ -1137,7 +1137,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
     public async Task<DurableBundleWireReply?> DurableBundle(
         string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
     {
         if (!TypedDurableOperations)
             return null;
@@ -1146,7 +1146,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+            return await kahunaNode.DurableBundleLocal(partitionId, entries, terminal, stage, fenceKey, fenceGeneration, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");

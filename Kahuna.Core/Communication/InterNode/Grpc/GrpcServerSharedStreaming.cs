@@ -3,8 +3,11 @@ using Grpc.Core;
 namespace Kahuna.Server.Communication.Internode.Grpc;
 
 /// <summary>
-/// One shared duplex-streaming pair (locks + key-values) to a peer, plus the semaphore that
-/// serializes writes onto it. Writes are bounded and the pair is disposable so a stream that goes
+/// One shared duplex-streaming pair (locks + key-values) to a peer, plus the semaphores that
+/// serialize writes onto it. Each stream has its own write semaphore: the two streams are
+/// separate gRPC calls, so a lock write and a key-value write never touch the same writer and
+/// gain nothing from a shared gate — a stalled bulk key-value write must not delay a lock write.
+/// Writes are bounded and the pair is disposable so a stream that goes
 /// quiet without dying (e.g. the peer was SIGSTOPed and the HTTP/2 session stalled with no error)
 /// can be torn down and rebuilt instead of wedging every future forwarded operation.
 /// </summary>
@@ -14,7 +17,9 @@ internal sealed class GrpcServerSharedStreaming
 
     public long Id { get; }
 
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);
+    public SemaphoreSlim LockWriteSemaphore { get; } = new(1, 1);
+
+    public SemaphoreSlim KeyValueWriteSemaphore { get; } = new(1, 1);
 
     public AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> LockStreaming { get; }
 

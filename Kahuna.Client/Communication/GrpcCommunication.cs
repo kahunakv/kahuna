@@ -800,7 +800,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         }
     }
 
-    private static List<KahunaGetManyKeyValuesResponseItem> GetGetManyKeyValuesResponseItems(
+    internal static List<KahunaGetManyKeyValuesResponseItem> GetGetManyKeyValuesResponseItems(
         RepeatedField<GrpcTryGetManyValuesResponseItem> items)
     {
         List<KahunaGetManyKeyValuesResponseItem> result = new(items.Count);
@@ -1818,36 +1818,36 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         {
             foreach (GrpcKeyValueByPrefixItemResponse item in page.Items)
             {
-                yield return new KeyValueGetByBucketItem
-                {
-                    Key = item.Key,
-                    Value = item.Value.IsEmpty ? null : GetResponseBytes(item.Value),
-                    Revision = item.Revision,
-                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter)
-                };
+                yield return ToBucketItem(item);
             }
         }
     }
 
-    private static List<KeyValueGetByBucketItem> GetByPrefixResponseItems(RepeatedField<GrpcKeyValueByPrefixItemResponse> grpcResponseItems)
+    internal static List<KeyValueGetByBucketItem> GetByPrefixResponseItems(RepeatedField<GrpcKeyValueByPrefixItemResponse> grpcResponseItems)
     {
         List<KeyValueGetByBucketItem> items = new(grpcResponseItems.Count);
 
         foreach (GrpcKeyValueByPrefixItemResponse x in grpcResponseItems)
-        {
-            items.Add(new()
-            {
-                Key = x.Key,
-                Value = GetResponseBytes(x.Value),
-                Revision = x.Revision,
-                LastModified = new(x.LastModifiedNode, x.LastModifiedPhysical, x.LastModifiedCounter)
-            });
-        }
+            items.Add(ToBucketItem(x));
 
         return items;
     }
 
-    private static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
+    /// <summary>
+    /// Decodes one scanned item. The server leaves the value field unset for a key that holds no value and
+    /// writes a present, empty field for a key that holds zero bytes, so reading the field without its
+    /// presence flag hands the caller an empty array where the REST transport hands back null. The paged and
+    /// the streamed scan share this decoder so the two cannot drift apart.
+    /// </summary>
+    private static KeyValueGetByBucketItem ToBucketItem(GrpcKeyValueByPrefixItemResponse item) => new()
+    {
+        Key = item.Key,
+        Value = item.HasValue ? GetResponseBytes(item.Value) : null,
+        Revision = item.Revision,
+        LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter)
+    };
+
+    internal static List<KahunaKeyValueTransactionResultValue> GetTransactionValues(RepeatedField<GrpcTryExecuteTransactionResponseValue> responseValues)
     {
         List<KahunaKeyValueTransactionResultValue> values = new(responseValues.Count);
         
@@ -1856,7 +1856,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             KahunaKeyValueTransactionResultValue responseValue = new()
             {
                 Key = response.Key,
-                Value = GetResponseBytes(response.Value),
+                Value = response.HasValue ? GetResponseBytes(response.Value) : null,
                 Revision = response.Revision,
                 Expires = new(response.ExpiresNode, response.ExpiresPhysical, response.ExpiresCounter),
                 LastModified = new(response.LastModifiedNode, response.LastModifiedPhysical, response.LastModifiedCounter)

@@ -95,12 +95,14 @@ public interface IInterNodeCommunication
     public Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken);
 
     /// <summary>Forwards an ordered group of durable-2PC deltas to the partition leader as ONE atomic scheduler
-    /// submission (an anchor's record init + prepare, or a single prepare), carrying the origin's admission class
-    /// and range fence. Answers null when the receiver does not implement the operation (an older node), so the
-    /// caller can fall back to per-entry forwards.</summary>
+    /// submission (an anchor's record init + prepare, or a single prepare), carrying the origin's admission class,
+    /// producing stage (a <see cref="Kahuna.Server.KeyValues.Writes.WriteSubmissionStage"/> value, so the leader's
+    /// queue-delay attribution names the origin's stage instead of inferring it), and range fence. Answers null
+    /// when the receiver does not implement the operation (an older node), so the caller can fall back to
+    /// per-entry forwards.</summary>
     public Task<DurableBundleWireReply?> DurableBundle(
         string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
 
     /// <summary>Replicates a transaction's terminal decision on its anchor partition's leader and answers with
     /// the canonical outcome read after the ordered apply. Answers null when the receiver does not implement the

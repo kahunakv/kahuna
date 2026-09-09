@@ -64,7 +64,9 @@ public sealed class TestGrpcServerBatcher
             new GrpcServerBatcherRequest(new GrpcTryLockRequest()),
             promise);
 
-        RequestRefs()[requestId] = item;
+        // Seed through the real admission path so the pending-request accounting stays balanced
+        // when a cleanup path later removes the request.
+        Assert.True(GrpcServerBatcher.TryAdmit(item));
         RequestStreamRefs()[requestId] = streamId;
 
         return promise;
@@ -102,7 +104,7 @@ public sealed class TestGrpcServerBatcher
         Assert.True(RequestStreamRefs().ContainsKey(9_100_003));
 
         // Cleanup the streamB entry so global state is left clean.
-        RequestRefs().TryRemove(9_100_003, out _);
+        GrpcServerBatcher.TryTakeRequest(9_100_003, out _);
         RequestStreamRefs().TryRemove(9_100_003, out _);
         b1.TrySetException(new OperationCanceledException());
     }
@@ -184,7 +186,9 @@ public sealed class TestGrpcServerBatcher
             new GrpcServerBatcherRequest(new GrpcLookupTransactionRecordRequest()),
             promise);
 
-        RequestRefs()[requestId] = item;
+        // Seed through the real admission path so the pending-request accounting stays balanced
+        // when a cleanup path later removes the request.
+        Assert.True(GrpcServerBatcher.TryAdmit(item));
         RequestStreamRefs()[requestId] = streamId;
 
         return promise;
