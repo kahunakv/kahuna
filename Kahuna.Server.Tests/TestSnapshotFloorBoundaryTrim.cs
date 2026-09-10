@@ -108,6 +108,15 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
         return store.Restore(RangeMapStore.MetaPartitionId, log);
     }
 
+    private static bool InjectRemove(SnapshotFloorStore store, string holdId)
+    {
+        SnapshotFloorDeltaMessage delta = new();
+        delta.Entries.Add(new SnapshotFloorDeltaEntry { Remove = true, Hold = new SnapshotHoldMessage { HoldId = holdId } });
+        byte[]  data = ReplicationSerializer.Serialize(delta);
+        RaftLog log  = new() { LogType = ReplicationTypes.SnapshotFloor, LogData = data };
+        return store.Restore(RangeMapStore.MetaPartitionId, log);
+    }
+
     /// <summary>
     /// Builds a <see cref="KeyValueContext"/> suitable for exercising
     /// <see cref="BaseHandler.RemoveExpiredRevisions"/>. Only the fields accessed by that method
@@ -363,11 +372,13 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
     }
 
     /// <summary>
-    /// With an expired hold the floor is Zero (no live holds): trimming must behave exactly
-    /// as if no floor were set — only RevisionRetention newest revisions kept.
+    /// An expired hold that is still registered pins the boundary exactly like a live one:
+    /// protection ends only when the hold's replicated removal (release or purge) commits, never
+    /// at bare lease expiry. Otherwise a lapsed hold later revived by a renew would find its
+    /// boundary already dropped from memory.
     /// </summary>
     [Fact]
-    public void WithExpiredHold_TrimIsUnchanged()
+    public void WithExpiredRegisteredHold_BoundaryStillPinned()
     {
         const int count     = 6;
         const int retention = 3;
@@ -391,13 +402,51 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
         h.TrimRevisions(entry, refRevision);
 
         Assert.NotNull(entry.Revisions);
-        // Expired hold → floor = Zero → normal trim
-        Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed (hold expired)");
-        Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 must be trimmed (hold expired)");
-        Assert.False(entry.Revisions.ContainsKey(3), "revision 3 must be trimmed (hold expired)");
+        // Expired-but-registered hold → boundary pin at revision 2, same as a live hold
+        Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed (below boundary)");
+        Assert.True(entry.Revisions.ContainsKey(2),   "revision 2 must be pinned (registered hold, lease lapsed)");
+        Assert.False(entry.Revisions.ContainsKey(3),  "revision 3 must be trimmed (below cutoff, newer than boundary)");
         Assert.True(entry.Revisions.ContainsKey(4), "revision 4 kept");
         Assert.True(entry.Revisions.ContainsKey(5), "revision 5 kept");
         Assert.True(entry.Revisions.ContainsKey(6), "revision 6 kept");
+        Assert.Equal(4, entry.Revisions.Count); // boundary (2) + retention window (4,5,6)
+    }
+
+    /// <summary>
+    /// Once the hold's removal is applied (a release or the reaper's purge), the pin is gone and
+    /// trimming reverts to the plain retention policy.
+    /// </summary>
+    [Fact]
+    public void WithRemovedHold_TrimIsUnchanged()
+    {
+        const int count     = 6;
+        const int retention = 3;
+        const long refRevision = count;
+
+        RaftManager         raft   = BuildRaft();
+        KahunaConfiguration config = BuildConfig(retention);
+        SnapshotFloorStore  store  = new(raft, null, null, NullLogger<IKahuna>.Instance);
+
+        HLCTimestamp holdTs  = new(1, 2000, 0);
+        HLCTimestamp expired = new(1, 1, 0);
+
+        Assert.True(InjectHold(store, new SnapshotHold("h1", "client", holdTs, expired)));
+        Assert.True(InjectRemove(store, "h1"));
+
+        KeyValueContext ctx    = BuildContext(raft, config, store);
+        TestableTrimHandler h = new(ctx);
+        KeyValueEntry entry   = BuildEntry(count);
+
+        h.TrimRevisions(entry, refRevision);
+
+        Assert.NotNull(entry.Revisions);
+        Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 must be trimmed (hold removed)");
+        Assert.False(entry.Revisions.ContainsKey(2),  "revision 2 must be trimmed (hold removed)");
+        Assert.False(entry.Revisions.ContainsKey(3),  "revision 3 must be trimmed (hold removed)");
+        Assert.True(entry.Revisions.ContainsKey(4), "revision 4 kept");
+        Assert.True(entry.Revisions.ContainsKey(5), "revision 5 kept");
+        Assert.True(entry.Revisions.ContainsKey(6), "revision 6 kept");
+        Assert.Equal(retention, entry.Revisions.Count);
     }
 
     // ── fail-loud floor guard (MissingProtectedVersion counter) ──────────────────────────

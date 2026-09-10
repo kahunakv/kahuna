@@ -564,15 +564,32 @@ public interface IKahuna
     /// <summary>
     /// Acquires or renews a refcounted hold protecting all revisions at/after
     /// <paramref name="timestamp"/>. Idempotent by (holderId, timestamp): a repeat returns the same
-    /// holdId and renews the lease. While the hold is live, Kahuna keeps the revision current at
-    /// <paramref name="timestamp"/> readable via every read path that honors <c>readTimestamp</c>.
+    /// holdId and renews the lease. While the hold is registered, Kahuna keeps the revision current
+    /// at <paramref name="timestamp"/> readable via every read path that honors <c>readTimestamp</c>.
+    ///
+    /// <para><b>Recovery contract.</b> A hold's protection ends when the hold is removed from the
+    /// registry (release, or the reaper's purge of an expired hold) — not at bare lease expiry.
+    /// A repeat acquire that returns the <i>same</i> holdId therefore proves the hold was
+    /// registered continuously and its pinned history is intact, even if its lease lapsed in
+    /// between. A repeat that returns a <i>new</i> holdId protects from now on only: it does not
+    /// prove the revision current at <paramref name="timestamp"/> survived earlier reclamation.</para>
     /// </summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)>
         LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct);
 
     /// <summary>
-    /// Renews an existing hold's lease. Returns a non-Set type when the hold has already
-    /// expired or was never registered.
+    /// Renews a registered hold's lease. Returns <see cref="KeyValueResponseType.DoesNotExist"/>
+    /// when the hold was never registered, was released, or was purged by the reaper.
+    ///
+    /// <para><b>Recovery contract.</b> Success proves the hold's protection never lapsed: a
+    /// registered hold constrains reclamation even after its lease expires, and only its
+    /// replicated removal ends that. So a successful renew — including one that revives a hold
+    /// whose lease lapsed, e.g. after full-cluster downtime longer than the lease — guarantees
+    /// the revision current at the held timestamp is still readable. After a restart, holds
+    /// loaded from the durable registry stay exempt from the purge for a configurable grace
+    /// window (<c>SnapshotHoldStartupGraceWindow</c>), giving holders time to renew.
+    /// <see cref="KeyValueResponseType.DoesNotExist"/> means the pinned history must be presumed
+    /// reclaimed — fail closed.</para>
     /// </summary>
     public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
         LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct);

@@ -5,8 +5,11 @@ namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
 /// An immutable record of one client-held MVCC snapshot hold. A hold at <see cref="Timestamp"/>
-/// keeps the revision current at that timestamp readable via every read path while the hold is live
-/// (i.e. while <see cref="LeaseExpiry"/> has not elapsed on the cluster HLC).
+/// keeps the revision current at that timestamp readable via every read path while the hold stays
+/// registered. The lease (<see cref="LeaseExpiry"/>, compared against the cluster HLC) governs the
+/// reported effective floor and when the reaper may purge the hold — not the protection cutoff:
+/// reclamation honors a registered hold even after its lease lapses, which is what lets a renew
+/// revive a lapsed-but-unpurged hold with its pinned history provably intact.
 /// </summary>
 internal sealed record SnapshotHold(
     string HoldId,

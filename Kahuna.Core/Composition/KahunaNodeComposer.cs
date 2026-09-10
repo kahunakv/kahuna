@@ -101,7 +101,7 @@ internal static class KahunaNodeComposer
         FairReadScheduler backendReadScheduler = new(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth, concurrentPerPartition: true);
         FairReadScheduler backendWriteScheduler = new(raftLogger, configuration.BackendWriteIOThreads, configuration.BackendReadQueueDepth);
 
-        SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+        SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger, configuration.SnapshotHoldStartupGraceWindow);
 
         // One completion-receipt store shared between the background writer (which snapshots it durably at
         // checkpoint time) and the key-value layer (which records and consults receipts), mirroring how the

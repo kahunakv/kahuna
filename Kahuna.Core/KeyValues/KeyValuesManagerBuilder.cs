@@ -141,7 +141,7 @@ internal sealed class KeyValuesManagerBuilder
         // Snapshot-floor registry: replicated on the same meta partition as the range map.
         // When an external store is provided (shared with BackgroundWriterActor) use it directly;
         // otherwise create a new instance owned by this manager.
-        snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+        snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger, configuration.SnapshotHoldStartupGraceWindow);
 
         // Completion-receipt store: shared with the BackgroundWriterActor when provided (so the writer
         // snapshots the receipts this manager records), otherwise owned locally. The durable overload

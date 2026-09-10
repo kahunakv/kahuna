@@ -28,11 +28,16 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// complete copy written on every mutation, so a cold restart reconstructs the full state locally.</para>
 ///
 /// <para><b>Lease semantics.</b> A hold's <see cref="SnapshotHold.LeaseExpiry"/> is an HLC
-/// timestamp; it is live iff <c>leaseExpiry &gt; currentHlc</c>. Expired holds are excluded from
-/// the effective floor but remain in the registry until explicitly released or overwritten by a
-/// subsequent acquire on the same (holderId, timestamp). Automatic reclamation of expired entries
-/// is deferred to a later task. Lease comparisons
-/// always use the cluster HLC, never wall-clock time.</para>
+/// timestamp; it is live iff <c>leaseExpiry &gt; currentHlc</c>. Liveness governs the <i>reported</i>
+/// effective floor (<see cref="GetEffectiveFloor"/>) and purge eligibility — never reclamation.
+/// Reclamation (<see cref="BeginPrune"/>, <see cref="GetProtectiveFloor"/>) honors every
+/// <i>registered</i> hold, expired or not: a hold's protection ends only when a replicated removal
+/// (an explicit release, or the reaper's purge) commits. Registry presence is therefore the
+/// protection invariant — while a hold is registered, no node prunes past its timestamp — which is
+/// what makes reviving a lapsed-but-registered hold sound (<see cref="RenewAsync"/>): presence
+/// proves the pinned history is still intact. Holds loaded from the durable snapshot are exempt
+/// from purge for a startup grace window, so a holder can renew after full-cluster downtime longer
+/// than its lease. Lease comparisons always use the cluster HLC, never wall-clock time.</para>
 ///
 /// <para><b>Single writer.</b> <see cref="AcquireAsync"/>, <see cref="RenewAsync"/>, and
 /// <see cref="ReleaseAsync"/> are the only mutators, each serialized by
@@ -67,11 +72,22 @@ internal sealed class SnapshotFloorStore : IDisposable
         new Dictionary<string, SnapshotHold>(StringComparer.Ordinal);
 
     /// <summary>
-    /// Incremented on every hold mutation (acquire, renew, release, purge, restore/replicate).
-    /// Used by <see cref="GetFloorForPrune"/> to detect that a mutation landed between an
-    /// epoch read and a floor sample, so the floor can be re-sampled.
+    /// Grace window after load during which holds present in the durable snapshot stay exempt
+    /// from the expired-hold purge, so a holder that was down together with the cluster can
+    /// renew (revive) its hold before the reaper ends its protection. Zero disables the grace.
     /// </summary>
-    private int mutationEpoch;
+    private readonly TimeSpan startupGraceWindow;
+
+    /// <summary>
+    /// Ids of the holds present in the durable snapshot at load time; these are the holds the
+    /// startup grace protects from purge. Read and cleared only under <see cref="mutateGate"/>
+    /// (the purge path). Null when nothing was loaded, no grace is configured, or the window
+    /// has closed.
+    /// </summary>
+    private HashSet<string>? startupGraceHoldIds;
+
+    /// <summary>HLC deadline of the startup grace window; Zero when no window was armed.</summary>
+    private HLCTimestamp startupGraceDeadline;
 
     /// <summary>
     /// Serializes a hold mutation's in-memory commit against the open/close of a prune-delete
@@ -104,7 +120,7 @@ internal sealed class SnapshotFloorStore : IDisposable
 
     private sealed class FloorCacheState
     {
-        public static readonly FloorCacheState Empty = new(HLCTimestamp.Zero, 0, HLCTimestamp.Zero);
+        public static readonly FloorCacheState Empty = new(HLCTimestamp.Zero, 0, HLCTimestamp.Zero, HLCTimestamp.Zero);
 
         public readonly HLCTimestamp Floor;
         public readonly int LiveCount;
@@ -116,11 +132,21 @@ internal sealed class SnapshotFloorStore : IDisposable
         /// </summary>
         public readonly HLCTimestamp NextExpiry;
 
-        public FloorCacheState(HLCTimestamp floor, int liveCount, HLCTimestamp nextExpiry)
+        /// <summary>
+        /// The minimum <see cref="SnapshotHold.Timestamp"/> over <b>all</b> registered holds,
+        /// live or expired. This is the reclamation bound: a hold protects its timestamp until
+        /// it is removed from the registry (release or replicated purge), not merely until its
+        /// lease lapses, so lease expiry and pruning cannot race. Never time-dependent, so this
+        /// value is exact between mutations. Zero when the registry is empty.
+        /// </summary>
+        public readonly HLCTimestamp ProtectiveFloor;
+
+        public FloorCacheState(HLCTimestamp floor, int liveCount, HLCTimestamp nextExpiry, HLCTimestamp protectiveFloor)
         {
             Floor = floor;
             LiveCount = liveCount;
             NextExpiry = nextExpiry;
+            ProtectiveFloor = protectiveFloor;
         }
     }
 
@@ -128,10 +154,12 @@ internal sealed class SnapshotFloorStore : IDisposable
         IRaft raft,
         string? storagePath,
         string? storageRevision,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        TimeSpan startupGraceWindow = default)
     {
         this.raft = raft;
         this.logger = logger;
+        this.startupGraceWindow = startupGraceWindow;
 
         snapshotPath = string.IsNullOrEmpty(storagePath)
             ? null
@@ -216,9 +244,13 @@ internal sealed class SnapshotFloorStore : IDisposable
     {
         HLCTimestamp floor = HLCTimestamp.Zero;
         HLCTimestamp nextExpiry = HLCTimestamp.Zero;
+        HLCTimestamp protectiveFloor = HLCTimestamp.Zero;
         int liveCount = 0;
         foreach (SnapshotHold hold in snapshot.Values)
         {
+            // The protective (reclamation) floor spans every registered hold, expired or not.
+            if (protectiveFloor == HLCTimestamp.Zero || hold.Timestamp.CompareTo(protectiveFloor) < 0)
+                protectiveFloor = hold.Timestamp;
             if (!hold.IsLive(currentTime))
                 continue;
             liveCount++;
@@ -227,63 +259,70 @@ internal sealed class SnapshotFloorStore : IDisposable
             if (nextExpiry == HLCTimestamp.Zero || hold.LeaseExpiry.CompareTo(nextExpiry) < 0)
                 nextExpiry = hold.LeaseExpiry;
         }
-        return liveCount == 0 ? FloorCacheState.Empty : new(floor, liveCount, nextExpiry);
+        return liveCount == 0 && protectiveFloor == HLCTimestamp.Zero
+            ? FloorCacheState.Empty
+            : new(floor, liveCount, nextExpiry, protectiveFloor);
     }
 
     /// <summary>
-    /// Samples the effective floor for use by an off-actor prune task, retrying if a hold mutation
-    /// lands mid-scan (an <see cref="mutationEpoch"/> change between the two epoch reads that
-    /// bracket the scan re-runs it, so the returned value reflects the mutation).
-    ///
-    /// <para>This is the raw sample only; it does not open a prune-delete window. Callers that are
-    /// about to delete revisions must use <see cref="BeginPrune"/>/<see cref="EndPrune"/> instead,
-    /// which sample under <see cref="pruneCommitLock"/> and let a concurrent acquire fail closed.
-    /// This method remains for read-only floor introspection.</para>
-    ///
-    /// <para>May be called from the scheduler thread — <see cref="holds"/> is a volatile
-    /// copy-on-write dict and <see cref="IRaft.HybridLogicalClock"/> is thread-safe.</para>
+    /// Returns the reclamation floor: the minimum held timestamp over every registered hold,
+    /// live or expired. Reclamation honors registry presence, not lease liveness — an expired
+    /// hold keeps protecting its timestamp until an explicit release or the reaper's replicated
+    /// purge removes it. That gap is what makes reviving a lapsed-but-registered hold sound:
+    /// presence proves no prune anywhere has passed the held timestamp. Returns
+    /// <see cref="HLCTimestamp.Zero"/> when the registry is empty. Lock-free; exact between
+    /// mutations because it does not depend on the clock.
     /// </summary>
-    public HLCTimestamp GetFloorForPrune(IRaft raftClock)
+    public HLCTimestamp GetProtectiveFloor()
     {
-        int epoch1, epoch2;
-        HLCTimestamp floor;
-        do
-        {
-            epoch1 = Volatile.Read(ref mutationEpoch);
-            if (holds.Count == 0)
-                return HLCTimestamp.Zero;
-            HLCTimestamp now = raftClock.HybridLogicalClock.TrySendOrLocalEvent(raftClock.GetLocalNodeId());
-            floor = GetEffectiveFloor(now);
-            epoch2 = Volatile.Read(ref mutationEpoch);
-        }
-        while (epoch1 != epoch2);
+        IReadOnlyDictionary<string, SnapshotHold> snapshot = holds;
+        if (snapshot.Count == 0)
+            return HLCTimestamp.Zero;
+
+        FloorCacheState cache = _floorCache;
+        if (cache.ProtectiveFloor != HLCTimestamp.Zero)
+            return cache.ProtectiveFloor;
+
+        // Defensive slow path: a non-empty registry must never read as "nothing protected" —
+        // that is the value that licenses reclaiming everything — even if the cache was not
+        // rebuilt for the current registry.
+        HLCTimestamp floor = HLCTimestamp.Zero;
+        foreach (SnapshotHold hold in snapshot.Values)
+            if (floor == HLCTimestamp.Zero || hold.Timestamp.CompareTo(floor) < 0)
+                floor = hold.Timestamp;
         return floor;
     }
 
     /// <summary>
-    /// Opens a prune-delete window and returns the floor the delete must honor. The floor is
-    /// sampled under <see cref="pruneCommitLock"/>, the same monitor a hold commit takes, so the
-    /// sample reflects every hold committed before this call — including one acquired during a
-    /// pre-sample pause. A hold that commits <em>after</em> this call instead observes the open
-    /// window (an odd <see cref="pruneDeleteGen"/>) and fails closed, because the delete about to
-    /// run was computed without it.
+    /// Samples the reclamation floor for read-only introspection by off-actor maintenance code.
+    ///
+    /// <para>This is the raw sample only; it does not open a prune-delete window. Callers that are
+    /// about to delete revisions must use <see cref="BeginPrune"/>/<see cref="EndPrune"/> instead,
+    /// which sample under <see cref="pruneCommitLock"/> and let a concurrent acquire fail closed.</para>
+    ///
+    /// <para>May be called from the scheduler thread — only volatile registry state is read.</para>
+    /// </summary>
+    public HLCTimestamp GetFloorForPrune() => GetProtectiveFloor();
+
+    /// <summary>
+    /// Opens a prune-delete window and returns the floor the delete must honor: the reclamation
+    /// floor over every registered hold, live or expired (<see cref="GetProtectiveFloor"/>). The
+    /// floor is sampled under <see cref="pruneCommitLock"/>, the same monitor a hold commit takes,
+    /// so the sample reflects every hold committed before this call — including one acquired
+    /// during a pre-sample pause. A hold that commits <em>after</em> this call instead observes
+    /// the open window (an odd <see cref="pruneDeleteGen"/>) and fails closed, because the delete
+    /// about to run was computed without it.
     ///
     /// <para>The returned <c>Token</c> must be passed to <see cref="EndPrune"/> once the backend
     /// delete finishes — on every path, success or exception — to close the window. The delete
     /// itself runs <b>outside</b> the lock so a slow backend call never blocks acquisition or the
     /// meta clock.</para>
     /// </summary>
-    public (HLCTimestamp Floor, long Token) BeginPrune(IRaft raftClock)
+    public (HLCTimestamp Floor, long Token) BeginPrune()
     {
         lock (pruneCommitLock)
         {
-            HLCTimestamp floor = HLCTimestamp.Zero;
-            if (holds.Count > 0)
-            {
-                HLCTimestamp now = raftClock.HybridLogicalClock.TrySendOrLocalEvent(raftClock.GetLocalNodeId());
-                floor = GetEffectiveFloor(now);
-            }
-
+            HLCTimestamp floor = GetProtectiveFloor();
             long token = ++pruneDeleteGen; // odd → a delete is now in flight
             return (floor, token);
         }
@@ -305,8 +344,12 @@ internal sealed class SnapshotFloorStore : IDisposable
 
     /// <summary>
     /// Acquires or renews a hold. Idempotent by (holderId, timestamp): a repeat returns the same
-    /// holdId and renews the lease. Only the meta-partition leader can commit holds; followers
-    /// return <see cref="KeyValueResponseType.MustRetry"/>.
+    /// holdId and renews the lease — including for a lapsed-but-still-registered hold, whose
+    /// revival carries the same continuity guarantee as <see cref="RenewAsync"/>. A fresh hold
+    /// (no registered match) protects from its commit forward only; it does not prove the
+    /// revision current at the requested timestamp survived earlier reclamation. Only the
+    /// meta-partition leader can commit holds; followers return
+    /// <see cref="KeyValueResponseType.MustRetry"/>.
     /// </summary>
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireAsync(
         string holderId,
@@ -330,18 +373,28 @@ internal sealed class SnapshotFloorStore : IDisposable
         try
         {
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-            HLCTimestamp expiry = AddMs(now, leaseMs);
 
             // Check for an existing hold with the same (holderId, timestamp) — idempotent acquire.
-            SnapshotHold? existing = null;
-            foreach (SnapshotHold h in holds.Values)
+            SnapshotHold? existing = FindExistingHold(holderId, timestamp);
+
+            if (existing is not null && !existing.IsLive(now))
             {
-                if (h.HolderId == holderId && h.Timestamp == timestamp)
-                {
-                    existing = h;
-                    break;
-                }
+                // Answering with the SAME holdId for a lapsed hold is a revival: it asserts the
+                // hold was registered continuously, i.e. no prune ever passed its timestamp.
+                // That assertion is only provable against a fully-applied registry — a fresh
+                // leader that has not applied an inherited purge would resurrect a hold whose
+                // protection pruning already ended. Confirmed leadership waits for the applied
+                // frontier to cover the commit frontier; anything unconfirmed fails closed.
+                if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                    return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
+
+                // Re-read: the awaited confirmation may have applied a committed purge or
+                // release. A vanished match simply degrades to a fresh acquire below.
+                now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+                existing = FindExistingHold(holderId, timestamp);
             }
+
+            HLCTimestamp expiry = AddMs(now, leaseMs);
 
             string holdId = existing?.HoldId ?? Guid.NewGuid().ToString("N");
 
@@ -370,8 +423,11 @@ internal sealed class SnapshotFloorStore : IDisposable
     }
 
     /// <summary>
-    /// Renews the lease on an existing hold. Returns <see cref="KeyValueResponseType.DoesNotExist"/>
-    /// when the holdId does not exist or has already expired.
+    /// Renews the lease on a registered hold. A lapsed hold that is still registered is revived:
+    /// registration is the protection invariant (reclamation honors every registered hold, live
+    /// or expired), so presence proves the pinned history is intact and success proves the
+    /// protection never lapsed. Returns <see cref="KeyValueResponseType.DoesNotExist"/> once the
+    /// hold has been released or purged — then the pinned history must be presumed reclaimed.
     /// </summary>
     public async Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> RenewAsync(
         string holdId,
@@ -393,7 +449,21 @@ internal sealed class SnapshotFloorStore : IDisposable
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
             if (!hold.IsLive(now))
-                return (KeyValueResponseType.DoesNotExist, HLCTimestamp.Zero);
+            {
+                // Revival. "Still registered" must be proven against a fully-applied registry:
+                // a fresh leader that has not applied an inherited purge would see a ghost of a
+                // hold whose protection pruning already ended, and reviving it would report a
+                // guarantee the data no longer meets. Confirmed leadership waits for the applied
+                // frontier to cover the commit frontier, so the re-read below is authoritative:
+                // still present ⇒ never purged ⇒ no prune anywhere passed the held timestamp.
+                if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                    return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
+                if (!holds.TryGetValue(holdId, out hold))
+                    return (KeyValueResponseType.DoesNotExist, HLCTimestamp.Zero);
+
+                now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            }
 
             HLCTimestamp expiry = AddMs(now, leaseMs);
 
@@ -438,6 +508,15 @@ internal sealed class SnapshotFloorStore : IDisposable
         {
             mutateGate.Release();
         }
+    }
+
+    /// <summary>Finds the registered hold matching (holderId, timestamp), or null.</summary>
+    private SnapshotHold? FindExistingHold(string holderId, HLCTimestamp timestamp)
+    {
+        foreach (SnapshotHold h in holds.Values)
+            if (h.HolderId == holderId && h.Timestamp == timestamp)
+                return h;
+        return null;
     }
 
     /// <summary>Rebuilds the hold registry from a meta-log entry replayed during WAL restore.</summary>
@@ -554,9 +633,9 @@ internal sealed class SnapshotFloorStore : IDisposable
         return true;
     }
 
-    // Installs the resulting registry: swaps the volatile map, rebuilds the floor cache before
-    // bumping the epoch (so a concurrent GetFloorForPrune re-samples), and persists the full set
-    // to disk. Idempotent — safe to run for both the eager leader commit and the ordered echo.
+    // Installs the resulting registry: swaps the volatile map, rebuilds the floor cache, and
+    // persists the full set to disk. Idempotent — safe to run for both the eager leader commit
+    // and the ordered echo.
     // Runs under pruneCommitLock so the swap is ordered against BeginPrune's floor sample.
     private void CommitInMemory(Dictionary<string, SnapshotHold> next)
     {
@@ -583,7 +662,6 @@ internal sealed class SnapshotFloorStore : IDisposable
         holds = next;
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
         _floorCache = BuildCache(next, now);
-        Interlocked.Increment(ref mutationEpoch);
         PersistToDisk(ToMessage(next));
     }
 
@@ -652,6 +730,17 @@ internal sealed class SnapshotFloorStore : IDisposable
             // answer.
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
             _floorCache = BuildCache(loaded, now);
+
+            // Arm the startup grace: loaded holds stay exempt from the expired-hold purge until
+            // the deadline, so a holder whose lease lapsed during full-cluster downtime — when
+            // no reclamation could run and its pinned history is therefore intact — gets this
+            // window to renew (revive) the hold before the reaper ends its protection.
+            if (loaded.Count > 0 && startupGraceWindow > TimeSpan.Zero)
+            {
+                startupGraceHoldIds = new HashSet<string>(loaded.Keys, StringComparer.Ordinal);
+                startupGraceDeadline = AddMs(now, (int)Math.Min(startupGraceWindow.TotalMilliseconds, int.MaxValue));
+            }
+
             if (logger.IsEnabled(LogLevel.Information))
                 logger.LogInformation("Loaded {Count} snapshot hold(s) from {Path}", loaded.Count, snapshotPath);
         }
@@ -698,9 +787,14 @@ internal sealed class SnapshotFloorStore : IDisposable
     }
 
     /// <summary>
-    /// Removes all holds whose lease has expired. Called periodically by the background reaper
-    /// so that a crashed holder cannot pin MVCC history indefinitely. Returns the number of
-    /// holds purged; 0 when the registry is clean or this node is not the meta-partition leader.
+    /// Removes all purge-eligible holds whose lease has expired. Called periodically by the
+    /// background reaper so that a crashed holder cannot pin MVCC history indefinitely. A purge
+    /// permanently ends a hold's protection — after it commits, prunes may pass the held
+    /// timestamp and a later renew fails closed — so it only runs under confirmed leadership
+    /// (a stale registry could purge a hold whose holder just renewed it), and holds loaded from
+    /// the durable snapshot are exempt while the startup grace window is open. Returns the number
+    /// of holds purged; 0 when the registry is clean, this node is not the confirmed
+    /// meta-partition leader, or every expired hold is inside the grace window.
     /// </summary>
     public async Task<int> PurgeExpiredHoldsAsync(CancellationToken ct = default)
     {
@@ -711,16 +805,28 @@ internal sealed class SnapshotFloorStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // Confirm before scanning so expiry is judged against a fully-applied registry: an
+            // inherited renew this node has not applied yet would otherwise read as expired and
+            // be purged, silently ending a protection its holder believes it extended. On a
+            // follower or an unconfirmable leader the cycle is skipped and retried next tick.
+            if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                return 0;
+
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            bool graceOpen = startupGraceHoldIds is not null && now.CompareTo(startupGraceDeadline) < 0;
+            if (!graceOpen)
+                startupGraceHoldIds = null;
 
             List<string>? expired = null;
             foreach ((string holdId, SnapshotHold hold) in holds)
             {
-                if (!hold.IsLive(now))
-                {
-                    expired ??= [];
-                    expired.Add(holdId);
-                }
+                if (hold.IsLive(now))
+                    continue;
+                if (graceOpen && startupGraceHoldIds!.Contains(holdId))
+                    continue;
+                expired ??= [];
+                expired.Add(holdId);
             }
 
             if (expired is null)

@@ -524,6 +524,16 @@ public sealed class KahunaConfiguration
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 
     /// <summary>
+    /// Grace window after a restart during which snapshot holds loaded from the durable
+    /// snapshot-floor registry are exempt from the expired-hold purge. While every node is down
+    /// no reclamation runs, so history pinned by a hold whose lease lapsed during full-cluster
+    /// downtime is still intact at restart; this window gives the holder time to renew — reviving
+    /// the hold — before the reaper ends its protection. <see cref="TimeSpan.Zero"/> disables the
+    /// grace (lapsed holds become purge-eligible immediately on the reaper cadence).
+    /// </summary>
+    public TimeSpan SnapshotHoldStartupGraceWindow { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
     /// Number of keys a KeyRange descriptor must contain before the auto-split trigger
     /// considers splitting it. 0 disables auto-split.
     /// </summary>

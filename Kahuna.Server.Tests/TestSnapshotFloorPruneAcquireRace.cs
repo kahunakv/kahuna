@@ -346,9 +346,8 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
     }
 
     /// <summary>
-    /// Unit test for the epoch-retry branch of <c>GetFloorForPrune</c>: a hold is acquired
-    /// before <c>GetFloorForPrune</c> runs (epoch already bumped), so the loop must complete in
-    /// one iteration with the hold reflected in the returned floor.
+    /// A hold committed before <c>GetFloorForPrune</c> runs must be reflected in the returned
+    /// floor, even when the call happens off-actor on a scheduler thread.
     /// </summary>
     [Fact]
     public async Task GetFloorForPrune_HoldCommittedBeforeScan_FloorReflectsHold()
@@ -366,18 +365,16 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
 
             HLCTimestamp holdTs = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
-            // Acquire a hold: this bumps mutationEpoch before GetFloorForPrune is called.
+            // Acquire a hold: its commit rebuilds the floor cache before GetFloorForPrune runs.
             (KeyValueResponseType holdType, _, _) =
-                await kahuna.LocateAndAcquireSnapshotHold("epoch-retry-holder", holdTs, leaseMs: 60_000, ct);
+                await kahuna.LocateAndAcquireSnapshotHold("pre-committed-holder", holdTs, leaseMs: 60_000, ct);
             Assert.Equal(KeyValueResponseType.Set, holdType);
 
-            // Call GetFloorForPrune from a scheduler task. The epoch already advanced (via the
-            // hold above), so epoch1 == epoch2 in the retry loop (stable scan) and the floor
-            // reflects the hold.
+            // Call GetFloorForPrune from a scheduler task; the floor must reflect the hold.
             HLCTimestamp floor = HLCTimestamp.Zero;
             bool ok = await raft.ReadScheduler.EnqueueTask(0, () =>
             {
-                floor = store.GetFloorForPrune(raft);
+                floor = store.GetFloorForPrune();
                 return true;
             });
 
@@ -413,7 +410,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             HLCTimestamp ts = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
             // Open a prune-delete window exactly as the background prune does before deleting.
-            (HLCTimestamp _, long token) = store.BeginPrune(raft);
+            (HLCTimestamp _, long token) = store.BeginPrune();
             try
             {
                 (KeyValueResponseType inWindow, _, _) =

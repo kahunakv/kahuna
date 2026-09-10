@@ -53,8 +53,8 @@ internal sealed class SnapshotHoldService
     }
 
     /// <summary>
-    /// Renews the lease on an existing hold. Fails when the hold has already expired or was never
-    /// registered.
+    /// Renews the lease on a registered hold, reviving it when the lease has lapsed but the hold
+    /// was not yet purged. Fails with DoesNotExist once the hold has been released or purged.
     /// </summary>
     public async Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> RenewSnapshotHold(
         string holdId, int leaseMs, CancellationToken ct)

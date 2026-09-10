@@ -1267,7 +1267,6 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         RevisionPruneResult pruneResult = default;
 
         SnapshotFloorStore? capturedFloorStore = snapshotFloorStore;
-        IRaft capturedRaft = raft;
 
         try
         {
@@ -1284,7 +1283,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 long pruneToken = 0;
                 bool windowOpen = capturedFloorStore is not null;
                 if (windowOpen)
-                    (floor, pruneToken) = capturedFloorStore!.BeginPrune(capturedRaft);
+                    (floor, pruneToken) = capturedFloorStore!.BeginPrune();
                 else
                     floor = HLCTimestamp.Zero;
 
@@ -1406,7 +1405,6 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         RevisionPruneResult pruneResult = default;
 
         SnapshotFloorStore? capturedSweepFloorStore = snapshotFloorStore;
-        IRaft capturedSweepRaft = raft;
 
         Action? capturedSweepHook = BeforePruneSampleHook;
         Action? capturedSweepAfterHook = AfterPruneSampleHook;
@@ -1423,7 +1421,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 long sweepToken = 0;
                 bool sweepWindowOpen = capturedSweepFloorStore is not null;
                 if (sweepWindowOpen)
-                    (sweepFloor, sweepToken) = capturedSweepFloorStore!.BeginPrune(capturedSweepRaft);
+                    (sweepFloor, sweepToken) = capturedSweepFloorStore!.BeginPrune();
                 else
                     sweepFloor = HLCTimestamp.Zero;
 

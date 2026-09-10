@@ -439,9 +439,10 @@ internal abstract class BaseHandler
     /// RevisionRetention entries when no snapshot floor is active. Called at archive time so the
     /// collector never needs a separate metadata pass to enforce the bound.
     ///
-    /// <para>When an effective snapshot floor is set, the single highest revision whose
-    /// <see cref="KeyValueRevisionEntry.LastModified"/> is at-or-before the floor is pinned as
-    /// the floor-boundary revision and exempted from removal. This ensures the as-of version
+    /// <para>When any snapshot hold is registered (live or lapsed-but-unpurged — protection ends
+    /// only when the hold's replicated removal commits), the single highest revision whose
+    /// <see cref="KeyValueRevisionEntry.LastModified"/> is at-or-before the reclamation floor is
+    /// pinned as the floor-boundary revision and exempted from removal. This ensures the as-of version
     /// that snapshot readers need survives in memory beyond the normal retention window; the full
     /// run of revisions between the boundary and now is left to disk and reached by the
     /// disk-fallback read paths on point and range reads. At most RevisionRetention + 1 revisions are kept per
@@ -467,20 +468,22 @@ internal abstract class BaseHandler
         long cutoff = refRevision - toBeKept + 1;
 
         // Determine the floor-boundary revision: the highest revision that would normally
-        // be trimmed (< cutoff) but whose timestamp is at-or-before the effective floor.
+        // be trimmed (< cutoff) but whose timestamp is at-or-before the reclamation floor.
         // We protect exactly this one revision so snapshot reads at floor-timestamp still
-        // hit memory without disk I/O for the boundary version itself.
+        // hit memory without disk I/O for the boundary version itself. The reclamation floor
+        // honors every registered hold, expired or not — a hold's protection ends only when
+        // its replicated removal (release or purge) commits, never at bare lease expiry — so
+        // a lapsed hold that is later revived by a renew still finds its boundary pinned.
         long floorBoundaryRevision = -1;
         SnapshotFloorStore? floorStore = context.SnapshotFloorStore;
         if (floorStore is not null && floorStore.Holds.Count > 0)
         {
-            HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-            HLCTimestamp effectiveFloor = floorStore.GetEffectiveFloor(now);
-            if (effectiveFloor != HLCTimestamp.Zero)
+            HLCTimestamp protectiveFloor = floorStore.GetProtectiveFloor();
+            if (protectiveFloor != HLCTimestamp.Zero)
             {
                 foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
                 {
-                    if (kv.Key < cutoff && kv.Value.LastModified.CompareTo(effectiveFloor) <= 0)
+                    if (kv.Key < cutoff && kv.Value.LastModified.CompareTo(protectiveFloor) <= 0)
                     {
                         if (kv.Key > floorBoundaryRevision)
                             floorBoundaryRevision = kv.Key;

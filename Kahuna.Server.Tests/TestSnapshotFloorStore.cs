@@ -1053,7 +1053,7 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             SnapshotFloorStore restarted = new(raft, dir, "vtest", kahunaLogger);
             try
             {
-                (HLCTimestamp pruneFloor, long token) = restarted.BeginPrune(raft);
+                (HLCTimestamp pruneFloor, long token) = restarted.BeginPrune();
                 restarted.EndPrune(token);
                 Assert.Equal(t1, pruneFloor);
             }
