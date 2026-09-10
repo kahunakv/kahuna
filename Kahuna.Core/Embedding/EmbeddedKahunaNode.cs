@@ -367,6 +367,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             TransactionPriorityAgingThreshold = options.TransactionPriorityAgingThreshold,
             TransactionPriorityMaxQueued = options.TransactionPriorityMaxQueued,
             ScriptCacheExpiration = options.ScriptCacheExpiration,
+            MaxScriptLength = options.MaxScriptLength,
+            MaxScriptDepth = options.MaxScriptDepth,
             RevisionsToKeepCached = options.RevisionsToKeepCached,
             CacheEntryTtl = options.CacheEntryTtl,
             CacheEntriesToRemove = options.CacheEntriesToRemove,

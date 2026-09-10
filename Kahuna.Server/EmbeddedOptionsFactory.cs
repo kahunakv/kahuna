@@ -73,6 +73,8 @@ public static class EmbeddedOptionsFactory
         TransactionPriorityAgingThreshold = opts.TransactionPriorityAgingThreshold,
         TransactionPriorityMaxQueued = opts.TransactionPriorityMaxQueued,
         ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
+    MaxScriptLength = opts.MaxScriptLength,
+    MaxScriptDepth = opts.MaxScriptDepth,
         CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
         CacheEntriesToRemove = opts.CacheEntriesToRemove,
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,

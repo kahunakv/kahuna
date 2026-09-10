@@ -31,18 +31,16 @@ public class TestServers
     }
 
     [Fact]
-    public void TestLargeScriptUsesArrayPoolFallback()
+    public void TestLargeScriptParses()
     {
-        // A script whose UTF-8 encoding exceeds the 4096-byte stackalloc threshold so the
-        // ArrayPool fallback path in ScriptParserProcessor.Parse(string) is exercised.
         ScriptParserProcessor parser = new(new KahunaConfiguration(), NullLogger<IKahuna>.Instance);
 
-        // Build a valid script: LET x = 'aaaa...' RETURN x with a string literal long enough
-        // that the total script UTF-8 byte count exceeds 4096.
+        // A single literal several kilobytes long, which is what a script carrying a serialized payload
+        // looks like. It stays inside the default length limit.
         string largeValue = new string('a', 4200);
         string script = $"LET x = '{largeValue}'\nRETURN x";
 
-        Assert.True(Encoding.UTF8.GetByteCount(script) > 4096, "pre-condition: script must exceed the 4096-byte stack threshold");
+        Assert.True(Encoding.UTF8.GetByteCount(script) > 4096, "pre-condition: the script must be several kilobytes");
 
         NodeAst ast = parser.Parse(script);
 

@@ -211,6 +211,16 @@ public sealed class EmbeddedKahunaOptions
 
     public TimeSpan ScriptCacheExpiration { get; set; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// Largest transaction script accepted, in bytes. Refused before the parse.
+    /// </summary>
+    public int MaxScriptLength { get; set; } = 65_536;
+
+    /// <summary>
+    /// Deepest transaction script syntax tree accepted. Every walker uses one stack frame per level.
+    /// </summary>
+    public int MaxScriptDepth { get; set; } = 256;
+
     public int RevisionsToKeepCached { get; set; } = 100;
 
     public TimeSpan CacheEntryTtl { get; set; } = TimeSpan.FromMinutes(5);

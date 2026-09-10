@@ -536,6 +536,12 @@ public sealed class KahunaCommandLineOptions
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;
 
+    [Option("max-script-length", Required = false, HelpText = "Largest transaction script accepted, in bytes; a longer body is refused before it is parsed", Default = 65536)]
+    public int MaxScriptLength { get; set; } = 65536;
+
+    [Option("max-script-depth", Required = false, HelpText = "Deepest transaction script syntax tree accepted, counting both nested expressions and the length of a statement list; the walkers use one stack frame per level, so raising this trades away the margin that keeps a hostile script from aborting the node", Default = 256)]
+    public int MaxScriptDepth { get; set; } = 256;
+
     [Option("revisions-to-cache", Required = false, HelpText = "Number of revisions to keep cached in memory", Default = 4)]
     public int RevisionsToKeepCached { get; set; } = 4;
 

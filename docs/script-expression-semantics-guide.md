@@ -115,6 +115,49 @@ Statements are separated by nothing but whitespace; there is no statement termin
 both a rejected character and a syntax error that follows from it, the character is reported, because it
 is the cause and the syntax error is the symptom.
 
+## String escapes
+
+A backslash escape inside a string literal is decoded. Until now the scanner recognized these sequences
+but passed them through unchanged, so `"a\nb"` was the four characters `a`, `\`, `n`, `b`, and a value
+could not hold a line break at all: the escape did nothing, and a raw control character is not accepted
+inside a literal.
+
+These are the recognized escapes:
+
+| Escape | Character |
+| --- | --- |
+| `\n` `\t` `\r` | line feed, tab, carriage return |
+| `\a` `\b` `\f` `\v` `\0` | bell, backspace, form feed, vertical tab, null |
+| `\\` | one backslash |
+| `\"` `\'` `` \` `` | the matching quote or backtick |
+| `\NNN` | the character with that one-to-three-digit octal code, so `\0` is null and `\101` is `A` |
+| `\xHH` | the character with that two-digit hexadecimal code |
+| `\uHHHH` | the character with that four-digit code |
+| `\UHHHHHHHH` | the character with that eight-digit code |
+
+Both quote forms and the backtick identifier form decode the same way.
+
+Any other escape is a script error. Whether `\q` was meant as `q` or as `\q` is unknowable, and either
+guess is wrong half the time. A literal that holds no backslash is untouched, and costs nothing.
+
+## Script size limits
+
+Two limits bound what one request may submit. Both are configurable, and both defaults sit far above any
+script a person writes.
+
+| Limit | Default | Option |
+| --- | --- | --- |
+| Script length, in bytes | 65536 | `--max-script-length` |
+| Syntax tree depth | 256 | `--max-script-depth` |
+
+An over-length script is refused before it is parsed. A script past the depth limit is a script error
+that names the line.
+
+One depth number covers both shapes that reach the limit, because a statement list is left-recursive:
+a flat run of statements is itself a deep spine whose depth is the statement count, exactly as a chain of
+operators is deep. Every walker over the tree uses one call frame per level, so an unbounded tree let a
+single request exhaust the stack and abort the whole node. Raising the limit trades that margin away.
+
 ## `BEGIN` options
 
 `BEGIN` takes a comma-separated option list, and every option in it applies:
@@ -131,6 +174,26 @@ Check any script that relies on a multi-option `BEGIN`, since it was not doing w
 
 Repeating an option is a script error. Which of two values the author meant is unknowable, and a
 silently discarded option is the failure the option list exists to avoid.
+
+`timeout` must be greater than zero. Zero is refused rather than read as "no limit": a transaction holds
+locks and an admission slot for as long as it runs, and the deadline is the only thing that ends one that
+never completes.
+
+`admissionWait` is the separate budget for queueing to start, as distinct from `timeout`, which is how
+long the transaction may then run. An explicit `admissionWait=0` means "start only if a slot is free
+right now" and gives up immediately otherwise; omitting the option takes the operator's default. An
+earlier version mapped an explicit zero onto the default, so a caller could not opt out of queueing at
+all. A negative value is a script error.
+
+## Array indexing
+
+An index may be a whole number, a double holding a whole number, or a string holding one. A helper
+already converted all three, but the bounds check inspected the original expression rather than the
+converted index, so every non-integer subscript was reported as out of range.
+
+A fractional index such as `arr[1.9]` is a script error rather than being truncated to `arr[1]`, and an
+empty string is a script error rather than being read as `arr[0]`. Both are far more likely to be an
+arithmetic mistake or an unset variable than a deliberate request for that element.
 
 ## Statements a transaction refuses
 

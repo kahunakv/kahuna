@@ -1,6 +1,4 @@
 
-using System.Buffers;
-using System.Text;
 using Kahuna.Server.Configuration;
 using Microsoft.Extensions.ObjectPool;
 
@@ -13,8 +11,6 @@ namespace Kahuna.Server.ScriptParser;
 /// </summary>
 internal sealed class ScriptParserProcessor
 {
-    private const int StackAllocThreshold = 4096;
-
     private static readonly DefaultObjectPoolProvider ScriptPoolProvider = new();
 
     private readonly ObjectPool<scriptParser> scriptParserPool;
@@ -48,28 +44,20 @@ internal sealed class ScriptParserProcessor
     }
     
     /// <summary>
-    /// Parses a string script and returns its AST
+    /// Parses a string script and returns its AST.
+    ///
+    /// <para>The text is handed to the scanner as it stands. This used to encode the script to UTF-8 bytes so
+    /// it could call the byte overload, which decoded those same bytes straight back into a string, so every
+    /// in-process parse paid for an encode, a decode and a string it threw away. Nothing else was gained,
+    /// because this overload does not use the cache the byte overload keys by hash.</para>
     /// </summary>
-    /// <param name="script"></param>    
-    /// <returns></returns>
     public NodeAst Parse(string script)
     {
         scriptParser scriptParser = scriptParserPool.Get();
 
         try
         {
-            int byteCount = Encoding.UTF8.GetByteCount(script);
-            byte[]? rented = byteCount > StackAllocThreshold ? ArrayPool<byte>.Shared.Rent(byteCount) : null;
-            Span<byte> scriptBytes = rented is not null ? rented.AsSpan(0, byteCount) : stackalloc byte[byteCount];
-            try
-            {
-                Encoding.UTF8.GetBytes(script.AsSpan(), scriptBytes);
-                return scriptParser.Parse(scriptBytes, null);
-            }
-            finally
-            {
-                if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
-            }
+            return scriptParser.Parse(script);
         }
         finally
         {

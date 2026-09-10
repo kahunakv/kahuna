@@ -31,6 +31,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Blake3" Version="3.0.2" />
     <PackageReference Include="Google.Protobuf" Version="3.29.6" />
     <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
     <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />

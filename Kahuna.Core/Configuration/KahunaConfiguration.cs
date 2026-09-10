@@ -157,6 +157,26 @@ public sealed class KahunaConfiguration
     /// Maximum number of entries the script cache may hold. New entries are dropped when the limit is reached.
     /// </summary>
     public int ScriptCacheMaxEntries { get; set; } = 1_000;
+
+    /// <summary>
+    /// Largest script accepted, in bytes of the encoded body. Refused before the parse, because the parse is
+    /// what turns the body into the tree the walkers descend. The default is far above any hand-written
+    /// script and far below the size needed to build a tree deep enough to exhaust the stack.
+    /// </summary>
+    public int MaxScriptLength { get; set; } = 65_536;
+
+    /// <summary>
+    /// Deepest syntax tree accepted. Every walker over the tree — execution, lock collection, batch
+    /// detection, expression evaluation — descends one call frame per level, and a stack overflow cannot be
+    /// caught, so an unbounded tree lets one request kill the process.
+    ///
+    /// <para>One number covers both hostile shapes. A statement list is left-recursive in the grammar, so a
+    /// flat run of statements is itself a left-deep spine whose depth is the statement count; a nested
+    /// expression is deep in the same sense. Measured on this codebase, roughly one thousand levels of
+    /// either shape aborts the process, so the default leaves a wide margin. Raising it trades that margin
+    /// away.</para>
+    /// </summary>
+    public int MaxScriptDepth { get; set; } = 256;
     
     public int DefaultTransactionTimeout { get; set; } = 5000;
 

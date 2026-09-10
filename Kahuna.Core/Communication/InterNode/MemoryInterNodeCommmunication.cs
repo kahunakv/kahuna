@@ -777,29 +777,31 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> bag = [];
+            // Acquired one key at a time in the order given, stopping at the first refusal, which is what the
+            // remote node does when this same request arrives over gRPC. Taking every key regardless would
+            // leave a transaction holding locks past the one it was already refused, so two transactions over
+            // the same keys could each end up holding part of the overlap and both abort with nothing done.
+            // Order is preserved for the same reason: the caller reports the first refusal it finds.
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> acquired = new(xkeys.Count);
 
             foreach ((string key, int expiresMs, KeyValueDurability durability) in xkeys)
-                bag.Add(await kahunaNode.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken));
+            {
+                (KeyValueResponseType type, string keyName, KeyValueDurability keyDurability, HLCTimestamp holder) =
+                    await kahunaNode.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
 
-            AddToAcquireLockResponses(bag, lockSync, responses);
+                acquired.Add((type, keyName, keyDurability, holder));
+
+                if (type != KeyValueResponseType.Locked)
+                    break;
+            }
+
+            lock (lockSync)
+                responses.AddRange(acquired);
+
             return;
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");
-    }
-
-    private static void AddToAcquireLockResponses(
-        ConcurrentBag<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> bag,
-        Lock lockSync,
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses
-    )
-    {
-        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder) in bag)
-        {
-            lock (lockSync)
-                responses.Add((type, key, durability, holder));
-        }
     }
 
     /// <summary>

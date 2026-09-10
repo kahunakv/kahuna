@@ -128,9 +128,12 @@ internal sealed class SetCommand : BaseCommand
                 break;
         }
         
-        // Carry the staged value on the modified result: the durable-intent finalize path reads it to build the
-        // prepared intent for this key, and without it the transaction cannot take the durable path (it falls back
-        // to the legacy ticket path). The client-facing result returned below is separate and unaffected.
+        // Record the outcome of this statement on the context. Three things read it: the NOT SET guard, which
+        // asks whether the statement that just ran succeeded; the prepare path, which raises the commit
+        // timestamp to the highest LastModified seen; and the batched forms, which hand it back as the
+        // script's result. It is not what the prepared intent is built from — staged values are accumulated
+        // separately per key, which is why the batched set builds this without a value and still commits.
+        // The client-facing result returned below is separate and unaffected.
         context.ModifiedResult = new()
         {
             Type = type,

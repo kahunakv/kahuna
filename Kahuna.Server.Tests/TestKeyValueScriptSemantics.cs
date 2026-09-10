@@ -363,4 +363,148 @@ public class TestKeyValueScriptSemantics : BaseCluster
             await LeaveCluster(node1, node2, node3);
         }
     }
+
+    /// <summary>
+    /// The lexer patterns always recognised backslash escapes, but the actions passed them through as
+    /// literal two-character text. A control character is also excluded from an unescaped literal, so until
+    /// now there was no way at all to put a line break into a value.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestStringEscapes([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            await AssertReturns(kahuna1, "RETURN \"a\\nb\"", "a\nb");
+            await AssertReturns(kahuna1, "RETURN 'a\\nb'", "a\nb");
+            await AssertReturns(kahuna1, "RETURN \"a\\tb\"", "a\tb");
+            await AssertReturns(kahuna1, "RETURN \"a\\\\b\"", "a\\b");
+            await AssertReturns(kahuna1, "RETURN \"a\\\"b\"", "a\"b");
+            await AssertReturns(kahuna1, "RETURN 'a\\'b'", "a'b");
+            await AssertReturns(kahuna1, "RETURN \"\\u0041\"", "A");
+            await AssertReturns(kahuna1, "RETURN \"\\x41\"", "A");
+
+            // The patterns accept an octal escape, so the decoder honours it: one to three digits.
+            await AssertReturns(kahuna1, "RETURN \"\\101\"", "A");
+            await AssertReturns(kahuna1, "RETURN \"a\\101b\"", "aAb");
+
+            // A literal with no backslash is untouched.
+            await AssertReturns(kahuna1, "RETURN \"plain text\"", "plain text");
+
+            // An escape nobody defined is refused, rather than guessed at by dropping or keeping the
+            // backslash.
+            string reason = await AssertErrored(kahuna1, "RETURN \"a\\qb\"");
+            Assert.Contains("Unknown escape sequence", reason, StringComparison.Ordinal);
+
+            // A value written with an escape round-trips through the store.
+            string key = GetRandomKey();
+
+            KeyValueTransactionResult write = await kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes($"SET '{key}' \"line1\\nline2\""), null, null);
+
+            Assert.Equal(KeyValueResponseType.Set, write.Type);
+
+            KeyValueTransactionResult read = await kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes($"GET '{key}'"), null, null);
+
+            Assert.Equal(KeyValueResponseType.Get, read.Type);
+            Assert.Equal("line1\nline2", Encoding.UTF8.GetString(read.Value ?? []));
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// The index expression is converted before it is checked. A helper already accepted a double and a
+    /// numeric string, but the bounds check inspected the original expression instead of the converted
+    /// index, and the field it read is zero for both of those types, so every non-integer subscript was
+    /// reported as out of range by a message saying the index had to be an integer.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestArrayIndexTypes([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            await AssertReturns(kahuna1, "RETURN (10..15)[1]", "11");
+            await AssertReturns(kahuna1, "RETURN (10..15)[1.0]", "11");
+            await AssertReturns(kahuna1, "RETURN (10..15)[\"1\"]", "11");
+            await AssertReturns(kahuna1, "RETURN (10..15)[0-0+1]", "11");
+
+            // Out of range stays a script error naming the line, for every accepted index type.
+            foreach (string index in new[] { "6", "6.0", "\"6\"", "0-1" })
+            {
+                string reason = await AssertErrored(kahuna1, $"RETURN (10..15)[{index}]");
+                Assert.Contains("Index must be positive and less than size of array", reason, StringComparison.Ordinal);
+                Assert.Contains("at line 1", reason, StringComparison.Ordinal);
+            }
+
+            // A fractional subscript is refused rather than truncated, and an empty string is refused
+            // rather than read as element zero. Both are far likelier to be a mistake than a request.
+            string fractional = await AssertErrored(kahuna1, "RETURN (10..15)[1.5]");
+            Assert.Contains("Index must be a whole number", fractional, StringComparison.Ordinal);
+
+            string empty = await AssertErrored(kahuna1, "RETURN (10..15)[\"\"]");
+            Assert.Contains("Index must be an integer", empty, StringComparison.Ordinal);
+
+            string wrongType = await AssertErrored(kahuna1, "RETURN (10..15)[true]");
+            Assert.Contains("Index must be an integer", wrongType, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// Two pessimistic transactions over the same keys, written in opposite order. The keys were collected
+    /// into hash sets and acquired in enumeration order, so the two could each take part of the overlap and
+    /// both abort with nothing done. Acquisition is now ordered, so on a shared leader one of the two always
+    /// gets through.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestOverlappingTransactionsDoNotBothAbort([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                string prefix = GetRandomKey();
+                string first = $"{prefix}/aaa";
+                string second = $"{prefix}/zzz";
+
+                string forward = $"BEGIN (timeout=5000) SET '{first}' 'x' SET '{second}' 'x' COMMIT END";
+                string backward = $"BEGIN (timeout=5000) SET '{second}' 'y' SET '{first}' 'y' COMMIT END";
+
+                DateTime startedAt = DateTime.UtcNow;
+
+                Task<KeyValueTransactionResult> left = kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(forward), null, null);
+                Task<KeyValueTransactionResult> right = kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(backward), null, null);
+
+                KeyValueTransactionResult[] results = await Task.WhenAll(left, right);
+
+                TimeSpan elapsed = DateTime.UtcNow - startedAt;
+
+                bool anySucceeded = results.Any(r => r.Type is KeyValueResponseType.Set or KeyValueResponseType.Get);
+
+                Assert.True(anySucceeded, $"both transactions failed: {results[0].Type} {results[0].Reason} / {results[1].Type} {results[1].Reason}");
+
+                // A live holder answers immediately, so neither side may sit out the transaction deadline.
+                Assert.True(elapsed < TimeSpan.FromSeconds(5), $"the pair took {elapsed.TotalMilliseconds:F0} ms, which is the transaction deadline");
+            }
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
 }

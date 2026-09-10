@@ -75,6 +75,15 @@ internal sealed class ScriptTransactionExecutor
         // admission, so an out-of-range ordinal cannot be treated as Critical and jump the queue.
         priority = TransactionPriorityOrderer.Normalize(priority);
 
+        // Refused before the parse rather than after it: the tree a long script builds is what the walkers
+        // then descend, and a body large enough to build a dangerous tree must never reach the parser.
+        if (script.Length > configuration.MaxScriptLength)
+            return new()
+            {
+                Type = KeyValueResponseType.InvalidInput,
+                Reason = $"Script is too long: {script.Length} bytes exceeds the limit of {configuration.MaxScriptLength}"
+            };
+
         try
         {
             // Parse synchronously before the first await; the AST owns everything needed
@@ -166,27 +175,22 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.BeginOption:
                     return await ExecuteTransaction(ast, null, parameters, true, priority);
 
-                case NodeType.SetCmp:
-                case NodeType.SetCmpRev:
-                case NodeType.SetNotExists:
-                case NodeType.SetExists:
-                    break;
-
                 case NodeType.Rollback:
                 case NodeType.Commit:
                     throw new KahunaScriptException("Invalid transaction", ast.yyline);
 
+                // The set-flag nodes are deliberately absent: they only ever appear inside the flag list of a
+                // SET, never as a script root, so they reach the same unknown-command error as anything else
+                // the grammar cannot put here.
                 default:
                     throw new KahunaScriptException("Unknown command: " + ast.nodeType, ast.yyline);
             }
-
-            return new() { Type = KeyValueResponseType.Errored };
         }
         catch (KahunaScriptException ex)
         {
             logger.LogKahunaScriptException(ex);
 
-            return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
+            return new() { Type = KeyValueResponseType.Errored, Reason = DescribeScriptError(ex) };
         }
         catch (KahunaAbortedException ex)
         {
@@ -215,6 +219,32 @@ internal sealed class ScriptTransactionExecutor
     }
 
     /// <summary>
+    /// Orders a lock set for acquisition. Ordinal, matching the ordering used for keys and range bounds
+    /// everywhere else in the store.
+    /// </summary>
+    private static List<string> SortedOrdinal(HashSet<string> keys)
+    {
+        List<string> sorted = new(keys);
+
+        sorted.Sort(StringComparer.Ordinal);
+
+        return sorted;
+    }
+
+    /// <summary>
+    /// Formats a script error for the client. A parse error already carries "at line X, column Y near 'tok'",
+    /// built where the token is still known, so the location is appended here only for the runtime errors that
+    /// carry a line alone. Appending unconditionally produced messages that named the same line twice.
+    /// </summary>
+    private static string DescribeScriptError(KahunaScriptException ex)
+    {
+        if (ex.Column > 0 || ex.Line <= 0)
+            return ex.Message;
+
+        return ex.Message + " at line " + ex.Line;
+    }
+
+    /// <summary>
     /// Returns a temporary script transaction context for executing a single non-transactional command.
     /// </summary>
     private static ScriptTransactionContext GetTempTransactionContext(List<KeyValueParameter>? parameters)
@@ -237,7 +267,7 @@ internal sealed class ScriptTransactionExecutor
     {
         bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
-        int admissionWaitMs = 0;
+        int? admissionWaitMs = null;
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         HLCTimestamp readTimestamp = HLCTimestamp.Zero;
 
@@ -284,7 +314,14 @@ internal sealed class ScriptTransactionExecutor
             if (options.TryGetValue("timeout", out optionValue))
             {
                 if (!int.TryParse(optionValue, out timeout))
-                    throw new KahunaScriptException("Invalid timeout option: " + timeout, optionsAst.yyline);
+                    throw new KahunaScriptException("Invalid timeout option: " + optionValue, optionsAst.yyline);
+
+                // Zero is refused rather than read as "no limit". A transaction holds locks and an admission
+                // slot for as long as it runs, so an unbounded script is a way to stall a node, and the
+                // deadline is the only thing that ends one that never completes. A caller who wants a very
+                // long transaction must say how long.
+                if (timeout <= 0)
+                    throw new KahunaScriptException("timeout must be greater than zero: " + optionValue, optionsAst.yyline);
             }
 
             // How long this script will queue for an admission slot, as distinct from the timeout above, which
@@ -292,8 +329,16 @@ internal sealed class ScriptTransactionExecutor
             // willing to wait a long time for its turn.
             if (options.TryGetValue("admissionWait", out optionValue))
             {
-                if (!int.TryParse(optionValue, out admissionWaitMs))
+                if (!int.TryParse(optionValue, out int parsedAdmissionWaitMs))
                     throw new KahunaScriptException("Invalid admissionWait option: " + optionValue, optionsAst.yyline);
+
+                // An option value is a literal and a sign is an operator, so the grammar cannot express a
+                // negative budget today. The check stands so that a later grammar change cannot turn one
+                // into a silent "do not wait" through the clamp below.
+                if (parsedAdmissionWaitMs < 0)
+                    throw new KahunaScriptException("admissionWait cannot be negative: " + optionValue, optionsAst.yyline);
+
+                admissionWaitMs = parsedAdmissionWaitMs;
             }
 
             if (options.TryGetValue("snapshot", out optionValue))
@@ -321,8 +366,11 @@ internal sealed class ScriptTransactionExecutor
 
         // The door-wait, deliberately separate from the execution timeout below. Clamped so no script can hold
         // a queue slot longer than the operator allows.
+        // An explicit zero means "run only if a slot is free right now" and must be distinguishable from an
+        // absent option, which takes the operator's default. Collapsing the two would make it impossible for a
+        // latency-sensitive caller to opt out of queueing at all.
         int admissionWait = Math.Min(
-            admissionWaitMs <= 0 ? configuration.DefaultAdmissionWaitMs : admissionWaitMs,
+            admissionWaitMs ?? configuration.DefaultAdmissionWaitMs,
             configuration.MaxAdmissionWaitMs);
 
         // Wait for a slot before minting the transaction's identity. A transaction that queued behind a
@@ -331,11 +379,24 @@ internal sealed class ScriptTransactionExecutor
         // synchronously and costs nothing.
         AdmissionLease? lease;
 
-        using (CancellationTokenSource admissionCts = new(TimeSpan.FromMilliseconds(admissionWait)))
+        using (CancellationTokenSource admissionCts = new())
         {
+            if (admissionWait > 0)
+                admissionCts.CancelAfter(TimeSpan.FromMilliseconds(admissionWait));
+
+            // A zero budget cannot be expressed as a zero-millisecond deadline: the orderer refuses an
+            // already-cancelled token before it looks for a free slot, so a timer that happens to fire first
+            // would turn "do not queue" into "do not run". Admission instead completes synchronously exactly
+            // when it did not have to queue, so cancelling an incomplete result abandons the waiter without
+            // ever waiting on it.
+            ValueTask<AdmissionLease?> admission = orderer.AdmitAsync(priority, admissionCts.Token);
+
+            if (admissionWait == 0 && !admission.IsCompleted)
+                await admissionCts.CancelAsync().ConfigureAwait(false);
+
             try
             {
-                lease = await orderer.AdmitAsync(priority, admissionCts.Token).ConfigureAwait(false);
+                lease = await admission.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -420,7 +481,7 @@ internal sealed class ScriptTransactionExecutor
         {
             logger.LogKahunaScriptException(ex);
 
-            return new() { Type = KeyValueResponseType.Errored, Reason = ex.Message + " at line " + ex.Line };
+            return new() { Type = KeyValueResponseType.Errored, Reason = DescribeScriptError(ex) };
         }
         catch (KahunaAbortedException ex)
         {
@@ -442,7 +503,7 @@ internal sealed class ScriptTransactionExecutor
         }
         catch (Exception ex)
         {
-            logger.LogOperationCanceledException(ex);
+            logger.LogTryExecuteTxError(ex);
 
             return new() { Type = KeyValueResponseType.Errored, Reason = ex.GetType().Name + ": " + ex.Message };
         }
@@ -464,6 +525,18 @@ internal sealed class ScriptTransactionExecutor
 
     /// <summary>
     /// Acquires all locks required by a pessimistic script transaction before execution begins.
+    ///
+    /// <para>The acquisition order is fixed, because the sets arrive here as hash sets and hash enumeration
+    /// order depends on what else the set holds. Two transactions over overlapping keys would otherwise
+    /// attempt them in different orders, each take part of the overlap, and both abort — a live holder is
+    /// reported immediately, so neither waits, but neither makes progress either. The order is: ephemeral
+    /// prefix locks, then persistent prefix locks, then the point locks, each ordinal ascending by key.</para>
+    ///
+    /// <para>This removes the mutual abort between two transactions whose shared keys land on one leader. It
+    /// does not remove it entirely: the point-lock batch fans out to one request per leader in parallel, so
+    /// two transactions can still each win a different leader's share. Making that impossible would mean
+    /// acquiring leader by leader in sequence, which costs a round trip per partition on every transaction
+    /// start, and the failure it would prevent is already a clean immediate abort.</para>
     /// </summary>
     private async Task AcquireLocksPessimistically(
         ScriptTransactionContext context,
@@ -477,11 +550,12 @@ internal sealed class ScriptTransactionExecutor
     {
         int numberLocks = ephemeralPrefixLocksToAcquire.Count + persistentPrefixLocksToAcquire.Count;
 
+
         if (numberLocks > 0)
         {
             context.PrefixLocksAcquired = new(numberLocks);
 
-            foreach (string prefixKey in ephemeralPrefixLocksToAcquire)
+            foreach (string prefixKey in SortedOrdinal(ephemeralPrefixLocksToAcquire))
             {
                 KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
                     context.TransactionId,
@@ -497,7 +571,7 @@ internal sealed class ScriptTransactionExecutor
                 context.PrefixLocksAcquired.Add((prefixKey, KeyValueDurability.Ephemeral));
             }
 
-            foreach (string prefixKey in persistentPrefixLocksToAcquire)
+            foreach (string prefixKey in SortedOrdinal(persistentPrefixLocksToAcquire))
             {
                 KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
                     context.TransactionId,
@@ -542,7 +616,7 @@ internal sealed class ScriptTransactionExecutor
                 if (persistentLocksToAcquire.Count > 0)
                 {
                     (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) =
-                        await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + 10, KeyValueDurability.Persistent, ctsToken);
+                        await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + ExtraLockingDelay, KeyValueDurability.Persistent, ctsToken);
 
                     if (acquireResponse != KeyValueResponseType.Locked)
                         throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
@@ -552,13 +626,23 @@ internal sealed class ScriptTransactionExecutor
                 }
             }
 
-            List<(string, int, KeyValueDurability)> keysToLock = new(numberLocks);
+            List<(string Key, int ExpiresMs, KeyValueDurability Durability)> keysToLock = new(numberLocks);
 
             foreach (string key in ephemeralLocksToAcquire)
                 keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Ephemeral));
 
             foreach (string key in persistentLocksToAcquire)
                 keysToLock.Add((key, timeout + ExtraLockingDelay, KeyValueDurability.Persistent));
+
+            // Sorted for the reason described on the acquisition-order comment above: two transactions that
+            // reach the same leader must attempt their shared keys in the same relative order, and the source
+            // sets are hash sets whose enumeration order depends on what else they contain.
+            keysToLock.Sort(static (left, right) =>
+            {
+                int byKey = string.CompareOrdinal(left.Key, right.Key);
+
+                return byKey != 0 ? byKey : left.Durability.CompareTo(right.Durability);
+            });
 
             List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
 
@@ -825,7 +909,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
                 default:
-                    throw new NotImplementedException();
+                    throw new KahunaScriptException("Invalid statement: " + ast.nodeType, ast.yyline);
             }
 
             break;
@@ -954,27 +1038,33 @@ internal sealed class ScriptTransactionExecutor
         bool isSetMany,
         HashSet<(string, KeyValueDurability)> keys)
     {
+        KeyValueDurability durability;
+
         if (isSetMany)
         {
             if (stmt.nodeType is not (NodeType.Set or NodeType.Eset))
                 return false;
 
-            if (stmt.leftAst?.yytext is null)
-                return false;
-
-            KeyValueDurability durability = stmt.nodeType == NodeType.Set
+            durability = stmt.nodeType == NodeType.Set
                 ? KeyValueDurability.Persistent
                 : KeyValueDurability.Ephemeral;
-
-            return keys.Add((stmt.leftAst.yytext!, durability));
         }
+        else
+        {
+            if (stmt.nodeType is not (NodeType.Delete or NodeType.Edelete))
+                return false;
 
-        if (stmt.nodeType is not (NodeType.Delete or NodeType.Edelete))
-            return false;
+            durability = stmt.nodeType == NodeType.Delete
+                ? KeyValueDurability.Persistent
+                : KeyValueDurability.Ephemeral;
+        }
 
         if (stmt.leftAst is null)
             return false;
 
+        // The key is resolved, not read as written. Two placeholders that resolve to the same key are one
+        // key, and batching them applies both writes together instead of in statement order, which commits a
+        // different revision than the same script run one statement at a time.
         string keyName;
 
         try
@@ -983,14 +1073,12 @@ internal sealed class ScriptTransactionExecutor
         }
         catch (KahunaScriptException)
         {
+            // An unresolvable key simply ends the batchable run; the statement itself reports the error when
+            // it executes.
             return false;
         }
 
-        KeyValueDurability deleteDurability = stmt.nodeType == NodeType.Delete
-            ? KeyValueDurability.Persistent
-            : KeyValueDurability.Ephemeral;
-
-        return keys.Add((keyName, deleteDurability));
+        return keys.Add((keyName, durability));
     }
 
 }

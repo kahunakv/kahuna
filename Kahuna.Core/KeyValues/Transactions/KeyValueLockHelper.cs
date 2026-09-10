@@ -165,6 +165,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.And:
                 case NodeType.Or:
                 case NodeType.Not:
+                case NodeType.Negate:
                 case NodeType.Add:
                 case NodeType.Subtract:
                 case NodeType.Mult:
@@ -195,7 +196,7 @@ internal sealed class KeyValueLockHelper : BaseCommand
                     break;
                 
                 default:
-                    throw new NotImplementedException();
+                    throw new KahunaScriptException("Invalid statement: " + ast.nodeType, ast.yyline);
             }
 
             break;

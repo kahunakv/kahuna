@@ -769,4 +769,117 @@ public sealed class TestTransactionPriorityAdmission
         // see what was actually written.
         Assert.Contains("soon", result.Reason ?? "", StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// An explicit <c>admissionWait=0</c> means "start only if a slot is free right now". It used to be
+    /// mapped onto the operator's default, so a caller could not opt out of queueing at all, and a
+    /// latency-sensitive caller was forced to wait out the default budget behind a saturated node.
+    /// </summary>
+    [Fact]
+    public async Task ExplicitZeroAdmissionWait_RefusesRatherThanQueues()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // One slot, so the second transaction cannot start until the first ends.
+        await using EmbeddedKahunaNode node = new(BaseOptions(maxConcurrentTransactions: 1), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("wait/blocker", ct);
+        await node.WaitForLeaderForKeyAsync("wait/k", ct);
+
+        TransactionPriorityOrderer orderer = KeyValuesOf(node).scriptOrderer;
+
+        Task<KeyValueTransactionResult> blocker = node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN SLEEP 1500 SET `wait/blocker` 'v' COMMIT END"), null, null);
+
+        await WaitUntil(() => orderer.InFlight == 1, "the blocking transaction to occupy the slot", ct);
+
+        // Refused at once rather than queued behind the blocker. The elapsed time proves it did not wait:
+        // the blocker holds the slot for 1500 ms, and the operator's default budget is far longer still.
+        DateTime submittedAt = DateTime.UtcNow;
+
+        KeyValueTransactionResult refused = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (admissionWait=0) SET `wait/k` 'v' COMMIT END"), null, null);
+
+        TimeSpan waited = DateTime.UtcNow - submittedAt;
+
+        Assert.Equal(KeyValueResponseType.AdmissionRefused, refused.Type);
+        Assert.True(waited < TimeSpan.FromMilliseconds(1000), $"the caller waited {waited.TotalMilliseconds:F0} ms instead of giving up at once");
+
+        Assert.Equal(KeyValueResponseType.Set, (await blocker).Type);
+
+        // With the slot free again the same script runs normally, so a zero budget is not a refusal in
+        // itself.
+        KeyValueTransactionResult admitted = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (admissionWait=0) SET `wait/k` 'v' COMMIT END"), null, null);
+
+        Assert.Equal(KeyValueResponseType.Set, admitted.Type);
+    }
+
+    /// <summary>
+    /// The two option values the executor now rejects, and the message that used to report the wrong value.
+    /// </summary>
+    [Fact]
+    public async Task InvalidOptionValues_AreRefusedWithTheValueTheAuthorWrote()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(BaseOptions(), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("opt/k", ct);
+
+        // int.TryParse zeroes its out parameter on failure, so this message used to report 0 rather than
+        // what the author actually wrote.
+        KeyValueTransactionResult resp = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (timeout=abc) SET `opt/k` 'v' COMMIT END"), null, null);
+
+        Assert.Equal(KeyValueResponseType.Errored, resp.Type);
+        Assert.Contains("abc", resp.Reason ?? "", StringComparison.Ordinal);
+        Assert.DoesNotContain(": 0", resp.Reason ?? "", StringComparison.Ordinal);
+
+        // Zero is refused rather than read as "no limit": nothing else would ever end a transaction that
+        // does not complete on its own.
+        resp = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (timeout=0) SET `opt/k` 'v' COMMIT END"), null, null);
+
+        Assert.Equal(KeyValueResponseType.Errored, resp.Type);
+        Assert.Contains("timeout must be greater than zero", resp.Reason ?? "", StringComparison.Ordinal);
+
+        // An option value is a literal, and a sign is an operator, so a negative budget cannot be written at
+        // all: the grammar refuses it before the executor sees the value.
+        resp = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("BEGIN (admissionWait=-1) SET `opt/k` 'v' COMMIT END"), null, null);
+
+        Assert.Equal(KeyValueResponseType.Errored, resp.Type);
+        Assert.Contains("Syntax error", resp.Reason ?? "", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A parse error used to name its location twice, because the parser already builds
+    /// "at line X, column Y near 'tok'" and the executor appended "at line X" to whatever it caught.
+    /// </summary>
+    [Fact]
+    public async Task SyntaxErrorNamesItsLocationOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(BaseOptions(), loggerFactory);
+        await node.StartAsync(ct);
+
+        KeyValueTransactionResult resp = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("SET k 'v' / "), null, null);
+
+        Assert.Equal(KeyValueResponseType.Errored, resp.Type);
+
+        string reason = resp.Reason ?? "";
+        int occurrences = reason.Split("at line").Length - 1;
+
+        Assert.True(occurrences == 1, $"the location appears {occurrences} times in '{reason}'");
+
+        // A runtime error carries a line but no column, so it still gets the suffix appended.
+        resp = await node.Kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("THROW 'boom'"), null, null);
+
+        Assert.Equal(KeyValueResponseType.Errored, resp.Type);
+        Assert.Equal("boom at line 1", resp.Reason);
+    }
 }

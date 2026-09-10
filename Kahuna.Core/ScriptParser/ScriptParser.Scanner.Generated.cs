@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.3
-//  DateTime: 10/09/2026 1:06:19 AM
-//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 9/09/2026 11:05:10 PM>
+//  DateTime: 10/09/2026 12:24:42 PM
+//  GPLEX input file <ScriptParser/ScriptParser.Language.analyzer.lex - 10/09/2026 12:24:19 PM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -2065,7 +2065,7 @@ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TA
 SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAT;
             break;
         case 175: // Recognized '{EscIdentifier}',	Shortest string "``"
-SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = UnescapeLiteral(yytext); return (int)Token.TIDENTIFIER;
             break;
         case 176: // Recognized '{Placeholder}',	Shortest string "@0"
 SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER;
@@ -2089,13 +2089,13 @@ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; r
 SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDOUBLEDOT;
             break;
         case 184: // Recognized '{StringSingle}',	Shortest string "''"
-SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = UnescapeLiteral(yytext); return (int)Token.TSTRING;
             break;
         case 185: // Recognized '{TAnd}',	Shortest string "&&"
 SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TAND;
             break;
         case 186: // Recognized '{String}',	Shortest string "\"\""
-SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING;
+SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = UnescapeLiteral(yytext); return (int)Token.TSTRING;
             break;
         case 187: // Recognized '{TNotEquals2}',	Shortest string "!="
 SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTEQUALS;

@@ -107,9 +107,9 @@ TAnd            &&
 
 {Decimal}		{ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TFLOAT; }
 
-{String}		{ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\"'); return (int)Token.TSTRING; }
+{String}		{ SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = UnescapeLiteral(yytext); return (int)Token.TSTRING; }
 
-{StringSingle}  { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING; }
+{StringSingle}  { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = UnescapeLiteral(yytext); return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
 
@@ -255,7 +255,7 @@ TAnd            &&
 
 {Identifier} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 
-{EscIdentifier} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
+{EscIdentifier} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = UnescapeLiteral(yytext); return (int)Token.TIDENTIFIER; }
 
 {Placeholder} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
 
