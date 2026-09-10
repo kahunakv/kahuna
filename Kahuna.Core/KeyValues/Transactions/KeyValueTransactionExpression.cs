@@ -29,13 +29,13 @@ internal static class KeyValueTransactionExpression
                 return context.GetVariable(ast, ast.yytext!);
             
             case NodeType.IntegerType:
-                return new(long.Parse(ast.yytext!));
-            
+                return new(ParseIntegerLiteral(ast));
+
             case NodeType.StringType:
                 return new(ast.yytext!);
-            
-            case NodeType.FloatType:               
-                return new(double.Parse(ast.yytext!, CultureInfo.InvariantCulture));
+
+            case NodeType.FloatType:
+                return new(ParseFloatLiteral(ast));
             
             case NodeType.BooleanType:
                 return new(ast.yytext! == "true");
@@ -102,6 +102,9 @@ internal static class KeyValueTransactionExpression
             
             case NodeType.Not:
                 return NotOperator.Eval(context, ast);
+
+            case NodeType.Negate:
+                return NegateOperator.Eval(context, ast);
             
             case NodeType.NotSet:
                 return NotSetOperator.Eval(context, ast);
@@ -147,5 +150,43 @@ internal static class KeyValueTransactionExpression
         }
 
         return new(KeyValueExpressionType.NullType);
+    }
+
+    /// <summary>
+    /// Converts an integer literal to its value. The scanner accepts both a decimal run of digits and a
+    /// "0x" prefixed hexadecimal one, so both are honored here; a plain parse would reject the hexadecimal
+    /// form the scanner already promised. The scanner never folds a sign into the literal, so the text is
+    /// always unsigned and a leading minus arrives as a separate negate node.
+    /// </summary>
+    private static long ParseIntegerLiteral(NodeAst ast)
+    {
+        ReadOnlySpan<char> text = ast.yytext.AsSpan();
+
+        if (text.Length > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        {
+            // A hexadecimal literal is a bit pattern, so a value with the top bit set reads back negative,
+            // exactly as the same literal does in C#.
+            if (long.TryParse(text[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out long hexValue))
+                return hexValue;
+
+            throw new KahunaScriptException("Invalid hexadecimal integer: " + ast.yytext, ast.yyline);
+        }
+
+        if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long value))
+            return value;
+
+        throw new KahunaScriptException("Integer out of range: " + ast.yytext, ast.yyline);
+    }
+
+    /// <summary>
+    /// Converts a floating point literal to its value. A literal too large for a double is a script error
+    /// rather than a framework exception, so the caller still sees the line it came from.
+    /// </summary>
+    private static double ParseFloatLiteral(NodeAst ast)
+    {
+        if (double.TryParse(ast.yytext, NumberStyles.Float, CultureInfo.InvariantCulture, out double value))
+            return value;
+
+        throw new KahunaScriptException("Float out of range: " + ast.yytext, ast.yyline);
     }
 }

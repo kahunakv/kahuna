@@ -44,6 +44,13 @@ internal partial class scriptScanner
     {
         base.yyerror(format, args);
 
+        // Keep the first error, not the last. A rejected character is reported from the scanner and then
+        // provokes a syntax error further along; the character is the cause and the syntax error is the
+        // symptom, so overwriting here would point the author at the wrong place. A scanner is built per
+        // parse, so this never carries an error across calls.
+        if (!string.IsNullOrEmpty(YYError))
+            return;
+
         YYError = string.Format(format, args);
         YYErrorLine = lastTokenLine;
         YYErrorColumn = lastTokenColumn;

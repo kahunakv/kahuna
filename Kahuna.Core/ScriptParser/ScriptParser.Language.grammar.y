@@ -21,6 +21,7 @@
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 %left TMULT TDIV
+%right UMINUS
 %right TNOT
 %left LSQUAREBRACE
 
@@ -183,7 +184,7 @@ begin_stmt : TBEGIN stmt_list TEND { $$.n = new(NodeType.Begin, $2.n, null, null
            | TBEGIN LPAREN begin_options RPAREN stmt_list TEND { $$.n = new(NodeType.Begin, $5.n, $3.n, null, null, null, null, null, $1.l); }
            ;
            
-begin_options : begin_options TCOMMA begin_option { $$.n = new(NodeType.BeginOptionList, $2.n, null, null, null, null, null, null, $1.l); }
+begin_options : begin_options TCOMMA begin_option { $$.n = new(NodeType.BeginOptionList, $1.n, $3.n, null, null, null, null, null, $1.l); }
               | begin_option { $$.n = $1.n; $$.l = $1.l; }
               ;
              
@@ -220,6 +221,7 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | expression TMULT expression { $$.n = new(NodeType.Mult, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TDIV expression { $$.n = new(NodeType.Div, $1.n, $3.n, null, null, null, null, null, $1.l); }
            | expression TDOUBLEDOT expression { $$.n = new(NodeType.Range, $1.n, $3.n, null, null, null, null, null, $1.l); }
+           | TMINUS expression %prec UMINUS { $$.n = new(NodeType.Negate, $2.n, null, null, null, null, null, null, $1.l); }
            | TNOT expression { $$.n = new(NodeType.Not, $2.n, null, null, null, null, null, null, $1.l); }
            | TNOT TSET { $$.n = new(NodeType.NotSet, null, null, null, null, null, null, null, $1.l); }
            | TNOT TFOUND { $$.n = new(NodeType.NotFound, null, null, null, null, null, null, null, $1.l); }

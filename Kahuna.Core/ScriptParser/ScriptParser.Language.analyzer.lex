@@ -59,8 +59,8 @@ RSquareBrace    \]
 Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
-Number          ("-"?[0-9]+)|("-"?[0][x][0-9A-Fa-f]+)
-Decimal         ("-"?)([0-9]+)(\.)([0-9]+)
+Number          ([0-9]+)|([0][x][0-9A-Fa-f]+)
+Decimal         ([0-9]+)(\.)([0-9]+)
 StrChs          [^\\\"\a\b\f\n\r\t\v\0]
 StrChs2          [^\\\'\a\b\f\n\r\t\v\0]
 DotChr          [^\r\n]
@@ -112,6 +112,8 @@ TAnd            &&
 {StringSingle}  { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('\''); return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
+
+{Eol}			/* skip: a line break separates statements but carries no token */
 
 {LParen} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.LPAREN; }
 
@@ -256,5 +258,11 @@ TAnd            &&
 {EscIdentifier} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext.Trim('`'); return (int)Token.TIDENTIFIER; }
 
 {Placeholder} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
+
+/* Catch-all, and it must stay last. Without it the generated scanner drops any character that starts
+   no pattern, so a stray ';' or '%' vanishes and the author sees a confusing syntax error further
+   along - or, worse, a different program that happens to parse. Single-character tokens declared
+   above still win, because a tie on match length goes to the earlier rule. */
+{NotWh} { SetTokenLocation(yyline, yycol, yyleng); yyerror("Unexpected character '{0}'", yytext); }
 
 %%

@@ -65,4 +65,5 @@ public enum NodeType
     Return,
     Sleep,
     Throw,
+    Negate,
 }

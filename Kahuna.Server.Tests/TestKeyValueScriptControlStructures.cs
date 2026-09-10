@@ -534,6 +534,9 @@ public class TestKeyValueScriptControlStructures : BaseCluster
             Assert.Equal(-1, resp.Revision);
             Assert.Equal("55", Encoding.UTF8.GetString(resp.Value ?? []));
         
+            // A start above the end is an empty range, so the loop body never runs and the total stays zero.
+            // This asserted 10 while the right operand was read as a count: "10..1" then meant one element
+            // starting at ten.
             script = """
              let total = 0
              for x in 10..1 do
@@ -545,8 +548,10 @@ public class TestKeyValueScriptControlStructures : BaseCluster
             resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
-            Assert.Equal("10", Encoding.UTF8.GetString(resp.Value ?? []));
-        
+            Assert.Equal("0", Encoding.UTF8.GetString(resp.Value ?? []));
+
+            // Both bounds are included, so this sums 0 through 9. It asserted 36, the sum of 0 through 8,
+            // because a count of nine elements starting at zero stopped one short of the end bound.
             script = """
              let r_start = 0
              let r_end = 9
@@ -560,7 +565,7 @@ public class TestKeyValueScriptControlStructures : BaseCluster
             resp = await RetryOnMustRetry(kahuna1, Encoding.UTF8.GetBytes(script), null, null);
             Assert.Equal(KeyValueResponseType.Get, resp.Type);
             Assert.Equal(-1, resp.Revision);
-            Assert.Equal("36", Encoding.UTF8.GetString(resp.Value ?? []));
+            Assert.Equal("45", Encoding.UTF8.GetString(resp.Value ?? []));
 
         }
         finally

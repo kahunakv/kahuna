@@ -6,6 +6,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions.Commands;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Transactions.Operators;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 
@@ -146,6 +147,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.And:
                 case NodeType.Or:
                 case NodeType.Not:
+                case NodeType.Negate:
                 case NodeType.Add:
                 case NodeType.Subtract:
                 case NodeType.Mult:
@@ -601,7 +603,12 @@ internal sealed class ScriptTransactionExecutor
                     if (ast.leftAst?.yytext is null || ast.rightAst?.yytext is null)
                         throw new KahunaScriptException("Invalid BEGIN option", ast.yyline);
 
-                    options.Add(ast.leftAst.yytext, ast.rightAst.yytext);
+                    // Reject a repeated option rather than letting one value quietly win. Which of the two
+                    // the author meant is unknowable, and a silently discarded option is the exact failure
+                    // this option list is meant to stop.
+                    if (!options.TryAdd(ast.leftAst.yytext, ast.rightAst.yytext))
+                        throw new KahunaScriptException("Duplicated BEGIN option: " + ast.leftAst.yytext, ast.yyline);
+
                     break;
             }
 
@@ -743,6 +750,14 @@ internal sealed class ScriptTransactionExecutor
                     context.Result = await GetByBucketCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
+                // A prefix scan fans out over every partition and carries no transaction identity, so inside a
+                // transaction it would read a snapshot blind to the transaction's own uncommitted writes and
+                // would take no prefix lock to make the read repeatable. Refusing is the honest answer until a
+                // transaction-carrying scan exists. GET BY BUCKET is the prefix read that does work here.
+                case NodeType.ScanByPrefix:
+                case NodeType.EscanByPrefix:
+                    throw new KahunaScriptException("SCAN BY PREFIX is not supported inside transactions, use GET BY BUCKET", ast.yyline);
+
                 case NodeType.Commit:
                     context.Action = KeyValueTransactionAction.Commit;
                     context.Status = KeyValueExecutionStatus.Stop;
@@ -784,6 +799,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.And:
                 case NodeType.Or:
                 case NodeType.Not:
+                case NodeType.Negate:
                 case NodeType.Add:
                 case NodeType.Subtract:
                 case NodeType.Mult:
@@ -821,9 +837,9 @@ internal sealed class ScriptTransactionExecutor
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid IF expression", ast.yyline);
 
-        KeyValueExpressionResult expressionResult = KeyValueTransactionExpression.Eval(context, ast.leftAst);
-
-        if (expressionResult is { Type: KeyValueExpressionType.BoolType, BoolValue: true })
+        // The condition must be a boolean, the same rule the logical operators follow. A number or a string
+        // here used to take the ELSE branch without a word, so a mistyped guard read as a working one.
+        if (BooleanOperand.Require(context, ast.leftAst, ast, "IF"))
         {
             if (ast.rightAst is not null)
                 await ExecuteTransactionInternal(context, ast.rightAst, cancellationToken);

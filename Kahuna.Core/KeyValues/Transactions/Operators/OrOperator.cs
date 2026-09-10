@@ -3,38 +3,29 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
+/// <summary>
+/// Represents a static operator used to evaluate logical OR expressions within a key-value transaction context.
+/// </summary>
+/// <remarks>
+/// Both operands must be boolean. The operator short-circuits: a true left operand returns true and the
+/// right operand is never evaluated.
+/// </remarks>
+/// <exception cref="KahunaScriptException">
+/// Thrown if the left or right AST node is null, or if an evaluated operand is not a boolean.
+/// </exception>
 internal static class OrOperator
 {
     public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);
-                
+
         if (ast.rightAst is null)
             throw new KahunaScriptException("Invalid right expression", ast.yyline);
-                
-        KeyValueExpressionResult left = KeyValueTransactionExpression.Eval(context, ast.leftAst);
-        KeyValueExpressionResult right = KeyValueTransactionExpression.Eval(context, ast.rightAst);
-        
-        switch (left.Type)
-        {
-            case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
-                return new(left.BoolValue || right.BoolValue);
-            
-            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return new(left.LongValue != 0 || right.LongValue != 0);
-            
-            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return new(left.DoubleValue != 0 || right.LongValue != 0);
-            
-            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return new(left.LongValue != 0 || right.DoubleValue != 0);
-            
-            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return new(left.DoubleValue != 0 || right.DoubleValue != 0);
-                
-            default:
-                throw new KahunaScriptException("Invalid operands: " + left.Type + " or " + right.Type, ast.yyline);
-        }
+
+        if (BooleanOperand.Require(context, ast.leftAst, ast, "||"))
+            return new(true);
+
+        return new(BooleanOperand.Require(context, ast.rightAst, ast, "||"));
     }
 }

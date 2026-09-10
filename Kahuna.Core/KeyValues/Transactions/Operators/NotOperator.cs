@@ -3,31 +3,19 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
+/// <summary>
+/// Represents a static operator used to evaluate logical NOT expressions within a key-value transaction context.
+/// </summary>
+/// <remarks>
+/// The operand must be a boolean, which is the same rule the other logical operators and IF follow.
+/// </remarks>
 internal static class NotOperator
 {
     public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);
-                
-        KeyValueExpressionResult left = KeyValueTransactionExpression.Eval(context, ast.leftAst);
-        
-        switch (left.Type)
-        {
-            case KeyValueExpressionType.BoolType:
-                return new(!left.BoolValue);
-            
-            case KeyValueExpressionType.LongType:
-                return new(left.LongValue != 0);
-            
-            case KeyValueExpressionType.DoubleType:
-                return new(left.DoubleValue != 0);
 
-            case KeyValueExpressionType.NullType:
-            case KeyValueExpressionType.StringType:
-            case KeyValueExpressionType.BytesType:
-            default:
-                throw new KahunaScriptException("Invalid operands: not(" + left.Type + ")", ast.yyline);
-        }
+        return new(!BooleanOperand.Require(context, ast.leftAst, ast, "!"));
     }
 }

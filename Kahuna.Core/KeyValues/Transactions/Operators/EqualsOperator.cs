@@ -7,6 +7,14 @@ using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
+/// <summary>
+/// Evaluates equality and inequality.
+///
+/// Numeric comparison is exact. An earlier version compared doubles within a fixed tolerance of 0.001,
+/// which made "1 == 1.0009" true and left a script no way to ask for an exact answer — a trap for counters,
+/// revisions and any other value that must match precisely. A script that wants a tolerance calls the
+/// 'nearly_equals' function and states its own.
+/// </summary>
 internal static class EqualsOperator
 {
     private const int StackAllocThreshold = 256;
@@ -40,13 +48,13 @@ internal static class EqualsOperator
                 return new(left.LongValue == right.LongValue);
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return new(Math.Abs(left.DoubleValue - right.DoubleValue) <= 0.001);
+                return new(left.DoubleValue == right.DoubleValue);
             
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return new(Math.Abs(left.LongValue - right.DoubleValue) <= 0.001);
+                return new(left.LongValue == right.DoubleValue);
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return new(Math.Abs(left.DoubleValue - right.LongValue) <= 0.001);
+                return new(left.DoubleValue == right.LongValue);
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.StringType:
             {
@@ -92,10 +100,10 @@ internal static class EqualsOperator
                     if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                 
-                    return new(Math.Abs(leftDouble - right.DoubleValue) <= 0.001);
+                    return new(leftDouble == right.DoubleValue);
                 }
 
-                return new(Math.Abs(leftLong - right.DoubleValue) <= 0.001);
+                return new(leftLong == right.DoubleValue);
             }
 
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.LongType:
@@ -105,7 +113,7 @@ internal static class EqualsOperator
                     if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                 
-                    return new(Math.Abs(leftDouble - right.LongValue) <= 0.001);
+                    return new(leftDouble == right.LongValue);
                 }
 
                 return new(leftLong == right.LongValue);
@@ -118,7 +126,7 @@ internal static class EqualsOperator
                     if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                     
-                    return new(Math.Abs(left.LongValue - rightDouble) <= 0.001);
+                    return new(left.LongValue == rightDouble);
                 }
 
                 return new(left.LongValue == rightLong);
@@ -131,10 +139,10 @@ internal static class EqualsOperator
                     if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
-                    return new(Math.Abs(left.DoubleValue - rightDouble) <= 0.001);
+                    return new(left.DoubleValue == rightDouble);
                 }
 
-                return new(Math.Abs(left.DoubleValue - rightLong) <= 0.001);
+                return new(left.DoubleValue == rightLong);
             }
 
             default:

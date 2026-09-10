@@ -17,7 +17,12 @@ internal static class DivOperator
                 
         KeyValueExpressionResult left = KeyValueTransactionExpression.Eval(context, ast.leftAst);
         KeyValueExpressionResult right = KeyValueTransactionExpression.Eval(context, ast.rightAst);
-        
+
+        // One answer for both numeric types. An integer divide used to raise a framework exception with no
+        // script line, while a double divide returned infinity and carried that value on into a stored key.
+        if (IsZero(right))
+            throw new KahunaScriptException("Division by zero", ast.yyline);
+
         switch (left.Type)
         {
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
@@ -86,6 +91,35 @@ internal static class DivOperator
                 
             default:
                 throw new KahunaScriptException("Invalid operands: " + left.Type + " / " + right.Type, ast.yyline);
+        }
+    }
+
+    /// <summary>
+    /// Reports whether the divisor is zero, covering the numeric string the operator also accepts. A string
+    /// that is not a number is not zero: the operand switch below reports it as an invalid operand instead,
+    /// which names both types and is the more useful message.
+    /// </summary>
+    private static bool IsZero(KeyValueExpressionResult right)
+    {
+        switch (right.Type)
+        {
+            case KeyValueExpressionType.LongType:
+                return right.LongValue == 0;
+
+            case KeyValueExpressionType.DoubleType:
+                return right.DoubleValue == 0;
+
+            case KeyValueExpressionType.StringType:
+                if (long.TryParse(right.StrValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out long asLong))
+                    return asLong == 0;
+
+                if (double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double asDouble))
+                    return asDouble == 0;
+
+                return false;
+
+            default:
+                return false;
         }
     }
 }

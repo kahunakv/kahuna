@@ -19,6 +19,7 @@ internal static class CallFunction
         { "floor", FloorFunction.Execute },
         { "min", MinFunction.Execute },
         { "max", MaxFunction.Execute },
+        { "nearly_equals", NearlyEqualsFunction.Execute },
         { "to_int", CastToLongFunction.Execute },
         { "to_integer", CastToLongFunction.Execute },
         { "to_long", CastToLongFunction.Execute },
