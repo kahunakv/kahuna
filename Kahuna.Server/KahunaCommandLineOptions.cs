@@ -285,6 +285,35 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-wal-single-fsync-commit", Required = false, HelpText = "Enable single-fsync fast path: ack on propose-quorum-durable and demote the commit marker to a lazy write", Default = true)]
     public bool RaftWalSingleFsyncCommit { get; set; } = true;
 
+    // Raft WAL shard column-family sizing (Kommander RocksDbWalTuning). Zero is the "not set"
+    // value on every numeric knob here, because none of them accepts zero as a real setting:
+    // it leaves Kommander's own default for that field in force. They take effect only when the
+    // WAL backend is RocksDB.
+
+    [Option("raft-wal-shard-write-buffer-size-mb", Required = false, HelpText = "Raft WAL shard memtable size in MiB (0 = Kommander default, 64)", Default = 0)]
+    public int RaftWalShardWriteBufferSizeMb { get; set; }
+
+    [Option("raft-wal-shard-min-write-buffer-number-to-merge", Required = false, HelpText = "Immutable Raft WAL memtables merged into one flush (0 = Kommander default, 2)", Default = 0)]
+    public int RaftWalShardMinWriteBufferNumberToMerge { get; set; }
+
+    [Option("raft-wal-shard-max-write-buffer-number", Required = false, HelpText = "Maximum Raft WAL memtables per shard column family; must exceed the merge count (0 = Kommander default, 4)", Default = 0)]
+    public int RaftWalShardMaxWriteBufferNumber { get; set; }
+
+    [Option("raft-wal-shard-level0-file-num-compaction-trigger", Required = false, HelpText = "L0 file count that triggers Raft WAL compaction into the base level (0 = Kommander default, 8)", Default = 0)]
+    public int RaftWalShardLevel0FileNumCompactionTrigger { get; set; }
+
+    [Option("raft-wal-shard-level0-slowdown-writes-trigger", Required = false, HelpText = "L0 file count at which Raft WAL writers are slowed (0 = Kommander default, 28)", Default = 0)]
+    public int RaftWalShardLevel0SlowdownWritesTrigger { get; set; }
+
+    [Option("raft-wal-shard-level0-stop-writes-trigger", Required = false, HelpText = "L0 file count at which Raft WAL writers are stopped (0 = Kommander default, 44)", Default = 0)]
+    public int RaftWalShardLevel0StopWritesTrigger { get; set; }
+
+    [Option("raft-wal-shard-max-bytes-for-level-base-mb", Required = false, HelpText = "max_bytes_for_level_base for the Raft WAL shard column families, in MiB; sizing it above the retained log keeps the live log in the base level (0 = Kommander default, which leaves RocksDB's 256 MiB)", Default = 0)]
+    public int RaftWalShardMaxBytesForLevelBaseMb { get; set; }
+
+    [Option("raft-wal-shard-universal-compaction", Required = false, HelpText = "Use universal instead of leveled compaction for the Raft WAL shard column families; makes the level-base setting inert", Default = false)]
+    public bool RaftWalShardUniversalCompaction { get; set; }
+
     [Option("raft-sqlite-wal-shard-count", Required = false, HelpText = "Number of SQLite shard databases across which partitions are distributed (0 = resolved to processor count on first initialisation)", Default = 0)]
     public int RaftSqliteWalShardCount { get; set; }
 

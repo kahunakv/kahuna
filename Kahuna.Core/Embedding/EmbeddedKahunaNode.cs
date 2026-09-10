@@ -291,7 +291,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         {
             "memory" => new InMemoryWAL(logger),
             "sqlite" => new SqliteWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites),
-            "rocksdb" => new RocksDbWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites, sharedResources: sharedResources),
+            "rocksdb" => new RocksDbWAL(
+                options.WalPath,
+                revision,
+                logger,
+                syncWrites: options.WalSyncWrites,
+                sharedResources: sharedResources,
+                tuning: RaftWalTuningFactory.Build(options)),
             _ => throw new KahunaServerException("Invalid WAL storage type: " + options.WalStorage)
         };
     }
@@ -521,6 +527,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             ConfigurationValidator.ValidateSettleWindow(
                 new() { RangeSplitSettleWindow = options.RangeSplitSettleWindow },
                 (long)options.MinLeaderStability.TotalMilliseconds);
+
+            // Checked here and not only where the WAL is built: on the memory and sqlite backends
+            // the shard knobs are inert, so nothing downstream would ever read them and a typo
+            // would survive until the deployment that switches the WAL to RocksDB.
+            ConfigurationValidator.ValidateRaftWalShardTuning(options);
         }
         catch (KahunaServerException ex)
         {

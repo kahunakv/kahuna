@@ -3,6 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 
 using Kahuna.Server.KeyValues.Transactions;
+using Kommander.WAL;
 
 namespace Kahuna.Server.Configuration;
 
@@ -325,6 +326,67 @@ public static class ConfigurationValidator
                 "Replication factor {ReplicationFactor} exceeds the {SeedNodeCount} seed node(s); " +
                 "ranges will hold one replica per available node until enough nodes join.",
                 replicationFactor, seedNodeCount);
+    }
+
+    /// <summary>
+    /// Validates the eight Raft WAL shard column-family knobs on <paramref name="options"/> before a
+    /// WAL is built from them.
+    ///
+    /// <para>Kommander's <c>RocksDbWAL</c> constructor is the authority on these values and enforces
+    /// the stall-lock guard itself. This mirror exists only to fail earlier and better: the Kommander
+    /// message names a <c>RocksDbWalTuning</c> property, which is not the name the operator wrote, and
+    /// it is raised deep inside node construction. Here the message names the Kahuna option, and a bad
+    /// value is refused even when the WAL backend is memory or sqlite — where the knobs are inert, so
+    /// Kommander would never look at them and a typo would survive to the next RocksDB deployment.</para>
+    ///
+    /// <para>Each check is skipped when its key is unset, except the two cross-field ones: those
+    /// evaluate the <b>effective</b> values, substituting Kommander's defaults for whatever the host
+    /// left unset, so a one-sided override cannot silently produce an invalid combination.</para>
+    /// </summary>
+    /// <exception cref="KahunaServerException">Thrown when a knob is out of range, when the write-buffer
+    /// count cannot satisfy the stall-lock guard, or when the L0 triggers are not strictly ordered.</exception>
+    public static void ValidateRaftWalShardTuning(EmbeddedKahunaOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        RequirePositive(options.RaftWalShardWriteBufferSizeMb, nameof(options.RaftWalShardWriteBufferSizeMb));
+        RequirePositive(options.RaftWalShardMinWriteBufferNumberToMerge, nameof(options.RaftWalShardMinWriteBufferNumberToMerge));
+        RequirePositive(options.RaftWalShardMaxWriteBufferNumber, nameof(options.RaftWalShardMaxWriteBufferNumber));
+        RequirePositive(options.RaftWalShardLevel0FileNumCompactionTrigger, nameof(options.RaftWalShardLevel0FileNumCompactionTrigger));
+        RequirePositive(options.RaftWalShardLevel0SlowdownWritesTrigger, nameof(options.RaftWalShardLevel0SlowdownWritesTrigger));
+        RequirePositive(options.RaftWalShardLevel0StopWritesTrigger, nameof(options.RaftWalShardLevel0StopWritesTrigger));
+        RequirePositive(options.RaftWalShardMaxBytesForLevelBaseMb, nameof(options.RaftWalShardMaxBytesForLevelBaseMb));
+
+        RocksDbWalTuning shipped = RocksDbWalTuning.Default;
+
+        int merge = options.RaftWalShardMinWriteBufferNumberToMerge ?? shipped.ShardMinWriteBufferNumberToMerge;
+        int maxBuffers = options.RaftWalShardMaxWriteBufferNumber ?? shipped.ShardMaxWriteBufferNumber;
+
+        // A flush waits for `merge` immutable memtables, so the writer needs one mutable memtable
+        // above that quorum. At equality every rotation stalls until the flush completes.
+        if (maxBuffers <= merge)
+            throw new KahunaServerException(
+                $"effective {nameof(options.RaftWalShardMaxWriteBufferNumber)} ({maxBuffers}) must be greater than " +
+                $"effective {nameof(options.RaftWalShardMinWriteBufferNumberToMerge)} ({merge}); " +
+                "otherwise a flush holds every memtable and each rotation write-stalls until it finishes");
+
+        int trigger = options.RaftWalShardLevel0FileNumCompactionTrigger ?? shipped.ShardLevel0FileNumCompactionTrigger;
+        int slowdown = options.RaftWalShardLevel0SlowdownWritesTrigger ?? shipped.ShardLevel0SlowdownWritesTrigger;
+        int stop = options.RaftWalShardLevel0StopWritesTrigger ?? shipped.ShardLevel0StopWritesTrigger;
+
+        if (trigger >= slowdown || slowdown >= stop)
+            throw new KahunaServerException(
+                $"effective Raft WAL L0 triggers must be strictly increasing, but " +
+                $"{nameof(options.RaftWalShardLevel0FileNumCompactionTrigger)} ({trigger}) < " +
+                $"{nameof(options.RaftWalShardLevel0SlowdownWritesTrigger)} ({slowdown}) < " +
+                $"{nameof(options.RaftWalShardLevel0StopWritesTrigger)} ({stop}) does not hold; " +
+                "writers would be slowed or stopped before compaction is ever asked to run");
+    }
+
+    private static void RequirePositive(int? value, string option)
+    {
+        if (value is <= 0)
+            throw new KahunaServerException($"{option} must be greater than zero when set, got {value}");
     }
 
     private static void ValidatePersistentRevisionRetention(KahunaConfiguration configuration)

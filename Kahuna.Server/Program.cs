@@ -109,9 +109,14 @@ else
 
         bool walSyncWrites = opts.GetWalSyncWrites();
 
+        // Routed through the embedded options object rather than read off the CLI here, so the
+        // command line reaches the WAL tuning through exactly one mapping. A second CLI-to-tuning
+        // mapping is how a flag ends up honoured in standalone mode and ignored in a cluster.
+        RocksDbWalTuning walTuning = RaftWalTuningFactory.Build(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
+
         IWAL walAdapter = opts.WalStorage switch
         {
-            "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites, sharedResources: sharedResources),
+            "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites, sharedResources: sharedResources, tuning: walTuning),
             "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
             "memory" => new InMemoryWAL(logger),
             _ => throw new KahunaServerException("Invalid WAL storage")

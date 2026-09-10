@@ -39,6 +39,14 @@ public static class EmbeddedOptionsFactory
         WalPath = opts.WalPath,
         WalRevision = opts.WalRevision,
         WalSyncWrites = opts.GetWalSyncWrites(),
+        RaftWalShardWriteBufferSizeMb = NullIfZero(opts.RaftWalShardWriteBufferSizeMb),
+        RaftWalShardMinWriteBufferNumberToMerge = NullIfZero(opts.RaftWalShardMinWriteBufferNumberToMerge),
+        RaftWalShardMaxWriteBufferNumber = NullIfZero(opts.RaftWalShardMaxWriteBufferNumber),
+        RaftWalShardLevel0FileNumCompactionTrigger = NullIfZero(opts.RaftWalShardLevel0FileNumCompactionTrigger),
+        RaftWalShardLevel0SlowdownWritesTrigger = NullIfZero(opts.RaftWalShardLevel0SlowdownWritesTrigger),
+        RaftWalShardLevel0StopWritesTrigger = NullIfZero(opts.RaftWalShardLevel0StopWritesTrigger),
+        RaftWalShardMaxBytesForLevelBaseMb = NullIfZero(opts.RaftWalShardMaxBytesForLevelBaseMb),
+        RaftWalShardUniversalCompaction = opts.RaftWalShardUniversalCompaction,
         RocksDbSharedMemoryEnabled = opts.RocksDbSharedMemory,
         RocksDbSharedMemoryBudgetMb = opts.RocksDbSharedMemoryBudgetMb,
         RocksDbSharedMemtableBudgetMb = opts.RocksDbSharedMemtableBudgetMb,
@@ -111,4 +119,11 @@ public static class EmbeddedOptionsFactory
         // against a stability figure the operator never set.
         MinLeaderStability = TimeSpan.FromMilliseconds(opts.RaftMinLeaderStabilityMs)
     };
+
+    /// <summary>
+    /// The command line spells "leave Kommander's default" as zero on the Raft WAL shard knobs,
+    /// because none of them accepts zero as a real setting. The embedded surface spells it as null.
+    /// This is the one place that translation happens.
+    /// </summary>
+    private static int? NullIfZero(int value) => value == 0 ? null : value;
 }

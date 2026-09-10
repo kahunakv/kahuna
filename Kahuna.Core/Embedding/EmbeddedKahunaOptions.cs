@@ -403,6 +403,87 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool RaftWalSingleFsyncCommit { get; set; }
 
+    // ── Raft WAL shard column-family sizing (Kommander RocksDbWalTuning) ──────────────────────
+    // Each knob below is null by default, and null means "leave Kommander's own default for that
+    // field untouched". RaftWalTuningFactory starts from RocksDbWalTuning.Default and applies only
+    // the fields a host actually set, so a host that sets none gets byte-for-byte the shipped
+    // layout. These reach the Raft WAL only when WalStorage is "rocksdb"; on the memory and sqlite
+    // backends they are inert, but they are still validated at startup so a typo cannot hide.
+    //
+    // What they are for: a Raft log row dies when a compaction pass covers it with a range
+    // tombstone. A row that meets its tombstone inside one flush unit is dropped at flush and never
+    // reaches L0; a row flushed earlier must be rewritten down the levels before it can die, which
+    // is the write amplification these knobs exist to cut. Read RocksDbWalTuning for the full
+    // reasoning, the memory envelope, and the stall-lock guard.
+
+    /// <summary>
+    /// Size of one Raft WAL shard-CF memtable in MiB. Maps to
+    /// <c>RocksDbWalTuning.ShardWriteBufferSizeBytes</c>. Null keeps Kommander's default (64 MiB).
+    /// Raising this widens the flush unit, and so the window in which a log row and its range
+    /// tombstone die together, but it also widens the WAL-replay unit a restart must re-read.
+    /// </summary>
+    public int? RaftWalShardWriteBufferSizeMb { get; set; }
+
+    /// <summary>
+    /// Immutable memtables merged into one Raft WAL shard-CF flush. Maps to
+    /// <c>RocksDbWalTuning.ShardMinWriteBufferNumberToMerge</c>. Null keeps Kommander's default (2).
+    /// This is the cheaper way to widen the flush unit: it doubles the span without doubling the
+    /// per-allocation granularity the shared WriteBufferManager accounts in.
+    /// </summary>
+    public int? RaftWalShardMinWriteBufferNumberToMerge { get; set; }
+
+    /// <summary>
+    /// Maximum memtables (mutable plus immutable) per Raft WAL shard CF. Maps to
+    /// <c>RocksDbWalTuning.ShardMaxWriteBufferNumber</c>. Null keeps Kommander's default (4).
+    /// Must exceed <see cref="RaftWalShardMinWriteBufferNumberToMerge"/>, or every memtable rotation
+    /// write-stalls until the pending flush finishes; see the stall-lock guard on
+    /// <c>RocksDbWalTuning</c>.
+    /// </summary>
+    public int? RaftWalShardMaxWriteBufferNumber { get; set; }
+
+    /// <summary>
+    /// L0 file count that triggers compaction into the base level for the Raft WAL shard CFs. Maps
+    /// to <c>RocksDbWalTuning.ShardLevel0FileNumCompactionTrigger</c>. Null keeps Kommander's
+    /// default (8).
+    /// </summary>
+    public int? RaftWalShardLevel0FileNumCompactionTrigger { get; set; }
+
+    /// <summary>
+    /// L0 file count at which RocksDB begins slowing Raft WAL writers. Maps to
+    /// <c>RocksDbWalTuning.ShardLevel0SlowdownWritesTrigger</c>. Null keeps Kommander's default
+    /// (28). Must sit above <see cref="RaftWalShardLevel0FileNumCompactionTrigger"/> and below
+    /// <see cref="RaftWalShardLevel0StopWritesTrigger"/>.
+    /// </summary>
+    public int? RaftWalShardLevel0SlowdownWritesTrigger { get; set; }
+
+    /// <summary>
+    /// L0 file count at which RocksDB stops Raft WAL writers entirely. Maps to
+    /// <c>RocksDbWalTuning.ShardLevel0StopWritesTrigger</c>. Null keeps Kommander's default (44).
+    /// </summary>
+    public int? RaftWalShardLevel0StopWritesTrigger { get; set; }
+
+    /// <summary>
+    /// <c>max_bytes_for_level_base</c> for the Raft WAL shard CFs, in MiB. Maps to
+    /// <c>RocksDbWalTuning.ShardMaxBytesForLevelBase</c>. Null keeps Kommander's default, which is
+    /// 0 and so leaves RocksDB's own 256 MiB in force.
+    /// <para>
+    /// Sizing this at or above the retained-log window keeps the whole live log in the base level,
+    /// where a range tombstone meets its rows in one compaction instead of after an L5-to-L6 push.
+    /// Inert when <see cref="RaftWalShardUniversalCompaction"/> is on: RocksDB does not consult
+    /// level sizing under universal compaction.
+    /// </para>
+    /// </summary>
+    public int? RaftWalShardMaxBytesForLevelBaseMb { get; set; }
+
+    /// <summary>
+    /// Switches the Raft WAL shard CFs from leveled to universal compaction. Maps to
+    /// <c>RocksDbWalTuning.ShardUniversalCompaction</c>. Null keeps Kommander's default (false,
+    /// leveled). Universal keeps the log in a few large sorted runs, so a range tombstone can drop
+    /// covered rows without the leveled L0-to-Lmax cascade; the retention bound stays the
+    /// durability floor either way, because only the physical layout changes.
+    /// </summary>
+    public bool? RaftWalShardUniversalCompaction { get; set; }
+
     public int CompactEveryOperations { get; set; } = 1000;
 
     public int CompactNumberEntries { get; set; } = 50;
