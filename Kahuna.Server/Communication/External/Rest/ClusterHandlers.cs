@@ -258,14 +258,21 @@ public static class ClusterHandlers
             }
         }
 
+        // A process that ran out of heap inside its WAL/apply pipeline and was configured not to fail fast is
+        // reachable but cannot vouch for its replication state: it must never answer ready again, or a probe
+        // cannot tell it from an idle follower and the orchestrator never replaces it.
+        string? fatalFault = Kahuna.Server.Diagnostics.ProcessFaults.FatalFaultObserved;
+
         return new()
         {
             Ready = initialized
                 && localRole != nameof(ClusterMemberRole.NotMember)
-                && localRole != nameof(ClusterMemberRole.Leaving),
+                && localRole != nameof(ClusterMemberRole.Leaving)
+                && fatalFault is null,
             Initialized = initialized,
             LocalRole = localRole,
-            HostedPartitions = hostedPartitions
+            HostedPartitions = hostedPartitions,
+            FatalFault = fatalFault
         };
     }
 }

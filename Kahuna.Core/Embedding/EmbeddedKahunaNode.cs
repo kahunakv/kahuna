@@ -68,6 +68,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftCommunication = new();
 
+        InstallProcessFaultPolicy(options);
         this.sharedResources = CreateSharedResources(options);
 
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
@@ -139,6 +140,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         actorSystem = new(logger: raftLogger);
 
+        InstallProcessFaultPolicy(options);
         this.sharedResources = CreateSharedResources(options);
 
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
@@ -307,6 +309,16 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
     /// RocksDB (the only case where there is anything to share). Returns null otherwise, which routes both
     /// databases down their byte-for-byte default paths.
     /// </summary>
+    // Process-wide, installed by the first node constructed in the process: an out-of-memory anywhere in the
+    // WAL/apply pipeline must terminate the process (or at least mark it unhealthy), never leave a reachable
+    // replica that appends nothing. See ProcessFaults for the two layers and why first-chance observation is
+    // needed to see a fault raised inside the WAL writer's own catch-all.
+    private static void InstallProcessFaultPolicy(EmbeddedKahunaOptions options)
+    {
+        global::Kahuna.Server.Diagnostics.ProcessFaults.FailFastEnabled = options.FailFastOnOutOfMemory;
+        global::Kahuna.Server.Diagnostics.ProcessFaults.InstallFirstChancePolicy();
+    }
+
     private static RocksDbSharedResources? CreateSharedResources(EmbeddedKahunaOptions options)
     {
         if (!options.RocksDbSharedMemoryEnabled)
@@ -375,9 +387,16 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             TransactionOutcomeRetentionTtl = options.TransactionOutcomeRetentionTtl,
             CompletionReceiptRetentionTtl = options.CompletionReceiptRetentionTtl,
             DurableRecordGcMaxPerPass = options.DurableRecordGcMaxPerPass,
+            DurableRecordRetentionMax = options.DurableRecordRetentionMax,
+            DurableRecordRetentionMaxBytes = options.DurableRecordRetentionMaxBytes,
+            DurableRecordRetentionHeapPressure = options.DurableRecordRetentionHeapPressure,
+            DurableRecordRetentionFloor = options.DurableRecordRetentionFloor,
+            DurableMaintenanceInterval = options.DurableMaintenanceInterval,
             DurableDeferredSettlement = options.DurableDeferredSettlement,
             DurableMaterializeByReference = options.DurableMaterializeByReference,
             DurableDecisionOutstandingMax = options.DurableDecisionOutstandingMax, DurablePreparedIntentMaxCount = options.DurablePreparedIntentMaxCount, DurablePreparedIntentMaxBytes = options.DurablePreparedIntentMaxBytes,
+            DurableDecisionDeadlineFloorMs = options.DurableDecisionDeadlineFloorMs,
+            DurableDecisionDeadlineCeilingMs = options.DurableDecisionDeadlineCeilingMs,
             MaxEntriesPerActor = options.MaxEntriesPerActor,
             MaxBytesPerActor = options.MaxBytesPerActor,
             CollectBatchMax = options.CollectBatchMax,

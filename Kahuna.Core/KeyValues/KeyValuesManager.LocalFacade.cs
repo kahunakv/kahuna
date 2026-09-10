@@ -165,6 +165,15 @@ internal sealed partial class KeyValuesManager
     internal void CollectExpiredCompletionReceipts() =>
         durableMaintenance.CollectExpiredCompletionReceipts();
 
+    internal void CollectExpiredCompletionReceipts(bool heapPressure) =>
+        durableMaintenance.CollectExpiredCompletionReceipts(heapPressure);
+
+    /// <summary>Whether the last record retention sweep ran under managed-heap pressure.</summary>
+    internal bool DurableHeapPressureObserved => durableMaintenance.HeapPressureObserved;
+
+    /// <summary>The durable-2PC maintenance service, for tests that drive or observe the retention budget.</summary>
+    internal DurableMaintenanceService DurableMaintenance => durableMaintenance;
+
     internal Task<int> TryResolveDecidedDurableBlockersAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken) =>
         durableMaintenance.TryResolveDecidedDurableBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken);

@@ -1218,7 +1218,32 @@ internal static class DurableTransactionMetrics
             "kahuna.durable_tx.gc_receipts_expired",
             description: "Completion receipts dropped by the age backstop with no owning transaction record.");
 
+    /// <summary>
+    /// Terminal transaction records reclaimed by the retention sweep <b>before</b> their TTL because the node's
+    /// resident-metadata budget (<c>DurableRecordRetentionMax</c> / <c>DurableRecordRetentionMaxBytes</c>) was
+    /// exceeded, or — tagged <c>reason=heap_pressure</c> — because the managed heap crossed the pressure
+    /// threshold. Counted in addition to <see cref="GcRecordsReclaimed"/>. A sustained non-zero rate means the
+    /// commit rate times the retention floor exceeds the budget: the memory bound is doing its job, and the
+    /// idempotency window is the floor rather than the TTL.
+    /// </summary>
+    internal static readonly Counter<long> GcRecordsReclaimedEarly =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.gc_records_reclaimed_early",
+            description: "Terminal transaction records reclaimed before their TTL by the resident-metadata budget or the heap-pressure valve.");
+
+    /// <summary>Retention sweeps that found the managed heap above the pressure threshold and reclaimed every
+    /// record past the floor. Any non-zero value means the budgets are undersized for the node's heap.</summary>
+    internal static readonly Counter<long> GcHeapPressureSweeps =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.gc_heap_pressure_sweeps",
+            description: "Retention sweeps run under managed-heap pressure (every terminal record past the floor reclaimed).");
+
     internal static void RecordsReclaimed(int count) => GcRecordsReclaimed.Add(count);
+
+    internal static void RecordsReclaimedEarly(int count, bool heapPressure) =>
+        GcRecordsReclaimedEarly.Add(count, new KeyValuePair<string, object?>("reason", heapPressure ? "heap_pressure" : "budget"));
+
+    internal static void HeapPressureSweep() => GcHeapPressureSweeps.Add(1);
 
     internal static void ReceiptsReleased(int count) => GcReceiptsReleased.Add(count);
 
@@ -1261,9 +1286,20 @@ internal static class DurableTransactionMetrics
         Func<long> preparedIntentCount,
         Func<long> preparedIntentBytes,
         Func<long> outstandingDurable,
-        Func<IReadOnlyList<(int PartitionId, long Entries, long Bytes)>>? committedHeadLedgerSizes = null)
+        Func<IReadOnlyList<(int PartitionId, long Entries, long Bytes)>>? committedHeadLedgerSizes = null,
+        Func<long>? recordBytes = null,
+        Func<long>? receiptBytes = null)
     {
         Meter gaugeMeter = new("Kahuna", "1.0");
+
+        // The two byte gauges are what the resident-metadata budget compares against its byte bound; exposing
+        // them next to the counts lets an operator size DurableRecordRetentionMaxBytes from a live node.
+        if (recordBytes is not null)
+            gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_record_bytes", recordBytes,
+                unit: "By", description: "Estimated heap bytes retained by resident canonical transaction records (the retention byte budget's input).");
+        if (receiptBytes is not null)
+            gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_receipt_bytes", receiptBytes,
+                unit: "By", description: "Estimated heap bytes retained by resident completion receipts (the retention byte budget's input).");
 
         if (committedHeadLedgerSizes is not null)
         {

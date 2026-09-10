@@ -676,6 +676,24 @@ public sealed class KahunaCommandLineOptions
     [Option("range-split-load-min-queue-depth", Required = false, HelpText = "Minimum WAL queue depth that must accompany the ops/sec rate before a load split fires; keeps a fast but unsaturated partition from splitting. Default 8.", Default = 8)]
     public int RangeSplitLoadMinQueueDepth { get; set; } = 8;
 
+    [Option("durable-record-retention-max", Required = false, HelpText = "Memory budget for retained durable-2PC metadata as a count of resident canonical transaction records per node. Above it the retention sweep reclaims the oldest terminal records before their TTL (never younger than the retention floor). 0 disables the count budget. Default 200000.", Default = 200_000)]
+    public int DurableRecordRetentionMax { get; set; } = 200_000;
+
+    [Option("durable-record-retention-max-bytes", Required = false, HelpText = "Memory budget for retained durable-2PC metadata as an estimated heap byte size of resident records plus completion receipts, enforced like --durable-record-retention-max. 0 disables the byte budget. Default 268435456 (256 MiB).", Default = 268_435_456L)]
+    public long DurableRecordRetentionMaxBytes { get; set; } = 268_435_456L;
+
+    [Option("durable-record-retention-heap-pressure", Required = false, HelpText = "Managed-heap load (0..1, post-GC heap over the heap hard limit or available memory) above which every terminal record older than the retention floor is reclaimed at once and the receipt backstop runs at the floor — the last-resort valve against running out of heap in the WAL path. 0 disables it. Default 0.85.", Default = 0.85d)]
+    public double DurableRecordRetentionHeapPressure { get; set; } = 0.85;
+
+    [Option("durable-record-retention-floor", Required = false, HelpText = "Seconds since its decision below which a terminal transaction record is never reclaimed early by a memory budget or the heap-pressure valve. This is the retention horizon prepared-intent recovery reasons with, so it is raised (with a warning) to at least the decision-deadline ceiling plus two maintenance ticks. At a steady commit rate the node retains at least rate × floor records whatever the budget. Default 90.", Default = 90)]
+    public int DurableRecordRetentionFloorSeconds { get; set; } = 90;
+
+    [Option("durable-maintenance-interval", Required = false, HelpText = "Seconds between durable-2PC maintenance ticks (prepared-intent recovery and the record retention sweep, TTL and memory budget). Shorter than the collection interval so a memory budget is enforced within seconds of being exceeded. Clamped to --range-collection-interval; 0 uses it. Default 5.", Default = 5)]
+    public int DurableMaintenanceIntervalSeconds { get; set; } = 5;
+
+    [Option("fail-fast-on-oom", Required = false, HelpText = "Terminate the process on any OutOfMemoryException so the orchestrator restarts the node with an empty heap, instead of leaving a reachable replica whose WAL/apply pipeline is dead. When false the node still never swallows the fault in its own apply paths and reports itself not ready on /v1/cluster/health from the first fatal fault on. Default true.", Default = true)]
+    public bool FailFastOnOutOfMemory { get; set; } = true;
+
     [Option("range-split-load-window", Required = false, HelpText = "Seconds the load predicate must hold continuously before a load split is triggered. Default 15.", Default = 15)]
     public int RangeSplitLoadWindowSeconds { get; set; } = 15;
 

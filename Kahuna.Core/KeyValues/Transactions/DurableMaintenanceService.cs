@@ -25,6 +25,16 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// that record-driven release — without the backstop, a receipt whose record was already gone leaked
 /// forever. Reclaimed receipts are batched into one replicated forget per participant partition rather
 /// than one per record, and chunked so a single entry cannot outgrow the transport's message limit.
+///
+/// The retention window is bounded in <b>memory</b> as well as time. Records and receipts are retained on
+/// every replica, so a purely time-bounded window grows linearly with the commit rate — at a few thousand
+/// commits per second a five-minute window is more than a gigabyte of gen2 on every node, and the node
+/// that runs out of heap first does so inside the Raft WAL write. The resident-metadata budget
+/// (<see cref="KahunaConfiguration.DurableRecordRetentionMax"/>, <c>…MaxBytes</c>) makes the window yield:
+/// above the budget the sweep reclaims the oldest terminal records ahead of their TTL, never below
+/// <see cref="KahunaConfiguration.DurableRecordRetentionFloor"/>, and a heap-pressure valve reclaims
+/// everything past the floor when the managed heap nears its limit. The floor is the retention horizon
+/// recovery reasons with (<see cref="EffectiveMinimumRetention"/>), which keeps early reclaim safe.
 /// </summary>
 internal sealed class DurableMaintenanceService
 {
@@ -56,6 +66,50 @@ internal sealed class DurableMaintenanceService
 
     private readonly int durableRecoveryMaxPartitionsPerPass;
 
+    // Resident-metadata budget (see the class remarks): count and estimated-byte bounds on the records plus
+    // receipts resident on this node, the managed-heap load above which the pressure valve opens, and the
+    // floor below which no record is reclaimed early whatever the budget says.
+    private readonly int retentionMaxRecords;
+
+    private readonly long retentionMaxBytes;
+
+    private readonly double retentionHeapPressure;
+
+    private readonly TimeSpan retentionFloor;
+
+    // The sweep reclaims down to this fraction of a budget rather than exactly to it, so a steady inflow does
+    // not put every tick back over the line by the time it runs.
+    private const double BudgetLowWaterFraction = 0.9;
+
+    // One warning per streak of budget-driven reclaim, then a reminder at this interval while it continues:
+    // the condition is expected under sustained load and must not become a line per tick.
+    private static readonly TimeSpan BudgetLogInterval = TimeSpan.FromMinutes(1);
+
+    private long budgetStreakLastLogTicks;
+
+    private bool budgetStreakActive;
+
+    /// <summary>
+    /// The shortest age at which a terminal record may be reclaimed on any node — the floor while a budget or
+    /// the pressure valve is enabled, otherwise the full TTL. Prepared-intent recovery uses this as the
+    /// horizon past which an absent record can no longer be read as "never initialized": with early reclaim
+    /// possible, an intent older than the floor with no record may be a reclaimed commit and is held rather
+    /// than presumed aborted. Early reclaim is safe exactly because this horizon moves with it.
+    /// </summary>
+    internal TimeSpan EffectiveMinimumRetention { get; }
+
+    /// <summary>Whether any memory bound on the retained metadata is enabled.</summary>
+    internal bool RetentionBudgetEnabled => retentionMaxRecords > 0 || retentionMaxBytes > 0 || HeapPressureValveEnabled;
+
+    private bool HeapPressureValveEnabled => retentionHeapPressure > 0 && retentionHeapPressure < 1;
+
+    /// <summary>Set by the last record sweep when it ran under heap pressure, so the receipt backstop that follows
+    /// it in the same tick runs at the floor instead of waiting for its own interval.</summary>
+    internal bool HeapPressureObserved { get; private set; }
+
+    /// <summary>Test seam: overrides the managed-heap load reading (0..1) the pressure valve compares against.</summary>
+    internal Func<double>? HeapLoadProbe { get; set; }
+
     internal DurableMaintenanceService(
         KeyValuesRuntime runtime,
         KeyValuesManager manager,
@@ -69,10 +123,57 @@ internal sealed class DurableMaintenanceService
         this.rangeStateTransfer = rangeStateTransfer;
         this.localLocks = localLocks;
 
-        durableRecordRetentionTtl = runtime.Configuration.TransactionOutcomeRetentionTtl;
-        durableRecordGcMaxPerPass = runtime.Configuration.DurableRecordGcMaxPerPass;
-        completionReceiptRetentionTtl = runtime.Configuration.CompletionReceiptRetentionTtl;
-        durableRecoveryMaxPartitionsPerPass = runtime.Configuration.DurableRecoveryMaxPartitionsPerPass;
+        KahunaConfiguration configuration = runtime.Configuration;
+
+        durableRecordRetentionTtl = configuration.TransactionOutcomeRetentionTtl;
+        durableRecordGcMaxPerPass = configuration.DurableRecordGcMaxPerPass;
+        completionReceiptRetentionTtl = configuration.CompletionReceiptRetentionTtl;
+        durableRecoveryMaxPartitionsPerPass = configuration.DurableRecoveryMaxPartitionsPerPass;
+
+        retentionMaxRecords = configuration.DurableRecordRetentionMax;
+        retentionMaxBytes = configuration.DurableRecordRetentionMaxBytes;
+        retentionHeapPressure = configuration.DurableRecordRetentionHeapPressure;
+        retentionFloor = ResolveRetentionFloor(configuration, runtime.Logger);
+
+        EffectiveMinimumRetention = RetentionBudgetEnabled && durableRecordRetentionTtl > TimeSpan.Zero
+            ? (retentionFloor < durableRecordRetentionTtl ? retentionFloor : durableRecordRetentionTtl)
+            : durableRecordRetentionTtl;
+    }
+
+    /// <summary>
+    /// The floor the budget honors: the configured value, raised to the longest an orphaned prepared intent can
+    /// take to be swept — its decision-deadline ceiling plus two maintenance ticks (one to become due, one of
+    /// rotation slack). Below that, a genuine orphan could reach the hold horizon before recovery presumes it
+    /// aborted and would be held instead, blocking its key space; the floor is the one knob that must never
+    /// undercut recovery, so a misconfiguration is corrected with a warning rather than honored.
+    /// </summary>
+    internal static TimeSpan ResolveRetentionFloor(KahunaConfiguration configuration, ILogger<IKahuna>? logger)
+    {
+        TimeSpan tick = MaintenanceTick(configuration);
+        TimeSpan orphanHorizon = TimeSpan.FromMilliseconds(Math.Max(0, configuration.DurableDecisionDeadlineCeilingMs)) + tick + tick;
+
+        TimeSpan configured = configuration.DurableRecordRetentionFloor;
+        if (configured >= orphanHorizon)
+            return configured;
+
+        logger?.LogWarning(
+            "DurableRecordRetentionFloor {Configured} is below the orphan-recovery horizon (decision-deadline ceiling {Ceiling} + 2 × maintenance tick {Tick}); raising it to {Effective} so a memory-budget reclaim can never precede the recovery of an orphaned prepared intent",
+            configured, TimeSpan.FromMilliseconds(configuration.DurableDecisionDeadlineCeilingMs), tick, orphanHorizon);
+
+        return orphanHorizon;
+    }
+
+    /// <summary>The maintenance actor's tick: <see cref="KahunaConfiguration.DurableMaintenanceInterval"/> clamped
+    /// to the collection interval, which it falls back to when non-positive.</summary>
+    internal static TimeSpan MaintenanceTick(KahunaConfiguration configuration)
+    {
+        TimeSpan collection = configuration.CollectionInterval;
+        TimeSpan maintenance = configuration.DurableMaintenanceInterval;
+
+        if (maintenance <= TimeSpan.Zero || (collection > TimeSpan.Zero && maintenance > collection))
+            return collection;
+
+        return maintenance;
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -224,6 +325,16 @@ internal sealed class DurableMaintenanceService
     /// lease and any leader-change replay. A record is purged only after every one of its participants' receipts
     /// was released durably; a failed release retains the record for the next pass (missing proof ⇒ retain).</para>
     ///
+    /// <para>The window yields to memory. Records and receipts are resident on every replica, so a window bounded
+    /// only in time grows linearly with the commit rate with no ceiling. When the resident count or estimated
+    /// bytes exceed the budget (<see cref="KahunaConfiguration.DurableRecordRetentionMax"/>, <c>…MaxBytes</c>),
+    /// the sweep also reclaims the oldest terminal records that are past
+    /// <see cref="KahunaConfiguration.DurableRecordRetentionFloor"/> but not yet past their TTL — oldest decision
+    /// first, this leader's proportional share of the overage, down to a low-water mark — and when the managed
+    /// heap is above <see cref="KahunaConfiguration.DurableRecordRetentionHeapPressure"/> it reclaims every such
+    /// record at once. The floor is what recovery treats as the retention horizon, so a record reclaimed early
+    /// is never mistaken for one that never existed.</para>
+    ///
     /// <para>The sweep runs in three stages — select every eligible record, then release <b>all</b> their receipts
     /// with one replicated forget per participant partition, then purge. Batching the release is what lets
     /// reclamation keep pace with commit inflow: a batch costs one round trip per partition it touches rather
@@ -239,6 +350,8 @@ internal sealed class DurableMaintenanceService
     /// </summary>
     internal async Task CollectDurableTransactionRecords(CancellationToken cancellationToken)
     {
+        HeapPressureObserved = false;
+
         if (transactionRecordStore.Count == 0)
             return;
 
@@ -264,6 +377,11 @@ internal sealed class DurableMaintenanceService
 
         int cap = durableRecordGcMaxPerPass;
 
+        // The memory budget is judged once per sweep, from the stores' running counters and the heap, before
+        // the scan: the scan then collects early-reclaim candidates only when there is an overage to cover.
+        RetentionPressure pressure = AssessRetentionPressure();
+        HeapPressureObserved = pressure.HeapPressure;
+
         // Stage 1 — select. The records eligible in the current batch, each paired with its anchor partition, plus
         // the batch-wide receipt set (keyed by the participant partition that must forget each) those partitions
         // forget in stage 2. A record's own participant partitions are not stored per-record: they are needed only
@@ -281,17 +399,37 @@ internal sealed class DurableMaintenanceService
         // of re-issuing a doomed replication per batch against a partition that is down or mid-election.
         HashSet<int> failedForgetPartitions = [];
 
-        foreach (TransactionRecord record in transactionRecordStore.Snapshot())
+        // Early-reclaim candidates: led, settled, terminal records past the floor but inside their TTL. Collected
+        // only under budget pressure; ordered and trimmed after the scan, since which are oldest is only known
+        // once all are seen.
+        List<(TransactionRecord Record, int AnchorPartition)>? budgetCandidates = pressure.OverBudget ? [] : null;
+
+        IReadOnlyCollection<TransactionRecord> snapshot = transactionRecordStore.Snapshot();
+
+        // For the proportional share: among the terminal records old enough to reclaim at all (past the floor),
+        // how many this node leads vs. how many are resident here. Records inside the floor are skipped before
+        // any routing or leadership lookup — the common case on a healthy node must stay a couple of field reads
+        // per record — and they are distributed across leaders like the older ones, so the ratio is unaffected.
+        int reclaimableTotal = 0;
+        int reclaimableLed = 0;
+        int expiredSelected = 0;
+
+        foreach (TransactionRecord record in snapshot)
         {
             if (cancellationToken.IsCancellationRequested)
                 break;
 
             if (!record.IsTerminal || record.DecidedAt == HLCTimestamp.Zero)
                 continue; // undecided records belong to recovery, never GC
-            if (now - record.DecidedAt < retentionTtl)
+
+            TimeSpan age = now - record.DecidedAt;
+            bool expired = age >= retentionTtl;
+
+            // Inside the floor nothing reclaims it; inside the TTL only a budget overage can.
+            if (!expired && (budgetCandidates is null || age < retentionFloor))
                 continue; // retention window not elapsed
-            if (settlementPending.Contains((record.TransactionId, record.Epoch)))
-                continue; // settlement still in progress locally
+
+            reclaimableTotal++;
 
             int anchorPartition = locator.LocateRange(record.RecordAnchorKey).PartitionId;
 
@@ -304,6 +442,66 @@ internal sealed class DurableMaintenanceService
             if (!leadsAnchor)
                 continue; // only the anchor leader drives this record's GC
 
+            reclaimableLed++;
+
+            if (settlementPending.Contains((record.TransactionId, record.Epoch)))
+                continue; // settlement still in progress locally
+
+            if (!expired)
+            {
+                budgetCandidates!.Add((record, anchorPartition));
+                continue;
+            }
+
+            AppendCompletionReceiptsForRecord(record, receiptsByPartition);
+            eligible.Add((record, anchorPartition));
+            expiredSelected++;
+
+            if (cap > 0 && eligible.Count >= cap)
+            {
+                await ReclaimBatchAsync(eligible, receiptsByPartition, failedForgetPartitions, cancellationToken).ConfigureAwait(false);
+                eligible.Clear();
+                receiptsByPartition.Clear();
+            }
+        }
+
+        if (eligible.Count > 0 && !cancellationToken.IsCancellationRequested)
+        {
+            await ReclaimBatchAsync(eligible, receiptsByPartition, failedForgetPartitions, cancellationToken).ConfigureAwait(false);
+            eligible.Clear();
+            receiptsByPartition.Clear();
+        }
+
+        // Stage 1b — the budget's share. Oldest decisions first: they are the records with the least remaining
+        // value as an idempotency answer and the ones the TTL would have reclaimed next anyway.
+        if (budgetCandidates is null || cancellationToken.IsCancellationRequested)
+        {
+            NoteBudgetState(pressure, reclaimed: 0, eligible: 0);
+            return;
+        }
+
+        int take = ChooseEarlyReclaimCount(pressure, budgetCandidates, reclaimableTotal, reclaimableLed, expiredSelected);
+        NoteBudgetState(pressure, reclaimed: take, eligible: budgetCandidates.Count);
+
+        if (take <= 0)
+            return;
+
+        budgetCandidates.Sort(static (a, b) =>
+        {
+            int byDecision = a.Record.DecidedAt.CompareTo(b.Record.DecidedAt);
+            return byDecision != 0 ? byDecision : a.Record.TransactionId.CompareTo(b.Record.TransactionId);
+        });
+
+        DurableTransactionMetrics.RecordsReclaimedEarly(take, pressure.HeapPressure);
+        if (pressure.HeapPressure)
+            DurableTransactionMetrics.HeapPressureSweep();
+
+        for (int i = 0; i < take; i++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            (TransactionRecord record, int anchorPartition) = budgetCandidates[i];
             AppendCompletionReceiptsForRecord(record, receiptsByPartition);
             eligible.Add((record, anchorPartition));
 
@@ -317,6 +515,169 @@ internal sealed class DurableMaintenanceService
 
         if (eligible.Count > 0 && !cancellationToken.IsCancellationRequested)
             await ReclaimBatchAsync(eligible, receiptsByPartition, failedForgetPartitions, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The budget verdict for one sweep: how far the resident metadata is over each bound, and whether the
+    /// heap-pressure valve is open.</summary>
+    internal readonly record struct RetentionPressure(long RecordOverage, long ByteOverage, bool HeapPressure, double HeapLoad)
+    {
+        public bool OverBudget => HeapPressure || RecordOverage > 0 || ByteOverage > 0;
+    }
+
+    /// <summary>
+    /// Reads the budget inputs — the stores' running count and byte estimates, and the managed-heap load — and
+    /// reports the overage above each bound's low-water mark. Pure with respect to the stores; reading it costs
+    /// two counters and one <see cref="GC.GetGCMemoryInfo()"/>.
+    /// </summary>
+    internal RetentionPressure AssessRetentionPressure()
+    {
+        long recordOverage = 0;
+        if (retentionMaxRecords > 0)
+        {
+            long lowWater = (long)(retentionMaxRecords * BudgetLowWaterFraction);
+            long resident = transactionRecordStore.Count;
+            if (resident > retentionMaxRecords)
+                recordOverage = resident - lowWater;
+        }
+
+        long byteOverage = 0;
+        if (retentionMaxBytes > 0)
+        {
+            long lowWater = (long)(retentionMaxBytes * BudgetLowWaterFraction);
+            long resident = transactionRecordStore.EstimatedBytes + completionReceiptStore.EstimatedBytes;
+            if (resident > retentionMaxBytes)
+                byteOverage = resident - lowWater;
+        }
+
+        double heapLoad = 0;
+        bool heapPressure = false;
+        if (HeapPressureValveEnabled)
+        {
+            heapLoad = HeapLoadProbe?.Invoke() ?? ReadManagedHeapLoad();
+            heapPressure = heapLoad >= retentionHeapPressure;
+        }
+
+        return new RetentionPressure(recordOverage, byteOverage, heapPressure, heapLoad);
+    }
+
+    /// <summary>Post-GC managed heap size over the runtime's available memory (the heap hard limit when one is
+    /// configured, the machine's or container's memory otherwise); 0 when the runtime reports no bound.</summary>
+    private static double ReadManagedHeapLoad()
+    {
+        GCMemoryInfo info = GC.GetGCMemoryInfo();
+        if (info.TotalAvailableMemoryBytes <= 0)
+            return 0;
+
+        return (double)info.HeapSizeBytes / info.TotalAvailableMemoryBytes;
+    }
+
+    /// <summary>
+    /// How many of the (unsorted) early-reclaim candidates this sweep takes. Under heap pressure, all of them.
+    /// Otherwise this leader's proportional share of the overage: every anchor leader in the cluster sees the
+    /// same resident total (records replicate to every replica of their anchor partition) and each can only
+    /// reclaim what it leads, so each takes <c>overage × led ÷ total</c> and the cluster converges to the
+    /// low-water mark in one round instead of every leader draining a full overage's worth. The records the
+    /// TTL already reclaimed this sweep count against the overage first. Pure, so the share is testable.
+    /// </summary>
+    internal static int ChooseEarlyReclaimCount(
+        RetentionPressure pressure,
+        List<(TransactionRecord Record, int AnchorPartition)> candidates,
+        int terminalTotal,
+        int terminalLed,
+        int expiredSelected)
+    {
+        if (candidates.Count == 0)
+            return 0;
+
+        if (pressure.HeapPressure)
+            return candidates.Count;
+
+        double share = terminalTotal <= 0 ? 1.0 : Math.Clamp((double)terminalLed / terminalTotal, 0.0, 1.0);
+
+        long byCount = 0;
+        if (pressure.RecordOverage > 0)
+        {
+            long remaining = pressure.RecordOverage - expiredSelected;
+            if (remaining > 0)
+                byCount = (long)Math.Ceiling(remaining * share);
+        }
+
+        long byBytes = 0;
+        if (pressure.ByteOverage > 0)
+        {
+            // Bytes are attributed per candidate (record plus the receipts it releases), so the count needed to
+            // cover the share of the byte overage depends on which candidates are taken; since the oldest are
+            // taken and sizes are roughly uniform, an average over the candidates is a fair conversion.
+            long candidateBytes = 0;
+            foreach ((TransactionRecord record, _) in candidates)
+                candidateBytes += EstimateReclaimableBytes(record);
+
+            double averageBytes = candidateBytes / (double)candidates.Count;
+            if (averageBytes > 0)
+                byBytes = (long)Math.Ceiling(pressure.ByteOverage * share / averageBytes) - expiredSelected;
+        }
+
+        return (int)Math.Clamp(Math.Max(byCount, byBytes), 0, candidates.Count);
+    }
+
+    // The heap a reclaimed record frees on this node: the record itself plus the receipts its persistent
+    // participants hold (one per participant, mirrored on every replica of the participant partition).
+    private static long EstimateReclaimableBytes(TransactionRecord record)
+    {
+        long bytes = record.EstimateBytes();
+        foreach (TransactionParticipantRef participant in record.Participants)
+        {
+            if (participant.Durability == KeyValueDurability.Persistent)
+                bytes += 64 + 26 + 2L * participant.Key.Length + 26 + 2L * record.RecordAnchorKey.Length;
+        }
+
+        return bytes;
+    }
+
+    // Operator signal for the budget, kept to one warning per streak plus a reminder per BudgetLogInterval: the
+    // start of early reclaim (memory, not time, is now the retention bound), a budget exceeded with nothing
+    // past the floor to reclaim (the floor, not the budget, is sizing the heap — the rate × floor product is
+    // too large for it), and the end of the streak once the sweep finds the node back under budget.
+    private void NoteBudgetState(RetentionPressure pressure, int reclaimed, int eligible)
+    {
+        long nowTicks = Stopwatch.GetTimestamp();
+
+        if (!pressure.OverBudget)
+        {
+            if (budgetStreakActive)
+            {
+                budgetStreakActive = false;
+                if (logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation(
+                        "Durable-2PC retention is back under its memory budget: {Records} records / {Bytes} estimated bytes resident; the full TTL window applies again",
+                        transactionRecordStore.Count, transactionRecordStore.EstimatedBytes + completionReceiptStore.EstimatedBytes);
+            }
+
+            return;
+        }
+
+        bool first = !budgetStreakActive;
+        budgetStreakActive = true;
+
+        if (!first && Stopwatch.GetElapsedTime(budgetStreakLastLogTicks, nowTicks) < BudgetLogInterval)
+            return;
+
+        budgetStreakLastLogTicks = nowTicks;
+
+        long residentBytes = transactionRecordStore.EstimatedBytes + completionReceiptStore.EstimatedBytes;
+
+        if (pressure.HeapPressure)
+            logger.LogWarning(
+                "Durable-2PC retention under managed-heap pressure (heap load {HeapLoad:P0} ≥ {Threshold:P0}): reclaiming all {Reclaimed} terminal records past the {Floor} floor ahead of their TTL; {Records} records / {Bytes} estimated bytes resident. The retention budgets are undersized for this node's heap",
+                pressure.HeapLoad, retentionHeapPressure, reclaimed, retentionFloor, transactionRecordStore.Count, residentBytes);
+        else if (eligible == 0)
+            logger.LogWarning(
+                "Durable-2PC retention over its memory budget ({Records} records / {Bytes} estimated bytes resident; budget {MaxRecords} records / {MaxBytes} bytes) but every terminal record this node leads is younger than the {Floor} floor: nothing can be reclaimed early. The commit rate times the floor exceeds the budget — lower the floor (and the decision-deadline ceiling it must cover) or raise the budget",
+                transactionRecordStore.Count, residentBytes, retentionMaxRecords, retentionMaxBytes, retentionFloor);
+        else
+            logger.LogWarning(
+                "Durable-2PC retention over its memory budget ({Records} records / {Bytes} estimated bytes resident; budget {MaxRecords} records / {MaxBytes} bytes): reclaiming {Reclaimed} of {Eligible} terminal records ahead of their TTL, none younger than the {Floor} floor. The idempotency window is the floor, not the TTL, while this continues",
+                transactionRecordStore.Count, residentBytes, retentionMaxRecords, retentionMaxBytes, reclaimed, eligible, retentionFloor);
     }
 
     /// <summary>Stages 2 and 3 of <see cref="CollectDurableTransactionRecords"/> for one selected batch:
@@ -434,11 +795,21 @@ internal sealed class DurableMaintenanceService
     /// acknowledgement-driven release there is nothing to replicate — each node ages out its own copy. The sweep
     /// is in-memory only and needs no per-pass cap.</para>
     /// </summary>
-    internal void CollectExpiredCompletionReceipts()
+    internal void CollectExpiredCompletionReceipts() => CollectExpiredCompletionReceipts(heapPressure: false);
+
+    /// <summary>
+    /// The receipt age backstop, run at the floor instead of its TTL when <paramref name="heapPressure"/> is set:
+    /// under pressure the node's survival outranks the idempotency answers the receipts still hold — the same
+    /// trade the record sweep makes for the records, and it needs no replication either way.
+    /// </summary>
+    internal void CollectExpiredCompletionReceipts(bool heapPressure)
     {
         TimeSpan retentionTtl = completionReceiptRetentionTtl;
         if (retentionTtl <= TimeSpan.Zero)
             return; // backstop disabled
+
+        if (heapPressure && HeapPressureValveEnabled && retentionFloor > TimeSpan.Zero && retentionFloor < retentionTtl)
+            retentionTtl = retentionFloor;
 
         if (completionReceiptStore.Count == 0)
             return;
@@ -685,8 +1056,9 @@ internal sealed class DurableMaintenanceService
         (partitionId, intent) => ApplyDurableCommit(partitionId, intent, CancellationToken.None),
         // The record retention horizon bounds when record absence can still be read as "never initialized":
         // past it, the absent record may be a reclaimed commit and the sweep holds the intent instead of
-        // presuming abort — the guard against discarding a committed leg whose settlement kept failing.
-        runtime.Configuration.TransactionOutcomeRetentionTtl,
+        // presuming abort — the guard against discarding a committed leg whose settlement kept failing. With
+        // a memory budget enabled the horizon is the retention floor, the earliest any leader may reclaim.
+        EffectiveMinimumRetention,
         logger,
         // The abort fence: a locally visible terminal Abort is definitive, so a commit-direction settle
         // must never push that transaction's value into the log whatever decision its caller read.

@@ -311,7 +311,9 @@ internal sealed class KeyValuesManagerBuilder
             () => preparedIntentStore.Count,
             () => preparedIntentStore.TotalBytes,
             () => txCoordinator.OutstandingDurableCount,
-            preparedIntentStore.SnapshotLedgerSizes);
+            preparedIntentStore.SnapshotLedgerSizes,
+            () => transactionRecordStore.EstimatedBytes,
+            () => completionReceiptStore.EstimatedBytes);
 
         // Admission-gate gauges on their own instance-owned meter, for the same reason: a disposed node's
         // orderers must not stay reachable through gauge callbacks.

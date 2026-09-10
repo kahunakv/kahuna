@@ -89,6 +89,34 @@ internal sealed record TransactionRecord(
 
         return false;
     }
+
+    // Approximate managed-heap cost of one resident record, for the retention memory budget. Object header +
+    // the scalar fields (five HLCs at 16 bytes, two longs, three small enums/bools, four references), the
+    // dictionary entry that holds it (entry + 24-byte key), the two owned strings, and the participant list
+    // with one string per participant. Strings are 2 bytes per char plus the object overhead. Deliberately an
+    // estimate: it needs to track heap growth proportionally, not match a profiler byte for byte.
+    private const int RecordFixedBytes = 16 + 5 * 16 + 2 * 8 + 12 + 4 * 8;
+    private const int DictionaryEntryBytes = 24 + 24 + 8;
+    private const int StringOverheadBytes = 26;
+    private const int ListOverheadBytes = 32;
+    private const int ParticipantStructBytes = 16;
+
+    /// <summary>Estimated heap bytes this record and its dictionary entry retain, for the retention budget.</summary>
+    public long EstimateBytes()
+    {
+        long bytes = RecordFixedBytes + DictionaryEntryBytes
+            + StringOverheadBytes + 2L * CoordinatorKey.Length
+            + StringOverheadBytes + 2L * RecordAnchorKey.Length
+            + ListOverheadBytes;
+
+        foreach (TransactionParticipantRef participant in Participants)
+            bytes += ParticipantStructBytes + StringOverheadBytes + 2L * participant.Key.Length;
+
+        if (RejectedBundledCommitOpIds is { Count: > 0 } rejected)
+            bytes += ListOverheadBytes + 16L * rejected.Count;
+
+        return bytes;
+    }
 }
 
 /// <summary>
