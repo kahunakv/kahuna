@@ -108,7 +108,9 @@ public sealed class TestTransactionRecordGc
             WalStorage = "memory",
             InitialPartitions = 4,
             // A tiny retention window so the record is eligible for GC almost immediately after commit.
-            TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1)
+            TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1),
+            // Every sweep here is one the test drives: keep the periodic maintenance tick out of the way.
+            DurableMaintenanceInterval = TimeSpan.FromMinutes(1)
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("gc/row-1", ct);
@@ -193,7 +195,9 @@ public sealed class TestTransactionRecordGc
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 4,
-            TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1)
+            TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1),
+            // Every sweep here is one the test drives: keep the periodic maintenance tick out of the way.
+            DurableMaintenanceInterval = TimeSpan.FromMinutes(1)
         }, loggerFactory);
         await node.StartAsync(ct);
 

@@ -561,8 +561,13 @@ takes ownership of the lock set, so the predicate lock never lapses in the gap b
 | `DurableDecisionDeadlineFloorMs` | 5,000 | Lower clamp on the per-transaction decision-deadline margin, and the value used during estimator warmup. |
 | `DurableDecisionDeadlineCeilingMs` | 60,000 | Upper clamp on the decision-deadline margin, capping how long a dead coordinator's undecided record can block recovery. Must be ≥ the floor. |
 | `DurableDecisionDeadlineMultiplier` | 4 | Multiplier applied to the observed finalize p99 before clamping to the floor/ceiling. |
-| `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes; a non-positive value disables age-based removal. |
-| `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and the prepared-intent recovery actor. |
+| `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes; a non-positive value disables age-based removal. Also the retention window of the durable-2PC canonical records and the completion receipts they release — see the memory budget below, which makes that window yield. |
+| `DurableRecordRetentionMax` | 200,000 | Memory budget for the durable-2PC metadata resident on a node, as a count of canonical transaction records. Above it the retention sweep reclaims the oldest terminal records **before** their TTL, down to 90% of the budget, each anchor leader taking its proportional share. A non-positive value disables the count budget. |
+| `DurableRecordRetentionMaxBytes` | 256 MiB | The same budget as an estimated heap byte size of resident records plus completion receipts (reported by the `kahuna.durable_tx.resident_record_bytes` / `resident_receipt_bytes` gauges). A non-positive value disables the byte budget. |
+| `DurableRecordRetentionHeapPressure` | 0.85 | Managed-heap load above which every terminal record older than the floor is reclaimed at once and the receipt backstop runs at the floor: the last-resort valve for budgets sized wrong for the node's heap. A non-positive value disables it. |
+| `DurableRecordRetentionFloor` | 90 seconds | Age below which no terminal record is reclaimed early, whatever the budgets say. It is the retention horizon prepared-intent recovery reasons with whenever a budget is enabled, so it is raised (with a warning) to at least `DurableDecisionDeadlineCeilingMs` + 2 × `DurableMaintenanceInterval`. At a steady commit rate a node retains at least rate × floor records, so size the floor for the heap. |
+| `DurableMaintenanceInterval` | 5 seconds | Tick interval of prepared-intent recovery and the record retention sweep. Clamped to `CollectionInterval`; a non-positive value uses it. |
+| `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and the completion-receipt age backstop; the ceiling of `DurableMaintenanceInterval`. |
 | Pending operations per session | 4,096 | Fixed safety bound on *in-flight* operations; additional registrations receive `RejectedCapacity` (transient — a completion frees a pending slot, so the caller retries in place). |
 | Total operations per session | 65,536 | Fixed bound on *retained* operation records (pending **plus** completed). Completed records are never evicted — they stay for duplicate-response replay — so this counter only rises within a session and the rejection is terminal: registrations beyond it receive `RejectedSessionBudget`, surfaced as `Aborted` (retry as a new transaction, never `MustRetry`). A non-positive value disables the bound. |
 | Participant in-doubt results | 8,192 per node | Fixed bound for normal acknowledgement-loss recovery. |
@@ -574,6 +579,24 @@ retention and never consume admission budget, so retained outcomes do not thrott
 throughput. A new durable transaction reserves one slot before prepare; when the budget is full it is
 rejected before prepare, and the coordinator never evicts recovery state to make room. This budget is
 deliberately independent of `TransactionOutcomeRetentionMax` (the best-effort terminal-outcome cache).
+
+Retention of the durable-2PC metadata is bounded in **memory**, not only in time. Canonical records
+and completion receipts are resident on every replica, so a window bounded only by
+`TransactionOutcomeRetentionTtl` grows linearly with the commit rate: at a few thousand commits per
+second a five-minute window is more than a gigabyte of gen2 on every node, and the first node to run
+out of heap does so inside the Raft WAL write. `DurableRecordRetentionMax` / `…MaxBytes` make the
+window yield — above the budget the sweep reclaims the oldest terminal records ahead of their TTL,
+never one younger than `DurableRecordRetentionFloor` — and `DurableRecordRetentionHeapPressure` opens
+a valve that reclaims everything past the floor when the heap nears its limit. While a budget is
+active the idempotency window is the floor rather than the TTL (`kahuna.durable_tx.gc_records_reclaimed_early`
+counts it), and the floor is what recovery uses as the "record may have been reclaimed" horizon, so
+early reclaim never turns a reclaimed commit into a presumed abort.
+
+An `OutOfMemoryException` anywhere in the process terminates it by default (`FailFastOnOutOfMemory`):
+the WAL writer and every replicated apply path catch broadly, and an out-of-memory swallowed there
+leaves a reachable, "healthy" replica whose WAL queue is pinned and appends nothing. With fail-fast
+disabled the node reports `ready: false` with a `fatalFault` on `/v1/cluster/health` from the first
+such fault on.
 
 ---
 

@@ -153,7 +153,7 @@ internal sealed class KeyValueRestorer
 
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Diagnostics.ProcessFaults.Survivable(ex, "KeyValueRestorer.Restore"))
         {
             logger.LogError(ex, "KeyValueRestorer: Error processing replication message");
             return false;

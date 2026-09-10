@@ -221,6 +221,8 @@ public sealed class TestTransactionRecordGcBatching
             InitialPartitions = 8,
             // Everything is immediately eligible; the periodic tick is a minute out, so each sweep is one we drive.
             TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1),
+            // Every sweep here is one the test drives: keep the periodic maintenance tick out of the way.
+            DurableMaintenanceInterval = TimeSpan.FromMinutes(1),
             // Long enough that the age backstop never fires here — these tests are about the record-driven release.
             CompletionReceiptRetentionTtl = TimeSpan.FromMinutes(30),
             DurableRecordGcMaxPerPass = gcMaxPerPass

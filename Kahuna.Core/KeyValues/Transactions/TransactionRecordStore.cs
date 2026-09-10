@@ -22,6 +22,10 @@ internal sealed class TransactionRecordStore
 {
     private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> records = new();
 
+    // Running estimate of the heap the resident records retain (see TransactionRecord.EstimateBytes), maintained
+    // at every insert/replace/remove so the retention memory budget reads a counter instead of scanning.
+    private long estimatedBytes;
+
     // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
     // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
     private long version;
@@ -245,6 +249,7 @@ internal sealed class TransactionRecordStore
                     rejected.Add(bundledCommit.OpId);
                     TransactionRecord memoed = existing with { RejectedBundledCommitOpIds = rejected };
                     records[key] = memoed;
+                    AccountReplaced(existing, memoed);
                     StampDirty(memoed.RecordAnchorKey);
 
                     if (gatedRejectionVerdicts.Count < GatedRejectionVerdictsMax)
@@ -263,11 +268,13 @@ internal sealed class TransactionRecordStore
             if (result.Outcome == TransactionApplyOutcome.Applied && result.Record is not null)
             {
                 records[key] = result.Record;
+                AccountReplaced(existing, result.Record);
                 StampDirty(result.Record.RecordAnchorKey);
             }
             else if (result.Outcome == TransactionApplyOutcome.Removed)
             {
-                records.TryRemove(key, out TransactionRecord? removed);
+                if (records.TryRemove(key, out TransactionRecord? removed))
+                    AccountReplaced(removed, null);
                 StampDirty(removed?.RecordAnchorKey ?? existing?.RecordAnchorKey);
             }
 
@@ -281,6 +288,19 @@ internal sealed class TransactionRecordStore
     public IReadOnlyCollection<TransactionRecord> Snapshot() => records.Values.ToArray();
 
     public int Count => records.Count;
+
+    /// <summary>Estimated heap bytes retained by the resident records (see <see cref="TransactionRecord.EstimateBytes"/>).
+    /// A running counter, so the retention budget can read it every tick without a scan.</summary>
+    public long EstimatedBytes => Math.Max(0, Interlocked.Read(ref estimatedBytes));
+
+    // Adjusts the running estimate for one dictionary slot going from <paramref name="before"/> to
+    // <paramref name="after"/> (either may be null: insert, replace, remove).
+    private void AccountReplaced(TransactionRecord? before, TransactionRecord? after)
+    {
+        long delta = (after?.EstimateBytes() ?? 0) - (before?.EstimateBytes() ?? 0);
+        if (delta != 0)
+            Interlocked.Add(ref estimatedBytes, delta);
+    }
 
     // ── replication ─────────────────────────────────────────────────────────────
 
@@ -629,6 +649,7 @@ internal sealed class TransactionRecordStore
         if (!records.TryGetValue(key, out TransactionRecord? existing))
         {
             records[key] = incoming;
+            AccountReplaced(null, incoming);
             StampDirty(incoming.RecordAnchorKey);
             return;
         }
@@ -643,6 +664,7 @@ internal sealed class TransactionRecordStore
         if (!existing.IsTerminal && incoming.IsTerminal)
         {
             records[key] = incoming;
+            AccountReplaced(existing, incoming);
             StampDirty(incoming.RecordAnchorKey);
             return;
         }
@@ -658,7 +680,9 @@ internal sealed class TransactionRecordStore
 
             if (merged.Count != (existing.RejectedBundledCommitOpIds?.Count ?? 0))
             {
-                records[key] = existing with { RejectedBundledCommitOpIds = merged };
+                TransactionRecord mergedRecord = existing with { RejectedBundledCommitOpIds = merged };
+                records[key] = mergedRecord;
+                AccountReplaced(existing, mergedRecord);
                 StampDirty(existing.RecordAnchorKey);
             }
         }
@@ -707,7 +731,10 @@ internal sealed class TransactionRecordStore
                 return 0;
 
             foreach ((HLCTimestamp TransactionId, long Epoch) key in toRemove)
-                records.TryRemove(key, out _);
+            {
+                if (records.TryRemove(key, out TransactionRecord? removed))
+                    AccountReplaced(removed, null);
+            }
 
             StampAllDirty();
             return toRemove.Count;

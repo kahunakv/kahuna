@@ -247,7 +247,70 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int DurableRecordGcMaxPerPass { get; set; } = 4_096;
 
+    /// <summary>
+    /// Memory budget for retained durable-2PC metadata, as a count of resident canonical transaction records per
+    /// node. Above it the retention sweep reclaims the oldest terminal records before their
+    /// <see cref="TransactionOutcomeRetentionTtl"/>, never below <see cref="DurableRecordRetentionFloor"/>.
+    /// The TTL alone bounds retention in time only, which at thousands of commits per second is gigabytes of
+    /// heap on every replica. A value &lt;= 0 disables the count budget.
+    /// </summary>
+    public int DurableRecordRetentionMax { get; set; } = 200_000;
+
+    /// <summary>
+    /// Memory budget for retained durable-2PC metadata as an estimated heap byte size of the resident records
+    /// plus completion receipts. Enforced like <see cref="DurableRecordRetentionMax"/>. A value &lt;= 0
+    /// disables the byte budget.
+    /// </summary>
+    public long DurableRecordRetentionMaxBytes { get; set; } = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Managed-heap load (0..1, post-GC heap over the runtime's available memory, honoring a heap hard limit)
+    /// above which every terminal record older than the floor is reclaimed at once and the receipt backstop
+    /// runs at the floor — the last-resort valve against running out of heap. A value &lt;= 0 disables it.
+    /// </summary>
+    public double DurableRecordRetentionHeapPressure { get; set; } = 0.85;
+
+    /// <summary>
+    /// Minimum age since its decision below which a terminal record is never reclaimed early by a budget or the
+    /// pressure valve. It is the effective retention horizon prepared-intent recovery reasons with, so it is
+    /// raised (with a warning) to at least the decision-deadline ceiling plus two maintenance ticks.
+    /// </summary>
+    public TimeSpan DurableRecordRetentionFloor { get; set; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Tick interval of prepared-intent recovery and the record retention sweep (the receipt age backstop keeps
+    /// the <see cref="CollectionInterval"/> cadence). Clamped to the collection interval; &lt;= 0 uses it.
+    /// </summary>
+    public TimeSpan DurableMaintenanceInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// When true (default), an <see cref="OutOfMemoryException"/> raised anywhere in the process terminates it
+    /// through <see cref="Environment.FailFast(string, Exception)"/> so the orchestrator restarts the node with
+    /// an empty heap. Every replicated apply path and the Raft WAL writer catch broadly to keep one bad entry
+    /// from stopping replication, and an out-of-memory caught there leaves the process alive with a dead WAL
+    /// pipeline: reachable, "healthy", appending nothing — a zombie follower. When false the fault is still
+    /// never swallowed by Kahuna's own apply paths, and the node reports itself not ready on
+    /// <c>/v1/cluster/health</c> from the first fatal fault on, so a probe can take it out of rotation.
+    /// </summary>
+    public bool FailFastOnOutOfMemory { get; set; } = true;
+
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
+
+    /// <summary>
+    /// Lower clamp (ms) on the durable-transaction decision-deadline margin — the window past the commit
+    /// timestamp within which a durable commit is still authorized before recovery may presume-abort it. Also
+    /// the value used while the finalize-latency estimator warms up. Keep it comfortably above a healthy
+    /// finalize's two Raft barriers.
+    /// </summary>
+    public long DurableDecisionDeadlineFloorMs { get; set; } = 5_000;
+
+    /// <summary>
+    /// Upper clamp (ms) on the decision-deadline margin: how long a dead coordinator's undecided record can block
+    /// recovery of its prepared intents. Must be &gt;= <see cref="DurableDecisionDeadlineFloorMs"/>. Together
+    /// with <see cref="DurableMaintenanceInterval"/> it sets the lowest <see cref="DurableRecordRetentionFloor"/>
+    /// the retention budget may honor.
+    /// </summary>
+    public long DurableDecisionDeadlineCeilingMs { get; set; } = 60_000;
 
     /// <summary>
     /// When true (default), a durable transaction's post-decision resolution (materialize committed values, settle

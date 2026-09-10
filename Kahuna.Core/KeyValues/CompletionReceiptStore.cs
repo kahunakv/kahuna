@@ -34,6 +34,20 @@ internal sealed class CompletionReceiptStore
 {
     private readonly ConcurrentDictionary<ReceiptKey, CompletionReceipt> receipts = new();
 
+    // Running estimate of the heap the resident receipts retain, maintained on every record/forget so the
+    // retention memory budget reads a counter instead of scanning two million entries.
+    private long estimatedBytes;
+
+    // Approximate heap cost of one receipt: the dictionary entry (entry + 24-byte key struct + 16-byte value
+    // struct) plus the key string and the anchor string, which the replicated apply decodes as fresh strings.
+    private const int ReceiptEntryBytes = 24 + 24 + 16;
+    private const int StringOverheadBytes = 26;
+
+    private static long EstimateBytes(string key, string? recordAnchorKey) =>
+        ReceiptEntryBytes
+        + StringOverheadBytes + 2L * key.Length
+        + (recordAnchorKey is null ? 0 : StringOverheadBytes + 2L * recordAnchorKey.Length);
+
     // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
     // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
     private long version;
@@ -179,7 +193,10 @@ internal sealed class CompletionReceiptStore
             return;
 
         if (receipts.TryAdd(new ReceiptKey(transactionId, key), new CompletionReceipt(recordAnchorKey, durability)))
+        {
+            Interlocked.Add(ref estimatedBytes, EstimateBytes(key, recordAnchorKey));
             StampDirty(key);
+        }
     }
 
     /// <summary>
@@ -210,9 +227,10 @@ internal sealed class CompletionReceiptStore
     /// </summary>
     public bool Forget(HLCTimestamp transactionId, string key)
     {
-        if (!receipts.TryRemove(new ReceiptKey(transactionId, key), out _))
+        if (!receipts.TryRemove(new ReceiptKey(transactionId, key), out CompletionReceipt removed))
             return false;
 
+        Interlocked.Add(ref estimatedBytes, -EstimateBytes(key, removed.RecordAnchorKey));
         StampDirty(key);
         return true;
     }
@@ -271,7 +289,10 @@ internal sealed class CompletionReceiptStore
             // Remove only if the value is still the one just observed, so a receipt re-recorded concurrently
             // under the same key is left for the next pass rather than dropped on stale information.
             if (receipts.TryRemove(receipt))
+            {
+                Interlocked.Add(ref estimatedBytes, -EstimateBytes(receipt.Key.Key, receipt.Value.RecordAnchorKey));
                 removed++;
+            }
         }
 
         if (removed > 0)
@@ -282,6 +303,10 @@ internal sealed class CompletionReceiptStore
 
     /// <summary>Current number of retained receipts. Diagnostic only.</summary>
     public int Count => receipts.Count;
+
+    /// <summary>Estimated heap bytes retained by the resident receipts — a running counter for the retention
+    /// memory budget, which reads it every tick.</summary>
+    public long EstimatedBytes => Math.Max(0, Interlocked.Read(ref estimatedBytes));
 
     /// <summary>Records a batch of receipts (used by split/merge routing on the destination leader).</summary>
     public void ImportRange(IEnumerable<CompletionReceiptRecord> records)
@@ -383,7 +408,7 @@ internal sealed class CompletionReceiptStore
 
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Diagnostics.ProcessFaults.Survivable(ex, "CompletionReceiptStore.Apply"))
         {
             logger?.LogError(ex, "Failed to apply completion-receipt batch on partition {Partition}", partitionId);
             return false;

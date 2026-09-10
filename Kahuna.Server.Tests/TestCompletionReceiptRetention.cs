@@ -93,6 +93,8 @@ public sealed class TestCompletionReceiptRetention
             // Tiny windows so both the record sweep and the age backstop are eligible immediately. The periodic
             // tick is a minute away, so every sweep in this test is one we drive explicitly.
             TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(1),
+            // Every sweep here is one the test drives: keep the periodic maintenance tick out of the way.
+            DurableMaintenanceInterval = TimeSpan.FromMinutes(1),
             CompletionReceiptRetentionTtl = TimeSpan.FromMilliseconds(1)
         }, loggerFactory);
         await node.StartAsync(ct);

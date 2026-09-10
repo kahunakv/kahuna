@@ -29,4 +29,13 @@ public sealed class KahunaClusterHealthResponse
     /// </summary>
     [JsonPropertyName("hostedPartitions")]
     public int HostedPartitions { get; set; }
+
+    /// <summary>
+    /// Set when the process observed a fault it cannot vouch for surviving (an out-of-memory in the
+    /// WAL/apply pipeline) and was configured not to fail fast on it. A node in this state answers 503 for
+    /// the rest of its life even though it stays reachable: its replication pipeline may be dead, and the
+    /// orchestrator should replace it. Null on a healthy node.
+    /// </summary>
+    [JsonPropertyName("fatalFault")]
+    public string? FatalFault { get; set; }
 }

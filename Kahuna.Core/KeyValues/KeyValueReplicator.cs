@@ -1093,7 +1093,7 @@ internal sealed class KeyValueReplicator
                     break;
             }
         } 
-        catch (Exception ex)
+        catch (Exception ex) when (Diagnostics.ProcessFaults.Survivable(ex, "KeyValueReplicator.Replicate"))
         {
             logger.LogError(ex, "KeyValueReplicator: Error processing replication message");
             return false;

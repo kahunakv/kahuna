@@ -431,6 +431,65 @@ public sealed class KahunaConfiguration
     public int DurableRecoveryMaxPartitionsPerPass { get; set; } = 64;
 
     /// <summary>
+    /// Memory budget for the durable-2PC metadata retained on this node, as a count of resident canonical
+    /// transaction records. <see cref="TransactionOutcomeRetentionTtl"/> alone bounds retention in <i>time</i>, so
+    /// resident records (and the two-or-so completion receipts each one holds on every replica) grow linearly
+    /// with the commit rate — a 5-minute window at a few thousand commits per second is more than a gigabyte
+    /// of heap on every node. When the resident count exceeds this budget the retention sweep reclaims the
+    /// oldest terminal records <b>early</b> (before their TTL), oldest-by-decision first, down to 90% of the
+    /// budget, but never one younger than <see cref="DurableRecordRetentionFloor"/>. Each anchor leader reclaims
+    /// its own proportional share of the overage, so a cluster converges to the budget without one leader
+    /// draining everything. A value &lt;= 0 disables the count budget. The budgets act inside the TTL sweep, so a
+    /// non-positive <see cref="TransactionOutcomeRetentionTtl"/> (age GC disabled) disables them too.
+    /// </summary>
+    public int DurableRecordRetentionMax { get; set; } = 200_000;
+
+    /// <summary>
+    /// Memory budget for the durable-2PC metadata retained on this node, as an <i>estimated</i> byte size of the
+    /// resident canonical records plus completion receipts (object, string and dictionary-entry overhead
+    /// included, so it tracks heap cost rather than wire size). Enforced exactly like
+    /// <see cref="DurableRecordRetentionMax"/>: the oldest terminal records past the floor are reclaimed early
+    /// until the estimate is back under 90% of the budget. Complements the count budget for workloads whose
+    /// transactions carry many or long keys. A value &lt;= 0 disables the byte budget.
+    /// </summary>
+    public long DurableRecordRetentionMaxBytes { get; set; } = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Managed-heap load (0..1, measured as the heap size after the last GC over the runtime's available memory,
+    /// which honors a configured heap hard limit) above which the retention sweep treats the node as under
+    /// memory pressure and reclaims <b>every</b> terminal record older than
+    /// <see cref="DurableRecordRetentionFloor"/> at once, whatever the count and byte budgets say — and the
+    /// completion-receipt age backstop runs at the floor instead of
+    /// <see cref="CompletionReceiptRetentionTtl"/>. This is the last-resort valve for the case the budgets were
+    /// sized wrong for the node: it trades the remaining idempotency window for not running out of heap in
+    /// the Raft WAL path. A value &lt;= 0 (or &gt;= 1) disables the pressure valve.
+    /// </summary>
+    public double DurableRecordRetentionHeapPressure { get; set; } = 0.85;
+
+    /// <summary>
+    /// Minimum age (since its decision) below which a terminal transaction record is <b>never</b> reclaimed by
+    /// the memory budgets or the heap-pressure valve — only the full <see cref="TransactionOutcomeRetentionTtl"/>
+    /// applies to younger records. This is the effective retention horizon whenever a budget is enabled, and it
+    /// is what prepared-intent recovery uses to tell an orphan (presume abort) from a leg whose committed record
+    /// may already have been reclaimed (hold), so it must stay above the time an orphaned intent can take to be
+    /// swept: the decision-deadline ceiling (<see cref="DurableDecisionDeadlineCeilingMs"/>) plus two
+    /// maintenance ticks (<see cref="DurableMaintenanceInterval"/>). A lower value is raised to that bound
+    /// with a warning. It also bounds what the budgets can achieve: at a steady commit rate the node retains at
+    /// least <c>rate × floor</c> records whatever the budget, so size the floor for the node's heap.
+    /// </summary>
+    public TimeSpan DurableRecordRetentionFloor { get; set; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Tick interval of the durable-2PC maintenance actor: prepared-intent recovery and the record retention
+    /// sweep (TTL and memory budget) run every tick; the completion-receipt age backstop keeps running once per
+    /// <see cref="CollectionInterval"/>. Shorter than the collection interval so a memory budget is enforced
+    /// within seconds of being exceeded rather than a minute of commits later, and so an orphaned intent is
+    /// swept soon after its deadline, which is what lets <see cref="DurableRecordRetentionFloor"/> be short.
+    /// Clamped to <see cref="CollectionInterval"/>; a value &lt;= 0 falls back to the collection interval.
+    /// </summary>
+    public TimeSpan DurableMaintenanceInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// When true (default), a durable transaction's post-decision resolution (materialize committed values, settle
     /// intents) runs off the commit critical path: finalize returns as soon as the decision record is durable, and
     /// settlement completes in the background (a lost run is finished by recovery). Reads and writes that meet a
