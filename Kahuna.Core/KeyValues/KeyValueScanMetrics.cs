@@ -49,4 +49,17 @@ internal static class KeyValueScanMetrics
         Meter.CreateCounter<long>(
             "kahuna.scan.abandoned_cancelled_total",
             description: "Backend scans skipped or stopped early because their continuation had expired.");
+
+    /// <summary>
+    /// Seeks a disk scan issued to jump over the remaining revision rows of one logical key's
+    /// block instead of stepping them one by one. A healthy version-heavy store shows roughly
+    /// one seek per deep logical key per scan; a rate near zero on such a store means the
+    /// tilde-key registry is not authoritative (a store created before the registry existed)
+    /// or the scanned buckets hold keys containing '~', and scans are paying
+    /// O(total revisions) again.
+    /// </summary>
+    internal static readonly Counter<long> RevisionRunSeeks =
+        Meter.CreateCounter<long>(
+            "kahuna.scan.revision_run_seeks_total",
+            description: "Seeks that jumped a scan over the rest of a key's revision rows.");
 }

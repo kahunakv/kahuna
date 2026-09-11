@@ -575,6 +575,16 @@ internal sealed class RangeScanContinuation : ReadContinuation
         {
             if (!entry.TryGetRevisionAtOrBefore(snapshotTs, out long snapRevision, out KeyValueRevisionEntry snapshot))
             {
+                // A head jump skipped revisions this entry never archived, and their flush
+                // requests may still be queued: neither the in-memory archive nor the disk
+                // projection can answer for the skipped window yet. Silently falling through
+                // here made the row vanish from (or read stale in) the scan; point reads
+                // already fail closed on the same condition (see TryGetHandler). MustRetry
+                // aborts the page, and the caller's page retry loop re-reads once the queued
+                // flushes are acknowledged.
+                if (entry.SnapshotAtRiskFromUnflushedGap(snapshotTs))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
                 // In-memory revision archive does not reach as far back as snapshotTs.
                 // Fall back to the stage-2 disk projection carried in from the off-actor task.
                 // Purely memory-only keys (never flushed) have no disk projection and are omitted.
