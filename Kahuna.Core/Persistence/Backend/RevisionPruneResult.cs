@@ -6,8 +6,10 @@ namespace Kahuna.Server.Persistence.Backend;
 /// <param name="KeysVisited">Number of logical keys inspected during the pass.</param>
 /// <param name="RevisionsDeleted">Number of historical revision records deleted.</param>
 /// <param name="BatchLimitReached">
-/// <c>true</c> when the pass stopped early because the batch budget was exhausted (or, for a
-/// backend-wide sweep, because there is more of the keyspace left to scan).
+/// <c>true</c> when the pass stopped early with work remaining: the delete budget was exhausted,
+/// the time budget ran out (<see cref="TimeBudgetExhausted"/> says which), or, for a backend-wide
+/// sweep, there is more of the keyspace left to scan. The caller re-queues / resumes on this flag
+/// alone; the reason flags only refine it.
 /// </param>
 /// <param name="RemainingKeys">
 /// For a targeted pass, the subset of the requested keys that still has prunable revisions or was
@@ -27,11 +29,17 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Of <paramref name="KeysVisited"/>, the keys answered from the backend's prune memo without a
 /// revision walk because the memo proved nothing was deletable yet. Backends without a memo report 0.
 /// </param>
+/// <param name="TimeBudgetExhausted">
+/// <c>true</c> when the pass stopped on the caller's wall-clock budget (the budgeted
+/// <c>PruneKeyValueRevisions</c> overload) with keys or keyspace still unvisited. Always accompanied
+/// by <see cref="BatchLimitReached"/>. Backends that ignore the budget never set it.
+/// </param>
 public readonly record struct RevisionPruneResult(
     int KeysVisited,
     int RevisionsDeleted,
     bool BatchLimitReached,
     IReadOnlyCollection<string>? RemainingKeys = null,
     int FloorViolations = 0,
-    int KeysSkipped = 0
+    int KeysSkipped = 0,
+    bool TimeBudgetExhausted = false
 );

@@ -316,6 +316,18 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         out RevisionPruneResult result) =>
         inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
 
+    // Forwarded explicitly: the interface's default implementation would drop the budget on the
+    // floor and hand the inner backend an unbounded pass.
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        HLCTimestamp floorTimestamp,
+        TimeSpan timeBudget,
+        out RevisionPruneResult result) =>
+        inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, timeBudget, out result);
+
     public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
         inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
 

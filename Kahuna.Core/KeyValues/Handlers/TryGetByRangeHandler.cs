@@ -455,7 +455,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             {
                 if (!KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                     entry.WriteIntent = null;
-                else if (!readTimestamp.IsNull()
+                // Gated on the caller's explicit timestamp (snapshotRead), not on readTimestamp,
+                // which is normalised to "now" and never null here — see the persistent merge.
+                else if (snapshotRead
                          && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, readTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
                 // live write intent from another tx: fall through to committed state
@@ -552,7 +554,10 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // archived revision whose LastModified ≤ readTimestamp (snapshot isolation) instead of
         // dropping the key. If no such revision is retained (key didn't exist at the snapshot,
         // or the revision was trimmed / lives only on disk), the key is invisible for this page.
-        if (!readTimestamp.IsNull() && entry is not null && entry.LastModified > readTimestamp)
+        // Only for an explicit as-of read: readTimestamp is normalised to "now" for the cursor
+        // and is never null, and a non-snapshot scan must serve the committed head rather than
+        // drop a live key whose archive does not reach the stamp (see RangeScanContinuation).
+        if (snapshotRead && entry is not null && entry.LastModified > readTimestamp)
         {
             if (!entry.TryGetRevisionAtOrBefore(readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;

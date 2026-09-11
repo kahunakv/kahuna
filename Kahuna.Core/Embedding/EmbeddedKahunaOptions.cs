@@ -569,7 +569,7 @@ public sealed class EmbeddedKahunaOptions
 
     public TimeSpan PersistentRevisionCleanupInterval { get; set; } = TimeSpan.FromMinutes(5);
 
-    public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
+    public int PersistentRevisionCleanupBatchSize { get; set; } = 10_000;
 
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 

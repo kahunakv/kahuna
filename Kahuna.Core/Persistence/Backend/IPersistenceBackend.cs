@@ -253,6 +253,31 @@ internal interface IPersistenceBackend
     );
 
     /// <summary>
+    /// Budgeted form of <see cref="PruneKeyValueRevisions(IReadOnlyCollection{string}?, int, TimeSpan, int, HLCTimestamp, out RevisionPruneResult)"/>.
+    /// The prune runs on the single background writer between flush passes, so an unbounded pass —
+    /// a chunk of keys with deep revision blocks, or a backend-wide sweep over a store with millions
+    /// of history rows — comes straight out of flush throughput and lets the unflushed backlog grow.
+    /// A backend that honours <paramref name="timeBudget"/> stops starting new keys (and, for a
+    /// sweep, stops stepping rows) once the budget elapses, reports the stop through
+    /// <see cref="RevisionPruneResult.BatchLimitReached"/> / <see cref="RevisionPruneResult.TimeBudgetExhausted"/>,
+    /// and resumes where it left off on the next call (targeted: via <see cref="RevisionPruneResult.RemainingKeys"/>;
+    /// sweep: via its own cursor). At least one key (or one bounded slice of rows) is always
+    /// processed per call, so progress is guaranteed even under a budget that is already spent.
+    /// <see cref="Timeout.InfiniteTimeSpan"/> or <see cref="TimeSpan.MaxValue"/> disables the budget.
+    /// The default implementation ignores the budget and runs the unbudgeted pass — acceptable for
+    /// backends whose prune is cheap (memory) or tests; the RocksDB backend overrides it.
+    /// </summary>
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        HLCTimestamp floorTimestamp,
+        TimeSpan timeBudget,
+        out RevisionPruneResult result
+    ) => PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+
+    /// <summary>
     /// Produces a crash-consistent base-image snapshot of the storage engine at
     /// <paramref name="destinationPath"/>.  The image is accompanied by a
     /// <see cref="CheckpointManifest"/> sidecar that records the WAL index and HLC

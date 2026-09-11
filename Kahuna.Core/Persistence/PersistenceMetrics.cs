@@ -12,22 +12,34 @@ internal static class PersistenceMetrics
 {
     internal static readonly Meter Meter = new("Kahuna", "1.0");
 
-    /// <summary>Keys the targeted prune walked (a revision-block scan). Compare with
+    /// <summary>Keys the prune (targeted and sweep) walked (a revision-block scan). Compare with
     /// <see cref="PruneKeysSkipped"/>: on a hot key-set with nothing prunable yet, skips should
     /// dominate; walks that dominate mean the memo is not covering the workload.</summary>
     internal static readonly Counter<long> PruneKeysWalked =
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.keys_walked_total",
-            description: "Keys whose revision block the targeted prune walked.");
+            description: "Keys whose revision block the revision prune (targeted or sweep) walked.");
 
-    /// <summary>Keys the targeted prune answered from the backend's memo without a walk.</summary>
+    /// <summary>Keys the prune answered from the backend's memo without a walk.</summary>
     internal static readonly Counter<long> PruneKeysSkipped =
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.keys_skipped_total",
-            description: "Keys the targeted prune skipped because the backend memo proved nothing was deletable.");
+            description: "Keys the revision prune (targeted or sweep) skipped because the backend memo proved nothing was deletable.");
 
-    /// <summary>Revision rows the targeted prune deleted.</summary>
+    /// <summary>Revision rows the prune (targeted and sweep) deleted.</summary>
     internal static readonly Counter<long> PruneRevisionsDeleted =
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.revisions_deleted_total",
-            description: "Historical revision rows deleted by the targeted prune.");
+            description: "Historical revision rows deleted by the revision prune (targeted or sweep).");
+
+    /// <summary>Backend-wide sweep passes that paused on their share of the cycle's time budget. The
+    /// sweep resumes from its cursor next cycle, so a steady rate only means the store is large; a
+    /// pass that keeps pausing without the cursor wrapping means the sweep never completes.</summary>
+    internal static readonly Counter<long> SweepBudgetExhausted =
+        Meter.CreateCounter<long>("kahuna.persistence.revision_prune.sweep_budget_exhausted_total",
+            description: "Backend-wide revision sweep passes that paused on the cycle's time budget.");
+
+    /// <summary>Wall-clock time one backend-wide sweep pass took; bounded by its time budget plus one key.</summary>
+    internal static readonly Histogram<double> SweepPassMs =
+        Meter.CreateHistogram<double>("kahuna.persistence.revision_prune.sweep_pass_duration", unit: "ms",
+            description: "Time one backend-wide revision sweep pass spent on the writer.");
 
     /// <summary>Flush cycles whose targeted prune stopped on its time budget with keys still queued. A
     /// sustained rate means retention is lagging the write rate; the flush itself is unaffected.</summary>

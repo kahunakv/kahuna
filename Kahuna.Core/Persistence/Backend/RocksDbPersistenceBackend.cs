@@ -2,6 +2,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Buffers.Text;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Kahuna.Server.Locks;
@@ -3127,18 +3128,36 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         TimeSpan retentionAge,
         int batchSize,
         HLCTimestamp floorTimestamp,
+        out RevisionPruneResult result) =>
+        PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, Timeout.InfiniteTimeSpan, out result);
+
+    public bool PruneKeyValueRevisions(
+        IReadOnlyCollection<string>? keys,
+        int retentionCount,
+        TimeSpan retentionAge,
+        int batchSize,
+        HLCTimestamp floorTimestamp,
+        TimeSpan timeBudget,
         out RevisionPruneResult result)
     {
         EnterDbFence();
         try
         {
-            return PruneKeyValueRevisionsFenced(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+            return PruneKeyValueRevisionsFenced(keys, retentionCount, retentionAge, batchSize, floorTimestamp, timeBudget, out result);
         }
         finally
         {
             ExitDbFence();
         }
     }
+
+    /// <summary>
+    /// Rows a backend-wide sweep steps between checks of its time budget. Rows between two keys'
+    /// ~CURRENT markers are the previous key's revision history; a key with a deep block (or a run
+    /// of them) can put millions of rows between consecutive keys, so the budget is checked on row
+    /// progress as well as on key progress.
+    /// </summary>
+    private const int SweepBudgetCheckRows = 1024;
 
     // Must run under the swap fence (EnterDbFence).
     private bool PruneKeyValueRevisionsFenced(
@@ -3147,6 +3166,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         TimeSpan retentionAge,
         int batchSize,
         HLCTimestamp floorTimestamp,
+        TimeSpan timeBudget,
         out RevisionPruneResult result)
     {
         int keysVisited = 0;
@@ -3154,7 +3174,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int deleted = 0;
         int floorViolations = 0;
         bool batchLimitReached = false;
+        bool timeBudgetExhausted = false;
         List<string>? remaining = null;
+
+        // The budget bounds the whole pass — walks, memo checks and sweep row stepping alike — from
+        // the moment the caller handed it over. It is consulted before every key after the first
+        // (one key always makes progress, so a caller that arrives with a spent budget still moves
+        // forward) and, in a sweep, every SweepBudgetCheckRows stepped rows.
+        bool budgeted = timeBudget != Timeout.InfiniteTimeSpan && timeBudget != TimeSpan.MaxValue;
+        long budgetStart = Stopwatch.GetTimestamp();
+
+        bool BudgetExhausted() => budgeted && Stopwatch.GetElapsedTime(budgetStart) >= timeBudget;
 
         if (keys is not null)
         {
@@ -3162,10 +3192,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             for (int i = 0; i < keyList.Count; i++)
             {
-                if (deleted >= batchSize)
+                bool deleteBudgetSpent = deleted >= batchSize;
+
+                if (deleteBudgetSpent || (i > 0 && BudgetExhausted()))
                 {
-                    // Batch full before reaching this key — everything from here on still needs work.
+                    // Stopped before reaching this key — everything from here on still needs work.
                     batchLimitReached = true;
+                    timeBudgetExhausted = !deleteBudgetSpent;
                     for (int j = i; j < keyList.Count; j++)
                         (remaining ??= []).Add(keyList[j]);
                     break;
@@ -3189,10 +3222,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         else
         {
             // Backend-wide sweep: visit each logical key via its ~CURRENT entry, resuming from the
-            // cursor left by the previous pass so each pass scans only a bounded slice (at most
-            // batchSize keys or batchSize deletes) instead of the whole column family.
+            // cursor left by the previous pass so each pass covers only a bounded slice — at most
+            // batchSize keys or batchSize deletes, and no longer than the time budget — instead of
+            // the whole column family.
+            //
+            // The rows between one key's ~CURRENT marker and the next key's are the next key's
+            // revision history, which the sweep does not need to see: PruneRevisionsForKey walks a
+            // block itself when the key needs pruning, and the memo answers most keys without a
+            // walk at all. Stepping those rows made the sweep O(total history rows) — seconds per
+            // pass on a hot store, taken from the flush every cleanup interval. Deep runs are
+            // jumped instead, with the same registry-gated seek the range scans use, so the sweep
+            // costs O(logical keys) plus the walks that actually prune.
             int keyBudget = batchSize;
             bool paused = false;
+            int nonCurrentRun = 0;
+            int rowsSinceBudgetCheck = 0;
 
             using Iterator iterator = db.NewIterator(readOptions: MaintenanceScanReadOptions, cf: columnFamilyKeys);
 
@@ -3212,12 +3256,40 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     break;
                 }
 
+                // Time budget on row progress: a run of deep blocks can put millions of rows between
+                // two keys. The cursor lands on the current (unprocessed) row, so nothing is skipped.
+                if (rowsSinceBudgetCheck >= SweepBudgetCheckRows)
+                {
+                    rowsSinceBudgetCheck = 0;
+
+                    if (BudgetExhausted())
+                    {
+                        sweepCursor = iterator.GetKeySpan().ToArray();
+                        batchLimitReached = true;
+                        timeBudgetExhausted = true;
+                        paused = true;
+                        break;
+                    }
+                }
+
                 // Only ~CURRENT rows map to a logical key to prune. Test the suffix on the native
                 // span and decode just the logical key for those — revision rows skip the decode.
                 ReadOnlySpan<byte> rawKeySpan = iterator.GetKeySpan();
 
                 if (rawKeySpan.EndsWith(CurrentMarkerUtf8))
                 {
+                    nonCurrentRun = 0;
+
+                    // Time budget on key progress; the first key of a pass always runs.
+                    if (keysVisited > 0 && BudgetExhausted())
+                    {
+                        sweepCursor = rawKeySpan.ToArray();
+                        batchLimitReached = true;
+                        timeBudgetExhausted = true;
+                        paused = true;
+                        break;
+                    }
+
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
                     PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, out bool keyLimitReached);
                     keysVisited++;
@@ -3231,7 +3303,16 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                         break;
                     }
                 }
+                else if (++nonCurrentRun == RevisionRunSeekThreshold && TrySeekPastRevisionRun(iterator, rawKeySpan))
+                {
+                    // Jumped over the rest of this key's revision rows to its ~CURRENT row (or, if the
+                    // key has none, to whatever sorts next). Re-read the landed row without a Next.
+                    nonCurrentRun = 0;
+                    rowsSinceBudgetCheck++;
+                    continue;
+                }
 
+                rowsSinceBudgetCheck++;
                 iterator.Next();
             }
 
@@ -3240,7 +3321,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 sweepCursor = null;
         }
 
-        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped);
+        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped, timeBudgetExhausted);
         return true;
     }
 
