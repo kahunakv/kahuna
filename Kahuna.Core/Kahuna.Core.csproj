@@ -8,13 +8,13 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <IsPackable>true</IsPackable>
     <PackageId>Kahuna.Core</PackageId>
-    <Version>1.7.7</Version>
-    <Description>.NET embeddable core for Kahuna: Distributed locks and reliable key-value store</Description>
+    <Version>1.7.8</Version>
+    <Description>.NET embeddable core for Kahuna: Distributed locks, reliable key-value store and idempotent sequencer</Description>
     <Authors>Andres Gutierrez</Authors>
     <Company>Andres Gutierrez</Company>
     <InvariantGlobalization>true</InvariantGlobalization>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageDescription>.NET embeddable core for Kahuna: Distributed locks and reliable key-value store</PackageDescription>
+    <PackageDescription>.NET embeddable core for Kahuna: Distributed locks, reliable key-value store and idempotent sequencer</PackageDescription>
     <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
     <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
