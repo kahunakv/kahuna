@@ -14,7 +14,7 @@ public sealed class TestPersistentRevisionRetentionConfiguration
         Assert.Equal(TimeSpan.Zero, configuration.PersistentRevisionRetentionAge);
         Assert.False(ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration));
         Assert.Equal(TimeSpan.FromMinutes(5), configuration.PersistentRevisionCleanupInterval);
-        Assert.Equal(1000, configuration.PersistentRevisionCleanupBatchSize);
+        Assert.Equal(10_000, configuration.PersistentRevisionCleanupBatchSize);
         Assert.True(configuration.PersistentRevisionCleanupOnWrite);
         Assert.Equal(TimeSpan.FromMilliseconds(250), configuration.PersistentRevisionCleanupTimeBudget);
     }

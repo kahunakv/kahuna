@@ -503,6 +503,13 @@ internal sealed class RangeMerger
     /// busy range whose first page is refused (a live transactional write in the window makes the whole
     /// page retryable) would otherwise count as under-min and be merged. Merging moves data, so an
     /// incomplete count must never decide it.</para>
+    ///
+    /// <para>The pages are read at an explicit snapshot minted when the count starts. That is what buys
+    /// the refusal: only a scan with a caller-supplied read timestamp waits on a live write intent that
+    /// could commit inside its snapshot (the safe-time rule) — a timestamp-less read-committed scan serves
+    /// committed heads and never refuses for an intent, exactly like a point read, so it would count a busy
+    /// range as if it were quiet. One snapshot for every page also gives the walk a single consistent
+    /// cut instead of a moving one.</para>
     /// </summary>
     internal async Task<(int Count, bool Complete)> CountRangeKeysAsync(
         RangeDescriptor descriptor,
@@ -512,6 +519,8 @@ internal sealed class RangeMerger
         int count      = 0;
         string? cursor = null;
         bool hasMore   = true;
+
+        HLCTimestamp countSnapshot = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         while (hasMore && count < maxCount)
         {
@@ -539,7 +548,7 @@ internal sealed class RangeMerger
                 descriptor.EndKey,
                 false,
                 Math.Min(CountPageSize, maxCount - count),
-                HLCTimestamp.Zero,
+                countSnapshot,
                 KeyValueDurability.Persistent,
                 ct);
 

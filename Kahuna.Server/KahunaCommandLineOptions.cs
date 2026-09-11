@@ -593,8 +593,8 @@ public sealed class KahunaCommandLineOptions
     [Option("persistent-revision-cleanup-interval", Required = false, HelpText = "Minimum interval between full persistent revision cleanup sweeps in seconds", Default = 300)]
     public int PersistentRevisionCleanupInterval { get; set; } = 300;
 
-    [Option("persistent-revision-cleanup-batch-size", Required = false, HelpText = "Maximum revision records deleted per cleanup pass", Default = 1000)]
-    public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
+    [Option("persistent-revision-cleanup-batch-size", Required = false, HelpText = "Maximum revision records deleted per cleanup pass (the time budget bounds the pass; this caps its tombstones). Default 10000.", Default = 10_000)]
+    public int PersistentRevisionCleanupBatchSize { get; set; } = 10_000;
 
     [Option("persistent-revision-cleanup-on-write", Required = false, HelpText = "Run targeted persistent revision cleanup after key/value writes (default: enabled)")]
     public bool PersistentRevisionCleanupOnWrite { get; set; }

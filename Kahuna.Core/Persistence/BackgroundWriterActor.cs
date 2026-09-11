@@ -125,6 +125,25 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <summary>Value bytes pinned by the dirty queues.</summary>
     internal long QueuedBytes => Volatile.Read(ref queuedBytes);
 
+    /// <summary>
+    /// Exponential moving average of the value size of received <c>QueueStore*</c> requests, in
+    /// fixed point (×256; the low byte is the fraction). Requests still in the writer's inbox are not
+    /// sized until they are received, and under load the inbox IS the backlog — a long writer turn
+    /// leaves the dirty queues empty and everything waiting in the mailbox — so the backlog monitor
+    /// sizes the inbox from this average instead of reporting only the dirty queues' bytes.
+    /// Written on the actor thread only; read from any thread.
+    /// </summary>
+    private long averageValueBytesX256;
+
+    /// <summary>Recent average value size of the writes this writer receives, in bytes.</summary>
+    internal long AverageValueBytes => Volatile.Read(ref averageValueBytesX256) >> 8;
+
+    /// <summary>
+    /// Wall-clock the targeted prune consumed in the current flush cycle, so the sweep that follows
+    /// it shares the cycle's prune budget instead of adding a second one on top.
+    /// </summary>
+    private TimeSpan targetedPruneElapsedThisCycle;
+
     /// <summary>Keys queued for targeted revision cleanup (tests/diagnostics).</summary>
     internal int PendingRevisionCleanupKeyCount => pendingRevisionCleanupKeys.Count;
 
@@ -1264,8 +1283,16 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private void NoteQueued(BackgroundWriteRequest request)
     {
         Interlocked.Increment(ref queuedItems);
-        if (request.Value is not null)
-            Interlocked.Add(ref queuedBytes, request.Value.Length);
+
+        int valueBytes = request.Value?.Length ?? 0;
+        if (valueBytes > 0)
+            Interlocked.Add(ref queuedBytes, valueBytes);
+
+        // EWMA with a 1/256 weight: current - current/256 + sample converges to 256 × mean(sample).
+        // Single writer (the actor thread), so the read-modify-write needs no interlock.
+        long current = averageValueBytesX256;
+        long next = current == 0 ? (long)valueBytes << 8 : current - (current >> 8) + valueBytes;
+        Volatile.Write(ref averageValueBytesX256, next);
     }
 
     private void NoteDequeued(BackgroundWriteRequest request)
@@ -1293,6 +1320,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// </summary>
     private async ValueTask RunTargetedRevisionCleanup()
     {
+        targetedPruneElapsedThisCycle = TimeSpan.Zero;
+
         if (!ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration))
             return;
 
@@ -1348,6 +1377,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 List<string> chunk = keysToClean.GetRange(offset, chunkLength);
                 int chunkDeleteBudget = Math.Max(1, deleteBudget - revisionsDeleted);
 
+                // What is left of the cycle's budget goes to the backend, which checks it before every
+                // key: a chunk of un-memoized keys with deep blocks can no longer overrun the budget by
+                // the whole chunk. The first key of a chunk always runs, so progress is guaranteed.
+                TimeSpan chunkTimeBudget = timeBudget - stopwatch.Elapsed;
+                if (chunkTimeBudget < TimeSpan.Zero)
+                    chunkTimeBudget = TimeSpan.Zero;
+
                 RevisionPruneResult pruneResult = default;
 
                 bool success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () =>
@@ -1374,6 +1410,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                             configuration.PersistentRevisionRetentionAge,
                             chunkDeleteBudget,
                             floor,
+                            chunkTimeBudget,
                             out RevisionPruneResult r);
                         pruneResult = r;
                         return ok;
@@ -1405,9 +1442,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 if (pruneResult.BatchLimitReached)
                 {
                     // Requeue only keys that still have prunable revisions (or were never visited
-                    // because the batch filled). Backends that don't report per-key backlog fall
-                    // back to the chunk, preserving the previous conservative behaviour.
-                    batchLimitReached = true;
+                    // because the batch filled or the time budget ran out). Backends that don't
+                    // report per-key backlog fall back to the chunk, preserving the previous
+                    // conservative behaviour.
+                    if (pruneResult.TimeBudgetExhausted)
+                        budgetExhausted = true;
+                    else
+                        batchLimitReached = true;
                     RequeueRevisionCleanupKeys(pruneResult.RemainingKeys ?? chunk);
                     break;
                 }
@@ -1423,7 +1464,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         if (offset < keysToClean.Count)
             RequeueRevisionCleanupKeys(keysToClean, offset);
 
-        double elapsedMs = stopwatch.Elapsed.TotalMilliseconds;
+        targetedPruneElapsedThisCycle = stopwatch.Elapsed;
+        double elapsedMs = targetedPruneElapsedThisCycle.TotalMilliseconds;
 
         PersistenceMetrics.PruneKeysWalked.Add(keysVisited - keysSkipped);
         PersistenceMetrics.PruneKeysSkipped.Add(keysSkipped);
@@ -1472,8 +1514,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <summary>
     /// Runs a backend-wide revision sweep no more often than
     /// <see cref="KahunaConfiguration.PersistentRevisionCleanupInterval"/>.
-    /// When a previous sweep hit the batch size limit the next eligible cycle resumes
-    /// immediately rather than waiting for another full interval.
+    /// When a previous sweep hit the batch size limit or its time budget, the next eligible cycle
+    /// resumes immediately (from the backend's cursor) rather than waiting for another full interval.
+    /// <para>
+    /// The sweep runs on the same writer as the flush, after the targeted prune of the same cycle.
+    /// Unbudgeted it cost O(rows in the store) per pass — on a hot store that was seconds of writer
+    /// time every cleanup interval, during which the unflushed backlog grew by the ingest rate (the
+    /// five-minute backlog spikes of the 1.7.8-flusher.1 soak). It now gets what the targeted prune
+    /// left of <see cref="KahunaConfiguration.PersistentRevisionCleanupTimeBudget"/>, never less than a
+    /// quarter of it so a saturated targeted queue cannot starve it, and the backend pauses on that
+    /// budget and resumes next cycle.
+    /// </para>
     /// Sweep failure is logged as a warning and never propagates to the caller.
     /// </summary>
     private async ValueTask RunFullRevisionSweep()
@@ -1501,6 +1552,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         lastFullSweepUtc = now;
         fullSweepBacklogPending = false;
+
+        TimeSpan cycleBudget = configuration.PersistentRevisionCleanupTimeBudget;
+        TimeSpan sweepBudget = cycleBudget - targetedPruneElapsedThisCycle;
+        TimeSpan sweepMinimum = TimeSpan.FromTicks(cycleBudget.Ticks / 4);
+        if (sweepBudget < sweepMinimum)
+            sweepBudget = sweepMinimum;
 
         stopwatch.Restart();
         RevisionPruneResult pruneResult = default;
@@ -1535,6 +1592,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         configuration.PersistentRevisionRetentionAge,
                         configuration.PersistentRevisionCleanupBatchSize,
                         sweepFloor,
+                        sweepBudget,
                         out RevisionPruneResult r);
                     pruneResult = r;
                     return ok;
@@ -1548,6 +1606,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             if (success)
             {
+                PersistenceMetrics.PruneKeysWalked.Add(pruneResult.KeysVisited - pruneResult.KeysSkipped);
+                PersistenceMetrics.PruneKeysSkipped.Add(pruneResult.KeysSkipped);
+                PersistenceMetrics.PruneRevisionsDeleted.Add(pruneResult.RevisionsDeleted);
+                PersistenceMetrics.SweepPassMs.Record(stopwatch.Elapsed.TotalMilliseconds);
+                if (pruneResult.TimeBudgetExhausted)
+                    PersistenceMetrics.SweepBudgetExhausted.Add(1);
+
                 if (pruneResult.RevisionsDeleted > 0 || pruneResult.BatchLimitReached)
                     logger.LogPrunedKeyValueRevisionsSweep(
                         pruneResult.KeysVisited,

@@ -593,9 +593,13 @@ public sealed class KahunaConfiguration
     public TimeSpan PersistentRevisionCleanupInterval { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Maximum revision records deleted per cleanup pass per backend worker.
+    /// Maximum revision records deleted per cleanup pass (one targeted prune cycle or one sweep pass).
+    /// The wall-clock bound on a pass is <see cref="PersistentRevisionCleanupTimeBudget"/>; this only
+    /// caps the tombstones one pass may write. Keep it well above the rows a single hot key can shed
+    /// per visit: a walk that stops on this limit has paid for the key's whole revision block and
+    /// must walk it again next cycle to delete the rest.
     /// </summary>
-    public int PersistentRevisionCleanupBatchSize { get; set; } = 1000;
+    public int PersistentRevisionCleanupBatchSize { get; set; } = 10_000;
 
     /// <summary>
     /// Queue keys touched by writes for targeted persistent revision cleanup.

@@ -476,12 +476,15 @@ internal sealed class RangeScanContinuation : ReadContinuation
         // could land at-or-before the snapshot timestamp we must wait (the shared safe-time
         // rule — see KeyValueWriteIntentSafeTime, which also proves a writer that began at or
         // after the snapshot can never commit inside it). For non-snapshot scans fall through
-        // to the committed state (the intent does not block the read).
+        // to the committed state (the intent does not block the read). Gated on the caller's
+        // explicit timestamp, not on snapshotTs: the latter is normalised to "now" for the
+        // cursor and is never null, so testing it made every non-snapshot page wait on any
+        // live intent — the point-read handler tests message.ReadTimestamp, and so must this.
         if (entry?.WriteIntent != null && entry.WriteIntent.TransactionId != transactionId)
         {
             if (!KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
-            else if (!snapshotTs.IsNull()
+            else if (isSnapshotRead
                      && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, snapshotTs))
                 return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
@@ -571,7 +574,17 @@ internal sealed class RangeScanContinuation : ReadContinuation
         // timestamp, serve the most recent archived revision at-or-before the snapshot.
         // If no such revision exists (key was created after the snapshot, or the revision
         // was pruned), the key is invisible for this scan.
-        if (!snapshotTs.IsNull() && entry is not null && entry.LastModified > snapshotTs)
+        //
+        // Only for an explicit as-of read (isSnapshotRead). snapshotTs is never null — stage 1
+        // normalises a missing read timestamp to "now" so the cursor can carry it — and the old
+        // test on snapshotTs alone sent every non-snapshot page down this path for any resident
+        // key written between stage 1 and this merge. A hot key trims its in-memory archive past
+        // that instant (or a head jump leaves a gap), the lookup missed, there is no disk
+        // projection on a non-snapshot page, and a key with a live committed head was silently
+        // dropped from the result: a read-committed COUNT(*) over a table under write load
+        // returned fewer rows than exist. A non-snapshot page must serve the committed head,
+        // exactly as a point read without a timestamp does.
+        if (isSnapshotRead && entry is not null && entry.LastModified > snapshotTs)
         {
             if (!entry.TryGetRevisionAtOrBefore(snapshotTs, out long snapRevision, out KeyValueRevisionEntry snapshot))
             {

@@ -49,7 +49,7 @@ internal sealed class PersistenceBacklogMonitor : IDisposable
         meter.CreateObservableGauge("kahuna.persistence.unflushed_items", () => UnflushedItems,
             description: "Committed writes held in memory awaiting the background flush: writer inbox plus dirty queues.");
         meter.CreateObservableGauge("kahuna.persistence.unflushed_bytes", () => UnflushedBytes, unit: "By",
-            description: "Value bytes held by the background writer's dirty queues awaiting flush.");
+            description: "Value bytes awaiting flush: the dirty queues' exact bytes plus the writer inbox sized at the recent average value size.");
         meter.CreateObservableGauge("kahuna.persistence.writer_inbox_items", () => InboxItems,
             description: "Requests sent to the background writer that it has not received yet.");
     }
@@ -63,9 +63,25 @@ internal sealed class PersistenceBacklogMonitor : IDisposable
     /// <summary>Unflushed committed writes on this node: inbox plus dirty queues.</summary>
     public long UnflushedItems => InboxItems + (Actor?.QueuedItems ?? 0);
 
-    /// <summary>Value bytes awaiting flush in the dirty queues. Inbox requests are not sized until the
-    /// writer receives them, so this trails <see cref="UnflushedItems"/> during a long writer turn.</summary>
-    public long UnflushedBytes => Actor?.QueuedBytes ?? 0;
+    /// <summary>
+    /// Value bytes awaiting flush: the dirty queues' exact total plus an estimate for the inbox.
+    /// Inbox requests are not sized until the writer receives them, and under load the inbox is where
+    /// the backlog lives (a long writer turn leaves the dirty queues empty), so counting only the
+    /// queues left the byte bound blind to the very backlog it exists for. The inbox is sized at the
+    /// writer's recent average value size; the estimate is exact for a steady value-size mix and
+    /// lags briefly when the mix shifts, which is adequate for a coarse admission budget.
+    /// </summary>
+    public long UnflushedBytes
+    {
+        get
+        {
+            BackgroundWriterActor? actor = Actor;
+            if (actor is null)
+                return 0;
+
+            return actor.QueuedBytes + InboxItems * actor.AverageValueBytes;
+        }
+    }
 
     /// <summary>True when either configured bound is exceeded; the aggregator then refuses ordinary writes.</summary>
     public bool IsOverBudget =>

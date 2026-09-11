@@ -1084,4 +1084,75 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
         public void Dispose() => inner.Dispose();
     }
+
+    // ── Non-snapshot scan must never drop a resident key with a live committed head ───────
+
+    /// <summary>
+    /// A read-committed scan carries no read timestamp, yet stage 1 stamps "now" on the continuation
+    /// so the cursor can carry it. A resident key written after that stamp used to be evaluated as a
+    /// snapshot read: once its in-memory archive held no revision at-or-before the stamp — a hot key
+    /// trims the archive to RevisionRetention, a head jump leaves a gap — the lookup missed, a
+    /// non-snapshot page has no disk projection to fall back on, and the key was silently dropped
+    /// although it has a live committed head. Under the bank load a read_committed COUNT(*) over 2,000
+    /// never-deleted rows returned 1,962-1,999 (CamusDB feature e31cf9bc). A non-snapshot page must
+    /// serve the committed head, exactly as a point read without a timestamp does.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_ResidentKeyOverwrittenPastItsArchiveDuringTheScan_IsStillReturned()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-hot-key-kept");
+
+        scheduler.Start();
+        try
+        {
+            ManualResetEventSlim gate = new(false);
+            ManualResetEventSlim pageEntered = new(false);
+
+            // One disk-only key so the scan must detach for a disk page; the resident key is the one
+            // under test. The first disk read blocks on 'gate' after signalling 'pageEntered'.
+            BlockingRangeBackend backend = new(gate, pageEntered, ["rng/z"]);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-hot-key-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            // Resident before the scan starts, so the stage-1 memory snapshot captures it.
+            KeyValueResponse? seeded = await actorRef.Ask(
+                MakeSet("rng/a", Encoding.UTF8.GetBytes("v0")), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal(KeyValueResponseType.Set, seeded!.Type);
+
+            Task<KeyValueResponse?> scanTask = actorRef.Ask(
+                MakeRangeScan("rng/", limit: 10), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.True(pageEntered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken),
+                "Stage-2 disk read should have started within 5 s");
+
+            // While the disk page is in flight, overwrite the resident key more times than the archive
+            // retains (RevisionRetention = 16): every archived revision now post-dates the scan's stamp,
+            // so an as-of lookup at the stamp misses. The key still has a live committed head.
+            for (int i = 1; i <= 20; i++)
+            {
+                KeyValueResponse? w = await actorRef.Ask(
+                    MakeSet("rng/a", Encoding.UTF8.GetBytes($"v{i}")), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                Assert.Equal(KeyValueResponseType.Set, w!.Type);
+            }
+
+            gate.Set();
+
+            KeyValueResponse? resp = await scanTask;
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.NotNull(resp.RangeResult);
+            Assert.Equal(2, resp.RangeResult!.Items.Count);
+            Assert.Equal("rng/a", resp.RangeResult.Items[0].Item1);
+            Assert.Equal("v20", Encoding.UTF8.GetString(resp.RangeResult.Items[0].Item2.Value!));
+            Assert.Equal("rng/z", resp.RangeResult.Items[1].Item1);
+            Assert.False(resp.RangeResult.HasMore);
+        }
+        finally { scheduler.Stop(); }
+    }
 }

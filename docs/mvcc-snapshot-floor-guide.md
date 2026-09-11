@@ -181,11 +181,18 @@ background writer with the flush and must never starve it:
 
 | Metric | Kind | Meaning |
 |--------|------|---------|
-| `kahuna.persistence.revision_prune.keys_walked_total` | counter | Keys whose revision block the targeted prune scanned. |
+| `kahuna.persistence.revision_prune.keys_walked_total` | counter | Keys whose revision block the prune (targeted or sweep) scanned. |
 | `kahuna.persistence.revision_prune.keys_skipped_total` | counter | Keys answered from the RocksDB prune memo without a scan (nothing deletable yet). On a hot key-set inside its retention window this should dominate `keys_walked_total`. |
-| `kahuna.persistence.revision_prune.revisions_deleted_total` | counter | Revision rows the targeted prune deleted. |
-| `kahuna.persistence.revision_prune.budget_exhausted_total` | counter | Flush cycles whose prune stopped on `PersistentRevisionCleanupTimeBudget` with keys still queued. A sustained rate means retention lags the write rate; the flush is unaffected. |
-| `kahuna.persistence.revision_prune.cycle_duration` | histogram (ms) | Time the targeted prune took per flush cycle; bounded by the time budget plus one chunk. |
+| `kahuna.persistence.revision_prune.revisions_deleted_total` | counter | Revision rows the prune (targeted or sweep) deleted. |
+| `kahuna.persistence.revision_prune.budget_exhausted_total` | counter | Flush cycles whose targeted prune stopped on `PersistentRevisionCleanupTimeBudget` with keys still queued. A sustained rate means retention lags the write rate; the flush is unaffected. |
+| `kahuna.persistence.revision_prune.cycle_duration` | histogram (ms) | Time the targeted prune took per flush cycle; bounded by the time budget plus one key (the backend checks the budget before every key). |
+| `kahuna.persistence.revision_prune.sweep_budget_exhausted_total` | counter | Backend-wide sweep passes that paused on their share of the time budget; the sweep resumes from its cursor next cycle. A large store pauses often and still completes; a sweep that pauses forever without wrapping is the signal to look at. |
+| `kahuna.persistence.revision_prune.sweep_pass_duration` | histogram (ms) | Time one sweep pass spent on the writer; bounded by its budget plus one key. |
+
+The RocksDB sweep visits keys through their `~CURRENT` rows and jumps over the revision rows in
+between with the same registry-gated seek the range scans use, so a pass costs O(logical keys) plus
+the walks that actually prune — not O(history rows) — and it checks its budget every 1,024 stepped
+rows as well as before every key.
 
 ---
 
@@ -221,8 +228,8 @@ hold has to protect:
 | `RevisionRetention` | 16 | How many recent revisions per key answer as-of reads from memory before falling back to disk. A live hold additionally keeps one boundary revision. |
 | `PersistentRevisionRetentionCount` | 0 (keep all) | How many revisions the persistent sweep keeps per key. The floor clamps this: protected revisions are kept regardless. |
 | `PersistentRevisionRetentionAge` | disabled | Age-based persistent pruning; also clamped by the floor. |
-| `PersistentRevisionCleanupBatchSize` | 1000 | Revision rows the targeted prune may delete per flush cycle. |
-| `PersistentRevisionCleanupTimeBudget` | 250 ms | Wall-clock the targeted prune may spend per flush cycle; keys it does not reach stay queued for the next cycle. Keep it well under `DirtyObjectsWriterDelay` (the flush budget): the prune runs on the same writer, so its time comes straight out of flush throughput. |
+| `PersistentRevisionCleanupBatchSize` | 10000 | Revision rows one prune pass (a targeted cycle or a sweep pass) may delete. The time budget bounds the pass; this only caps its tombstones. Keep it well above what one hot key sheds per visit: a walk cut short by this limit has already paid for the whole block and must walk it again next cycle. |
+| `PersistentRevisionCleanupTimeBudget` | 250 ms | Wall-clock the revision prune may spend per flush cycle, shared by the targeted prune and the sweep that follows it (the sweep always gets at least a quarter). The RocksDB backend checks it before every key and every 1,024 sweep rows; keys and keyspace it does not reach are resumed next cycle. Keep it well under `DirtyObjectsWriterDelay` (the flush budget): the prune runs on the same writer, so its time comes straight out of flush throughput. |
 | `leaseMs` (per acquire/renew) | — caller-chosen | How long a hold survives without renewal. Renew well inside it; choose it coarse enough that renewals aren't a hot path. |
 
 General guidance:

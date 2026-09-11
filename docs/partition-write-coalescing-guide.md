@@ -258,7 +258,7 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 | `KeyValueWriteMaxQueueDelayMs` | `1000` | Maximum time an admitted write may wait before dispatch; on expiry it is released as `MustRetry`. |
 | `MaxKeyValueWriteAggregatorInboxSize` | `16384` | Ordinary-submission inbox bound per lane; control messages are exempt. |
 | `PersistenceMaxUnflushedItems` | `1000000` | Persistence back-pressure: ordinary writes are refused (`MustRetry`) while this node holds more committed-but-unflushed writes than this (background writer inbox plus dirty queues). Terminal work is exempt. `0` disables. |
-| `PersistenceMaxUnflushedBytes` | `512 MiB` | Byte counterpart, over the value bytes queued for the background flush. `0` disables. |
+| `PersistenceMaxUnflushedBytes` | `512 MiB` | Byte counterpart, over the value bytes queued for the background flush (dirty queues exactly, inbox estimated from the recent average value size). `0` disables. |
 
 The number of lanes is derived from the key/value worker count; there is no separate knob, because
 lane count does not limit Raft concurrency (detached work is per partition).
@@ -323,7 +323,8 @@ outcome string — never a key, partition id, or transaction id):
   duration.
 - **Observable gauges** — queued items, queued serialized bytes, and in-flight partitions; and, from the
   persistence side, `kahuna.persistence.unflushed_items` (writer inbox plus dirty queues),
-  `kahuna.persistence.unflushed_bytes` (value bytes in the dirty queues) and
+  `kahuna.persistence.unflushed_bytes` (the dirty queues' exact value bytes plus the inbox sized at
+  the writer's recent average value size — under load the inbox is where the backlog sits) and
   `kahuna.persistence.writer_inbox_items`. A rising `unflushed_items` with `unflushed_backlog`
   rejections is the flusher falling behind ingest — look at the prune and flush instruments before
   raising the budget.
