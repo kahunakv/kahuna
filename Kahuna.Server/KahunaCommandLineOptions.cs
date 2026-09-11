@@ -602,6 +602,15 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-persistent-revision-cleanup-on-write", Required = false, HelpText = "Disable targeted persistent revision cleanup after key/value writes")]
     public bool DisablePersistentRevisionCleanupOnWrite { get; set; }
 
+    [Option("persistent-revision-cleanup-time-budget", Required = false, HelpText = "Milliseconds per flush cycle the targeted persistent revision cleanup may spend; keys not reached stay queued for the next cycle so cleanup never starves the flush. Default 250.", Default = 250)]
+    public int PersistentRevisionCleanupTimeBudgetMs { get; set; } = 250;
+
+    [Option("persistence-max-unflushed-items", Required = false, HelpText = "Maximum committed key/value writes held in memory awaiting the background flush before ordinary writes are rejected with a retryable status (0 = unbounded). Default 1000000.", Default = 1_000_000L)]
+    public long PersistenceMaxUnflushedItems { get; set; } = 1_000_000;
+
+    [Option("persistence-max-unflushed-bytes", Required = false, HelpText = "Maximum value bytes queued for the background flush before ordinary writes are rejected with a retryable status (0 = unbounded). Default 536870912 (512 MB).", Default = 536_870_912L)]
+    public long PersistenceMaxUnflushedBytes { get; set; } = 536_870_912;
+
     [Option("pitr-window", Required = false, HelpText = "Point-in-time recovery window in seconds; WAL entries older than now-window may be compacted. Valid range: (0, 21600]. Default 3600 (1 hour).", Default = 3600)]
     public int PitrWindowSeconds { get; set; } = 3600;
 

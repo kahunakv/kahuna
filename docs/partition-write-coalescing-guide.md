@@ -257,6 +257,8 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 | `KeyValueWriteMaxQueuedBytesPerPartition` | `32 MiB` | Maximum admitted serialized bytes per partition. |
 | `KeyValueWriteMaxQueueDelayMs` | `1000` | Maximum time an admitted write may wait before dispatch; on expiry it is released as `MustRetry`. |
 | `MaxKeyValueWriteAggregatorInboxSize` | `16384` | Ordinary-submission inbox bound per lane; control messages are exempt. |
+| `PersistenceMaxUnflushedItems` | `1000000` | Persistence back-pressure: ordinary writes are refused (`MustRetry`) while this node holds more committed-but-unflushed writes than this (background writer inbox plus dirty queues). Terminal work is exempt. `0` disables. |
+| `PersistenceMaxUnflushedBytes` | `512 MiB` | Byte counterpart, over the value bytes queued for the background flush. `0` disables. |
 
 The number of lanes is derived from the key/value worker count; there is no separate knob, because
 lane count does not limit Raft concurrency (detached work is per partition).
@@ -265,6 +267,20 @@ Validation normalizes non-positive capacities to their defaults, clamps a negati
 post-completion hold to zero (and both down to the queue-delay bound), clamps the batch limits so a
 batch can never select more than a partition may hold, and **rejects** a queue-delay that is not
 comfortably below the write-intent lease.
+
+### Persistence back-pressure
+
+The admission caps above bound what the aggregator holds *before* Raft. What a replica holds *after*
+Raft — every committed write, value included, until the background flush lands it — had no bound: a
+flusher slower than ingest (a maintenance task hogging the writer, a slow volume) let that population
+grow at the ingest rate until the heap limit killed the replica, on followers first, because they
+apply everything and serve nothing that would slow the leader down. `PersistenceMaxUnflushedItems` /
+`PersistenceMaxUnflushedBytes` close that gap: before admitting an ordinary write the aggregator asks
+the node's `PersistenceBacklogMonitor` whether the unflushed backlog is over budget and, if so, refuses
+retryably. Followers cannot refuse a Raft apply, but they run the same flusher over the same stream as
+the leader, so gating the leader's ingest on its own backlog bounds theirs too. Terminal submissions
+bypass the gate for the same reason they have reserve headroom: they finish transactions that already
+hold resources.
 
 ### Choosing linger
 
@@ -301,11 +317,16 @@ Instruments are published on the `Kahuna` meter with low-cardinality tags only (
 outcome string — never a key, partition id, or transaction id):
 
 - **Counters** — admitted writes; rejections (tagged `queue_full` / `stopping` / `fence_stale` /
-  `queue_expired`); dispatched batches; dispatched log entries; batch outcomes (`success` /
-  `transient` / `permanent`).
+  `queue_expired` / `unflushed_backlog`); dispatched batches; dispatched log entries; batch outcomes
+  (`success` / `transient` / `permanent`).
 - **Histograms** — entries per batch, serialized bytes per batch, oldest-item queue age, and Raft-call
   duration.
-- **Observable gauges** — queued items, queued serialized bytes, and in-flight partitions.
+- **Observable gauges** — queued items, queued serialized bytes, and in-flight partitions; and, from the
+  persistence side, `kahuna.persistence.unflushed_items` (writer inbox plus dirty queues),
+  `kahuna.persistence.unflushed_bytes` (value bytes in the dirty queues) and
+  `kahuna.persistence.writer_inbox_items`. A rising `unflushed_items` with `unflushed_backlog`
+  rejections is the flusher falling behind ingest — look at the prune and flush instruments before
+  raising the budget.
 
 The primary effectiveness signal is **dispatched entries ÷ dispatched batches**. Under a coalescing
 burst it should approach the configured batch cap; a value near one means writes are arriving too

@@ -46,6 +46,9 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
+    /// <summary>Unflushed-backlog gauges and the write aggregator's back-pressure probe; disposed with the node.</summary>
+    private readonly PersistenceBacklogMonitor backlogMonitor;
+
     /// <summary>
     /// Watches the committed placement map: owns the per-node placement projection, tears down the
     /// per-partition background state of ranges this node stops replicating, and re-derives the
@@ -140,6 +143,7 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         backendReadScheduler = components.BackendReadScheduler;
         backendWriteScheduler = components.BackendWriteScheduler;
         backgroundWriter = components.BackgroundWriter;
+        backlogMonitor = components.BacklogMonitor;
         locks = components.Locks;
         keyValues = components.KeyValues;
         sequencer = components.Sequencer;
@@ -204,6 +208,8 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         placement.Dispose();
 
         keyValues.Dispose();
+
+        backlogMonitor.Dispose();
 
         backups.Dispose();
 

@@ -29,6 +29,7 @@ internal sealed record KahunaNodeComponents(
     FairReadScheduler BackendWriteScheduler,
     KahunaDurabilityProvider DurabilityProvider,
     IActorRef<BackgroundWriterActor, BackgroundWriteRequest> BackgroundWriter,
+    PersistenceBacklogMonitor BacklogMonitor,
     LockManager Locks,
     KeyValuesManager KeyValues,
     SequencerManager Sequencer);

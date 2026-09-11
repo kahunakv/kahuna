@@ -435,7 +435,8 @@ internal sealed partial class KeyValuesManager : IDisposable
         TransactionRecordStore? externalRecordStore = null,
         PreparedIntentStore? externalIntentStore = null,
         Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator = null,
-        PartitionDurabilityTracker? durabilityTracker = null
+        PartitionDurabilityTracker? durabilityTracker = null,
+        PersistenceBacklogMonitor? backlogMonitor = null
     )
     {
         // Every part of the subsystem is built and wired by the builder, in an order that is itself
@@ -455,7 +456,8 @@ internal sealed partial class KeyValuesManager : IDisposable
             externalRecordStore,
             externalIntentStore,
             writeBatchExecutorDecorator,
-            durabilityTracker);
+            durabilityTracker,
+            backlogMonitor);
 
         this.runtime = built.runtime;
         this.scriptParserEvicter = built.scriptParserEvicter;

@@ -211,6 +211,66 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     private const int RevisionRunSeekThreshold = 8;
 
+    // ── Revision-prune memo ─────────────────────────────────────────────────────────────────
+    //
+    // The targeted prune runs inside every flush cycle for every key that cycle flushed. Without
+    // a memo each visit walks the key's whole revision block — a native iterator step, a value
+    // decode and a key copy per "<key>~<rev>" row — only to learn that nothing is old enough, or
+    // numerous enough, to delete. A hot key accrues revisions at its write rate, so that walk grows
+    // without bound and the prune's share of the flush cycle grows with it, until the writer spends
+    // most of every cycle pruning nothing and the unflushed backlog grows faster than it drains.
+    // (Kahuna 1.7.7 bank soak: ~4,000 hot keys at hundreds of revisions each cost seconds of prune
+    // per cycle against a one-second flush budget; the backlog filled the heap in ten minutes.)
+    //
+    // The memo records, per key, what the last walk learned and what changed since: the number of
+    // history rows and the commit time of the oldest non-current row. Both move only through this
+    // backend — StoreKeyValuesFenced advances them as it writes, DeleteFamilyRows drops them with
+    // the rows — so a visit decides in O(1) whether a walk could delete anything: count retention
+    // needs more history rows than it keeps, age retention needs the oldest non-current row to be
+    // older than the cutoff. A key that satisfies neither is skipped. The memo is conservative by
+    // construction — every update between walks pushes it towards "eligible" (a smaller oldest
+    // timestamp, a larger row count) — so a stale memo costs a needless walk, never a missed prune.
+    // Keys without a memo always walk; a walk that stops on the delete budget drops the memo so the
+    // key walks again next cycle.
+    //
+    // Bounded: past MaxPruneMemos the table is cleared and rebuilt by the next walks, a
+    // correctness-neutral reset that costs each key one extra walk.
+    private sealed class PruneMemo
+    {
+        /// <summary>History rows ("&lt;key&gt;~&lt;rev&gt;") known for the key, including the current
+        /// revision's own row. Exact after a walk; only ever incremented between walks.</summary>
+        public int HistoryRows;
+
+        /// <summary>Commit physical time of the oldest history row that is not the current revision's,
+        /// or <see cref="long.MaxValue"/> when none exists. Exact after a walk; only lowered between walks.</summary>
+        public long OldestNonCurrentPhysical;
+
+        /// <summary>Commit physical time of the oldest non-current row the last walk's floor did NOT
+        /// protect (below the floor-boundary revision), or <see cref="long.MaxValue"/>. Equals
+        /// <see cref="OldestNonCurrentPhysical"/> when no floor was active. While a floor stands, this is
+        /// the row age retention can still reach — the one that decides whether a floor-blocked key is
+        /// worth walking again. Only lowered between walks.</summary>
+        public long OldestUnprotectedPhysical;
+
+        /// <summary>True when the last walk found deletable rows the snapshot floor made it keep: the key
+        /// is worth walking again only once the floor moves, more history arrives, or an unprotected row
+        /// ages past the cutoff.</summary>
+        public bool FloorBlocked;
+
+        /// <summary>Floor the last walk ran under; meaningful when <see cref="FloorBlocked"/>.</summary>
+        public HLCTimestamp FloorAtWalk;
+
+        /// <summary>History rows the last walk saw; meaningful when <see cref="FloorBlocked"/>.</summary>
+        public int HistoryRowsAtWalk;
+    }
+
+    /// <summary>Upper bound on memoized keys; ~100 bytes each, so the table stays well under 32 MB.</summary>
+    private const int MaxPruneMemos = 200_000;
+
+    private readonly Dictionary<string, PruneMemo> pruneMemos = new(StringComparer.Ordinal);
+
+    private readonly Lock _pruneMemoLock = new();
+
     /// <summary>
     /// Raw key bytes at which the next backend-wide revision sweep should resume, or <c>null</c> to
     /// start from the beginning of the column family. Carried across sweep passes so each pass scans
@@ -535,6 +595,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 {
                     db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
                     InitializeTildeRegistry();
+                    ClearPruneMemos();
                     storageUnavailable = false;
 
                     logger.LogWarning(
@@ -1044,7 +1105,151 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             return false;
         }
 
+        NotePruneMemoStoredRows(span, writeCurrent, writeHistory, durableHeads);
+
         return true;
+    }
+
+    /// <summary>
+    /// Advances the prune memos of the keys a committed batch touched, so a later prune visit can
+    /// still decide eligibility without a walk. Every history row written counts towards the key's
+    /// row total; a history row that lands below the head is non-current from the moment it lands,
+    /// and when the head advances the previous head's own row becomes non-current — both lower the
+    /// oldest-non-current timestamp. Only ever moves a memo towards "eligible". Keys without a memo
+    /// are not tracked here: their next visit walks anyway.
+    /// </summary>
+    private void NotePruneMemoStoredRows(
+        Span<PersistenceRequestItem> span,
+        bool[] writeCurrent,
+        bool[] writeHistory,
+        Dictionary<string, StoredKeyValueOrdering> durableHeads)
+    {
+        lock (_pruneMemoLock)
+        {
+            if (pruneMemos.Count == 0)
+                return;
+
+            for (int i = 0; i < span.Length; i++)
+            {
+                if (!writeCurrent[i] && !writeHistory[i])
+                    continue;
+
+                ref readonly PersistenceRequestItem item = ref span[i];
+
+                if (!pruneMemos.TryGetValue(item.Key, out PruneMemo? memo))
+                    continue;
+
+                if (writeHistory[i])
+                {
+                    memo.HistoryRows++;
+
+                    if (!writeCurrent[i])
+                        LowerOldest(memo, item.LastModifiedPhysical);
+                }
+
+                if (writeCurrent[i] && durableHeads.TryGetValue(item.Key, out StoredKeyValueOrdering previousHead))
+                    LowerOldest(memo, previousHead.LastModifiedPhysical);
+            }
+        }
+    }
+
+    /// <summary>A row landing between walks is not yet classified against any floor, so it lowers both
+    /// oldest timestamps: conservative for whichever check runs next.</summary>
+    private static void LowerOldest(PruneMemo memo, long physical)
+    {
+        memo.OldestNonCurrentPhysical = Math.Min(memo.OldestNonCurrentPhysical, physical);
+        memo.OldestUnprotectedPhysical = Math.Min(memo.OldestUnprotectedPhysical, physical);
+    }
+
+    /// <summary>
+    /// O(1) eligibility check before a prune walk. True when the key's memo proves the walk would
+    /// delete nothing under the given policy: no more history rows than count retention keeps and no
+    /// non-current row older than the age cutoff. When the last walk was floor-blocked, the deletable
+    /// rows it found are known to be protected, so only a moved floor, history written since, or an
+    /// unprotected row aging past the cutoff can change the answer. False (walk) whenever the key has
+    /// no memo.
+    /// </summary>
+    private bool PruneMemoProvesNothingToDelete(string key, int retentionCount, TimeSpan retentionAge, long cutoffPhysical, HLCTimestamp floorTimestamp)
+    {
+        lock (_pruneMemoLock)
+        {
+            if (!pruneMemos.TryGetValue(key, out PruneMemo? memo))
+                return false;
+
+            bool needAge = retentionAge > TimeSpan.Zero;
+
+            if (memo.FloorBlocked)
+            {
+                if (floorTimestamp != memo.FloorAtWalk || memo.HistoryRows != memo.HistoryRowsAtWalk)
+                    return false;
+
+                return !(needAge && memo.OldestUnprotectedPhysical < cutoffPhysical);
+            }
+
+            bool countEligible = retentionCount > 0 && memo.HistoryRows > retentionCount;
+            bool ageEligible = needAge && memo.OldestNonCurrentPhysical < cutoffPhysical;
+
+            return !countEligible && !ageEligible;
+        }
+    }
+
+    /// <summary>Records what a completed walk learned about a key (see the memo remarks above).</summary>
+    private void RememberPruneWalk(string key, int historyRows, long oldestNonCurrentPhysical, long oldestUnprotectedPhysical, bool floorBlocked, HLCTimestamp floorTimestamp)
+    {
+        lock (_pruneMemoLock)
+        {
+            if (!pruneMemos.TryGetValue(key, out PruneMemo? memo))
+            {
+                if (pruneMemos.Count >= MaxPruneMemos)
+                    pruneMemos.Clear();
+
+                memo = new();
+                pruneMemos[key] = memo;
+            }
+
+            memo.HistoryRows = historyRows;
+            memo.OldestNonCurrentPhysical = oldestNonCurrentPhysical;
+            memo.OldestUnprotectedPhysical = oldestUnprotectedPhysical;
+            memo.FloorBlocked = floorBlocked;
+            memo.FloorAtWalk = floorTimestamp;
+            memo.HistoryRowsAtWalk = historyRows;
+        }
+    }
+
+    private void ForgetPruneMemo(string key)
+    {
+        lock (_pruneMemoLock)
+            pruneMemos.Remove(key);
+    }
+
+    private void ForgetPruneMemos(IReadOnlyList<string> keys)
+    {
+        lock (_pruneMemoLock)
+        {
+            if (pruneMemos.Count == 0)
+                return;
+
+            for (int i = 0; i < keys.Count; i++)
+                pruneMemos.Remove(keys[i]);
+        }
+    }
+
+    /// <summary>Drops every memo; the next visit of each key walks it. Used after a recovery reopen,
+    /// whose freshly opened store may differ from what the memos describe, and by tests.</summary>
+    internal void ClearPruneMemos()
+    {
+        lock (_pruneMemoLock)
+            pruneMemos.Clear();
+    }
+
+    /// <summary>Number of memoized keys (diagnostics/tests).</summary>
+    internal int PruneMemoCount
+    {
+        get
+        {
+            lock (_pruneMemoLock)
+                return pruneMemos.Count;
+        }
     }
 
     /// <summary>Batch-candidate ordering for the current row: revision first, commit HLC tiebreak.</summary>
@@ -2638,6 +2843,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
 
         db.Write(batch, DefaultWriteOptions);
+
+        if (columnFamily == columnFamilyKeys)
+            ForgetPruneMemos(keys);
+
         return true;
     }
 
@@ -2941,6 +3150,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         out RevisionPruneResult result)
     {
         int keysVisited = 0;
+        int keysSkipped = 0;
         int deleted = 0;
         int floorViolations = 0;
         bool batchLimitReached = false;
@@ -2962,7 +3172,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 string key = keyList[i];
-                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, out bool keyLimitReached);
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, out bool keyLimitReached);
                 keysVisited++;
 
                 if (keyLimitReached)
@@ -3009,7 +3219,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (rawKeySpan.EndsWith(CurrentMarkerUtf8))
                 {
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
-                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, out bool keyLimitReached);
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, out bool keyLimitReached);
                     keysVisited++;
 
                     if (keyLimitReached)
@@ -3030,7 +3240,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 sweepCursor = null;
         }
 
-        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations);
+        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped);
         return true;
     }
 
@@ -3049,9 +3259,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         HLCTimestamp floorTimestamp,
         ref int deleted,
         ref int floorViolations,
+        ref int keysSkipped,
         out bool batchLimitReached)
     {
         batchLimitReached = false;
+
+        bool needAge = retentionAge > TimeSpan.Zero;
+        bool needFloor = floorTimestamp != HLCTimestamp.Zero;
+        long cutoffPhysical = needAge
+            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds
+            : long.MinValue;
+
+        // The memo answers most visits of a hot key without touching the store: nothing to delete
+        // yet, so nothing to walk. See the memo remarks for why this is exact-or-conservative.
+        if (PruneMemoProvesNothingToDelete(key, retentionCount, retentionAge, cutoffPhysical, floorTimestamp))
+        {
+            keysSkipped++;
+            return;
+        }
 
         int keyLen = Encoding.UTF8.GetByteCount(key);
         // ~CURRENT is the longer suffix; one buffer serves both the marker lookup and the ~ prefix.
@@ -3080,12 +3305,6 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // Reuse key bytes already in keyBuffer[0..keyLen); overwrite suffix to just "~".
             keyBuffer[keyLen] = (byte)'~';
             ReadOnlySpan<byte> prefixBytes = keyBuffer[..(keyLen + 1)];
-
-            bool needAge = retentionAge > TimeSpan.Zero;
-            bool needFloor = floorTimestamp != HLCTimestamp.Zero;
-            long cutoffPhysical = needAge
-                ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds
-                : long.MinValue;
 
             List<(long Revision, long LastModifiedPhysical, HLCTimestamp LastModified, byte[] RawKeyBytes)> revisions = [];
 
@@ -3132,7 +3351,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             }
 
             if (revisions.Count == 0)
+            {
+                // No history rows at all (a no-revision key): nothing to prune until one is written.
+                RememberPruneWalk(key, 0, long.MaxValue, long.MaxValue, floorBlocked: false, floorTimestamp);
                 return;
+            }
 
             // Sort descending so index 0 is the newest revision.
             revisions.Sort(static (a, b) => b.Revision.CompareTo(a.Revision));
@@ -3151,6 +3374,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             using WriteBatch batch = new();
             int deletedInBatch = 0;
+            int floorBlockedCandidates = 0;
             HashSet<long>? deletedRevNums = null;
 
             for (int i = 0; i < revisions.Count; i++)
@@ -3161,18 +3385,22 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (revNum == currentRevision)
                     continue;
 
-                // Floor protection: when a floor is active, protect the boundary revision and
-                // everything newer.  When no revision exists at-or-before the floor (floorRevision
-                // < 0), the key was created entirely after the floor — all its revisions are
-                // protected by skipping this key entirely.
-                if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
-                    continue;
-
                 bool deleteByCount = retentionCount > 0 && i >= retentionCount;
                 bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
 
                 if (!deleteByCount && !deleteByAge)
                     continue;
+
+                // Floor protection: when a floor is active, protect the boundary revision and
+                // everything newer.  When no revision exists at-or-before the floor (floorRevision
+                // < 0), the key was created entirely after the floor — all its revisions are
+                // protected by skipping this key entirely. Counted so the memo knows this key holds
+                // deletable rows that only a moved floor (or new history) can release.
+                if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
+                {
+                    floorBlockedCandidates++;
+                    continue;
+                }
 
                 if (deleted + deletedInBatch >= batchSize)
                 {
@@ -3226,6 +3454,29 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 CommitPrunedFloor(stagedFloor);
 
             deleted += deletedInBatch;
+
+            if (batchLimitReached)
+            {
+                // Deletable rows remain: no memo, so the next visit walks again.
+                ForgetPruneMemo(key);
+            }
+            else
+            {
+                long oldestNonCurrent = long.MaxValue;
+                long oldestUnprotected = long.MaxValue;
+                foreach ((long revNum, long lastModifiedPhysical, _, _) in revisions)
+                {
+                    if (revNum == currentRevision || (deletedRevNums is not null && deletedRevNums.Contains(revNum)))
+                        continue;
+                    if (lastModifiedPhysical < oldestNonCurrent)
+                        oldestNonCurrent = lastModifiedPhysical;
+                    bool protectedByFloor = needFloor && (floorRevision < 0 || revNum >= floorRevision);
+                    if (!protectedByFloor && lastModifiedPhysical < oldestUnprotected)
+                        oldestUnprotected = lastModifiedPhysical;
+                }
+
+                RememberPruneWalk(key, revisions.Count - deletedInBatch, oldestNonCurrent, oldestUnprotected, floorBlockedCandidates > 0, floorTimestamp);
+            }
         }
         finally
         {

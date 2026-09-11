@@ -115,7 +115,8 @@ internal sealed class KeyValuesManagerBuilder
         TransactionRecordStore? externalRecordStore,
         PreparedIntentStore? externalIntentStore,
         Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? writeBatchExecutorDecorator,
-        PartitionDurabilityTracker? durabilityTracker)
+        PartitionDurabilityTracker? durabilityTracker,
+        PersistenceBacklogMonitor? backlogMonitor = null)
     {
         this.actorSystem = actorSystem;
         this.raft = raft;
@@ -240,7 +241,10 @@ internal sealed class KeyValuesManagerBuilder
                 BatchExecutionTimeoutMs = configuration.KeyValueWriteBatchExecutionTimeoutMs,
                 MaxQueueDelayMs = configuration.KeyValueWriteMaxQueueDelayMs,
                 AggregatorInboxSize = configuration.MaxKeyValueWriteAggregatorInboxSize,
-                LaneCount = Math.Max(1, configuration.KeyValueWorkers)
+                LaneCount = Math.Max(1, configuration.KeyValueWorkers),
+                // Persistence back-pressure: ordinary writes are refused while this node's unflushed
+                // backlog is over budget (see PersistenceBacklogMonitor).
+                UnflushedBacklogGate = backlogMonitor is null ? null : () => backlogMonitor.IsOverBudget
             },
             new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore),
             logger

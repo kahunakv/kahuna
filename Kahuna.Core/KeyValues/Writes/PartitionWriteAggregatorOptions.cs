@@ -76,4 +76,12 @@ internal sealed record PartitionWriteAggregatorOptions
 
     /// <summary>Ordinary-submission inbox bound per lane; control messages bypass it. &lt;= 0 disables.</summary>
     public int AggregatorInboxSize { get; init; } = 16_384;
+
+    /// <summary>
+    /// Optional back-pressure probe consulted before every ordinary admission: true means the node's
+    /// background persistence backlog (committed writes not yet flushed) is over budget, and the
+    /// submission is rejected retryably instead of being replicated into an ever-growing unflushed
+    /// queue on every replica. Terminal submissions bypass it, like the reserve headroom.
+    /// </summary>
+    public Func<bool>? UnflushedBacklogGate { get; init; }
 }

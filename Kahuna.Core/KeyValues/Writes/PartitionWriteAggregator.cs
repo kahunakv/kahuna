@@ -24,6 +24,8 @@ internal sealed class PartitionWriteAggregator : IDisposable
 
     private readonly long maxOperationBytes;
 
+    private readonly Func<bool>? unflushedBacklogGate;
+
     /// <summary>Cancels in-flight batch round trips on shutdown so a hung executor cannot hold the drain open past
     /// its timeout. Handed to every lane; cancelled by <see cref="SignalStop"/>.</summary>
     private readonly CancellationTokenSource shutdownCts = new();
@@ -47,6 +49,7 @@ internal sealed class PartitionWriteAggregator : IDisposable
         this.timeProvider = timeProvider ?? TimeProvider.System;
         stampsPerMs = Math.Max(1, this.timeProvider.TimestampFrequency / 1000);
         maxOperationBytes = options.MaxOperationBytes;
+        unflushedBacklogGate = options.UnflushedBacklogGate;
         admission = new PartitionAdmissionRegistry(
             options.MaxQueuedItemsPerPartition,
             options.MaxQueuedBytesPerPartition,
@@ -107,6 +110,17 @@ internal sealed class PartitionWriteAggregator : IDisposable
         if (maxOperationBytes > 0 && item.ByteLength > maxOperationBytes)
         {
             PartitionWriteAggregatorMetrics.RejectedOversized();
+            return false;
+        }
+
+        // Persistence back-pressure: a write admitted here is replicated and applied on every replica, where
+        // it waits in memory for the background flush. When that backlog is over budget on this node, its
+        // followers — running the same flusher against the same stream — are at least as far behind, so
+        // admitting more only converts heap into unflushed queue. Terminal work still passes: it finishes
+        // transactions that already hold resources, and rejecting it would keep those resources pinned.
+        if (item.AdmissionClass != WriteAdmissionClass.Terminal && unflushedBacklogGate is not null && unflushedBacklogGate())
+        {
+            PartitionWriteAggregatorMetrics.RejectedUnflushedBacklog();
             return false;
         }
 

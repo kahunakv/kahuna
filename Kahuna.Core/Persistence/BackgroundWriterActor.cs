@@ -109,6 +109,31 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// </summary>
     private readonly Queue<BackgroundWriteRequest> dirtyKeyValues = new();
 
+    /// <summary>
+    /// Requests received into the dirty queues and not yet drained into a flush batch, with the
+    /// value bytes they pin. Maintained on the actor thread, read by <see cref="PersistenceBacklogMonitor"/>
+    /// from any thread — hence the volatile accessors. The inbox portion of the backlog (sent, not yet
+    /// received) is read from the actor runner by the monitor.
+    /// </summary>
+    private long queuedItems;
+
+    private long queuedBytes;
+
+    /// <summary>Requests in the dirty queues (received, not yet drained into a flush batch).</summary>
+    internal long QueuedItems => Volatile.Read(ref queuedItems);
+
+    /// <summary>Value bytes pinned by the dirty queues.</summary>
+    internal long QueuedBytes => Volatile.Read(ref queuedBytes);
+
+    /// <summary>Keys queued for targeted revision cleanup (tests/diagnostics).</summary>
+    internal int PendingRevisionCleanupKeyCount => pendingRevisionCleanupKeys.Count;
+
+    /// <summary>
+    /// Keys handed to the backend per targeted-prune call. Small enough that the time budget is
+    /// checked often (one backend call per chunk), large enough to amortize the scheduler hop.
+    /// </summary>
+    private const int RevisionCleanupChunkKeys = 64;
+
     // Highest LastModified HLC enqueued for persistence per partition. Every committed key-value write
     // — from the leader's proposal completion and from follower replication alike — is sent here as a
     // QueueStoreKeyValue, so this is the single point that observes "applied and queued". A full backup
@@ -354,10 +379,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         {
             case BackgroundWriteType.QueueStoreLock:
                 dirtyLocks.Enqueue(message);
+                NoteQueued(message);
                 break;
             
             case BackgroundWriteType.QueueStoreKeyValue:
                 dirtyKeyValues.Enqueue(message);
+                NoteQueued(message);
                 if (message.PartitionId >= 0)
                     maxEnqueuedHlc.AddOrUpdate(message.PartitionId, message.LastModified,
                         (_, existing) => message.LastModified.CompareTo(existing) > 0 ? message.LastModified : existing);
@@ -908,6 +935,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                 while (dirtyLocks.TryDequeue(out BackgroundWriteRequest? lockRequest))
                 {
+                    NoteDequeued(lockRequest);
                     // Stamped only when the partition is not already awaiting a checkpoint: the stamp
                     // marks when this checkpoint interval started, not when the partition was last
                     // written (see partitionDirtySince).
@@ -1077,6 +1105,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                 while (dirtyKeyValues.TryDequeue(out BackgroundWriteRequest? keyValueRequest))
                 {
+                    NoteDequeued(keyValueRequest);
                     // Stamped only when the partition is not already awaiting a checkpoint: the stamp
                     // marks when this checkpoint interval started, not when the partition was last
                     // written (see partitionDirtySince).
@@ -1232,11 +1261,35 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         return true;
     }
 
+    private void NoteQueued(BackgroundWriteRequest request)
+    {
+        Interlocked.Increment(ref queuedItems);
+        if (request.Value is not null)
+            Interlocked.Add(ref queuedBytes, request.Value.Length);
+    }
+
+    private void NoteDequeued(BackgroundWriteRequest request)
+    {
+        Interlocked.Decrement(ref queuedItems);
+        if (request.Value is not null)
+            Interlocked.Add(ref queuedBytes, -request.Value.Length);
+    }
+
     /// <summary>
-    /// Drains the pending revision cleanup key set and calls the persistence backend to prune
-    /// old revision records for those keys. Keys are re-queued when the batch limit is reached
-    /// or the backend call fails, so cleanup is retried on the next flush cycle.
+    /// Drains the pending revision cleanup key set and calls the persistence backend to prune old
+    /// revision records for those keys, in chunks, under a wall-clock budget
+    /// (<see cref="KahunaConfiguration.PersistentRevisionCleanupTimeBudget"/>) and the per-cycle
+    /// delete budget (<see cref="KahunaConfiguration.PersistentRevisionCleanupBatchSize"/>).
+    /// <para>
+    /// The cleanup shares the single writer with the flush, so every millisecond it takes is a
+    /// millisecond the flush does not run while committed writes keep arriving. Its cost is not
+    /// bounded by anything the writer controls — a hot key's revision block grows with its write
+    /// rate, and the backend memo can only skip keys it has already walked — so the budget is what
+    /// keeps a retention backlog from turning into a flush backlog. Keys not reached within the
+    /// budget, keys the backend reports as still prunable, and keys of a failed chunk are all
+    /// re-queued (bounded by <see cref="MaxPendingCleanupKeys"/>) and retried on later cycles.
     /// Cleanup failure never propagates to the caller.
+    /// </para>
     /// </summary>
     private async ValueTask RunTargetedRevisionCleanup()
     {
@@ -1263,109 +1316,157 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         List<string> keysToClean = [..pendingRevisionCleanupKeys];
         pendingRevisionCleanupKeys.Clear();
 
+        TimeSpan timeBudget = configuration.PersistentRevisionCleanupTimeBudget;
+        int deleteBudget = configuration.PersistentRevisionCleanupBatchSize;
+
         stopwatch.Restart();
-        RevisionPruneResult pruneResult = default;
+
+        int keysVisited = 0;
+        int keysSkipped = 0;
+        int revisionsDeleted = 0;
+        int floorViolations = 0;
+        bool batchLimitReached = false;
+        bool budgetExhausted = false;
 
         SnapshotFloorStore? capturedFloorStore = snapshotFloorStore;
+        Action? capturedHook = BeforePruneSampleHook;
+        Action? capturedAfterHook = AfterPruneSampleHook;
+
+        int offset = 0;
 
         try
         {
-            Action? capturedHook = BeforePruneSampleHook;
-            Action? capturedAfterHook = AfterPruneSampleHook;
-            bool success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () =>
+            while (offset < keysToClean.Count)
             {
-                capturedHook?.Invoke();
-                // Open a prune-delete window: the floor is sampled under the store's commit lock so
-                // any hold committed before this point is reflected, and any hold that commits after
-                // it observes the open window and fails closed rather than losing its boundary to
-                // the delete below.
-                HLCTimestamp floor;
-                long pruneToken = 0;
-                bool windowOpen = capturedFloorStore is not null;
-                if (windowOpen)
-                    (floor, pruneToken) = capturedFloorStore!.BeginPrune();
-                else
-                    floor = HLCTimestamp.Zero;
-
-                try
+                if (stopwatch.Elapsed >= timeBudget)
                 {
-                    capturedAfterHook?.Invoke();
-                    bool ok = persistenceBackend.PruneKeyValueRevisions(
-                        keysToClean,
-                        configuration.PersistentRevisionRetentionCount,
-                        configuration.PersistentRevisionRetentionAge,
-                        configuration.PersistentRevisionCleanupBatchSize,
-                        floor,
-                        out RevisionPruneResult r);
-                    pruneResult = r;
-                    return ok;
+                    budgetExhausted = true;
+                    break;
                 }
-                finally
+
+                int chunkLength = Math.Min(RevisionCleanupChunkKeys, keysToClean.Count - offset);
+                List<string> chunk = keysToClean.GetRange(offset, chunkLength);
+                int chunkDeleteBudget = Math.Max(1, deleteBudget - revisionsDeleted);
+
+                RevisionPruneResult pruneResult = default;
+
+                bool success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () =>
                 {
+                    capturedHook?.Invoke();
+                    // Open a prune-delete window: the floor is sampled under the store's commit lock so
+                    // any hold committed before this point is reflected, and any hold that commits after
+                    // it observes the open window and fails closed rather than losing its boundary to
+                    // the delete below. One window per chunk keeps each window short.
+                    HLCTimestamp floor;
+                    long pruneToken = 0;
+                    bool windowOpen = capturedFloorStore is not null;
                     if (windowOpen)
-                        capturedFloorStore!.EndPrune(pruneToken);
-                }
-            });
+                        (floor, pruneToken) = capturedFloorStore!.BeginPrune();
+                    else
+                        floor = HLCTimestamp.Zero;
 
-            if (success)
-            {
-                if (pruneResult.RevisionsDeleted > 0 || pruneResult.BatchLimitReached)
-                    logger.LogPrunedKeyValueRevisionsTargeted(
-                        pruneResult.KeysVisited,
-                        pruneResult.RevisionsDeleted,
-                        pruneResult.BatchLimitReached,
-                        stopwatch.ElapsedMilliseconds,
-                        configuration.Storage,
-                        configuration.PersistentRevisionRetentionCount,
-                        configuration.PersistentRevisionRetentionAge
-                    );
+                    try
+                    {
+                        capturedAfterHook?.Invoke();
+                        bool ok = persistenceBackend.PruneKeyValueRevisions(
+                            chunk,
+                            configuration.PersistentRevisionRetentionCount,
+                            configuration.PersistentRevisionRetentionAge,
+                            chunkDeleteBudget,
+                            floor,
+                            out RevisionPruneResult r);
+                        pruneResult = r;
+                        return ok;
+                    }
+                    finally
+                    {
+                        if (windowOpen)
+                            capturedFloorStore!.EndPrune(pruneToken);
+                    }
+                });
 
-                if (pruneResult.FloorViolations > 0)
+                if (!success)
                 {
-                    SnapshotFloorMetrics.MissingProtectedVersion.Add(pruneResult.FloorViolations);
-                    logger.LogError(
-                        "Persistent prune deleted {Count} floor-protected boundary revision(s) — floor enforcement has a gap; this counter must stay 0. backend={Backend}",
-                        pruneResult.FloorViolations,
-                        configuration.Storage);
+                    // The cursor still points at this chunk, so the tail re-queue below covers it.
+                    logger.LogWarning(
+                        "Failed to prune key/value revisions for {Count} targeted keys; will retry. backend={Backend}",
+                        chunk.Count,
+                        configuration.Storage
+                    );
+                    break;
                 }
+
+                keysVisited += pruneResult.KeysVisited;
+                keysSkipped += pruneResult.KeysSkipped;
+                revisionsDeleted += pruneResult.RevisionsDeleted;
+                floorViolations += pruneResult.FloorViolations;
+                offset += chunkLength;
 
                 if (pruneResult.BatchLimitReached)
                 {
                     // Requeue only keys that still have prunable revisions (or were never visited
                     // because the batch filled). Backends that don't report per-key backlog fall
-                    // back to the full set, preserving the previous conservative behaviour.
-                    foreach (string key in pruneResult.RemainingKeys ?? keysToClean)
-                    {
-                        if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
-                            pendingRevisionCleanupKeys.Add(key);
-                    }
-                }
-            }
-            else
-            {
-                logger.LogWarning(
-                    "Failed to prune key/value revisions for {Count} targeted keys; will retry. backend={Backend}",
-                    keysToClean.Count,
-                    configuration.Storage
-                );
-
-                foreach (string key in keysToClean)
-                {
-                    if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
-                        pendingRevisionCleanupKeys.Add(key);
+                    // back to the chunk, preserving the previous conservative behaviour.
+                    batchLimitReached = true;
+                    RequeueRevisionCleanupKeys(pruneResult.RemainingKeys ?? chunk);
+                    break;
                 }
             }
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Exception during targeted revision cleanup; will retry {Count} keys. backend={Backend}", keysToClean.Count, configuration.Storage);
-
-            foreach (string key in keysToClean)
-            {
-                if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
-                    pendingRevisionCleanupKeys.Add(key);
-            }
+            logger.LogWarning(ex, "Exception during targeted revision cleanup; will retry {Count} keys. backend={Backend}", keysToClean.Count - offset, configuration.Storage);
         }
+
+        // Everything past the cursor was not handed to the backend this cycle: budget, delete
+        // limit, failure or exception alike.
+        if (offset < keysToClean.Count)
+            RequeueRevisionCleanupKeys(keysToClean, offset);
+
+        double elapsedMs = stopwatch.Elapsed.TotalMilliseconds;
+
+        PersistenceMetrics.PruneKeysWalked.Add(keysVisited - keysSkipped);
+        PersistenceMetrics.PruneKeysSkipped.Add(keysSkipped);
+        PersistenceMetrics.PruneRevisionsDeleted.Add(revisionsDeleted);
+        PersistenceMetrics.PruneCycleMs.Record(elapsedMs);
+
+        if (budgetExhausted)
+            PersistenceMetrics.PruneBudgetExhausted.Add(1);
+
+        if (revisionsDeleted > 0 || batchLimitReached || budgetExhausted)
+            logger.LogPrunedKeyValueRevisionsTargeted(
+                keysVisited,
+                revisionsDeleted,
+                batchLimitReached || budgetExhausted,
+                (long)elapsedMs,
+                configuration.Storage,
+                configuration.PersistentRevisionRetentionCount,
+                configuration.PersistentRevisionRetentionAge
+            );
+
+        if (floorViolations > 0)
+        {
+            SnapshotFloorMetrics.MissingProtectedVersion.Add(floorViolations);
+            logger.LogError(
+                "Persistent prune deleted {Count} floor-protected boundary revision(s) — floor enforcement has a gap; this counter must stay 0. backend={Backend}",
+                floorViolations,
+                configuration.Storage);
+        }
+    }
+
+    private void RequeueRevisionCleanupKeys(IReadOnlyCollection<string> keys)
+    {
+        foreach (string key in keys)
+        {
+            if (pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys)
+                pendingRevisionCleanupKeys.Add(key);
+        }
+    }
+
+    private void RequeueRevisionCleanupKeys(List<string> keys, int fromIndex)
+    {
+        for (int i = fromIndex; i < keys.Count && pendingRevisionCleanupKeys.Count < MaxPendingCleanupKeys; i++)
+            pendingRevisionCleanupKeys.Add(keys[i]);
     }
 
     /// <summary>

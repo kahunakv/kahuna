@@ -404,6 +404,15 @@ public static class ConfigurationValidator
         if (configuration.PersistentRevisionCleanupBatchSize < 1)
             configuration.PersistentRevisionCleanupBatchSize = 1;
 
+        if (configuration.PersistentRevisionCleanupTimeBudget <= TimeSpan.Zero)
+            configuration.PersistentRevisionCleanupTimeBudget = TimeSpan.FromMilliseconds(250);
+
+        if (configuration.PersistenceMaxUnflushedItems < 0)
+            configuration.PersistenceMaxUnflushedItems = 0;
+
+        if (configuration.PersistenceMaxUnflushedBytes < 0)
+            configuration.PersistenceMaxUnflushedBytes = 0;
+
         if (!IsPersistentRevisionRetentionEnabled(configuration))
             return;
 
