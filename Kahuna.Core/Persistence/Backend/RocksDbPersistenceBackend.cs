@@ -153,10 +153,63 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private static readonly HLCTimestamp FailClosedFloor = new(int.MaxValue, long.MaxValue, uint.MaxValue);
 
     private readonly Lock _floorLock = new();
-    
+
     private HLCTimestamp? _prunedFloorCache; // null until first loaded from the DB
-    
+
     private bool _prunedFloorCorrupt;
+
+    // ── Tilde-key registry ─────────────────────────────────────────────────────────────────
+    //
+    // The kv column family interleaves, in one sorted keyspace, the rows of a logical key
+    // ("X~<revision>", "X~CURRENT", "X~NOREV") with the rows of any *other* logical key that
+    // starts with "X~" (keys may legally contain '~'). A range scan that wants only ~CURRENT
+    // rows therefore cannot blindly seek from a revision row "X~<rev>" to "X~CURRENT": the
+    // skipped window may hold the complete row blocks of such sibling keys, and skipping them
+    // silently drops their rows from the scan.
+    //
+    // Every key that can hide inside that window necessarily contains '~'. The registry
+    // records, durably and monotonically, a covering prefix for every logical key ever stored
+    // that contains '~': the key's bucket prefix (everything up to and including its last '/'),
+    // or the empty prefix for a slashless key. A seek-skip over the revision rows of block X is
+    // sound exactly when no registered prefix can cover a key that starts with "X~" — checked
+    // by TildeRegistryBlocksSkip. Prefix granularity keeps the registry bounded by the number
+    // of buckets that hold tilde keys (schema-shaped, not data-shaped).
+    //
+    // Registry rows live at "\0tilde/<prefix>" in the kv family — the '\0' prefix keeps them
+    // inert to every user scan, like the pruned-history floor row. They are written in the SAME
+    // WriteBatch as the first tilde key of their bucket, so a crash can never persist a tilde
+    // key without its registry row. The in-memory snapshot is updated BEFORE the batch commits:
+    // an over-registration only suppresses an optimization, never correctness.
+    //
+    // The registry is authoritative only for stores that have run registry-aware code for their
+    // whole life: a sentinel row is written when the store is first opened with an empty kv
+    // family. A pre-existing store without the sentinel keeps today's step-over-every-row scan
+    // behavior (correct, slow) — its historical tilde keys were never registered.
+    private static ReadOnlySpan<byte> TildeRegistryRowPrefixUtf8 => "\0tilde/"u8;
+
+    private static ReadOnlySpan<byte> TildeRegistrySentinelKeyUtf8 => "\0tilde_registry"u8;
+
+    /// <summary>
+    /// Immutable snapshot of the registered tilde prefixes. Replaced wholesale under
+    /// <see cref="_tildeRegistryLock"/>; read lock-free by scans on scheduler threads.
+    /// </summary>
+    private volatile string[] tildePrefixes = [];
+
+    /// <summary>
+    /// True when the registry provably covers every tilde key the store has ever held, i.e. the
+    /// store carried the registry sentinel from its first non-empty open. False for stores
+    /// created by older builds: their scans never seek-skip.
+    /// </summary>
+    private volatile bool tildeRegistryAuthoritative;
+
+    private readonly Lock _tildeRegistryLock = new();
+
+    /// <summary>
+    /// Consecutive non-current rows a scan steps over inside one run before it attempts a
+    /// seek past the rest of the block. Blocks with fewer revisions than this never pay a
+    /// seek or a registry check; deep blocks pay this many steps plus one seek.
+    /// </summary>
+    private const int RevisionRunSeekThreshold = 8;
 
     /// <summary>
     /// Raw key bytes at which the next backend-wide revision sweep should resume, or <c>null</c> to
@@ -193,6 +246,88 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         this.logger = logger ?? NullLogger.Instance;
 
         db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
+
+        InitializeTildeRegistry();
+    }
+
+    /// <summary>
+    /// Loads the tilde-key registry and decides whether it is authoritative for this store.
+    /// A store whose kv family holds no user rows yet (fresh, or internal '\0' rows only) gets
+    /// the sentinel written now — nothing unregistered can already exist, and every later write
+    /// passes through <see cref="StoreKeyValuesFenced"/>, which registers as it stores. A store
+    /// with user rows but no sentinel predates the registry: its historical tilde keys are
+    /// unknown, so scans never seek-skip there. Runs from the constructor and after a recovery
+    /// reopen; both hold no fence, and no reader exists yet (constructor) or every reader is
+    /// blocked on the swap fence's write side (recovery).
+    /// </summary>
+    private void InitializeTildeRegistry()
+    {
+        bool sentinelPresent = db.Get(TildeRegistrySentinelKeyUtf8, cf: columnFamilyKeys) is not null;
+
+        if (!sentinelPresent)
+        {
+            if (KvFamilyHoldsUserRows())
+            {
+                tildeRegistryAuthoritative = false;
+                tildePrefixes = [];
+                if (logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation(
+                        "RocksDb store at {Path}/{Revision} predates the tilde-key registry; range scans keep the step-over-history behavior",
+                        path, dbRevision);
+                return;
+            }
+
+            // Not synced: a crash before this lands re-runs the same empty-store check on the
+            // next open and rewrites the sentinel — no user write can slip in before the
+            // constructor returns.
+            db.Put(TildeRegistrySentinelKeyUtf8, ReadOnlySpan<byte>.Empty, cf: columnFamilyKeys);
+        }
+
+        List<string> prefixes = [];
+
+        using (Iterator iterator = db.NewIterator(cf: columnFamilyKeys))
+        {
+            iterator.Seek(TildeRegistryRowPrefixUtf8);
+
+            while (iterator.Valid())
+            {
+                ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
+                if (!rawKey.StartsWith(TildeRegistryRowPrefixUtf8))
+                    break;
+
+                prefixes.Add(Encoding.UTF8.GetString(rawKey[TildeRegistryRowPrefixUtf8.Length..]));
+                iterator.Next();
+            }
+        }
+
+        tildePrefixes = prefixes.ToArray();
+        tildeRegistryAuthoritative = true;
+    }
+
+    /// <summary>
+    /// True when the kv family holds at least one row outside the reserved '\0' internal
+    /// namespace and the legacy space-prefixed floor row. Only such rows can be revision or
+    /// sibling rows a seek-skip would have to reason about.
+    /// </summary>
+    private bool KvFamilyHoldsUserRows()
+    {
+        using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
+        iterator.SeekToFirst();
+
+        while (iterator.Valid())
+        {
+            ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
+
+            if ((rawKey.Length > 0 && rawKey[0] == 0) || rawKey.SequenceEqual(LegacyPrunedFloorKeyUtf8))
+            {
+                iterator.Next();
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -399,6 +534,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 try
                 {
                     db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
+                    InitializeTildeRegistry();
                     storageUnavailable = false;
 
                     logger.LogWarning(
@@ -895,6 +1031,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     pendingNoRev ??= new(StringComparer.Ordinal));
         }
 
+        RegisterTildeKeys(batch, span);
+
         // "false on failure" contract — see StoreDurabilityFloors for the reasoning.
         try
         {
@@ -945,6 +1083,180 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             return item.LastModifiedCounter < stored.LastModifiedCounter ? -1 : 1;
 
         return item.LastModifiedNode.CompareTo(stored.LastModifiedNode);
+    }
+
+    /// <summary>
+    /// Adds a registry row to <paramref name="batch"/> for the bucket prefix of every
+    /// tilde-containing key in the batch that is not registered yet, and publishes the new
+    /// prefixes to the in-memory snapshot BEFORE the batch commits. Publishing early is safe:
+    /// an extra registered prefix only suppresses the seek-skip optimization. Publishing late
+    /// would be unsound — an iterator opened after the commit could observe the new sibling
+    /// keys while a concurrent scan still believes their bucket is tilde-free. The registry
+    /// row rides the same atomic batch as the keys' own rows, so a crash can never persist a
+    /// tilde key without it. Re-putting an already-present registry row is harmless.
+    /// </summary>
+    private void RegisterTildeKeys(WriteBatch batch, Span<PersistenceRequestItem> span)
+    {
+        List<string>? additions = null;
+        string[] snapshot = tildePrefixes;
+
+        for (int i = 0; i < span.Length; i++)
+        {
+            string key = span[i].Key;
+            if (!key.Contains('~'))
+                continue;
+
+            int lastSlash = key.LastIndexOf('/');
+            string prefix = lastSlash < 0 ? "" : key[..(lastSlash + 1)];
+
+            if (Array.IndexOf(snapshot, prefix) >= 0 || (additions is not null && additions.Contains(prefix)))
+                continue;
+
+            (additions ??= []).Add(prefix);
+        }
+
+        if (additions is null)
+            return;
+
+        lock (_tildeRegistryLock)
+        {
+            string[] current = tildePrefixes;
+            List<string> merged = new(current.Length + additions.Count);
+            merged.AddRange(current);
+
+            foreach (string prefix in additions)
+            {
+                if (!merged.Contains(prefix))
+                    merged.Add(prefix);
+            }
+
+            if (merged.Count != current.Length)
+                tildePrefixes = merged.ToArray();
+        }
+
+        // One buffer serves every registry row; registration is rare (first tilde key of a
+        // bucket), so renting for the occasional oversized prefix is fine.
+        byte[]? rented = null;
+        Span<byte> rowKeyBuffer = stackalloc byte[KeyStackThreshold];
+
+        try
+        {
+            foreach (string prefix in additions)
+            {
+                int rowKeyLen = TildeRegistryRowPrefixUtf8.Length + Encoding.UTF8.GetByteCount(prefix);
+
+                Span<byte> rowKey = rowKeyBuffer;
+                if (rowKeyLen > rowKey.Length)
+                {
+                    if (rented is null || rented.Length < rowKeyLen)
+                    {
+                        if (rented is not null)
+                            ArrayPool<byte>.Shared.Return(rented);
+                        rented = ArrayPool<byte>.Shared.Rent(rowKeyLen);
+                    }
+
+                    rowKey = rented;
+                }
+
+                rowKey = rowKey[..rowKeyLen];
+                TildeRegistryRowPrefixUtf8.CopyTo(rowKey);
+                Encoding.UTF8.GetBytes(prefix, rowKey[TildeRegistryRowPrefixUtf8.Length..]);
+                batch.Put(rowKey, ReadOnlySpan<byte>.Empty, cf: columnFamilyKeys);
+            }
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// True when a registered tilde prefix could cover a logical key that starts with
+    /// "<paramref name="blockKey"/>~" — a sibling key whose row block can sort between a
+    /// revision row of this block and the block's ~CURRENT row. When this returns false and
+    /// the registry is authoritative, no such sibling exists in the store, so a seek from a
+    /// revision row of the block straight to its ~CURRENT row cannot jump over any row of
+    /// another key. Prefix families overlap exactly when one string is a prefix of the other.
+    /// </summary>
+    private bool TildeRegistryBlocksSkip(string blockKey)
+    {
+        string[] snapshot = tildePrefixes;
+
+        for (int i = 0; i < snapshot.Length; i++)
+        {
+            string prefix = snapshot[i];
+
+            if (prefix.Length > blockKey.Length)
+            {
+                if (prefix.AsSpan(0, blockKey.Length).SequenceEqual(blockKey) && prefix[blockKey.Length] == '~')
+                    return true;
+            }
+            else if (blockKey.AsSpan(0, prefix.Length).SequenceEqual(prefix))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Attempts to seek <paramref name="iterator"/> from a non-current row of one logical
+    /// key's block directly to that block's ~CURRENT row, skipping the rest of its revision
+    /// rows in one move. This is what keeps a scan O(logical keys) instead of O(total
+    /// revisions ever written) on version-heavy stores. Returns true when the iterator moved —
+    /// the caller must re-read the landed key and must NOT call Next first. Returns false when
+    /// the row is not provably skippable: the registry is not authoritative for this store, a
+    /// registered sibling prefix could hide keys inside the skip window, the row is a ~NOREV
+    /// row (a single row — stepping is cheaper), the row has no '~', or the computed target
+    /// would not move the iterator strictly forward.
+    /// </summary>
+    private bool TrySeekPastRevisionRun(Iterator iterator, ReadOnlySpan<byte> rawKey)
+    {
+        if (!tildeRegistryAuthoritative)
+            return false;
+
+        if (rawKey.EndsWith(NoRevMarkerUtf8))
+            return false;
+
+        int lastTilde = rawKey.LastIndexOf((byte)'~');
+        if (lastTilde <= 0)
+            return false;
+
+        ReadOnlySpan<byte> blockKeyBytes = rawKey[..lastTilde];
+
+        if (TildeRegistryBlocksSkip(Encoding.UTF8.GetString(blockKeyBytes)))
+            return false;
+
+        int targetLen = lastTilde + CurrentMarkerUtf8.Length;
+
+        byte[]? rented = null;
+        Span<byte> target = targetLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rented = ArrayPool<byte>.Shared.Rent(targetLen));
+
+        try
+        {
+            target = target[..targetLen];
+            blockKeyBytes.CopyTo(target);
+            CurrentMarkerUtf8.CopyTo(target[lastTilde..]);
+
+            // The target must sort strictly after the current row or the scan could loop.
+            // Every row written below ~CURRENT satisfies this (revision suffixes are decimal,
+            // and '0'..'9' sort before 'C'); the guard makes any unforeseen suffix safe.
+            // rawKey is a span over native iterator memory, so every read of it happens
+            // before the Seek below invalidates it.
+            if (target.SequenceCompareTo(rawKey) <= 0)
+                return false;
+
+            iterator.Seek(target);
+            KeyValueScanMetrics.RevisionRunSeeks.Add(1);
+            return true;
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     /// <summary>
@@ -1718,6 +2030,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // One parse shell serves every row of the scan; fields are copied out per row.
             RocksDbKeyValueMessage shell = new();
 
+            int nonCurrentRun = 0;
+
             while (iterator.Valid() && result.Count < KeyValueScanLimits.MaxPrefixScanResults)
             {
                 // GetKeySpan returns a span directly over native memory — no byte[] copy.
@@ -1729,9 +2043,19 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                 if (!rawKey.EndsWith(CurrentMarkerUtf8))
                 {
+                    // Deep revision blocks are jumped rather than stepped — see
+                    // GetKeyValueByRangeFenced for the run/seek contract.
+                    if (++nonCurrentRun == RevisionRunSeekThreshold && TrySeekPastRevisionRun(iterator, rawKey))
+                    {
+                        nonCurrentRun = 0;
+                        continue;
+                    }
+
                     iterator.Next();
                     continue;
                 }
+
+                nonCurrentRun = 0;
 
                 // Decode only keys that pass both filters.
                 string keyWithoutMarker = Encoding.UTF8.GetString(rawKey[..^CurrentMarkerUtf8.Length]);
@@ -2057,6 +2381,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // One parse shell serves every row of the scan; fields are copied out per row.
             RocksDbKeyValueMessage shell = new();
 
+            int nonCurrentRun = 0;
+
             while (iterator.Valid() && result.Count < limit)
             {
                 // GetKeySpan returns a span directly over native memory — no byte[] copy.
@@ -2068,9 +2394,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                 if (!rawKey.EndsWith(CurrentMarkerUtf8))
                 {
+                    // A long run of non-current rows is a deep revision block. Try once per run
+                    // to jump the rest of the block, so a blocked bucket pays one registry check
+                    // per run rather than one per row. On a successful seek the iterator already
+                    // moved: re-read the landed key without Next.
+                    if (++nonCurrentRun == RevisionRunSeekThreshold && TrySeekPastRevisionRun(iterator, rawKey))
+                    {
+                        nonCurrentRun = 0;
+                        continue;
+                    }
+
                     iterator.Next();
                     continue;
                 }
+
+                nonCurrentRun = 0;
 
                 // Decode only keys that pass both filters.
                 string keyWithoutMarker = Encoding.UTF8.GetString(rawKey[..^CurrentMarkerUtf8.Length]);
@@ -2128,15 +2466,27 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         // One parse shell serves every row of the scan; fields are copied out per row.
         RocksDbKeyValueMessage shell = new();
 
+        int nonCurrentRun = 0;
+
         while (iterator.Valid() && items.Count < limit)
         {
             ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
             if (!rawKey.EndsWith(CurrentMarkerUtf8))
             {
+                // Deep revision blocks are jumped rather than stepped — see
+                // GetKeyValueByRangeFenced for the run/seek contract.
+                if (++nonCurrentRun == RevisionRunSeekThreshold && TrySeekPastRevisionRun(iterator, rawKey))
+                {
+                    nonCurrentRun = 0;
+                    continue;
+                }
+
                 iterator.Next();
                 continue;
             }
+
+            nonCurrentRun = 0;
 
             string key = Encoding.UTF8.GetString(rawKey[..^CurrentMarkerUtf8.Length]);
 
