@@ -603,6 +603,31 @@ public sealed class KahunaConfiguration
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 
     /// <summary>
+    /// Wall-clock budget the targeted revision cleanup may spend per flush cycle. The cleanup runs on
+    /// the single background writer between flush passes, so its cost comes straight out of the
+    /// flush throughput: keys not reached within the budget stay queued for the next cycle instead
+    /// of delaying the flush. Must be positive; the flush time budget itself is
+    /// <see cref="DirtyObjectsWriterDelay"/>.
+    /// </summary>
+    public TimeSpan PersistentRevisionCleanupTimeBudget { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Maximum committed key/value writes this node may hold in memory awaiting the background
+    /// flush (the writer's inbox plus its dirty queues) before the write aggregator stops admitting
+    /// ordinary writes with a retryable rejection. Terminal work (transaction decisions and
+    /// settlement) is never gated. A flusher that cannot keep up with ingest otherwise fills the
+    /// heap without bound; every replica runs the same flusher, so throttling the leader's ingest
+    /// also relieves its followers. A value &lt;= 0 disables the item bound.
+    /// </summary>
+    public long PersistenceMaxUnflushedItems { get; set; } = 1_000_000;
+
+    /// <summary>
+    /// Byte counterpart of <see cref="PersistenceMaxUnflushedItems"/>: the value bytes held by the
+    /// writer's dirty queues awaiting flush. A value &lt;= 0 disables the byte bound.
+    /// </summary>
+    public long PersistenceMaxUnflushedBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>
     /// Grace window after a restart during which snapshot holds loaded from the durable
     /// snapshot-floor registry are exempt from the expired-hold purge. While every node is down
     /// no reclamation runs, so history pinned by a hold whose lease lapsed during full-cluster

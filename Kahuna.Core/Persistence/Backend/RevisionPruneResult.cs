@@ -23,10 +23,15 @@ namespace Kahuna.Server.Persistence.Backend;
 /// value triggers the <c>kahuna.snapshot_floor.missing_protected_version_total</c> metric in
 /// <c>BackgroundWriterActor</c> and must never occur in normal operation.
 /// </param>
+/// <param name="KeysSkipped">
+/// Of <paramref name="KeysVisited"/>, the keys answered from the backend's prune memo without a
+/// revision walk because the memo proved nothing was deletable yet. Backends without a memo report 0.
+/// </param>
 public readonly record struct RevisionPruneResult(
     int KeysVisited,
     int RevisionsDeleted,
     bool BatchLimitReached,
     IReadOnlyCollection<string>? RemainingKeys = null,
-    int FloorViolations = 0
+    int FloorViolations = 0,
+    int KeysSkipped = 0
 );

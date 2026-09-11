@@ -109,6 +109,7 @@ internal static class PartitionWriteAggregatorMetrics
     private static readonly KeyValuePair<string, object?> ReasonStopping = new("reason", "stopping");
     private static readonly KeyValuePair<string, object?> ReasonFenceStale = new("reason", "fence_stale");
     private static readonly KeyValuePair<string, object?> ReasonQueueExpired = new("reason", "queue_expired");
+    private static readonly KeyValuePair<string, object?> ReasonUnflushedBacklog = new("reason", "unflushed_backlog");
     private static readonly KeyValuePair<string, object?> OutcomeSuccess = new("outcome", "success");
     private static readonly KeyValuePair<string, object?> OutcomeTransient = new("outcome", "transient");
     private static readonly KeyValuePair<string, object?> OutcomePermanent = new("outcome", "permanent");
@@ -117,6 +118,7 @@ internal static class PartitionWriteAggregatorMetrics
     internal static void RejectedOversized() => Rejections.Add(1, ReasonOversized);
     internal static void RejectedInboxFull() => Rejections.Add(1, ReasonInboxFull);
     internal static void RejectedStopping() => Rejections.Add(1, ReasonStopping);
+    internal static void RejectedUnflushedBacklog() => Rejections.Add(1, ReasonUnflushedBacklog);
     internal static void ReleasedFenceStale() => Rejections.Add(1, ReasonFenceStale);
     internal static void ReleasedQueueExpired() => Rejections.Add(1, ReasonQueueExpired);
 

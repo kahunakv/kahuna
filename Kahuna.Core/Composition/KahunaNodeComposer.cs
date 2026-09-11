@@ -142,8 +142,13 @@ internal static class KahunaNodeComposer
             durabilityTracker
         );
 
+        // The node's unflushed-backlog view: gauges for operators and the admission probe the write
+        // aggregator consults, so a flusher that falls behind ingest throttles writes instead of
+        // growing the heap until the process dies.
+        PersistenceBacklogMonitor backlogMonitor = new(backgroundWriter, configuration);
+
         LockManager locks = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, durabilityTracker);
-        KeyValuesManager keyValues = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator, durabilityTracker);
+        KeyValuesManager keyValues = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator, durabilityTracker, backlogMonitor);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).
@@ -180,6 +185,7 @@ internal static class KahunaNodeComposer
             backendWriteScheduler,
             durabilityProvider,
             backgroundWriter,
+            backlogMonitor,
             locks,
             keyValues,
             sequencer);

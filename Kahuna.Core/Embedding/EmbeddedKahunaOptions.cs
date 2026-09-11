@@ -574,6 +574,24 @@ public sealed class EmbeddedKahunaOptions
     public bool PersistentRevisionCleanupOnWrite { get; set; } = true;
 
     /// <summary>
+    /// Wall-clock budget per flush cycle for the targeted persistent revision cleanup; keys not
+    /// reached stay queued for the next cycle so the cleanup never starves the flush.
+    /// </summary>
+    public TimeSpan PersistentRevisionCleanupTimeBudget { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Maximum committed writes held in memory awaiting the background flush before ordinary writes
+    /// are rejected with a retryable status. 0 disables the bound.
+    /// </summary>
+    public long PersistenceMaxUnflushedItems { get; set; } = 1_000_000;
+
+    /// <summary>
+    /// Maximum value bytes queued for the background flush before ordinary writes are rejected with
+    /// a retryable status. 0 disables the bound.
+    /// </summary>
+    public long PersistenceMaxUnflushedBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>
     /// Length of the point-in-time recovery window. Valid range: (0, 6h].
     /// </summary>
     public TimeSpan PitrWindow { get; set; } = TimeSpan.FromHours(1);

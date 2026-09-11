@@ -176,6 +176,17 @@ is ever reclaimed, so the counter is 0. **A non-zero value means floor enforceme
 protected version may have been lost — alert on it.** `live_holds` and `effective_floor_ms` are for
 capacity and correctness dashboards (how many branches are pinning history, and how far back).
 
+The persistent prune that the floor clamps has its own instruments, because it shares the single
+background writer with the flush and must never starve it:
+
+| Metric | Kind | Meaning |
+|--------|------|---------|
+| `kahuna.persistence.revision_prune.keys_walked_total` | counter | Keys whose revision block the targeted prune scanned. |
+| `kahuna.persistence.revision_prune.keys_skipped_total` | counter | Keys answered from the RocksDB prune memo without a scan (nothing deletable yet). On a hot key-set inside its retention window this should dominate `keys_walked_total`. |
+| `kahuna.persistence.revision_prune.revisions_deleted_total` | counter | Revision rows the targeted prune deleted. |
+| `kahuna.persistence.revision_prune.budget_exhausted_total` | counter | Flush cycles whose prune stopped on `PersistentRevisionCleanupTimeBudget` with keys still queued. A sustained rate means retention lags the write rate; the flush is unaffected. |
+| `kahuna.persistence.revision_prune.cycle_duration` | histogram (ms) | Time the targeted prune took per flush cycle; bounded by the time budget plus one chunk. |
+
 ---
 
 ## 9. Limits and things to know
@@ -210,6 +221,8 @@ hold has to protect:
 | `RevisionRetention` | 16 | How many recent revisions per key answer as-of reads from memory before falling back to disk. A live hold additionally keeps one boundary revision. |
 | `PersistentRevisionRetentionCount` | 0 (keep all) | How many revisions the persistent sweep keeps per key. The floor clamps this: protected revisions are kept regardless. |
 | `PersistentRevisionRetentionAge` | disabled | Age-based persistent pruning; also clamped by the floor. |
+| `PersistentRevisionCleanupBatchSize` | 1000 | Revision rows the targeted prune may delete per flush cycle. |
+| `PersistentRevisionCleanupTimeBudget` | 250 ms | Wall-clock the targeted prune may spend per flush cycle; keys it does not reach stay queued for the next cycle. Keep it well under `DirtyObjectsWriterDelay` (the flush budget): the prune runs on the same writer, so its time comes straight out of flush throughput. |
 | `leaseMs` (per acquire/renew) | — caller-chosen | How long a hold survives without renewal. Renew well inside it; choose it coarse enough that renewals aren't a hot path. |
 
 General guidance:
@@ -218,6 +231,12 @@ General guidance:
   keep renewing it — retention knobs alone are best-effort and will eventually reclaim unheld history.
 - Aggressive persistent retention is safe to combine with holds: the floor overrides it for exactly the
   versions a hold needs, and nothing more.
+- Enabling retention on a hot key-set is cheap in steady state: the RocksDB backend memoizes, per key,
+  how many history rows it has and how old its oldest non-current row is, and skips the revision walk
+  until count or age could actually delete something (the store path advances the memo as it writes;
+  a moved floor, a deleted key or a recovery reopen re-arm the walk). Without the memo every flush
+  cycle re-walked every hot key's whole revision block, and on a 2,000-row bank workload that walk
+  alone outgrew the one-second flush budget within two minutes.
 - Watch `missing_protected_version_total` — it should be flat at 0.
 
 ---
