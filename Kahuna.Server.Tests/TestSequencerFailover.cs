@@ -228,6 +228,70 @@ public sealed class TestSequencerFailover : BaseCluster
     }
 
     /// <summary>
+    /// The update operation across a real cluster, through the redirect path. Two of the three nodes do
+    /// not own the sequence, so their updates are forwarded to the one that does, and the owner's wait
+    /// is what the forwarded call is waiting on.
+    ///
+    /// <para>The property asserted is uniqueness <b>within the new incarnation</b>: an update that
+    /// lowers the current value deliberately reissues values the previous incarnation handed out, so
+    /// only allocations made after the update are compared. Whether the two incarnations overlap is the
+    /// caller's choice; whether one incarnation issues a value twice is not.</para>
+    /// </summary>
+    [Fact]
+    public async Task UpdatedSequenceAllocatesUniquelyFromEveryNode()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft raft1, IRaft raft2, IRaft raft3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3,
+         MemoryInterNodeCommmunication transport) =
+            await AssembleThreNodeClusterWithTransport("memory", DataPartitions, raftLogger, kahunaLogger, c =>
+            {
+                c.SequencerBlockSize = 8;
+                // The owner withholds success for a whole lease, so the server default of five seconds
+                // would be this test's runtime rather than its work.
+                c.SequencerBlockLease = TimeSpan.FromMilliseconds(500);
+            });
+
+        IKahuna[] nodes = [kahuna1, kahuna2, kahuna3];
+
+        try
+        {
+            string name = "update/" + Guid.NewGuid().ToString("N");
+
+            Assert.Equal(SequenceResponseType.Success, await Create(kahuna1, name));
+
+            foreach (IKahuna node in nodes)
+                await Reserve(node, name, 1);
+
+            // Routed from a node chosen without regard to ownership, so the forward is exercised for two
+            // of the three possible owners.
+            Assert.Equal(SequenceResponseType.Success, await UpdateWithRetry(kahuna3, name, new SequenceUpdate(CurrentValue: 50_000)));
+
+            HashSet<long> issued = [];
+
+            foreach (IKahuna node in nodes)
+                await AllocateInto(issued, node, name, 10);
+
+            Assert.Equal(3 * 10, issued.Count);
+            Assert.All(issued, value => Assert.True(value > 50_000, $"value {value} predates the update"));
+
+            (SequenceResponseType readResponse, ReadOnlySequenceEntry? sequence) =
+                await kahuna1.LocateAndGetSequence(name, SequenceDurability.Persistent, ct);
+
+            Assert.Equal(SequenceResponseType.Success, readResponse);
+            Assert.NotNull(sequence);
+            Assert.Equal(1, sequence.Incarnation);
+
+            Assert.True(transport.SequenceForwardCallCount > 0,
+                "expected sequence requests to be redirected to the owning node");
+        }
+        finally
+        {
+            await LeaveCluster(raft1, raft2, raft3);
+        }
+    }
+
+    /// <summary>
     /// The owner-direct entry points — the ones a forwarded request lands on — re-check leadership
     /// themselves: on a node that does not lead the sequence's partition they answer
     /// <c>MustRetry</c> instead of serving, so a stale forward can neither put a second actor behind
@@ -344,9 +408,32 @@ public sealed class TestSequencerFailover : BaseCluster
         for (int attempt = 0; attempt < 60; attempt++)
         {
             (SequenceResponseType response, _) = await kahuna.LocateAndCreateSequence(
-                name, 0, 1, null, SequenceDurability.Persistent, ct);
+                name, 0, 1, null, null, SequenceDurability.Persistent, ct);
 
             if (response != SequenceResponseType.MustRetry)
+                return response;
+
+            await Task.Delay(Math.Min(10 * (attempt + 1), 100), ct);
+        }
+
+        return SequenceResponseType.MustRetry;
+    }
+
+    /// <summary>
+    /// Updates, absorbing the transitional outcomes a freshly assembled cluster produces before its
+    /// partition leaders settle. <c>MustRetry</c> guarantees the attempt wrote nothing, so retrying it
+    /// is what a real client does.
+    /// </summary>
+    private static async Task<SequenceResponseType> UpdateWithRetry(IKahuna kahuna, string name, SequenceUpdate update)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        for (int attempt = 0; attempt < 30; attempt++)
+        {
+            (SequenceResponseType response, _) = await kahuna.LocateAndUpdateSequence(
+                name, update, SequenceDurability.Persistent, ct);
+
+            if (response is not (SequenceResponseType.MustRetry or SequenceResponseType.NotFound))
                 return response;
 
             await Task.Delay(Math.Min(10 * (attempt + 1), 100), ct);

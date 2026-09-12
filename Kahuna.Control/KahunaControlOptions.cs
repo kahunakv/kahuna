@@ -67,11 +67,29 @@ public sealed class KahunaControlOptions
     [Option("delete-sequence", Required = false, HelpText = "Deletes a persistent sequence by the given name")]
     public string? DeleteSequence { get; set; }
 
+    [Option("update-sequence", Required = false, HelpText = "Rewrites a sequence's parameters and starts a new incarnation of its value stream. Takes about one server block lease to answer")]
+    public string? UpdateSequence { get; set; }
+
+    [Option("current-value", Required = false, HelpText = "Sets the sequence's reserved high-water mark when updating; the next value issued is this plus the increment")]
+    public long? CurrentValue { get; set; }
+
+    [Option("block-size", Required = false, HelpText = "Values the sequence reserves per commit. 1 is gap-free at one commit, with its fsync, per value")]
+    public int? BlockSize { get; set; }
+
+    [Option("remove-max-value", Required = false, HelpText = "Removes the sequence's maximum when updating")]
+    public bool RemoveMaxValue { get; set; }
+
+    [Option("remove-block-size", Required = false, HelpText = "Returns the sequence to the server-wide block size when updating")]
+    public bool RemoveBlockSize { get; set; }
+
     [Option("initial-value", Required = false, HelpText = "Defines the initial value for a sequence")]
     public long InitialValue { get; set; }
 
+    // Nullable rather than defaulted, because an update must be able to tell "the caller typed an
+    // increment" from "the caller typed nothing". A defaulted 1 would make every update silently rewrite
+    // the increment. Create supplies the default at its own call site.
     [Option("increment", Required = false, HelpText = "Defines the increment for a sequence")]
-    public long Increment { get; set; } = 1;
+    public long? Increment { get; set; }
 
     [Option("max-value", Required = false, HelpText = "Defines the optional maximum value for a sequence")]
     public long? MaxValue { get; set; }

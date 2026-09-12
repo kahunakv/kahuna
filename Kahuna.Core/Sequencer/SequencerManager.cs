@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
@@ -36,6 +37,10 @@ internal sealed class SequencerManager
 
     private readonly KeyValuesManager keyValues;
 
+    private readonly KahunaConfiguration configuration;
+
+    private readonly ILogger<IKahuna> logger;
+
     private readonly IRaft raft;
 
     private readonly DataPartitionRouter dataPartitionRouter;
@@ -56,6 +61,8 @@ internal sealed class SequencerManager
     )
     {
         this.keyValues = keyValues;
+        this.configuration = configuration;
+        this.logger = logger;
         this.raft = raft;
         this.dataPartitionRouter = new(raft);
 
@@ -97,6 +104,7 @@ internal sealed class SequencerManager
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
@@ -104,10 +112,26 @@ internal sealed class SequencerManager
         if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
             return Task.FromResult((error, -1L));
 
-        if (increment <= 0 || maxValue.HasValue && maxValue.Value < initialValue)
+        if (!TryValidateCreate(initialValue, increment, maxValue, blockSize))
             return Task.FromResult((SequenceResponseType.InvalidInput, -1L));
 
-        return locator.LocateAndCreateSequence(normalizedName, initialValue, increment, maxValue, durability, cancellationToken);
+        return locator.LocateAndCreateSequence(normalizedName, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, long)> LocateAndUpdateSequence(
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
+            return Task.FromResult((error, -1L));
+
+        if (!TryValidateUpdate(update))
+            return Task.FromResult((SequenceResponseType.InvalidInput, -1L));
+
+        return locator.LocateAndUpdateSequence(normalizedName, update, durability, cancellationToken);
     }
 
     public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(
@@ -209,6 +233,7 @@ internal sealed class SequencerManager
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
@@ -216,7 +241,7 @@ internal sealed class SequencerManager
         if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
             return (error, -1);
 
-        if (increment <= 0 || maxValue.HasValue && maxValue.Value < initialValue)
+        if (!TryValidateCreate(initialValue, increment, maxValue, blockSize))
             return (SequenceResponseType.InvalidInput, -1);
 
         if (!await IsLocalOwner(normalizedName, cancellationToken).ConfigureAwait(false))
@@ -228,10 +253,94 @@ internal sealed class SequencerManager
             initialValue: initialValue,
             increment: increment,
             maxValue: maxValue,
+            blockSize: blockSize,
             cancellationToken: cancellationToken
         )).ConfigureAwait(false);
 
         return response is null ? (SequenceResponseType.Error, -1) : (response.Type, response.Revision);
+    }
+
+    /// <summary>
+    /// Rewrites a sequence's parameters, breaking its identity as a value stream so that a block
+    /// reserved from the previous record is voided rather than drained by whoever holds it.
+    ///
+    /// <para><b>This call takes about one <c>SequencerBlockLease</c> to answer, on purpose.</b> A
+    /// reserved block is served with no storage traffic at all, so a node that has lost the sequence's
+    /// partition without noticing keeps issuing from its window until the lease forces it to revalidate.
+    /// Reporting success before then would report a guarantee that does not hold yet. Every caller of an
+    /// update is a DDL-shaped statement, so a bounded delay is the right price; an instant answer that is
+    /// wrong for a lease period is the failure being paid to avoid.</para>
+    ///
+    /// <para>The wait happens here rather than in the actor: an actor serves every sequence hashed to it
+    /// and processes one request at a time, so sleeping inside it would stall allocations on sequences
+    /// the update never touched.</para>
+    /// </summary>
+    public async Task<(SequenceResponseType, long)> UpdateSequence(
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (!TryValidate(name, durability, out string normalizedName, out SequenceResponseType error))
+            return (error, -1);
+
+        if (!TryValidateUpdate(update))
+            return (SequenceResponseType.InvalidInput, -1);
+
+        // Revalidation is what eventually voids a stale window, and this setting turns it off. With it
+        // off no wait is long enough, so the operation is refused rather than answered with a guarantee
+        // the node cannot keep. Refusing beats silently substituting a default: an operator who disabled
+        // revalidation did so deliberately and needs to be told the two settings conflict.
+        if (configuration.SequencerBlockLease <= TimeSpan.Zero)
+        {
+            logger.LogWarning(
+                "Refusing to update sequence '{Name}': SequencerBlockLease is disabled, so a block reserved from the " +
+                "replaced incarnation would never be revalidated and could keep issuing values indefinitely",
+                normalizedName);
+
+            return (SequenceResponseType.InvalidInput, -1);
+        }
+
+        if (!await IsLocalOwner(normalizedName, cancellationToken).ConfigureAwait(false))
+            return (SequenceResponseType.MustRetry, -1);
+
+        SequenceResponse? response = await router.Ask(new SequenceRequest(
+            SequenceRequestType.Update,
+            normalizedName,
+            update: update,
+            cancellationToken: cancellationToken
+        )).ConfigureAwait(false);
+
+        if (response is null)
+            return (SequenceResponseType.Error, -1);
+
+        if (response.Type != SequenceResponseType.Success)
+            return (response.Type, response.Revision);
+
+        await WaitForStaleWindow(response.StaleWindowClosesAt, cancellationToken).ConfigureAwait(false);
+
+        return (SequenceResponseType.Success, response.Revision);
+    }
+
+    /// <summary>
+    /// Sleeps until <paramref name="deadline"/>, a monotonic instant the actor stamped from its confirmed
+    /// write. Measured with <see cref="Stopwatch"/> rather than a wall clock so a clock adjustment during
+    /// the wait can neither shorten nor extend it.
+    /// </summary>
+    private static async Task WaitForStaleWindow(long deadline, CancellationToken cancellationToken)
+    {
+        // Looped rather than delayed once, because a timer may fire early and answering early is exactly
+        // what this wait exists to prevent.
+        while (true)
+        {
+            long now = Stopwatch.GetTimestamp();
+
+            if (now >= deadline)
+                return;
+
+            await Task.Delay(Stopwatch.GetElapsedTime(now, deadline), cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(
@@ -327,6 +436,41 @@ internal sealed class SequencerManager
         return true;
     }
 
+    /// <summary>
+    /// Parameter checks a create must pass before anything is written. Shared with the routed half so the
+    /// two cannot drift apart.
+    /// </summary>
+    private static bool TryValidateCreate(long initialValue, long increment, long? maxValue, int? blockSize)
+    {
+        return increment > 0
+            && (!maxValue.HasValue || maxValue.Value >= initialValue)
+            && blockSize is not < 1;
+    }
+
+    /// <summary>
+    /// What a change set can be rejected for without reading the record. Anything that depends on the
+    /// record as it will be — a maximum below a current value the caller left alone — is checked inside
+    /// the actor, against the folded record, where it is actually decidable.
+    /// </summary>
+    private static bool TryValidateUpdate(SequenceUpdate update)
+    {
+        if (update.IsEmpty)
+            return false;
+
+        if (update.Increment is <= 0)
+            return false;
+
+        if (update.BlockSize is < 1)
+            return false;
+
+        // A caller that both clears a setting and supplies a value for it has contradicted itself; the
+        // safest reading of a contradiction is to write neither.
+        if (update.RemoveMaxValue && update.MaxValue.HasValue)
+            return false;
+
+        return !(update.RemoveBlockSize && update.BlockSize.HasValue);
+    }
+
     private static bool TryValidateReserve(int count, string? idempotencyKey, out string? normalizedIdempotencyKey)
     {
         normalizedIdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim();
@@ -349,7 +493,9 @@ internal sealed class SequencerManager
             revision,
             durability,
             state.CreatedAt,
-            state.UpdatedAt
+            state.UpdatedAt,
+            state.BlockSize,
+            state.Incarnation
         );
     }
 }

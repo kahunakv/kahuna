@@ -74,7 +74,9 @@ public interface IKahunaCommunication
 
      Task<(SequenceResponseType, ReadOnlySequenceEntry?, int)> GetSequence(string url, string name, SequenceDurability durability, CancellationToken cancellationToken);
 
-     Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken);
+     Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken);
+
+     Task<(SequenceResponseType, long, int)> UpdateSequence(string url, string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken);
 
      Task<(SequenceResponseType, SequenceAllocation, int)> NextSequenceValue(string url, string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken);
 

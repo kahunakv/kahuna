@@ -17,6 +17,13 @@ public sealed class KahunaSequenceCreateRequest
     [JsonPropertyName("maxValue")]
     public long? MaxValue { get; set; }
 
+    /// <summary>
+    /// Values this sequence reserves per commit. Null leaves it on the server-wide setting; <c>1</c> is
+    /// gap-free at one commit, with its fsync, per value.
+    /// </summary>
+    [JsonPropertyName("blockSize")]
+    public int? BlockSize { get; set; }
+
     [JsonPropertyName("durability")]
     public SequenceDurability Durability { get; set; } = SequenceDurability.Persistent;
 }

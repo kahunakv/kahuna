@@ -1,3 +1,4 @@
+using Kahuna.Shared.Sequences;
 using Kommander;
 using Nixie.Routers;
 
@@ -28,6 +29,15 @@ internal sealed class SequenceRequest : IConsistentHashable
     public long? MaxValue { get; }
 
     /// <summary>
+    /// Per-sequence values reserved per commit. Only meaningful for <see cref="SequenceRequestType.Create"/>;
+    /// null leaves the sequence on the server-wide setting.
+    /// </summary>
+    public int? BlockSize { get; }
+
+    /// <summary>Change set for an <see cref="SequenceRequestType.Update"/>; default for every other type.</summary>
+    public SequenceUpdate Update { get; }
+
+    /// <summary>
     /// Partition whose reserved blocks an <see cref="SequenceRequestType.Invalidate"/> surrenders.
     /// Negative means every partition. Ignored by other request types.
     /// </summary>
@@ -44,6 +54,8 @@ internal sealed class SequenceRequest : IConsistentHashable
         long initialValue = 0,
         long increment = 0,
         long? maxValue = null,
+        int? blockSize = null,
+        SequenceUpdate update = default,
         int partitionId = -1,
         CancellationToken cancellationToken = default
     )
@@ -55,6 +67,8 @@ internal sealed class SequenceRequest : IConsistentHashable
         InitialValue = initialValue;
         Increment = increment;
         MaxValue = maxValue;
+        BlockSize = blockSize;
+        Update = update;
         PartitionId = partitionId;
         CancellationToken = cancellationToken;
     }

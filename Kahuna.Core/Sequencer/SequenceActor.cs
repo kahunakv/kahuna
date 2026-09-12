@@ -35,6 +35,12 @@ namespace Kahuna.Server.Sequencer;
 /// record (a routed read, answered by the real leader) before anything more is served from it; a
 /// record that turns out to be a different incarnation voids the window.</para>
 ///
+/// <para>An update breaks the incarnation deliberately, which closes the window from the other side
+/// too: for one lease period after the break no actor will issue from the sequence at all, answering
+/// <c>MustRetry</c> instead. Without that hold, the new incarnation would start handing out values
+/// while a window reserved from the old one was still live somewhere — which is precisely the
+/// collision the break exists to prevent.</para>
+///
 /// <para>Requests are processed one at a time, which is what makes the block safe to hold without any
 /// lock, and replaces the per-name semaphore the previous read-modify-write loop needed.</para>
 /// </summary>
@@ -95,6 +101,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
                 SequenceRequestType.Reserve => await Reserve(message).ConfigureAwait(false),
                 SequenceRequestType.Create => await Create(message).ConfigureAwait(false),
                 SequenceRequestType.Delete => await Delete(message).ConfigureAwait(false),
+                SequenceRequestType.Update => await Update(message).ConfigureAwait(false),
                 SequenceRequestType.Invalidate => Invalidate(message),
                 _ => SequenceStaticResponses.Error
             };
@@ -138,7 +145,11 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
                 if (state is null)
                     return Static(loadError);
 
-                block = new(GetStorageKey(message.Name), state, revision);
+                block = new(GetStorageKey(message.Name), state, revision)
+                {
+                    AllocationHeldUntil = ResolveAllocationHold(state)
+                };
+
                 Admit(message.Name, block);
                 verifiedThisAttempt = true;
             }
@@ -152,6 +163,18 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             {
                 if (await Refresh(message.Name, block, cancellationToken).ConfigureAwait(false) is { } leaseError)
                     return leaseError;
+            }
+
+            // A sequence whose incarnation was broken within the last lease period may still have a
+            // window live on a node that has not revalidated. Nothing is issued until that window has
+            // certainly closed, so the two streams cannot overlap. Nothing durable was consumed, so
+            // MustRetry is the accurate answer rather than a failure.
+            if (block.AllocationHeldUntil != 0)
+            {
+                if (Stopwatch.GetTimestamp() < block.AllocationHeldUntil)
+                    return SequenceStaticResponses.MustRetry;
+
+                block.AllocationHeldUntil = 0;
             }
 
             if (block.State.Increment <= 0)
@@ -186,7 +209,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
 
             if (!fromBlock)
             {
-                if (!TryPlanBump(block.State, message.Count, configuration.SequencerBlockSize, out bump))
+                if (!TryPlanBump(block.State, message.Count, ResolveBlockSize(block.State), out bump))
                     return SequenceStaticResponses.MaxValueExceeded;
 
                 start = bump.Start;
@@ -351,6 +374,7 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             InitialValue = message.InitialValue,
             Increment = message.Increment,
             MaxValue = message.MaxValue,
+            BlockSize = message.BlockSize,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -392,6 +416,115 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
             KeyValueResponseType.DoesNotExist => SequenceStaticResponses.NotFound,
             _ => Static(Map(response))
         };
+    }
+
+    /// <summary>
+    /// Rewrites the sequence's parameters and breaks its incarnation, so that a block reserved from the
+    /// record being replaced is voided rather than drained by whoever holds it.
+    ///
+    /// <para>Returns as soon as the write is confirmed, carrying the instant the replaced incarnation's
+    /// windows expire. Waiting that interval out is the caller's half of the operation and happens in
+    /// <see cref="SequencerManager"/>: this actor serves every sequence hashed to it, one request at a
+    /// time, so sleeping here would stall allocations for sequences the update never touched.</para>
+    /// </summary>
+    private async Task<SequenceResponse> Update(SequenceRequest message)
+    {
+        // Any block reserved from the incarnation about to be replaced must not survive it.
+        blocks.Remove(message.Name);
+
+        CancellationToken cancellationToken = message.CancellationToken;
+
+        for (int attempt = 0; attempt < RetryDelays.Length; attempt++)
+        {
+            (SequenceResponseType loadError, SequenceState? state, long revision) =
+                await Read(message.Name, cancellationToken).ConfigureAwait(false);
+
+            if (state is null)
+                return Static(loadError);
+
+            // Folded into the record just read, on every attempt. Carrying a mutated state forward from
+            // an attempt that lost its compare-and-swap would bump the incarnation twice for one logical
+            // update, voiding a window a legitimate owner had re-established in between.
+            if (!TryApply(state, message.Update, Now()))
+                return SequenceStaticResponses.InvalidInput;
+
+            (KeyValueResponseType writeType, long writtenRevision, _) = await keyValues.SystemSetKeyValue(
+                GetStorageKey(message.Name),
+                SequenceStateCodec.Serialize(state),
+                revision,
+                KeyValueFlags.SetIfEqualToRevision,
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            // Dropped again after the round trip, whatever the outcome — the same second removal Delete
+            // performs, for the same reason: a reservation that raced the write must not be served from
+            // a block whose record may have moved underneath it.
+            blocks.Remove(message.Name);
+
+            if (writeType == KeyValueResponseType.Set)
+                return new(SequenceResponseType.Success, default, writtenRevision, StaleWindowDeadline());
+
+            // A lost compare-and-swap (or a partition asking for a retry) is re-read and re-folded. Every
+            // other outcome is the record's own answer and is reported as it is.
+            if (writeType is not (KeyValueResponseType.NotSet or KeyValueResponseType.MustRetry))
+                return Static(Map(writeType));
+
+            await Task.Delay(RetryDelays[attempt], cancellationToken).ConfigureAwait(false);
+        }
+
+        logger.LogWarning("Sequence update exhausted retries for {Name}", message.Name);
+
+        return SequenceStaticResponses.MustRetry;
+    }
+
+    /// <summary>
+    /// Folds a change set into <paramref name="state"/> and breaks its incarnation. Returns false when
+    /// the result would be a sequence that cannot allocate, in which case the caller discards the record
+    /// and writes nothing.
+    /// </summary>
+    private static bool TryApply(SequenceState state, SequenceUpdate update, HLCTimestamp now)
+    {
+        if (update.CurrentValue.HasValue)
+            state.CurrentValue = update.CurrentValue.Value;
+
+        if (update.Increment.HasValue)
+            state.Increment = update.Increment.Value;
+
+        if (update.InitialValue.HasValue)
+            state.InitialValue = update.InitialValue.Value;
+
+        if (update.RemoveMaxValue)
+            state.MaxValue = null;
+        else if (update.MaxValue.HasValue)
+            state.MaxValue = update.MaxValue.Value;
+
+        if (update.RemoveBlockSize)
+            state.BlockSize = null;
+        else if (update.BlockSize.HasValue)
+            state.BlockSize = update.BlockSize.Value;
+
+        // Checked against the record as it will be, not against the fields the caller happened to send:
+        // lowering the maximum below a current value the caller left alone is just as unusable as
+        // sending both, and only the folded record shows it.
+        if (state.Increment <= 0)
+            return false;
+
+        if (state.MaxValue.HasValue && state.MaxValue.Value < state.CurrentValue)
+            return false;
+
+        if (state.BlockSize is < 1)
+            return false;
+
+        state.Incarnation++;
+        state.IncarnatedAt = now;
+        state.UpdatedAt = now;
+
+        // Every recorded allocation belongs to the incarnation being replaced. Replaying one after a
+        // restart would hand back values the new incarnation has not reserved — a duplicate by a
+        // different route. A keyed retry arriving after an update allocates fresh values instead.
+        state.Idempotency.Clear();
+
+        return true;
     }
 
     /// <summary>
@@ -470,21 +603,79 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
     /// Replaces the block's view of the durable record. The reserved window survives — it was won by an
     /// earlier compare-and-swap and no other node can reissue it — unless the record turns out to be a
     /// different incarnation of the name, in which case the old window is void.
+    ///
+    /// <para><c>Incarnation</c> is what makes an update visible here. The other three fields all stay
+    /// put when a caller only moves the current value, so without the counter a <c>setval</c> would be
+    /// read as the same stream and the pre-update window would keep draining.</para>
     /// </summary>
-    private static void Adopt(SequenceBlock block, SequenceState state, long revision)
+    private void Adopt(SequenceBlock block, SequenceState state, long revision)
     {
         bool sameIncarnation = state.CreatedAt == block.State.CreatedAt
             && state.InitialValue == block.State.InitialValue
-            && state.Increment == block.State.Increment;
+            && state.Increment == block.State.Increment
+            && state.Incarnation == block.State.Incarnation;
 
         block.State = state;
         block.Revision = revision;
+        block.AllocationHeldUntil = ResolveAllocationHold(state);
 
         if (sameIncarnation)
             return;
 
         block.Current = state.CurrentValue;
         block.Ceiling = state.CurrentValue;
+    }
+
+    /// <summary>
+    /// Values this sequence reserves per compare-and-swap: its own setting when it carries one, and the
+    /// server-wide setting otherwise. Resolved per reservation rather than captured into the record, so
+    /// an operator who retunes the node sees existing sequences follow the new value.
+    /// </summary>
+    private int ResolveBlockSize(SequenceState state)
+    {
+        return state.BlockSize ?? configuration.SequencerBlockSize;
+    }
+
+    /// <summary>
+    /// Monotonic instant before which this actor must issue nothing from <paramref name="state"/>,
+    /// because a block reserved from the incarnation it replaced may still be live on a node that has
+    /// not revalidated. Zero when the record has never been updated, when the break is already older
+    /// than the lease, or when revalidation is disabled (in which case an update is refused outright,
+    /// so no record written by this build can carry a break that matters).
+    ///
+    /// <para>The elapsed time is the difference of the two hybrid-logical clocks' physical components.
+    /// That is a duration bound, never an ordering decision — the same use
+    /// <see cref="SequenceStateCodec.Prune"/> already makes of it to age idempotency entries out. A
+    /// peer whose clock runs ahead cannot hold the sequence longer than one lease, because the result
+    /// is clamped to it.</para>
+    /// </summary>
+    private long ResolveAllocationHold(SequenceState state)
+    {
+        TimeSpan lease = configuration.SequencerBlockLease;
+
+        if (lease <= TimeSpan.Zero || state.IncarnatedAt == HLCTimestamp.Zero)
+            return 0;
+
+        double leaseMs = lease.TotalMilliseconds;
+        double remainingMs = leaseMs - (Now().L - state.IncarnatedAt.L);
+
+        if (remainingMs <= 0)
+            return 0;
+
+        if (remainingMs > leaseMs)
+            remainingMs = leaseMs;
+
+        return Stopwatch.GetTimestamp() + (long)(remainingMs * Stopwatch.Frequency / 1000d);
+    }
+
+    /// <summary>
+    /// Monotonic instant at which a window reserved from the incarnation an update has just replaced can
+    /// no longer be served anywhere, measured from the confirmed write.
+    /// </summary>
+    private long StaleWindowDeadline()
+    {
+        return Stopwatch.GetTimestamp()
+            + (long)(configuration.SequencerBlockLease.TotalMilliseconds * Stopwatch.Frequency / 1000d);
     }
 
     // ── residency ───────────────────────────────────────────────────────────────────────────────
@@ -578,6 +769,14 @@ internal sealed class SequenceActor : IActor<SequenceRequest, SequenceResponse>
         public long Ceiling { get; set; }
 
         public long LastUsed { get; set; }
+
+        /// <summary>
+        /// Monotonic instant before which nothing may be issued from this sequence, because the record's
+        /// incarnation was broken recently enough that a window reserved from the previous one could
+        /// still be live elsewhere. Zero — the overwhelmingly common case — means no hold, which is why
+        /// the allocation path tests this field rather than recomputing the deadline from the record.
+        /// </summary>
+        public long AllocationHeldUntil { get; set; }
 
         /// <summary>
         /// Monotonic (<see cref="Stopwatch"/>) instant of the last successful durable round trip, from

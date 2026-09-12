@@ -1542,6 +1542,7 @@ public class KahunaClient
         long initialValue = 0,
         long increment = 1,
         long? maxValue = null,
+        int? blockSize = null,
         SequenceDurability durability = SequenceDurability.Persistent,
         CancellationToken cancellationToken = default
     )
@@ -1552,6 +1553,7 @@ public class KahunaClient
             initialValue,
             increment,
             maxValue,
+            blockSize,
             durability,
             cancellationToken
         ).ConfigureAwait(false);
@@ -1562,6 +1564,47 @@ public class KahunaClient
         KahunaSequence? sequence = await GetSequence(name, durability, cancellationToken).ConfigureAwait(false);
         if (sequence is null)
             throw new KahunaException("Created sequence could not be read", SequenceResponseType.Error);
+
+        return sequence;
+    }
+
+    /// <summary>
+    /// Rewrites a sequence's parameters — its current value above all — and starts a new incarnation of
+    /// its value stream. This is the <c>setval</c> / <c>ALTER SEQUENCE RESTART</c> operation.
+    ///
+    /// <para><b>The call takes about one server block lease to return, by design.</b> A node that has
+    /// lost the sequence's partition without noticing keeps issuing from the window it already reserved,
+    /// and only revalidation stops it. The server withholds success until that can no longer happen, so
+    /// a caller who is told the update succeeded can rely on it. For the same interval the sequence
+    /// answers allocations with a retryable refusal. Budget a client deadline above the server's
+    /// <c>SequencerBlockLease</c> (5 s by default) or a correct update reads as a timeout.</para>
+    ///
+    /// <para>Lowering the current value makes the sequence hand out values it has handed out before.
+    /// That is what the operation is for; uniqueness across two incarnations is the caller's to
+    /// decide.</para>
+    /// </summary>
+    /// <returns>The sequence as it reads after the update.</returns>
+    public async Task<KahunaSequence> UpdateSequence(
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability = SequenceDurability.Persistent,
+        CancellationToken cancellationToken = default
+    )
+    {
+        (SequenceResponseType response, _, _) = await communication.UpdateSequence(
+            GetUrlFor(KahunaRoutingDomain.Sequence, name),
+            name,
+            update,
+            durability,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (response != SequenceResponseType.Success)
+            throw new KahunaException("Failed to update sequence: " + response, response);
+
+        KahunaSequence? sequence = await GetSequence(name, durability, cancellationToken).ConfigureAwait(false);
+        if (sequence is null)
+            throw new KahunaException("Updated sequence could not be read", SequenceResponseType.Error);
 
         return sequence;
     }

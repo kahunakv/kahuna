@@ -2242,7 +2242,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         return ((SequenceResponseType)response.Type, ToReadOnlySequenceEntry(response.Sequence), response.TimeElapsedMs);
     }
 
-    public async Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken)
+    public async Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken)
     {
         GrpcCreateSequenceRequest request = new()
         {
@@ -2255,9 +2255,50 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         if (maxValue.HasValue)
             request.MaxValue = maxValue.Value;
 
+        if (blockSize.HasValue)
+            request.BlockSize = blockSize.Value;
+
         GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
         Sequencer.SequencerClient client = GetSequencerClient(channel);
         GrpcSequenceResponse response = await client.CreateSequenceAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
+
+        return ((SequenceResponseType)response.Type, response.Revision, response.TimeElapsedMs);
+    }
+
+    /// <summary>
+    /// Rewrites a sequence's parameters. The server withholds success for one block lease, so this call
+    /// takes seconds by design and is sent with no deadline beyond the caller's token.
+    /// </summary>
+    public async Task<(SequenceResponseType, long, int)> UpdateSequence(string url, string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        GrpcUpdateSequenceRequest request = new()
+        {
+            Name = name,
+            RemoveMaxValue = update.RemoveMaxValue,
+            RemoveBlockSize = update.RemoveBlockSize,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (update.CurrentValue.HasValue)
+            request.CurrentValue = update.CurrentValue.Value;
+
+        if (update.Increment.HasValue)
+            request.Increment = update.Increment.Value;
+
+        if (update.InitialValue.HasValue)
+            request.InitialValue = update.InitialValue.Value;
+
+        if (update.MaxValue.HasValue)
+            request.MaxValue = update.MaxValue.Value;
+
+        if (update.BlockSize.HasValue)
+            request.BlockSize = update.BlockSize.Value;
+
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        Sequencer.SequencerClient client = GetSequencerClient(channel);
+        GrpcSequenceResponse response = await client.UpdateSequenceAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         LearnRoute(KahunaRoutingDomain.Sequence, name, response.Route, url);
 
@@ -2335,7 +2376,9 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             entry.Revision,
             (SequenceDurability)entry.Durability,
             new(entry.CreatedAtNode, entry.CreatedAtPhysical, entry.CreatedAtCounter),
-            new(entry.UpdatedAtNode, entry.UpdatedAtPhysical, entry.UpdatedAtCounter)
+            new(entry.UpdatedAtNode, entry.UpdatedAtPhysical, entry.UpdatedAtCounter),
+            entry.HasBlockSize ? entry.BlockSize : null,
+            entry.Incarnation
         );
     }
 

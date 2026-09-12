@@ -22,11 +22,22 @@ public sealed partial class KahunaManager
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return sequencer.LocateAndCreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+        return sequencer.LocateAndCreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, long)> LocateAndUpdateSequence(
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.LocateAndUpdateSequence(name, update, durability, cancellationToken);
     }
 
     public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(
@@ -73,11 +84,22 @@ public sealed partial class KahunaManager
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
     {
-        return sequencer.CreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+        return sequencer.CreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
+    }
+
+    public Task<(SequenceResponseType, long)> UpdateSequence(
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        return sequencer.UpdateSequence(name, update, durability, cancellationToken);
     }
 
     public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(

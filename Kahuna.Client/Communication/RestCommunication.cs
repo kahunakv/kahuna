@@ -1730,11 +1730,36 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         return (response.Type, response.Sequence, (int)stopwatch.GetElapsedMilliseconds());
     }
 
-    public async Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken)
+    public async Task<(SequenceResponseType, long, int)> CreateSequence(string url, string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken)
     {
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        KahunaSequenceCreateRequest request = new() { Name = name, InitialValue = initialValue, Increment = increment, MaxValue = maxValue, Durability = durability };
+        KahunaSequenceCreateRequest request = new() { Name = name, InitialValue = initialValue, Increment = increment, MaxValue = maxValue, BlockSize = blockSize, Durability = durability };
         KahunaSequenceResponse response = await PostSequenceRequest(url, "create", name, request, KahunaJsonContext.Default.KahunaSequenceCreateRequest, cancellationToken).ConfigureAwait(false);
+        return (response.Type, response.Revision, (int)stopwatch.GetElapsedMilliseconds());
+    }
+
+    /// <summary>
+    /// Rewrites a sequence's parameters. The server withholds success for one block lease, so this call
+    /// takes seconds by design.
+    /// </summary>
+    public async Task<(SequenceResponseType, long, int)> UpdateSequence(string url, string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+        KahunaSequenceUpdateRequest request = new()
+        {
+            Name = name,
+            CurrentValue = update.CurrentValue,
+            Increment = update.Increment,
+            InitialValue = update.InitialValue,
+            MaxValue = update.MaxValue,
+            RemoveMaxValue = update.RemoveMaxValue,
+            BlockSize = update.BlockSize,
+            RemoveBlockSize = update.RemoveBlockSize,
+            Durability = durability
+        };
+
+        KahunaSequenceResponse response = await PostSequenceRequest(url, "update", name, request, KahunaJsonContext.Default.KahunaSequenceUpdateRequest, cancellationToken).ConfigureAwait(false);
         return (response.Type, response.Revision, (int)stopwatch.GetElapsedMilliseconds());
     }
 

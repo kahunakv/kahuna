@@ -14,6 +14,7 @@ using Kahuna.Client;
 using Kahuna.Control.Commands;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
 using RadLine;
 using Spectre.Console;
 
@@ -99,6 +100,7 @@ public static class InteractiveConsole
                 "eget-lock",
                 // sequences
                 "create-sequence",
+                "update-sequence",
                 "get-sequence",
                 "next-sequence",
                 "reserve-sequence",
@@ -337,6 +339,12 @@ public static class InteractiveConsole
                 if (commandTrim.StartsWith("reserve-sequence ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await ReserveSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.StartsWith("update-sequence ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await UpdateSequence(connection, history, commandTrim);
                     continue;
                 }
 
@@ -609,16 +617,48 @@ public static class InteractiveConsole
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2)
         {
-            AnsiConsole.MarkupLine("[yellow]usage: create-sequence <name> [initial-value] [increment] [max-value][/]\n");
+            AnsiConsole.MarkupLine("[yellow]usage: create-sequence <name> [initial-value] [increment] [max-value] [block-size][/]\n");
             return;
         }
 
         long initialValue = parts.Length > 2 ? long.Parse(parts[2]) : 0;
         long increment = parts.Length > 3 ? long.Parse(parts[3]) : 1;
         long? maxValue = parts.Length > 4 ? long.Parse(parts[4]) : null;
+        int? blockSize = parts.Length > 5 ? int.Parse(parts[5]) : null;
 
-        KahunaSequence sequence = await connection.CreateSequence(parts[1], initialValue, increment, maxValue);
+        KahunaSequence sequence = await connection.CreateSequence(parts[1], initialValue, increment, maxValue, blockSize);
         WriteSequence(sequence, "created");
+    }
+
+    /// <summary>
+    /// <c>update-sequence &lt;name&gt; &lt;current-value&gt; [increment] [max-value] [block-size]</c>.
+    /// The command pauses for several seconds: the server withholds success until a block reserved from
+    /// the replaced incarnation can no longer be served anywhere.
+    /// </summary>
+    private static async Task UpdateSequence(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: update-sequence <name> <current-value> [increment] [max-value] [block-size][/]\n");
+            return;
+        }
+
+        SequenceUpdate update = new(
+            long.Parse(parts[2]),
+            parts.Length > 3 ? long.Parse(parts[3]) : null,
+            null,
+            parts.Length > 4 ? long.Parse(parts[4]) : null,
+            false,
+            parts.Length > 5 ? int.Parse(parts[5]) : null
+        );
+
+        AnsiConsole.MarkupLine("[grey]waiting out the block lease before the update is confirmed…[/]");
+
+        KahunaSequence sequence = await connection.UpdateSequence(parts[1], update);
+        WriteSequence(sequence, "updated");
     }
 
     private static async Task GetSequence(KahunaClient connection, List<string> history, string commandTrim)
@@ -707,13 +747,15 @@ public static class InteractiveConsole
     private static void WriteSequence(KahunaSequence sequence, string action)
     {
         AnsiConsole.MarkupLine(
-            "r{0} [cyan]{1}[/] [lightpink3]{2}[/] current [cyan]{3}[/] increment {4} max {5}\n",
+            "r{0} [cyan]{1}[/] [lightpink3]{2}[/] current [cyan]{3}[/] increment {4} max {5} block {6} incarnation {7}\n",
             sequence.Revision,
             action,
             Markup.Escape(sequence.Name),
             sequence.CurrentValue,
             sequence.Increment,
-            sequence.MaxValue?.ToString() ?? "-"
+            sequence.MaxValue?.ToString() ?? "-",
+            sequence.BlockSize?.ToString() ?? "default",
+            sequence.Incarnation
         );
     }
 

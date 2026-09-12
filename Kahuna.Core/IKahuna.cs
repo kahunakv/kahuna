@@ -313,7 +313,13 @@ public interface IKahuna
 
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken);
 
-    public Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken);
+    public Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Rewrites a sequence's parameters and breaks its identity as a value stream. Takes about one
+    /// <c>SequencerBlockLease</c> to answer by design; see <c>SequencerManager.UpdateSequence</c>.
+    /// </summary>
+    public Task<(SequenceResponseType, long)> LocateAndUpdateSequence(string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken);
 
     public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken);
 
@@ -326,7 +332,9 @@ public interface IKahuna
 
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken);
 
-    public Task<(SequenceResponseType, long)> CreateSequence(string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken);
+    public Task<(SequenceResponseType, long)> CreateSequence(string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken);
+
+    public Task<(SequenceResponseType, long)> UpdateSequence(string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken);
 
     public Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken);
 

@@ -62,6 +62,7 @@ internal sealed class SequenceLocator
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
@@ -72,9 +73,32 @@ internal sealed class SequenceLocator
             return (SequenceResponseType.MustRetry, -1);
 
         if (servedLocally)
-            return await manager.CreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken).ConfigureAwait(false);
+            return await manager.CreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken).ConfigureAwait(false);
 
-        return await interNodeCommunication.CreateSequence(leader, name, initialValue, increment, maxValue, durability, cancellationToken).ConfigureAwait(false);
+        return await interNodeCommunication.CreateSequence(leader, name, initialValue, increment, maxValue, blockSize, durability, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Routes an update to the sequence's owner. The owner holds the answer back for one block lease
+    /// before reporting success, so a forwarded update occupies its inter-node call for that long by
+    /// design; every transport on this path must allow for it.
+    /// </summary>
+    public async Task<(SequenceResponseType, long)> LocateAndUpdateSequence(
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        (bool servedLocally, string leader) = await ResolveOwner(name, confirmLeadership: false, cancellationToken).ConfigureAwait(false);
+
+        if (leader.Length == 0)
+            return (SequenceResponseType.MustRetry, -1);
+
+        if (servedLocally)
+            return await manager.UpdateSequence(name, update, durability, cancellationToken).ConfigureAwait(false);
+
+        return await interNodeCommunication.UpdateSequence(leader, name, update, durability, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(

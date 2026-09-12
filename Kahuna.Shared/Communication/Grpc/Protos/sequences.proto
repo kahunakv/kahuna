@@ -4,6 +4,7 @@ import "Communication/Grpc/Protos/routing.proto";
 
 service Sequencer {
   rpc CreateSequence (GrpcCreateSequenceRequest) returns (GrpcSequenceResponse);
+  rpc UpdateSequence (GrpcUpdateSequenceRequest) returns (GrpcSequenceResponse);
   rpc GetSequence (GrpcGetSequenceRequest) returns (GrpcSequenceResponse);
   rpc NextSequenceValue (GrpcNextSequenceRequest) returns (GrpcSequenceAllocationResponse);
   rpc ReserveSequenceRange (GrpcReserveSequenceRangeRequest) returns (GrpcSequenceAllocationResponse);
@@ -16,6 +17,22 @@ message GrpcCreateSequenceRequest {
   int64 Increment = 3;
   optional int64 MaxValue = 4;
   GrpcSequenceDurability Durability = 5;
+  optional int32 BlockSize = 6;
+}
+
+// Every field of the change set is optional: an absent one leaves that parameter of the record alone.
+// MaxValue and BlockSize are optional at rest as well, so each carries a companion Clear flag that
+// distinguishes "leave it alone" from "remove the setting".
+message GrpcUpdateSequenceRequest {
+  string Name = 1;
+  optional int64 CurrentValue = 2;
+  optional int64 Increment = 3;
+  optional int64 InitialValue = 4;
+  optional int64 MaxValue = 5;
+  bool RemoveMaxValue = 6;
+  optional int32 BlockSize = 7;
+  bool RemoveBlockSize = 8;
+  GrpcSequenceDurability Durability = 9;
 }
 
 message GrpcGetSequenceRequest {
@@ -55,6 +72,8 @@ message GrpcSequenceEntry {
   int32 UpdatedAtNode = 11;
   int64 UpdatedAtPhysical = 12;
   uint32 UpdatedAtCounter = 13;
+  optional int32 BlockSize = 14;
+  int64 Incarnation = 15;
 }
 
 message GrpcSequenceAllocation {

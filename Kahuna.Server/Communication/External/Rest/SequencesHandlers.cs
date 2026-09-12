@@ -21,6 +21,27 @@ public static class SequencesHandlers
                 request.InitialValue,
                 request.Increment,
                 request.MaxValue,
+                request.BlockSize,
+                request.Durability,
+                cancellationToken
+            );
+
+            return new KahunaSequenceResponse { Type = response, Revision = revision, Route = SequenceRoute(capture, request.Name) };
+        });
+
+        // Answers in about one SequencerBlockLease rather than immediately: the owning node withholds
+        // success until a block reserved from the replaced incarnation can no longer be served anywhere.
+        // See SequencerManager.UpdateSequence.
+        app.MapPost("/v1/sequences/update", async (KahunaSequenceUpdateRequest request, IKahuna kahuna, CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return new KahunaSequenceResponse { Type = SequenceResponseType.InvalidInput };
+
+            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
+            (SequenceResponseType response, long revision) = await kahuna.LocateAndUpdateSequence(
+                request.Name,
+                request.ToUpdate(),
                 request.Durability,
                 cancellationToken
             );

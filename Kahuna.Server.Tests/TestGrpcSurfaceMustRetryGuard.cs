@@ -165,6 +165,30 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     }
 
     [Theory]
+    [MemberData(nameof(RetryableEscapes))]
+    public async Task UpdateSequence_RetryableEscape_AnswersMustRetry(Exception escape)
+    {
+        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+
+        GrpcSequenceResponse response = await service.UpdateSequence(
+            new GrpcUpdateSequenceRequest { Name = "orders", CurrentValue = 10 }, new StubServerCallContext());
+
+        Assert.Equal(SequenceResponseType.MustRetry, (SequenceResponseType)response.Type);
+    }
+
+    [Theory]
+    [MemberData(nameof(NonRetryableEscapes))]
+    public async Task UpdateSequence_NonRetryableEscape_KeepsPropagating(Exception escape)
+    {
+        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+
+        Exception thrown = await Assert.ThrowsAnyAsync<Exception>(() => service.UpdateSequence(
+            new GrpcUpdateSequenceRequest { Name = "orders", CurrentValue = 10 }, new StubServerCallContext()));
+
+        Assert.Same(escape, thrown);
+    }
+
+    [Theory]
     [MemberData(nameof(NonRetryableEscapes))]
     public async Task NextSequenceValue_NonRetryableEscape_KeepsPropagating(Exception escape)
     {
@@ -210,8 +234,12 @@ public sealed class TestGrpcSurfaceMustRetryGuard
             => throw escape;
 
         public override Task<(SequenceResponseType, long)> LocateAndCreateSequence(
-            string name, long initialValue, long increment, long? maxValue, SequenceDurability durability,
+            string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability,
             CancellationToken cancellationToken)
+            => throw escape;
+
+        public override Task<(SequenceResponseType, long)> LocateAndUpdateSequence(
+            string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken)
             => throw escape;
     }
 

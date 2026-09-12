@@ -15,11 +15,22 @@ public static class SequenceCommand
 {
     private static readonly JsonSerializerOptions JsonSerializerOptions = new(JsonSerializerDefaults.Web);
 
-    public static async Task Create(KahunaClient connection, string name, long initialValue, long increment, long? maxValue, string? format)
+    public static async Task Create(KahunaClient connection, string name, long initialValue, long increment, long? maxValue, int? blockSize, string? format)
     {
-        KahunaSequence result = await connection.CreateSequence(name, initialValue, increment, maxValue, SequenceDurability.Persistent);
+        KahunaSequence result = await connection.CreateSequence(name, initialValue, increment, maxValue, blockSize, SequenceDurability.Persistent);
 
         WriteSequence(result, "created", format);
+    }
+
+    /// <summary>
+    /// Rewrites a sequence's parameters. The server holds the answer for one block lease before it
+    /// reports success, so this command pauses for several seconds on purpose.
+    /// </summary>
+    public static async Task Update(KahunaClient connection, string name, SequenceUpdate update, string? format)
+    {
+        KahunaSequence result = await connection.UpdateSequence(name, update, SequenceDurability.Persistent);
+
+        WriteSequence(result, "updated", format);
     }
 
     public static async Task Get(KahunaClient connection, string name, string? format)
@@ -74,13 +85,15 @@ public static class SequenceCommand
         }
 
         Console.WriteLine(
-            "r{0} {1} {2} current {3} increment {4} max {5}",
+            "r{0} {1} {2} current {3} increment {4} max {5} block {6} incarnation {7}",
             result.Revision,
             action,
             result.Name,
             result.CurrentValue,
             result.Increment,
-            result.MaxValue?.ToString() ?? "-"
+            result.MaxValue?.ToString() ?? "-",
+            result.BlockSize?.ToString() ?? "default",
+            result.Incarnation
         );
     }
 

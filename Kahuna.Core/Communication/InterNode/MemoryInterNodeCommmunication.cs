@@ -194,6 +194,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
@@ -201,7 +202,25 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.CreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+            return await kahunaNode.CreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
+        }
+
+        throw new KahunaServerException($"The node {node} does not exist.");
+    }
+
+    /// <summary>Forwards a sequence update to the node that owns the sequence's partition.</summary>
+    public async Task<(SequenceResponseType, long)> UpdateSequence(
+        string node,
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
+        {
+            Interlocked.Increment(ref sequenceForwardCallCount);
+            return await kahunaNode.UpdateSequence(name, update, durability, cancellationToken);
         }
 
         throw new KahunaServerException($"The node {node} does not exist.");

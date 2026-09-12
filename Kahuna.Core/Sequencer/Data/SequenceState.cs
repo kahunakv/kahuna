@@ -25,6 +25,29 @@ internal sealed class SequenceState
 
     public long? MaxValue { get; set; }
 
+    /// <summary>
+    /// Values reserved per compare-and-swap for this one sequence. Null means the server-wide
+    /// <c>SequencerBlockSize</c> applies, resolved at every reservation rather than frozen into the
+    /// record — an operator who retunes the node must see old sequences follow the new setting.
+    /// <c>1</c> is gap-free at one commit, with its fsync, per value.
+    /// </summary>
+    public int? BlockSize { get; set; }
+
+    /// <summary>
+    /// How many times this sequence's identity as a value stream has been deliberately broken. Bumped
+    /// only by an update; never by an ordinary reservation, which is why a block holder can compare it
+    /// to decide whether the window it reserved still belongs to the record it is looking at.
+    /// </summary>
+    public long Incarnation { get; set; }
+
+    /// <summary>
+    /// When the last break happened. <see cref="HLCTimestamp.Zero"/> on a record that has never been
+    /// updated. No node may issue values from the sequence until <c>SequencerBlockLease</c> has passed
+    /// since this instant: a block reserved from the previous incarnation, held on a node that has not
+    /// yet revalidated, is still live until then. Used as a duration bound only, never to order events.
+    /// </summary>
+    public HLCTimestamp IncarnatedAt { get; set; }
+
     public HLCTimestamp CreatedAt { get; set; }
 
     public HLCTimestamp UpdatedAt { get; set; }

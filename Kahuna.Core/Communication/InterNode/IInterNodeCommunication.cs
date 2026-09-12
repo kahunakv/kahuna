@@ -24,7 +24,9 @@ public interface IInterNodeCommunication
 
     public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string node, string resource, LockDurability durability, CancellationToken cancellationToken);
 
-    public Task<(SequenceResponseType, long)> CreateSequence(string node, string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken);
+    public Task<(SequenceResponseType, long)> CreateSequence(string node, string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken);
+
+    public Task<(SequenceResponseType, long)> UpdateSequence(string node, string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken);
 
     public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(string node, string name, SequenceDurability durability, CancellationToken cancellationToken);
 

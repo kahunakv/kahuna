@@ -12,14 +12,26 @@ internal sealed class SequenceResponse
     /// <summary>Allocated range; default for every non-<c>Reserve</c> operation and every failure.</summary>
     public SequenceAllocation Allocation { get; }
 
-    /// <summary>Record revision produced by a create; -1 otherwise.</summary>
+    /// <summary>Record revision produced by a create or an update; -1 otherwise.</summary>
     public long Revision { get; }
 
-    public SequenceResponse(SequenceResponseType type, SequenceAllocation allocation = default, long revision = -1)
+    /// <summary>
+    /// Monotonic (<see cref="System.Diagnostics.Stopwatch"/>) instant at which a block reserved from the
+    /// incarnation this update replaced can no longer be served anywhere, so the caller may be told the
+    /// update succeeded. Zero for every other operation.
+    ///
+    /// <para>The actor returns it rather than waiting on it: a <see cref="SequenceActor"/> serves every
+    /// sequence hashed to it and processes one request at a time, so sleeping out a lease period inside
+    /// it would stall allocations for unrelated sequences.</para>
+    /// </summary>
+    public long StaleWindowClosesAt { get; }
+
+    public SequenceResponse(SequenceResponseType type, SequenceAllocation allocation = default, long revision = -1, long staleWindowClosesAt = 0)
     {
         Type = type;
         Allocation = allocation;
         Revision = revision;
+        StaleWindowClosesAt = staleWindowClosesAt;
     }
 }
 

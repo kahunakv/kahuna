@@ -2345,6 +2345,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         long initialValue,
         long increment,
         long? maxValue,
+        int? blockSize,
         SequenceDurability durability,
         CancellationToken cancellationToken
     )
@@ -2360,8 +2361,53 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (maxValue.HasValue)
             request.MaxValue = maxValue.Value;
 
+        if (blockSize.HasValue)
+            request.BlockSize = blockSize.Value;
+
         GrpcSequenceResponse response = await GetSequencerClient(node)
             .CreateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+
+        return ((SequenceResponseType)response.Type, response.Revision);
+    }
+
+    /// <summary>
+    /// Forwards a sequence update to the node that owns the sequence's partition. The owner holds its
+    /// answer back for one block lease, so this call is expected to take that long and carries no
+    /// deadline of its own beyond the caller's token.
+    /// </summary>
+    public async Task<(SequenceResponseType, long)> UpdateSequence(
+        string node,
+        string name,
+        SequenceUpdate update,
+        SequenceDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcUpdateSequenceRequest request = new()
+        {
+            Name = name,
+            RemoveMaxValue = update.RemoveMaxValue,
+            RemoveBlockSize = update.RemoveBlockSize,
+            Durability = (GrpcSequenceDurability)durability
+        };
+
+        if (update.CurrentValue.HasValue)
+            request.CurrentValue = update.CurrentValue.Value;
+
+        if (update.Increment.HasValue)
+            request.Increment = update.Increment.Value;
+
+        if (update.InitialValue.HasValue)
+            request.InitialValue = update.InitialValue.Value;
+
+        if (update.MaxValue.HasValue)
+            request.MaxValue = update.MaxValue.Value;
+
+        if (update.BlockSize.HasValue)
+            request.BlockSize = update.BlockSize.Value;
+
+        GrpcSequenceResponse response = await GetSequencerClient(node)
+            .UpdateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
 
         return ((SequenceResponseType)response.Type, response.Revision);
     }
@@ -2399,7 +2445,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             entry.Revision,
             (SequenceDurability)entry.Durability,
             new HLCTimestamp(entry.CreatedAtNode, entry.CreatedAtPhysical, entry.CreatedAtCounter),
-            new HLCTimestamp(entry.UpdatedAtNode, entry.UpdatedAtPhysical, entry.UpdatedAtCounter)
+            new HLCTimestamp(entry.UpdatedAtNode, entry.UpdatedAtPhysical, entry.UpdatedAtCounter),
+            entry.HasBlockSize ? entry.BlockSize : null,
+            entry.Incarnation
         ));
     }
 

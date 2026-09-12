@@ -834,9 +834,10 @@ public sealed class TestSequences
         string name,
         long initialValue = 0,
         long increment = 1,
-        long? maxValue = null
+        long? maxValue = null,
+        int? blockSize = null
     ) => node.Kahuna.LocateAndCreateSequence(
-        name, initialValue, increment, maxValue, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+        name, initialValue, increment, maxValue, blockSize, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
 
     private static Task<(SequenceResponseType, SequenceAllocation)> Next(
         EmbeddedKahunaNode node,

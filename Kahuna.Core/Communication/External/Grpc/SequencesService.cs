@@ -56,6 +56,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 request.InitialValue,
                 request.Increment,
                 request.HasMaxValue ? request.MaxValue : null,
+                request.HasBlockSize ? request.BlockSize : null,
                 (SequenceDurability)request.Durability,
                 context.CancellationToken)
             : sequences.LocateAndCreateSequence(
@@ -63,6 +64,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
                 request.InitialValue,
                 request.Increment,
                 request.HasMaxValue ? request.MaxValue : null,
+                request.HasBlockSize ? request.BlockSize : null,
                 (SequenceDurability)request.Durability,
                 context.CancellationToken));
 
@@ -76,6 +78,49 @@ public sealed class SequencesService : Sequencer.SequencerBase
         AttachRoute(createResponse, capture, request.Name);
 
         return createResponse;
+    }
+
+    public override Task<GrpcSequenceResponse> UpdateSequence(GrpcUpdateSequenceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.UpdateSequenceCore(r, c), static _ => SequenceMustRetry.Sequence());
+
+    /// <summary>
+    /// Rewrites a sequence's parameters. The owning node withholds its answer for one block lease, so
+    /// this call legitimately takes seconds; a caller's deadline must allow for that or a correct
+    /// operation reads as a timeout.
+    /// </summary>
+    private async Task<GrpcSequenceResponse> UpdateSequenceCore(GrpcUpdateSequenceRequest request, ServerCallContext context)
+    {
+        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
+
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return new() { Type = GrpcSequenceResponseType.SequenceInvalidInput, TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds() };
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
+        SequenceUpdate update = new(
+            request.HasCurrentValue ? request.CurrentValue : null,
+            request.HasIncrement ? request.Increment : null,
+            request.HasInitialValue ? request.InitialValue : null,
+            request.HasMaxValue ? request.MaxValue : null,
+            request.RemoveMaxValue,
+            request.HasBlockSize ? request.BlockSize : null,
+            request.RemoveBlockSize
+        );
+
+        (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context)
+            ? sequences.UpdateSequence(request.Name, update, (SequenceDurability)request.Durability, context.CancellationToken)
+            : sequences.LocateAndUpdateSequence(request.Name, update, (SequenceDurability)request.Durability, context.CancellationToken));
+
+        GrpcSequenceResponse updateResponse = new()
+        {
+            Type = (GrpcSequenceResponseType)response,
+            Revision = revision,
+            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
+        };
+
+        AttachRoute(updateResponse, capture, request.Name);
+
+        return updateResponse;
     }
 
     public override Task<GrpcSequenceResponse> GetSequence(GrpcGetSequenceRequest request, ServerCallContext context)
@@ -236,11 +281,15 @@ public sealed class SequencesService : Sequencer.SequencerBase
             CreatedAtCounter = sequence.CreatedAt.C,
             UpdatedAtNode = sequence.UpdatedAt.N,
             UpdatedAtPhysical = sequence.UpdatedAt.L,
-            UpdatedAtCounter = sequence.UpdatedAt.C
+            UpdatedAtCounter = sequence.UpdatedAt.C,
+            Incarnation = sequence.Incarnation
         };
 
         if (sequence.MaxValue.HasValue)
             entry.MaxValue = sequence.MaxValue.Value;
+
+        if (sequence.BlockSize.HasValue)
+            entry.BlockSize = sequence.BlockSize.Value;
 
         return entry;
     }

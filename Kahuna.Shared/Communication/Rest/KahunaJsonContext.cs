@@ -32,6 +32,7 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KeyValueTransactionRequest))]
 [JsonSerializable(typeof(KahunaSequenceCreateRequest))]
 [JsonSerializable(typeof(KahunaSequenceNameRequest))]
+[JsonSerializable(typeof(KahunaSequenceUpdateRequest))]
 [JsonSerializable(typeof(KahunaSequenceNextRequest))]
 [JsonSerializable(typeof(KahunaSequenceReserveRequest))]
 [JsonSerializable(typeof(KahunaSequenceResponse))]

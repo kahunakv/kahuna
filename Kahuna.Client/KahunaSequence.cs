@@ -15,6 +15,16 @@ public sealed class KahunaSequence
 
     public long? MaxValue { get; }
 
+    /// <summary>Values this sequence reserves per commit, or null when the server-wide setting applies.</summary>
+    public int? BlockSize { get; }
+
+    /// <summary>
+    /// How many times an update has deliberately broken this sequence's value stream. Values carrying
+    /// different incarnations come from streams the caller chose to separate, so whether they overlap
+    /// is the caller's decision rather than a guarantee.
+    /// </summary>
+    public long Incarnation { get; }
+
     public long Revision { get; }
 
     public SequenceDurability Durability { get; }
@@ -30,6 +40,8 @@ public sealed class KahunaSequence
         InitialValue = entry.InitialValue;
         Increment = entry.Increment;
         MaxValue = entry.MaxValue;
+        BlockSize = entry.BlockSize;
+        Incarnation = entry.Incarnation;
         Revision = entry.Revision;
         Durability = entry.Durability;
         CreatedAt = entry.CreatedAt;

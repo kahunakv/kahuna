@@ -19,14 +19,18 @@ namespace Kahuna.Server.Sequencer.Data;
 ///   <item><b>Version 1</b> — binary, idempotency entries without a timestamp.</item>
 ///   <item><b>Version 2</b> — binary, each idempotency entry carries the timestamp its retention
 ///   window is measured from.</item>
+///   <item><b>Version 3</b> — binary, the record additionally carries its per-sequence block size and
+///   the incarnation counter with the instant of the last break.</item>
 /// </list>
-/// <para>Only version 2 is ever written; reading an older record and writing it back migrates it.</para>
+/// <para>Only version 3 is ever written; reading an older record and writing it back migrates it.</para>
 /// </summary>
 internal static class SequenceStateCodec
 {
     private const byte BinaryFormatVersionWithoutEntryTimestamps = 1;
 
-    private const byte BinaryFormatVersion = 2;
+    private const byte BinaryFormatVersionWithoutIncarnation = 2;
+
+    private const byte BinaryFormatVersion = 3;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -43,6 +47,8 @@ internal static class SequenceStateCodec
             + 2 + nameLen                                     // name
             + 8 + 8 + 8                                       // CurrentValue, InitialValue, Increment
             + 1 + (state.MaxValue.HasValue ? 8 : 0)           // MaxValue flag + optional value
+            + 1 + (state.BlockSize.HasValue ? 4 : 0)          // BlockSize flag + optional value
+            + 8 + 16                                           // Incarnation, IncarnatedAt
             + 16 + 16                                          // CreatedAt, UpdatedAt
             + 4;                                               // idempotency count
 
@@ -72,6 +78,19 @@ internal static class SequenceStateCodec
         {
             buf[pos++] = 0;
         }
+
+        if (state.BlockSize.HasValue)
+        {
+            buf[pos++] = 1;
+            BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), state.BlockSize.Value); pos += 4;
+        }
+        else
+        {
+            buf[pos++] = 0;
+        }
+
+        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), state.Incarnation); pos += 8;
+        WriteHlcTimestamp(buf, ref pos, state.IncarnatedAt);
 
         WriteHlcTimestamp(buf, ref pos, state.CreatedAt);
         WriteHlcTimestamp(buf, ref pos, state.UpdatedAt);
@@ -185,10 +204,11 @@ internal static class SequenceStateCodec
             int pos = 0;
 
             byte version = span[pos++];
-            if (version is not (BinaryFormatVersion or BinaryFormatVersionWithoutEntryTimestamps))
+            if (version is not (BinaryFormatVersion or BinaryFormatVersionWithoutIncarnation or BinaryFormatVersionWithoutEntryTimestamps))
                 return null;
 
-            bool hasEntryTimestamps = version == BinaryFormatVersion;
+            bool hasEntryTimestamps = version >= BinaryFormatVersionWithoutIncarnation;
+            bool hasIncarnation = version >= BinaryFormatVersion;
 
             ushort nameLen = BinaryPrimitives.ReadUInt16LittleEndian(span[pos..]); pos += 2;
             string name = Encoding.UTF8.GetString(span.Slice(pos, nameLen)); pos += nameLen;
@@ -201,6 +221,21 @@ internal static class SequenceStateCodec
             if (span[pos++] != 0)
             {
                 maxValue = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
+            }
+
+            int? blockSize = null;
+            long incarnation = 0;
+            HLCTimestamp incarnatedAt = HLCTimestamp.Zero;
+
+            if (hasIncarnation)
+            {
+                if (span[pos++] != 0)
+                {
+                    blockSize = BinaryPrimitives.ReadInt32LittleEndian(span[pos..]); pos += 4;
+                }
+
+                incarnation = BinaryPrimitives.ReadInt64LittleEndian(span[pos..]); pos += 8;
+                incarnatedAt = ReadHlcTimestamp(span, ref pos);
             }
 
             HLCTimestamp createdAt = ReadHlcTimestamp(span, ref pos);
@@ -242,6 +277,9 @@ internal static class SequenceStateCodec
                 InitialValue = initialValue,
                 Increment = increment,
                 MaxValue = maxValue,
+                BlockSize = blockSize,
+                Incarnation = incarnation,
+                IncarnatedAt = incarnatedAt,
                 CreatedAt = createdAt,
                 UpdatedAt = updatedAt,
                 Idempotency = idempotency

@@ -8,6 +8,7 @@
 
 using CommandLine;
 using Kahuna.Client;
+using Kahuna.Shared.Sequences;
 using Kahuna.Control;
 using Kahuna.Control.Commands;
 using Spectre.Console;
@@ -105,7 +106,26 @@ if (IsSingleCommand(opts))
 
         if (!string.IsNullOrEmpty(opts.CreateSequence))
         {
-            await SequenceCommand.Create(connection, opts.CreateSequence, opts.InitialValue, opts.Increment, opts.MaxValue, format);
+            await SequenceCommand.Create(connection, opts.CreateSequence, opts.InitialValue, opts.Increment ?? 1, opts.MaxValue, opts.BlockSize, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.UpdateSequence))
+        {
+            await SequenceCommand.Update(
+                connection,
+                opts.UpdateSequence,
+                new SequenceUpdate(
+                    opts.CurrentValue,
+                    opts.Increment,
+                    null,
+                    opts.MaxValue,
+                    opts.RemoveMaxValue,
+                    opts.BlockSize,
+                    opts.RemoveBlockSize
+                ),
+                format
+            );
             return;
         }
 
@@ -382,6 +402,9 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (!string.IsNullOrEmpty(kahunaControlOptions.DeleteSequence))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.UpdateSequence))
         return true;
 
     if (kahunaControlOptions.ClusterMembers)
