@@ -81,13 +81,19 @@ internal sealed class DurableMaintenanceService
     // not put every tick back over the line by the time it runs.
     private const double BudgetLowWaterFraction = 0.9;
 
-    // One warning per streak of budget-driven reclaim, then a reminder at this interval while it continues:
-    // the condition is expected under sustained load and must not become a line per tick.
-    private static readonly TimeSpan BudgetLogInterval = TimeSpan.FromMinutes(1);
+    // One warning per streak of budget-driven reclaim, then a reminder at this interval while it continues: the
+    // condition is the steady state under sustained load (the 1.7.8 soaks sat 1.8-1.9x over the record budget for
+    // 45 minutes on every node, bounded by the floor) and must not become a line per tick or per minute. The
+    // continuous signal is the kahuna.durable_tx.retention_over_budget gauge and the gc_budget_sweeps counter.
+    internal static readonly TimeSpan BudgetLogInterval = TimeSpan.FromMinutes(10);
 
-    private long budgetStreakLastLogTicks;
+    private readonly RetentionBudgetLogGate budgetLogGate = new(BudgetLogInterval);
 
-    private bool budgetStreakActive;
+    /// <summary>True while the last sweep found the resident-metadata budget exceeded (the
+    /// <c>kahuna.durable_tx.retention_over_budget</c> gauge). Written by the sweep, read by the gauge callback.</summary>
+    internal bool RetentionOverBudget => Volatile.Read(ref retentionOverBudget);
+
+    private bool retentionOverBudget;
 
     /// <summary>
     /// The shortest age at which a terminal record may be reclaimed on any node — the floor while a budget or
@@ -634,50 +640,52 @@ internal sealed class DurableMaintenanceService
         return bytes;
     }
 
-    // Operator signal for the budget, kept to one warning per streak plus a reminder per BudgetLogInterval: the
-    // start of early reclaim (memory, not time, is now the retention bound), a budget exceeded with nothing
-    // past the floor to reclaim (the floor, not the budget, is sizing the heap — the rate × floor product is
-    // too large for it), and the end of the streak once the sweep finds the node back under budget.
+    // Operator signal for the budget: one warning when a streak starts (memory, not time, is now the retention
+    // bound — or, with nothing past the floor to reclaim, the floor rather than the budget is sizing the heap and
+    // the rate × floor product is too large for it), one reminder per BudgetLogInterval carrying the current
+    // numbers, and one line when the sweep finds the node back under budget. Every over-budget sweep also counts
+    // on gc_budget_sweeps by outcome, so the cadence of the condition stays visible without the log.
     private void NoteBudgetState(RetentionPressure pressure, int reclaimed, int eligible)
     {
         long nowTicks = Stopwatch.GetTimestamp();
 
-        if (!pressure.OverBudget)
+        Volatile.Write(ref retentionOverBudget, pressure.OverBudget);
+
+        if (pressure.OverBudget)
+            DurableTransactionMetrics.BudgetSweep(pressure.HeapPressure ? RetentionBudgetSweepOutcome.HeapPressure
+                : eligible == 0 ? RetentionBudgetSweepOutcome.FloorBound
+                : RetentionBudgetSweepOutcome.Reclaimed);
+
+        RetentionBudgetLogAction action = budgetLogGate.Observe(pressure.OverBudget, nowTicks);
+
+        switch (action)
         {
-            if (budgetStreakActive)
-            {
-                budgetStreakActive = false;
+            case RetentionBudgetLogAction.None:
+                return;
+
+            case RetentionBudgetLogAction.StreakEnded:
                 if (logger.IsEnabled(LogLevel.Information))
                     logger.LogInformation(
                         "Durable-2PC retention is back under its memory budget: {Records} records / {Bytes} estimated bytes resident; the full TTL window applies again",
                         transactionRecordStore.Count, transactionRecordStore.EstimatedBytes + completionReceiptStore.EstimatedBytes);
-            }
-
-            return;
+                return;
         }
 
-        bool first = !budgetStreakActive;
-        budgetStreakActive = true;
-
-        if (!first && Stopwatch.GetElapsedTime(budgetStreakLastLogTicks, nowTicks) < BudgetLogInterval)
-            return;
-
-        budgetStreakLastLogTicks = nowTicks;
-
         long residentBytes = transactionRecordStore.EstimatedBytes + completionReceiptStore.EstimatedBytes;
+        TimeSpan streak = budgetLogGate.StreakDuration(nowTicks);
 
         if (pressure.HeapPressure)
             logger.LogWarning(
-                "Durable-2PC retention under managed-heap pressure (heap load {HeapLoad:P0} ≥ {Threshold:P0}): reclaiming all {Reclaimed} terminal records past the {Floor} floor ahead of their TTL; {Records} records / {Bytes} estimated bytes resident. The retention budgets are undersized for this node's heap",
-                pressure.HeapLoad, retentionHeapPressure, reclaimed, retentionFloor, transactionRecordStore.Count, residentBytes);
+                "Durable-2PC retention under managed-heap pressure (heap load {HeapLoad:P0} ≥ {Threshold:P0}): reclaiming all {Reclaimed} terminal records past the {Floor} floor ahead of their TTL; {Records} records / {Bytes} estimated bytes resident; over budget for {Streak}. The retention budgets are undersized for this node's heap. Next reminder in {Interval}",
+                pressure.HeapLoad, retentionHeapPressure, reclaimed, retentionFloor, transactionRecordStore.Count, residentBytes, streak, BudgetLogInterval);
         else if (eligible == 0)
             logger.LogWarning(
-                "Durable-2PC retention over its memory budget ({Records} records / {Bytes} estimated bytes resident; budget {MaxRecords} records / {MaxBytes} bytes) but every terminal record this node leads is younger than the {Floor} floor: nothing can be reclaimed early. The commit rate times the floor exceeds the budget — lower the floor (and the decision-deadline ceiling it must cover) or raise the budget",
-                transactionRecordStore.Count, residentBytes, retentionMaxRecords, retentionMaxBytes, retentionFloor);
+                "Durable-2PC retention over its memory budget ({Records} records / {Bytes} estimated bytes resident; budget {MaxRecords} records / {MaxBytes} bytes; over budget for {Streak}) but every terminal record this node leads is younger than the {Floor} floor: nothing can be reclaimed early. The commit rate times the floor exceeds the budget — lower the floor (and the decision-deadline ceiling it must cover) or raise the budget. Next reminder in {Interval}; watch kahuna.durable_tx.retention_over_budget and resident_records meanwhile",
+                transactionRecordStore.Count, residentBytes, retentionMaxRecords, retentionMaxBytes, streak, retentionFloor, BudgetLogInterval);
         else
             logger.LogWarning(
-                "Durable-2PC retention over its memory budget ({Records} records / {Bytes} estimated bytes resident; budget {MaxRecords} records / {MaxBytes} bytes): reclaiming {Reclaimed} of {Eligible} terminal records ahead of their TTL, none younger than the {Floor} floor. The idempotency window is the floor, not the TTL, while this continues",
-                transactionRecordStore.Count, residentBytes, retentionMaxRecords, retentionMaxBytes, reclaimed, eligible, retentionFloor);
+                "Durable-2PC retention over its memory budget ({Records} records / {Bytes} estimated bytes resident; budget {MaxRecords} records / {MaxBytes} bytes; over budget for {Streak}): reclaiming {Reclaimed} of {Eligible} terminal records ahead of their TTL, none younger than the {Floor} floor. The idempotency window is the floor, not the TTL, while this continues. Next reminder in {Interval}; watch kahuna.durable_tx.retention_over_budget and gc_records_reclaimed_early meanwhile",
+                transactionRecordStore.Count, residentBytes, retentionMaxRecords, retentionMaxBytes, streak, reclaimed, eligible, retentionFloor, BudgetLogInterval);
     }
 
     /// <summary>Stages 2 and 3 of <see cref="CollectDurableTransactionRecords"/> for one selected batch:

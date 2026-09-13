@@ -160,8 +160,11 @@ public sealed class TestRevisionPruneMemo : IDisposable
         Assert.Equal(0, blocked.RevisionsDeleted);
         Assert.Equal(0, blocked.FloorViolations);
 
-        // Same floor: nothing can have changed, so the memo skips.
-        Assert.Equal(1, Prune(key, age: TimeSpan.FromSeconds(30), floor: floor).KeysSkipped);
+        // Same floor: nothing can have changed, so the memo skips — and reports the skip as floor-blocked,
+        // so an operator can tell "retention is waiting on a hold" from "retention is waiting on the clock".
+        RevisionPruneResult skipped = Prune(key, age: TimeSpan.FromSeconds(30), floor: floor);
+        Assert.Equal(1, skipped.KeysSkipped);
+        Assert.Equal(1, skipped.KeysFloorBlocked);
 
         // The floor moves past revision 2: revision 1 becomes deletable, the memo must walk.
         HLCTimestamp moved = new(0, old + 1, 0);
@@ -174,7 +177,28 @@ public sealed class TestRevisionPruneMemo : IDisposable
         // Floor lifted entirely: the remaining old rows go.
         RevisionPruneResult lifted = Prune(key, age: TimeSpan.FromSeconds(30));
         Assert.Equal(0, lifted.KeysSkipped);
+        Assert.Equal(0, lifted.KeysFloorBlocked);
         Assert.Equal(2, lifted.RevisionsDeleted);
+    }
+
+    [Fact]
+    public void SkipsInsideTheRetentionWindow_AreNotReportedAsFloorBlocked()
+    {
+        // The 1.7.8 soak shape: count retention off, age retention one hour, every row younger than that.
+        // Millions of memo skips and zero deletions is the policy at work, not a hold that never lifts —
+        // and the result must say so by keeping the floor-blocked count at zero.
+        const string key = "memo/policy";
+        long fresh = NowMs - 60_000;
+        Assert.True(backend.StoreKeyValues([Item(key, 1, fresh), Item(key, 2, fresh + 1), Item(key, 3, fresh + 2), Item(key, 4, NowMs)]));
+
+        RevisionPruneResult walked = Prune(key, count: 0, age: TimeSpan.FromHours(1));
+        Assert.Equal(0, walked.KeysSkipped);
+        Assert.Equal(0, walked.RevisionsDeleted);
+
+        RevisionPruneResult skipped = Prune(key, count: 0, age: TimeSpan.FromHours(1));
+        Assert.Equal(1, skipped.KeysSkipped);
+        Assert.Equal(0, skipped.KeysFloorBlocked);
+        Assert.Equal(0, skipped.RevisionsDeleted);
     }
 
     [Fact]
@@ -191,7 +215,9 @@ public sealed class TestRevisionPruneMemo : IDisposable
         // Age 95 s: rev2 is deletable but protected → floor-blocked; rev1 (90 s) is not old enough.
         RevisionPruneResult blocked = Prune(key, age: TimeSpan.FromSeconds(95), floor: floor);
         Assert.Equal(0, blocked.RevisionsDeleted);
-        Assert.Equal(1, Prune(key, age: TimeSpan.FromSeconds(95), floor: floor).KeysSkipped);
+        RevisionPruneResult blockedAgain = Prune(key, age: TimeSpan.FromSeconds(95), floor: floor);
+        Assert.Equal(1, blockedAgain.KeysSkipped);
+        Assert.Equal(1, blockedAgain.KeysFloorBlocked);
 
         // Same floor, but the cutoff now passes rev1: the memo must not hide it behind the block.
         RevisionPruneResult aged = Prune(key, age: TimeSpan.FromSeconds(80), floor: floor);

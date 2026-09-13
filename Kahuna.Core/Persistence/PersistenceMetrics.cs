@@ -24,6 +24,13 @@ internal static class PersistenceMetrics
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.keys_skipped_total",
             description: "Keys the revision prune (targeted or sweep) skipped because the backend memo proved nothing was deletable.");
 
+    /// <summary>Of the skipped keys, those whose deletable rows the snapshot floor (a hold registry entry)
+    /// protects. Skips with this at zero are retention waiting on the clock or the row count — i.e. the
+    /// configured policy, not a hold, is what keeps history on disk.</summary>
+    internal static readonly Counter<long> PruneKeysFloorBlocked =
+        Meter.CreateCounter<long>("kahuna.persistence.revision_prune.keys_floor_blocked_total",
+            description: "Keys the revision prune skipped because the snapshot floor protects every row it could otherwise delete (a subset of keys_skipped_total).");
+
     /// <summary>Revision rows the prune (targeted and sweep) deleted.</summary>
     internal static readonly Counter<long> PruneRevisionsDeleted =
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.revisions_deleted_total",

@@ -39,6 +39,16 @@ ARG KAHUNA_INITIAL_CLUSTER
 ARG KAHUNA_RAFT_SCHEME="https://"
 
 ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
+
+# Crash dumps go to their own volume (see Dockerfile.standalone for the rationale): never under
+# /storage, never in the container filesystem. Mount /dumps in the compose file to keep them.
+RUN mkdir -p /dumps
+VOLUME ["/dumps"]
+ENV DOTNET_DbgEnableMiniDump=1
+ENV DOTNET_DbgMiniDumpType=2
+ENV DOTNET_DbgMiniDumpName=/dumps/kahuna-%p-%t.dmp
+ENV DOTNET_EnableCrashReport=1
+
 ENV KAHUNA_RAFT_NODENAME="$KAHUNA_RAFT_NODENAME"
 ENV KAHUNA_RAFT_NODEID="$KAHUNA_RAFT_NODEID"
 ENV KAHUNA_RAFT_HOST="$KAHUNA_RAFT_HOST"
@@ -66,6 +76,12 @@ COPY --chmod=755 <<'EOT' /app/entrypoint.sh
 
 mkdir -p /storage/data
 mkdir -p /storage/wal
+
+# createdump does not create the dump directory; an override that points somewhere missing would
+# silently lose the dump.
+if [ -n "$DOTNET_DbgMiniDumpName" ]; then
+    mkdir -p "$(dirname "$DOTNET_DbgMiniDumpName")"
+fi
 
 # The cleartext HTTP/2 flag is only valid with a value; when the variable is empty, omit the
 # flag entirely so the command-line parser does not see a bare option.

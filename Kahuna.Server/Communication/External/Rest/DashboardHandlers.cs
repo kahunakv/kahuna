@@ -50,6 +50,10 @@ public static class DashboardHandlers
         "kahuna.kv.write.rejections",
         "kahuna.kv.write.outcomes",
 
+        // Persistence back-pressure: the unflushed backlog against its budget, and whether the gate is closed.
+        "kahuna.persistence.unflushed_budget_fraction",
+        "kahuna.persistence.backlog_gate_closed",
+
         // Scans and read amplification.
         "kahuna.scan.snapshot_prefix_rows_examined_total",
         "kahuna.scan.snapshot_prefix_entries_returned_total",

@@ -9,6 +9,12 @@ GRPC_CLEARTEXT_PORT="${KAHUNA_GRPC_CLEARTEXT_PORT:-8083}"
 
 mkdir -p "${DATA_DIR}/data" "${DATA_DIR}/wal"
 
+# createdump does not create the dump directory; an override that points somewhere missing would
+# silently lose the dump.
+if [ -n "${DOTNET_DbgMiniDumpName:-}" ]; then
+  mkdir -p "$(dirname "${DOTNET_DbgMiniDumpName}")"
+fi
+
 # The cleartext HTTP/2 flag is only valid with a value. When the variable is empty, omit the
 # flag so the command-line parser does not see a bare option.
 H2C_ARGS=()

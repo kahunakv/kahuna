@@ -592,6 +592,20 @@ active the idempotency window is the floor rather than the TTL (`kahuna.durable_
 counts it), and the floor is what recovery uses as the "record may have been reclaimed" horizon, so
 early reclaim never turns a reclaimed commit into a presumed abort.
 
+Being over the budget is the **steady state** at a few thousand commits per second: the commit rate
+times the floor exceeds the budget, and only a configuration change alters that (the 1.7.8 soaks sat
+at 1.8–1.9× the record budget on every node for 45 minutes, bounded by the floor). The sweep
+therefore logs it sparingly — one warning when a streak starts, one reminder every ten minutes with
+the current numbers and the streak's length, and one information line when the node is back under
+budget — and leaves the continuous signal to the instruments: `kahuna.durable_tx.retention_over_budget`
+(gauge, 1 while the last sweep found a budget exceeded), `kahuna.durable_tx.resident_records` /
+`resident_record_bytes` / `resident_receipt_bytes` (what the budget compares), and
+`kahuna.durable_tx.gc_budget_sweeps` (counter, tagged `outcome=reclaimed` when records past the floor
+were reclaimed early, `floor_bound` when every led record was younger than the floor and nothing could
+be reclaimed, `heap_pressure` when the valve opened). A steady `floor_bound` rate on followers with
+`reclaimed` on the anchor leaders is the expected shape under load; alert on `retention_over_budget`
+only together with a rising `resident_record_bytes`, which means the floor is not holding either.
+
 An `OutOfMemoryException` anywhere in the process terminates it by default (`FailFastOnOutOfMemory`):
 the WAL writer and every replicated apply path catch broadly, and an out-of-memory swallowed there
 leaves a reachable, "healthy" replica whose WAL queue is pinned and appends nothing. With fail-fast

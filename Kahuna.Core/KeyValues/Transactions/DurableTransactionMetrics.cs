@@ -22,6 +22,19 @@ internal enum PrepareRetryLoopOutcome
     RangeMoved
 }
 
+/// <summary>What an over-budget retention sweep could do; the tag of <see cref="DurableTransactionMetrics.GcBudgetSweeps"/>.</summary>
+internal enum RetentionBudgetSweepOutcome
+{
+    /// <summary>Records past the floor were reclaimed ahead of their TTL.</summary>
+    Reclaimed,
+
+    /// <summary>Every led terminal record is younger than the floor: nothing could be reclaimed.</summary>
+    FloorBound,
+
+    /// <summary>The managed-heap pressure valve opened and everything past the floor was reclaimed.</summary>
+    HeapPressure
+}
+
 /// <summary>What the one-phase eligibility gate decided for a finalize; the tag of
 /// <see cref="DurableTransactionMetrics.OnePhaseGateDecisions"/>. Only <see cref="Entered"/> attempts can
 /// later count as a commit or a fallback. Every exclusion names the shape that closed the bundle, so an
@@ -1244,6 +1257,30 @@ internal static class DurableTransactionMetrics
         GcRecordsReclaimedEarly.Add(count, new KeyValuePair<string, object?>("reason", heapPressure ? "heap_pressure" : "budget"));
 
     internal static void HeapPressureSweep() => GcHeapPressureSweeps.Add(1);
+
+    /// <summary>
+    /// Retention sweeps that found the resident-metadata budget exceeded, by what the sweep could do about it:
+    /// <c>reclaimed</c> (records past the floor were reclaimed ahead of their TTL), <c>floor_bound</c> (every
+    /// record this node leads is younger than the floor, so nothing could be reclaimed — the rate × floor
+    /// product, not the budget, is sizing the heap), or <c>heap_pressure</c> (the valve opened). Being over
+    /// budget is the steady state under sustained load, so the log carries it at most once per ten minutes;
+    /// this counter and the <c>retention_over_budget</c> gauge carry it continuously.
+    /// </summary>
+    internal static readonly Counter<long> GcBudgetSweeps =
+        Meter.CreateCounter<long>("kahuna.durable_tx.gc_budget_sweeps",
+            description: "Retention sweeps that ran over the resident-metadata budget, tagged by outcome (reclaimed, floor_bound, heap_pressure).");
+
+    private static readonly KeyValuePair<string, object?> BudgetOutcomeReclaimed = new("outcome", "reclaimed");
+    private static readonly KeyValuePair<string, object?> BudgetOutcomeFloorBound = new("outcome", "floor_bound");
+    private static readonly KeyValuePair<string, object?> BudgetOutcomeHeapPressure = new("outcome", "heap_pressure");
+
+    internal static void BudgetSweep(RetentionBudgetSweepOutcome outcome) =>
+        GcBudgetSweeps.Add(1, outcome switch
+        {
+            RetentionBudgetSweepOutcome.HeapPressure => BudgetOutcomeHeapPressure,
+            RetentionBudgetSweepOutcome.FloorBound => BudgetOutcomeFloorBound,
+            _ => BudgetOutcomeReclaimed
+        });
 
     internal static void ReceiptsReleased(int count) => GcReceiptsReleased.Add(count);
 

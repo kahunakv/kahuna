@@ -1170,28 +1170,39 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// unprotected row aging past the cutoff can change the answer. False (walk) whenever the key has
     /// no memo.
     /// </summary>
-    private bool PruneMemoProvesNothingToDelete(string key, int retentionCount, TimeSpan retentionAge, long cutoffPhysical, HLCTimestamp floorTimestamp)
+    private PruneMemoVerdict PruneMemoVerdictFor(string key, int retentionCount, TimeSpan retentionAge, long cutoffPhysical, HLCTimestamp floorTimestamp)
     {
         lock (_pruneMemoLock)
         {
             if (!pruneMemos.TryGetValue(key, out PruneMemo? memo))
-                return false;
+                return PruneMemoVerdict.Walk;
 
             bool needAge = retentionAge > TimeSpan.Zero;
 
             if (memo.FloorBlocked)
             {
                 if (floorTimestamp != memo.FloorAtWalk || memo.HistoryRows != memo.HistoryRowsAtWalk)
-                    return false;
+                    return PruneMemoVerdict.Walk;
 
-                return !(needAge && memo.OldestUnprotectedPhysical < cutoffPhysical);
+                return needAge && memo.OldestUnprotectedPhysical < cutoffPhysical
+                    ? PruneMemoVerdict.Walk
+                    : PruneMemoVerdict.SkipFloorBlocked;
             }
 
             bool countEligible = retentionCount > 0 && memo.HistoryRows > retentionCount;
             bool ageEligible = needAge && memo.OldestNonCurrentPhysical < cutoffPhysical;
 
-            return !countEligible && !ageEligible;
+            return countEligible || ageEligible ? PruneMemoVerdict.Walk : PruneMemoVerdict.SkipNotEligible;
         }
+    }
+
+    /// <summary>What the memo says about a prune visit; the two skips are reported separately so an operator can
+    /// tell retention waiting on a snapshot hold from retention waiting on the clock or the row count.</summary>
+    private enum PruneMemoVerdict
+    {
+        Walk,
+        SkipNotEligible,
+        SkipFloorBlocked
     }
 
     /// <summary>Records what a completed walk learned about a key (see the memo remarks above).</summary>
@@ -3171,6 +3182,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         int keysVisited = 0;
         int keysSkipped = 0;
+        int keysFloorBlocked = 0;
         int deleted = 0;
         int floorViolations = 0;
         bool batchLimitReached = false;
@@ -3205,7 +3217,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 string key = keyList[i];
-                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, out bool keyLimitReached);
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached);
                 keysVisited++;
 
                 if (keyLimitReached)
@@ -3291,7 +3303,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     }
 
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
-                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, out bool keyLimitReached);
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached);
                     keysVisited++;
 
                     if (keyLimitReached)
@@ -3321,7 +3333,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 sweepCursor = null;
         }
 
-        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped, timeBudgetExhausted);
+        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped, timeBudgetExhausted, keysFloorBlocked);
         return true;
     }
 
@@ -3341,6 +3353,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         ref int deleted,
         ref int floorViolations,
         ref int keysSkipped,
+        ref int keysFloorBlocked,
         out bool batchLimitReached)
     {
         batchLimitReached = false;
@@ -3353,9 +3366,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         // The memo answers most visits of a hot key without touching the store: nothing to delete
         // yet, so nothing to walk. See the memo remarks for why this is exact-or-conservative.
-        if (PruneMemoProvesNothingToDelete(key, retentionCount, retentionAge, cutoffPhysical, floorTimestamp))
+        PruneMemoVerdict verdict = PruneMemoVerdictFor(key, retentionCount, retentionAge, cutoffPhysical, floorTimestamp);
+        if (verdict != PruneMemoVerdict.Walk)
         {
             keysSkipped++;
+            if (verdict == PruneMemoVerdict.SkipFloorBlocked)
+                keysFloorBlocked++;
             return;
         }
 

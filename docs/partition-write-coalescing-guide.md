@@ -320,14 +320,25 @@ outcome string — never a key, partition id, or transaction id):
   `queue_expired` / `unflushed_backlog`); dispatched batches; dispatched log entries; batch outcomes
   (`success` / `transient` / `permanent`).
 - **Histograms** — entries per batch, serialized bytes per batch, oldest-item queue age, and Raft-call
-  duration.
+  duration (`kahuna.kv.write.raft_duration`, measured on the high-resolution `Stopwatch` clock: a
+  coarse tick clock under-read the few-millisecond rounds a post-completion hold produces by 4–5×).
 - **Observable gauges** — queued items, queued serialized bytes, and in-flight partitions; and, from the
   persistence side, `kahuna.persistence.unflushed_items` (writer inbox plus dirty queues),
   `kahuna.persistence.unflushed_bytes` (the dirty queues' exact value bytes plus the inbox sized at
   the writer's recent average value size — under load the inbox is where the backlog sits) and
   `kahuna.persistence.writer_inbox_items`. A rising `unflushed_items` with `unflushed_backlog`
   rejections is the flusher falling behind ingest — look at the prune and flush instruments before
-  raising the budget.
+  raising the budget. `kahuna.persistence.unflushed_budget_fraction` is the backlog against the
+  tighter budget (items ÷ `PersistenceMaxUnflushedItems` or bytes ÷ `PersistenceMaxUnflushedBytes`,
+  whichever is larger; alert at 0.75) and `kahuna.persistence.backlog_gate_closed` is 1 while the
+  gate is refusing ordinary writes.
+
+The backlog monitor also samples itself every five seconds and writes to the log — nobody watches a
+gauge: a **warning** when the backlog crosses 75% of a budget, a **warning** when back-pressure
+actually engages ("Persistence back-pressure engaged", a budget exceeded, ordinary writes refused
+retryably), a reminder every ten minutes while either condition holds, and an information line when
+it clears. Hysteresis keeps a backlog saw-toothing around the line from raising and clearing every
+sample: once raised, the warning clears only below 60% of the budget.
 
 The primary effectiveness signal is **dispatched entries ÷ dispatched batches**. Under a coalescing
 burst it should approach the configured batch cap; a value near one means writes are arriving too

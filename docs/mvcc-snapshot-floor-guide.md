@@ -183,11 +183,20 @@ background writer with the flush and must never starve it:
 |--------|------|---------|
 | `kahuna.persistence.revision_prune.keys_walked_total` | counter | Keys whose revision block the prune (targeted or sweep) scanned. |
 | `kahuna.persistence.revision_prune.keys_skipped_total` | counter | Keys answered from the RocksDB prune memo without a scan (nothing deletable yet). On a hot key-set inside its retention window this should dominate `keys_walked_total`. |
+| `kahuna.persistence.revision_prune.keys_floor_blocked_total` | counter | Of the skipped keys, those whose deletable rows the snapshot floor (a hold registry entry) protects. Skips with this at zero are retention waiting on the clock or the row count — the configured policy, not a hold, is what keeps history on disk. |
 | `kahuna.persistence.revision_prune.revisions_deleted_total` | counter | Revision rows the prune (targeted or sweep) deleted. |
 | `kahuna.persistence.revision_prune.budget_exhausted_total` | counter | Flush cycles whose targeted prune stopped on `PersistentRevisionCleanupTimeBudget` with keys still queued. A sustained rate means retention lags the write rate; the flush is unaffected. |
 | `kahuna.persistence.revision_prune.cycle_duration` | histogram (ms) | Time the targeted prune took per flush cycle; bounded by the time budget plus one key (the backend checks the budget before every key). |
 | `kahuna.persistence.revision_prune.sweep_budget_exhausted_total` | counter | Backend-wide sweep passes that paused on their share of the time budget; the sweep resumes from its cursor next cycle. A large store pauses often and still completes; a sweep that pauses forever without wrapping is the signal to look at. |
 | `kahuna.persistence.revision_prune.sweep_pass_duration` | histogram (ms) | Time one sweep pass spent on the writer; bounded by its budget plus one key. |
+
+Read the counters against the policy. With `PersistentRevisionRetentionCount = 0` and
+`PersistentRevisionRetentionAge = 1h` (the 1.7.8 soak configuration) nothing is deletable for the
+first hour, so a 45-minute run shows millions of memo skips, zero deletions, zero floor-blocked keys,
+and a store growing at the write rate — the policy at work, not a gate that never opens. The
+background writer logs the effective policy once at startup ("Persistent revision retention on this
+node …") so the numbers can be read against it; both bounds disabled means history on disk is
+unbounded, and that line says so.
 
 The RocksDB sweep visits keys through their `~CURRENT` rows and jumps over the revision rows in
 between with the same registry-gated seek the range scans use, so a pass costs O(logical keys) plus

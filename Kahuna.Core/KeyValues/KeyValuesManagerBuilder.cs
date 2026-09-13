@@ -474,6 +474,14 @@ internal sealed class KeyValuesManagerBuilder
         localScans = new(runtime, localKeyValues);
         durableMaintenance = new(runtime, manager, txCoordinator, rangeStateTransfer, localLocks);
 
+        // The budget state the retention sweep logs at most once per ten minutes, as a continuous signal: 1 while
+        // the last sweep found the resident-metadata budget exceeded. Same instance-owned meter as the resident
+        // gauges, so it stops publishing with the node.
+        DurableMaintenanceService gaugeMaintenance = durableMaintenance;
+        durableGaugeMeter.CreateObservableGauge("kahuna.durable_tx.retention_over_budget",
+            () => gaugeMaintenance.RetentionOverBudget ? 1 : 0,
+            description: "1 while the last retention sweep found the resident-metadata budget (DurableRecordRetentionMax / MaxBytes) exceeded, else 0.");
+
         // Replica stale-base veto: when THIS node's fence memory proves a replicated validated-base prepare's
         // base moved, the verdict is deterministically correct — but the acknowledgement folds only the
         // LEADER's verdict, and a leader whose memory is frozen admits exactly the prepares the healthy

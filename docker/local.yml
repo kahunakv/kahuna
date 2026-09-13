@@ -29,6 +29,7 @@ services:
       - "8087:2072"
     volumes:
       - kahuna1-data:/storage
+      - kahuna1-dumps:/dumps
     environment:
       Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
       Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
@@ -63,6 +64,7 @@ services:
       - "8088:2072"
     volumes:
       - kahuna2-data:/storage
+      - kahuna2-dumps:/dumps
     environment:
       Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
       Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
@@ -97,6 +99,7 @@ services:
       - "8089:2072"
     volumes:
       - kahuna3-data:/storage
+      - kahuna3-dumps:/dumps
     environment:
       Logging__LogLevel__Default: ${KAHUNA_SERVER_DEFAULT_LOG_LEVEL:-Information}
       Logging__LogLevel__Kahuna: ${KAHUNA_SERVER_LOG_LEVEL:-Debug}
@@ -114,6 +117,11 @@ volumes:
   kahuna1-data:
   kahuna2-data:
   kahuna3-data:
+  # Crash dumps (DOTNET_DbgMiniDumpName=/dumps/... in the image): kept apart from the data volumes so
+  # a dump survives a wiped or tmpfs-backed data directory. Inspect with dotnet-dump.
+  kahuna1-dumps:
+  kahuna2-dumps:
+  kahuna3-dumps:
 
 networks:
   custom_net:

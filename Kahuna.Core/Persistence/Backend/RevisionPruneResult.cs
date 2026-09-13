@@ -29,6 +29,11 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Of <paramref name="KeysVisited"/>, the keys answered from the backend's prune memo without a
 /// revision walk because the memo proved nothing was deletable yet. Backends without a memo report 0.
 /// </param>
+/// <param name="KeysFloorBlocked">
+/// Of <paramref name="KeysSkipped"/>, the keys the memo skipped because their deletable rows are all
+/// protected by the snapshot floor (a hold registry entry), as opposed to simply not old or numerous
+/// enough yet. Separates "retention is waiting on a hold" from "retention is waiting on the clock".
+/// </param>
 /// <param name="TimeBudgetExhausted">
 /// <c>true</c> when the pass stopped on the caller's wall-clock budget (the budgeted
 /// <c>PruneKeyValueRevisions</c> overload) with keys or keyspace still unvisited. Always accompanied
@@ -41,5 +46,6 @@ public readonly record struct RevisionPruneResult(
     IReadOnlyCollection<string>? RemainingKeys = null,
     int FloorViolations = 0,
     int KeysSkipped = 0,
-    bool TimeBudgetExhausted = false
+    bool TimeBudgetExhausted = false,
+    int KeysFloorBlocked = 0
 );

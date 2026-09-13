@@ -349,7 +349,11 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     /// as priority control — every failure converted into a normal completion.</summary>
     private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries)
     {
-        long start = Environment.TickCount64;
+        // High-resolution start stamp. Environment.TickCount64 is a coarse clock (a jiffy — 4 ms on a typical
+        // Linux kernel — and integer milliseconds at best), and with the post-completion hold shortening each
+        // round to a few milliseconds most rounds read as 0 or 1 ms: the raft_duration histogram under-read the
+        // round by 4-5x on the 1.7.8 soaks (0.73 ms sampled against ~3.4 ms implied by the batch rate).
+        long start = Stopwatch.GetTimestamp();
 
         RaftBatchReplicationResult? result = null;
         bool threw = false;
@@ -395,7 +399,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         // One batch-level effectiveness sample: committed if every submission committed; transient if any failure
         // was retryable. (A mixed batch is rare — only per-entry fencing produces it — and records as a failure.)
-        PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Environment.TickCount64 - start);
+        PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Stopwatch.GetElapsedTime(start).TotalMilliseconds);
 
         self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes, Stopwatch.GetTimestamp()));
     }

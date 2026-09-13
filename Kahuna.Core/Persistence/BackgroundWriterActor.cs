@@ -390,6 +390,41 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             writerDelay,
             writerDelay
         );
+
+        LogRevisionRetentionPolicy();
+    }
+
+    /// <summary>
+    /// One line at startup saying what bounds persisted revision history on this node, so a prune that walks
+    /// thousands of keys and deletes nothing can be read against the policy instead of suspected of being
+    /// stuck. (The 1.7.8 soaks ran count retention off and age retention at one hour for 45 minutes: 5.3 M memo
+    /// skips, 0 deletions, and a store growing at the write rate — exactly the configured policy, but nothing
+    /// in the log or the metrics said so.)
+    /// </summary>
+    private void LogRevisionRetentionPolicy()
+    {
+        if (!logger.IsEnabled(LogLevel.Information))
+            return;
+
+        bool byCount = configuration.PersistentRevisionRetentionCount > 0;
+        bool byAge = configuration.PersistentRevisionRetentionAge > TimeSpan.Zero;
+
+        string bound = (byCount, byAge) switch
+        {
+            (true, true) => $"the newest {configuration.PersistentRevisionRetentionCount} revisions per key and any revision younger than {configuration.PersistentRevisionRetentionAge} are kept; older ones past the count are pruned",
+            (true, false) => $"the newest {configuration.PersistentRevisionRetentionCount} revisions per key are kept; older ones are pruned regardless of age",
+            (false, true) => $"every revision younger than {configuration.PersistentRevisionRetentionAge} is kept regardless of count; older ones are pruned. History on disk grows at the write rate for that long before the prune deletes anything",
+            _ => "count and age retention are both disabled: no historical revision is ever pruned and history on disk is unbounded"
+        };
+
+        logger.LogInformation(
+            "Persistent revision retention on this node ({Backend}): {Bound}. Targeted prune on write: {OnWrite}; backend-wide sweep every {Interval}; per-cycle delete budget {BatchSize} rows, time budget {TimeBudget}. Metrics: kahuna.persistence.revision_prune.keys_walked_total / keys_skipped_total (keys_floor_blocked_total = skips held by a snapshot floor) / revisions_deleted_total",
+            configuration.Storage,
+            bound,
+            configuration.PersistentRevisionCleanupOnWrite,
+            configuration.PersistentRevisionCleanupInterval,
+            configuration.PersistentRevisionCleanupBatchSize,
+            configuration.PersistentRevisionCleanupTimeBudget);
     }
     
     public async Task Receive(BackgroundWriteRequest message)
@@ -1352,6 +1387,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         int keysVisited = 0;
         int keysSkipped = 0;
+        int keysFloorBlocked = 0;
         int revisionsDeleted = 0;
         int floorViolations = 0;
         bool batchLimitReached = false;
@@ -1435,6 +1471,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                 keysVisited += pruneResult.KeysVisited;
                 keysSkipped += pruneResult.KeysSkipped;
+                keysFloorBlocked += pruneResult.KeysFloorBlocked;
                 revisionsDeleted += pruneResult.RevisionsDeleted;
                 floorViolations += pruneResult.FloorViolations;
                 offset += chunkLength;
@@ -1469,6 +1506,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         PersistenceMetrics.PruneKeysWalked.Add(keysVisited - keysSkipped);
         PersistenceMetrics.PruneKeysSkipped.Add(keysSkipped);
+        if (keysFloorBlocked > 0)
+            PersistenceMetrics.PruneKeysFloorBlocked.Add(keysFloorBlocked);
         PersistenceMetrics.PruneRevisionsDeleted.Add(revisionsDeleted);
         PersistenceMetrics.PruneCycleMs.Record(elapsedMs);
 
@@ -1608,6 +1647,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             {
                 PersistenceMetrics.PruneKeysWalked.Add(pruneResult.KeysVisited - pruneResult.KeysSkipped);
                 PersistenceMetrics.PruneKeysSkipped.Add(pruneResult.KeysSkipped);
+                if (pruneResult.KeysFloorBlocked > 0)
+                    PersistenceMetrics.PruneKeysFloorBlocked.Add(pruneResult.KeysFloorBlocked);
                 PersistenceMetrics.PruneRevisionsDeleted.Add(pruneResult.RevisionsDeleted);
                 PersistenceMetrics.SweepPassMs.Record(stopwatch.Elapsed.TotalMilliseconds);
                 if (pruneResult.TimeBudgetExhausted)
