@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Grpc.Core;
 using Kommander.Time;
@@ -25,7 +26,7 @@ public sealed class TestSnapshotFloorGrpcWire
     public async Task GetSnapshotFloor_AuthoritativeAnswer_CarriesTypeFloorAndCountOverTheWire()
     {
         KeyValuesService service = new(
-            new FixedFloorKahuna((KeyValueResponseType.Get, Floor, 3)), NullLogger<IKahuna>.Instance);
+            new FixedFloorKahuna((KeyValueResponseType.Get, Floor, 3)), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcGetSnapshotFloorResponse response = await service.GetSnapshotFloor(
             new GrpcGetSnapshotFloorRequest(), Context());
@@ -41,7 +42,7 @@ public sealed class TestSnapshotFloorGrpcWire
     public async Task GetSnapshotFloor_Refusal_SurvivesWireAsMustRetry()
     {
         KeyValuesService service = new(
-            new FixedFloorKahuna((KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0)), NullLogger<IKahuna>.Instance);
+            new FixedFloorKahuna((KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0)), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcGetSnapshotFloorResponse response = await service.GetSnapshotFloor(
             new GrpcGetSnapshotFloorRequest(), Context());

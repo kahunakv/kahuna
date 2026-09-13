@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Grpc.Core;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
@@ -200,7 +201,7 @@ public sealed class TestKeyRangeRegistrationSurface : BaseCluster
 
         try
         {
-            KeyValuesService service = new(nodes[0], NullLogger<IKahuna>.Instance);
+            KeyValuesService service = new(nodes[0], NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcRegisterKeyRangeResponse response = await service.RegisterKeyRange(
                 new GrpcRegisterKeyRangeRequest { KeySpace = space }, new StubServerCallContext());

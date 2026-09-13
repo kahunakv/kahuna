@@ -4,6 +4,7 @@ using Google.Protobuf;
 using System.Runtime.CompilerServices;
 
 using Grpc.Core;
+using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Locks;
@@ -33,6 +34,8 @@ public sealed class LocksService : Locker.LockerBase
     private readonly KahunaConfiguration configuration;
 
     private readonly IRaft raft; 
+
+    private readonly NodeTransportGate gate;
     
     private readonly ILogger<IKahuna> logger;
     
@@ -42,12 +45,14 @@ public sealed class LocksService : Locker.LockerBase
     /// <param name="locks"></param>
     /// <param name="configuration"></param>
     /// <param name="raft"></param>
+    /// <param name="gate"></param>
     /// <param name="logger"></param>
-    public LocksService(IKahuna locks, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger)
+    public LocksService(IKahuna locks, KahunaConfiguration configuration, IRaft raft, NodeTransportGate gate, ILogger<IKahuna> logger)
     {
         this.locks = locks;
         this.configuration = configuration;
         this.raft = raft;
+        this.gate = gate;
         this.logger = logger;
     }
     
@@ -514,6 +519,9 @@ public sealed class LocksService : Locker.LockerBase
         ServerCallContext context
     )
     {
+        // Only peers open this stream: it carries forwarded lock operations.
+        gate.RequirePeer(context);
+
         int inFlight = 1;
         TaskCompletionSource drain = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

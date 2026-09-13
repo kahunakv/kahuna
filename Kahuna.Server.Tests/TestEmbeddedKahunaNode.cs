@@ -34,6 +34,12 @@ public sealed class TestEmbeddedKahunaNode
             WalStorage = "memory",
             HttpScheme = "http://",
             HttpAuthBearerToken = "raft-token",
+            TransportSecurity = new RaftTransportSecurityOptions
+            {
+                NodeAuthenticationMode = RaftNodeAuthenticationMode.SharedSecret,
+                SharedSecret = "embedded-secret",
+                TrustedClientCertificateThumbprints = ["AA"]
+            },
             HttpTimeout = 9,
             HttpVersion = "1.1",
             HeartbeatInterval = TimeSpan.FromMilliseconds(75),
@@ -67,6 +73,7 @@ public sealed class TestEmbeddedKahunaNode
         Assert.Equal(options.InitialPartitions, config.InitialPartitions);
         Assert.Equal(options.HttpScheme, config.HttpScheme);
         Assert.Equal(options.HttpAuthBearerToken, config.HttpAuthBearerToken);
+        Assert.Same(options.TransportSecurity, config.TransportSecurity);
         Assert.Equal(options.HttpTimeout, config.HttpTimeout);
         Assert.Equal(options.HttpVersion, config.HttpVersion);
         Assert.Equal(options.HeartbeatInterval, config.HeartbeatInterval);

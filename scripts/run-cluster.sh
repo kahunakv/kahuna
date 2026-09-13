@@ -133,6 +133,7 @@ start_node() {
         --grpc-cleartext-ports "${h2c_port}"
         --https-certificate    "${PUBLISH_DIR}/certificate.pfx"
         --raft-allow-insecure-certificate-validation
+        --allow-plaintext-listener
         --initial-cluster      "${peer1}" "${peer2}"
         --initial-cluster-partitions "${PARTITIONS}"
     )

@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Grpc.Core;
 using Kommander.Time;
@@ -29,7 +30,7 @@ public sealed class TestAdmissionRefusedWire
     public async Task AdmissionRefused_SurvivesTheGrpcHopAsItself()
     {
         RecordingStartTransactionKahuna kahuna = new(KeyValueResponseType.AdmissionRefused);
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcStartTransactionResponse response = await service.StartTransaction(
             new GrpcStartTransactionRequest { CoordinatorKey = "tx-1" }, Context());
@@ -50,7 +51,7 @@ public sealed class TestAdmissionRefusedWire
     {
         // The regression that would silently make every warm-up look like load shedding.
         RecordingStartTransactionKahuna kahuna = new(KeyValueResponseType.MustRetry);
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcStartTransactionResponse response = await service.StartTransaction(
             new GrpcStartTransactionRequest { CoordinatorKey = "tx-2" }, Context());
@@ -65,7 +66,7 @@ public sealed class TestAdmissionRefusedWire
     public async Task TheCallersAdmissionBudget_ReachesTheServerOverGrpc()
     {
         RecordingStartTransactionKahuna kahuna = new(KeyValueResponseType.Set);
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         // Round-tripped through protobuf first, so the field is proven to serialize rather than merely being
         // set on an in-memory object the service then reads back.

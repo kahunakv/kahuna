@@ -1,3 +1,4 @@
+using Kommander;
 using Kahuna.Server.Persistence.Pitr;
 using Writes = Kahuna.Server.KeyValues.Writes;
 
@@ -392,6 +393,17 @@ public sealed class EmbeddedKahunaOptions
     public string HttpScheme { get; set; } = "https://";
 
     public string HttpAuthBearerToken { get; set; } = "";
+
+    /// <summary>
+    /// Node-to-node transport security, passed to Kommander as-is. Null keeps Kommander's defaults.
+    /// <para>
+    /// An embedded node talks to its peers in-process, so this has no effect on its own traffic. It is for
+    /// hosts that also serve Kahuna's gRPC surface on a real transport: the node-only surfaces read their
+    /// trust policy from here. Set <see cref="RaftTransportSecurityOptions.ClientCertificate"/> to supply a
+    /// certificate without a PKCS#12 file.
+    /// </para>
+    /// </summary>
+    public RaftTransportSecurityOptions? TransportSecurity { get; set; }
 
     public int HttpTimeout { get; set; } = 5;
 

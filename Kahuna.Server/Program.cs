@@ -1,7 +1,6 @@
 ﻿
 using Nixie;
 using System.Net;
-using Flurl.Http;
 using CommandLine;
 
 using Kahuna;
@@ -10,6 +9,7 @@ using Kahuna.Services;
 using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
+using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Diagnostics;
 
@@ -70,10 +70,19 @@ opts.StorageRevision = DataPathResolver.ResolveStorageRevision(opts.StorageRevis
 
 bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertificate, opts.HttpsPorts);
 
+// One options object for Raft and Kahuna's inter-node traffic, built and validated before anything binds.
+RaftTransportSecurityOptions transportSecurity = NodeTransportSecurityPolicy.Build(opts);
+NodeTransportSecurityPolicy.Validate(opts, transportSecurity);
+
+if (!standalone)
+    NodeTransportSecurityPolicy.ValidateRaftPortListener(opts, httpsConfigured);
+
+bool bindPlaintextListeners = NodeTransportSecurityPolicy.ShouldBindPlaintextListeners(httpsConfigured, opts.AllowPlaintextListener);
+
 if (standalone)
 {
     builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
-        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts), services.GetRequiredService<ILoggerFactory>()));
+        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity), services.GetRequiredService<ILoggerFactory>()));
 
     builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
     builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
@@ -102,7 +111,7 @@ else
     {
         ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
 
-        RaftConfiguration configuration = CreateRaftConfiguration(opts);
+        RaftConfiguration configuration = CreateRaftConfiguration(opts, transportSecurity);
 
         ConfigurationValidator.ValidateReplicaPlacement(
             configuration.ReplicationFactor, opts.InitialCluster!.Count(), logger);
@@ -155,9 +164,16 @@ else
 
         return manager;
     });
-    builder.Services.AddSingleton<IInterNodeCommunication, GrpcInterNodeCommunication>();
+    // The inter-node transport must dial with the exact options Kommander uses; see GrpcInterNodeCommunication.
+    builder.Services.AddSingleton<IInterNodeCommunication>(services => new GrpcInterNodeCommunication(
+        services.GetRequiredService<KahunaConfiguration>(),
+        services.GetRequiredService<IRaft>().Configuration.GetTransportAuthenticator().Options,
+        services.GetRequiredService<ILogger<GrpcInterNodeCommunication>>()));
     builder.Services.AddHostedService<ReplicationService>();
 }
+
+// Guards the node-only gRPC surfaces with the same trust policy Raft applies.
+builder.Services.AddNodeTransportGate();
 
 // Registered outside both branches: the dashboard's summary endpoint reads the resolved storage
 // paths and the node name from here, and it answers on a standalone node as well as a clustered one.
@@ -176,68 +192,58 @@ builder.Services.AddGrpcReflection();
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.AllowSynchronousIO = false;
-    
-    if (opts.HttpPorts is null || !opts.HttpPorts.Any())
-        options.Listen(IPAddress.Any, 2070, listenOptions =>
-        {
-            listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
-        });
-    else
-        foreach (string port in opts.HttpPorts)
-            options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
+
+    // Cleartext listeners beside a configured certificate are an explicit opt-in.
+    if (bindPlaintextListeners)
+    {
+        foreach (int port in NodeTransportSecurityPolicy.GetHttpPorts(opts))
+            options.Listen(IPAddress.Any, port, listenOptions =>
             {
                 listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
             });
 
-    // Cleartext HTTP/2 (h2c) for gRPC. Kestrel only accepts prior-knowledge HTTP/2 without
-    // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
-    // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
-    //
-    // A standalone node with no explicit ports binds 2072, so a gRPC client can reach it out of
-    // the box: HTTPS needs a certificate the node does not have by default, and the plain HTTP
-    // listener negotiates HTTP/1.1 without ALPN. A node joining a cluster keeps the listener off
-    // unless it is asked for — the port carries no TLS and no authentication.
-    if (opts.GrpcCleartextPorts is null || !opts.GrpcCleartextPorts.Any())
-    {
-        if (standalone)
-            options.Listen(IPAddress.Any, 2072, listenOptions =>
+        // Cleartext HTTP/2 (h2c) for gRPC. Kestrel only accepts prior-knowledge HTTP/2 without
+        // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
+        // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
+        //
+        // A standalone node with no explicit ports binds 2072, so a gRPC client can reach it out of
+        // the box: HTTPS needs a certificate the node does not have by default, and the plain HTTP
+        // listener negotiates HTTP/1.1 without ALPN. A node joining a cluster keeps the listener off
+        // unless it is asked for — the port carries no TLS and no authentication.
+        IReadOnlyList<int> cleartextGrpcPorts = NodeTransportSecurityPolicy.ParsePorts(opts.GrpcCleartextPorts, "--grpc-cleartext-ports");
+
+        if (cleartextGrpcPorts.Count == 0 && standalone)
+            cleartextGrpcPorts = [NodeTransportSecurityPolicy.DefaultStandaloneCleartextGrpcPort];
+
+        foreach (int port in cleartextGrpcPorts)
+            options.Listen(IPAddress.Any, port, listenOptions =>
             {
                 listenOptions.Protocols = HttpProtocols.Http2;
             });
     }
-    else
-        foreach (string port in opts.GrpcCleartextPorts)
-            options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
-            {
-                listenOptions.Protocols = HttpProtocols.Http2;
-            });
 
     if (!httpsConfigured)
         return;
 
-    if (opts.HttpsPorts is null || !opts.HttpsPorts.Any())
-        options.Listen(IPAddress.Any, 2071, listenOptions =>
-        {
-            listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
-            listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword);
-        });
-    else
+    // Under mTLS the listener on --raft-port is the cluster listener: it demands a client certificate.
+    // The other HTTPS listeners stay server-TLS only for application clients.
+    foreach (int port in NodeTransportSecurityPolicy.GetHttpsPorts(opts))
     {
-        foreach (string port in opts.HttpsPorts)
+        bool clusterListener = NodeTransportSecurityPolicy.IsClusterListener(transportSecurity, port, opts.RaftPort);
+
+        options.Listen(IPAddress.Any, port, listenOptions =>
         {
-            options.Listen(IPAddress.Any, int.Parse(port), listenOptions =>
-            {
-                listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
-                listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword);
-            });
-        }
+            listenOptions.Protocols = NodeTransportSecurityPolicy.GetHttpsProtocols(clusterListener);
+            listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword,
+                httpsOptions => NodeTransportSecurityPolicy.ConfigureClientCertificate(httpsOptions, clusterListener));
+        });
     }
 });
 
 ThreadPool.SetMinThreads(256, 128);
-    
-// @todo Review certificate validation
-FlurlHttp.Clients.WithDefaults(x => x.ConfigureInnerHandler(ih => ih.ServerCertificateCustomValidationCallback = (a, b, c, d) => true));
+
+// No process-wide certificate bypass: Kommander's cluster clients and Kahuna's inter-node channels take
+// their certificate policy from the transport-security options, so other HTTP clients validate normally.
 
 KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
 {
@@ -338,6 +344,18 @@ if (app.Logger.IsEnabled(LogLevel.Information))
 if (!httpsConfigured)
     app.Logger.LogInformation("HTTPS disabled: no certificate configured (pass --https-certificate to enable it)");
 
+if (!bindPlaintextListeners)
+    app.Logger.LogInformation("Cleartext HTTP and h2c listeners not bound: an HTTPS certificate is configured (pass --allow-plaintext-listener to bind them)");
+
+if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.MutualTls && app.Logger.IsEnabled(LogLevel.Information))
+    app.Logger.LogInformation("MutualTls: port {RaftPort} requires a trusted client certificate and serves HTTP/1.1 and HTTP/2 only", opts.RaftPort);
+
+if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.SharedSecret)
+    app.Logger.LogWarning("SharedSecret authenticates Raft only; Kahuna's inter-node gRPC stays unauthenticated. Use MutualTls to cover both");
+
+if (opts.RaftAllowInsecureCertificateValidation)
+    app.Logger.LogWarning("--raft-allow-insecure-certificate-validation is set: peer certificates are not validated on Raft or Kahuna inter-node connections. Other HTTP clients are unaffected. Development only");
+
 // Must wrap the pipeline before any route runs: maps retryable infrastructure exceptions
 // (Raft resolution, inter-node transport) escaping the kv/locks/sequences surfaces to a typed
 // MustRetry response instead of an unclassifiable HTTP 500.
@@ -420,7 +438,7 @@ else
     (app.Services.GetRequiredService<IRaft>() as IDisposable)?.Dispose();
 }
 
-static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
+static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, RaftTransportSecurityOptions transportSecurity)
 {
     return new()
     {
@@ -428,10 +446,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts)
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,
         Port = opts.RaftPort,
-        TransportSecurity = new()
-        {
-            AllowInsecureCertificateValidation = opts.RaftAllowInsecureCertificateValidation
-        },
+        TransportSecurity = transportSecurity,
         InitialPartitions = opts.InitialClusterPartitions,
         HttpScheme = opts.RaftHttpScheme,
         HttpAuthBearerToken = opts.RaftHttpAuthBearerToken,

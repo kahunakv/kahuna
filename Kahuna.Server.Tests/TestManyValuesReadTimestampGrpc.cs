@@ -1,4 +1,5 @@
 
+using Kahuna.Server.Communication;
 using Kahuna.Server.KeyValues.Writes;
 using Google.Protobuf;
 using Kommander.Data;
@@ -39,7 +40,7 @@ public class TestManyValuesReadTimestampGrpc
     // too-narrow proto field (e.g. int32 physical) or a transposed field would corrupt the round-trip.
     private static readonly HLCTimestamp SampleTs = new(3, 5_000_000_000L, 4_000_000_123u);
 
-    private static KeyValuesService NewService(CapturingKahuna fake) => new(fake, NullLogger<IKahuna>.Instance);
+    private static KeyValuesService NewService(CapturingKahuna fake) => new(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
     private static T WireRoundTrip<T>(T message, MessageParser<T> parser) where T : IMessage<T> =>
         parser.ParseFrom(message.ToByteArray());

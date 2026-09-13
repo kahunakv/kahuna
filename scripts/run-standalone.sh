@@ -53,6 +53,7 @@ ARGS=(
   --http-ports "${HTTP_PORT}"
   --https-ports "${HTTPS_PORT}"
   --https-certificate "${PUBLISH_DIR}/certificate.pfx"
+  --allow-plaintext-listener
   --initial-cluster-partitions "${PARTITIONS}"
 )
 

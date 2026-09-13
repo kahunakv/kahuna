@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Grpc.Core;
 using Kahuna.Client.Routing;
@@ -119,8 +120,8 @@ public sealed class TestRoutingMetadata : BaseCluster
             Assert.NotNull(snapshot);
             Assert.Equal("", rejection);
 
-            KeyValuesService keyValues = new(kahuna1, NullLogger<IKahuna>.Instance);
-            LocksService locks = new(kahuna1, new KahunaConfiguration(), raft1, NullLogger<IKahuna>.Instance);
+            KeyValuesService keyValues = new(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+            LocksService locks = new(kahuna1, new KahunaConfiguration(), raft1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             foreach (string key in GoldenKeys)
             {
@@ -183,7 +184,7 @@ public sealed class TestRoutingMetadata : BaseCluster
             RoutingMetadataSnapshot? snapshot = RoutingMetadataSnapshot.TryCreate(metadata, TimeSpan.FromMinutes(1), out _);
             Assert.NotNull(snapshot);
 
-            SequencesService sequences = new(kahuna1, NullLogger<IKahuna>.Instance);
+            SequencesService sequences = new(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             for (int i = 0; i < 6; i++)
             {
@@ -240,7 +241,7 @@ public sealed class TestRoutingMetadata : BaseCluster
                 }
             }
 
-            KeyValuesService keyValues = new(kahuna1, NullLogger<IKahuna>.Instance);
+            KeyValuesService keyValues = new(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             string lower = keySpace + "/aaaa";
             string upper = keySpace + "/zzzz";
@@ -406,7 +407,7 @@ public sealed class TestRoutingMetadata : BaseCluster
 
             Assert.True(await resolver.RefreshMetadataAsync(TestContext.Current.CancellationToken));
 
-            KeyValuesService keyValues = new(kahuna1, NullLogger<IKahuna>.Instance);
+            KeyValuesService keyValues = new(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             int direct = 0;
             const int probes = 20;

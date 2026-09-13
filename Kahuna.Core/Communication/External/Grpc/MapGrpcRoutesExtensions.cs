@@ -1,5 +1,7 @@
 
+using Kahuna.Server.Communication;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Kahuna.Communication.External.Grpc;
 
@@ -15,6 +17,11 @@ public static class MapGrpcRoutesExtensions
 {
     public static void MapGrpcKahunaRoutes(this WebApplication app)
     {
+        // Fail at startup, not at the first call: the services cannot be activated without the gate.
+        if (app.Services.GetService<NodeTransportGate>() is null)
+            throw new InvalidOperationException(
+                "The Kahuna gRPC services require a NodeTransportGate. Call services.AddNodeTransportGate() before building the application.");
+
         app.MapGrpcService<LocksService>();
         app.MapGrpcService<KeyValuesService>();
         app.MapGrpcService<SequencesService>();

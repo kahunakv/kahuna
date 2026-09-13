@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Grpc.Core;
 using Kommander.Time;
@@ -35,7 +36,7 @@ public sealed class TestPointReadGrpcWire
     public async Task TryGetKeyValue_CarriesFullEntryMetadataOverTheWire()
     {
         KeyValuesService service = new(
-            new FixedPointReadKahuna(KeyValueResponseType.Get, Entry(Value)), NullLogger<IKahuna>.Instance);
+            new FixedPointReadKahuna(KeyValueResponseType.Get, Entry(Value)), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryGetKeyValueResponse response = await service.TryGetKeyValue(
             new GrpcTryGetKeyValueRequest { Key = "greeting", Revision = -1 }, Context());
@@ -56,7 +57,7 @@ public sealed class TestPointReadGrpcWire
     public async Task TryExistsKeyValue_CarriesFullEntryMetadataOverTheWire()
     {
         KeyValuesService service = new(
-            new FixedPointReadKahuna(KeyValueResponseType.Exists, Entry(null)), NullLogger<IKahuna>.Instance);
+            new FixedPointReadKahuna(KeyValueResponseType.Exists, Entry(null)), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryExistsKeyValueResponse response = await service.TryExistsKeyValue(
             new GrpcTryExistsKeyValueRequest { Key = "greeting", Revision = -1 }, Context());

@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Grpc.Core;
 using Kahuna.Client;
 using Kahuna.Communication.External.Grpc;
@@ -86,7 +87,7 @@ public sealed class TestRangeAdminTransports
 
         IKahuna kahuna = node.Kahuna;
         ClusterService cluster = new(node.Raft, kahuna);
-        KeyValuesService keyValues = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService keyValues = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         const string space = "transport/parity";
 

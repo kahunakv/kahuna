@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using System.Threading.Channels;
 using Grpc.Core;
 using Kommander;
@@ -29,7 +30,7 @@ public sealed class TestServerBatcherMaintenanceLane
     public async Task StuckMaintenanceCall_DoesNotBlockCompletedUnrelatedResponse()
     {
         BlockingSeedKahuna kahuna = new();
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
 
         Task batch = service.BatchServerKeyValueRequests(
@@ -73,7 +74,7 @@ public sealed class TestServerBatcherMaintenanceLane
     public async Task LaneOperations_ExecuteOneAtATime_InArrivalOrder()
     {
         OrderRecordingSeedKahuna kahuna = new(gatedKeySpace: "alpha");
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
 
         Task batch = service.BatchServerKeyValueRequests(
@@ -120,7 +121,7 @@ public sealed class TestServerBatcherMaintenanceLane
     public async Task FaultedLaneOperation_IsRefused_AndReleasesTheLane()
     {
         ThrowingSeedKahuna kahuna = new(poisonedKeySpace: "poisoned");
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
 
         await service.BatchServerKeyValueRequests(
@@ -159,7 +160,7 @@ public sealed class TestServerBatcherMaintenanceLane
         using CancellationTokenSource cancellation = new();
 
         OrderRecordingSeedKahuna kahuna = new(gatedKeySpace: "alpha");
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
 
         Task batch = service.BatchServerKeyValueRequests(

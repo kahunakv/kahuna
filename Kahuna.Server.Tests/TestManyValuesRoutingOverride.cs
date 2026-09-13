@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Grpc.Core;
 using Kommander.Time;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -27,7 +28,7 @@ public sealed class TestManyValuesRoutingOverride
     public async Task GetManyOverride_RoutesPerKey_NotLocalActorRead()
     {
         RoutingRecordingKahuna fake = new();
-        KeyValuesService service = new(fake, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryGetManyValuesRequest request = new()
         {
@@ -52,7 +53,7 @@ public sealed class TestManyValuesRoutingOverride
     public async Task ExistsManyOverride_RoutesPerKey_NotLocalActorRead()
     {
         RoutingRecordingKahuna fake = new();
-        KeyValuesService service = new(fake, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryExistsManyValuesRequest request = new()
         {

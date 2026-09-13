@@ -34,7 +34,7 @@ public sealed class TestInterNodeTransportMustRetry
     private const string UnreachableNode = "https://localhost:1";
 
     private static GrpcInterNodeCommunication BuildTransport() =>
-        new(new KahunaConfiguration(), NullLogger<GrpcInterNodeCommunication>.Instance);
+        new(new KahunaConfiguration(), new RaftTransportSecurityOptions(), NullLogger<GrpcInterNodeCommunication>.Instance);
 
     [Fact]
     public async Task StartTransaction_LeaderUnreachable_ReturnsMustRetry()

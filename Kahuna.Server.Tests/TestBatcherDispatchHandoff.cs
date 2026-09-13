@@ -1,3 +1,4 @@
+using Kommander;
 using System.Collections.Concurrent;
 using System.Reflection;
 
@@ -40,7 +41,7 @@ public sealed class TestBatcherDispatchHandoff
     [Fact]
     public void ServerBatcher_ItemArrivedDuringHandoff_ReclaimsOwnership()
     {
-        GrpcServerBatcher batcher = new("test://server-dispatch-handoff", NullLogger.Instance);
+        GrpcServerBatcher batcher = new("test://server-dispatch-handoff", new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         // The dispatcher owns the flag and has just seen an empty inbox.
         SetServerProcessing(batcher, 0);
@@ -69,7 +70,7 @@ public sealed class TestBatcherDispatchHandoff
     [Fact]
     public async Task ServerBatcher_FinalProducerWithNoLaterTraffic_IsNotStranded()
     {
-        GrpcServerBatcher batcher = new("test://server-dispatch-handoff-final", NullLogger.Instance);
+        GrpcServerBatcher batcher = new("test://server-dispatch-handoff-final", new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         // The dispatcher owns the flag and has just seen an empty inbox: exactly the state a real
         // enqueue meets in the dangerous window.

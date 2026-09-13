@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Grpc.Core;
 using Kommander;
 using Kommander.Time;
@@ -28,7 +29,7 @@ public sealed class TestBatchedHandlerFaultRefusal
     [Fact]
     public async Task ClientBatch_FaultedHandler_AnswersMustRetryAndLeavesTheStreamAlive()
     {
-        KeyValuesService service = new(new ThrowingSetKahuna(), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new ThrowingSetKahuna(), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         CapturingStreamWriter<GrpcBatchClientKeyValueResponse> responses = new();
 
@@ -71,7 +72,7 @@ public sealed class TestBatchedHandlerFaultRefusal
     [Fact]
     public async Task ServerBatch_FaultedManyHandler_RefusesEveryRequestedKey()
     {
-        KeyValuesService service = new(new ThrowingSetKahuna(), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new ThrowingSetKahuna(), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         CapturingStreamWriter<GrpcBatchServerKeyValueResponse> responses = new();
 
@@ -109,7 +110,7 @@ public sealed class TestBatchedHandlerFaultRefusal
         // The lock handler under test reads neither the configuration nor raft — it forwards straight
         // to IKahuna — so the batcher path is exercised without standing up a Raft node.
         LocksService service = new(
-            new ThrowingLockKahuna(), new KahunaConfiguration(), null!, NullLogger<IKahuna>.Instance);
+            new ThrowingLockKahuna(), new KahunaConfiguration(), null!, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         CapturingStreamWriter<GrpcBatchClientLockResponse> responses = new();
 
@@ -136,7 +137,7 @@ public sealed class TestBatchedHandlerFaultRefusal
     public async Task ServerLockBatch_FaultedHandler_AnswersMustRetry()
     {
         LocksService service = new(
-            new ThrowingLockKahuna(), new KahunaConfiguration(), null!, NullLogger<IKahuna>.Instance);
+            new ThrowingLockKahuna(), new KahunaConfiguration(), null!, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         CapturingStreamWriter<GrpcBatchServerLockResponse> responses = new();
 
@@ -167,7 +168,7 @@ public sealed class TestBatchedHandlerFaultRefusal
     [Fact]
     public async Task ServerBatch_FaultedTypelessHandler_AnswersNoneEnvelopeWithoutPayload()
     {
-        KeyValuesService service = new(new ThrowingLookupKahuna(), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new ThrowingLookupKahuna(), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         CapturingStreamWriter<GrpcBatchServerKeyValueResponse> responses = new();
 

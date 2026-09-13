@@ -13,13 +13,13 @@ public sealed class KahunaCommandLineOptions
     [Option('h', "host", Required = false, HelpText = "Host to bind incoming connections to", Default = "*")]
     public string Host { get; set; } = "*";
 
-    [Option('p', "http-ports", Required = false, HelpText = "Ports to bind incoming HTTP connections to")]
+    [Option('p', "http-ports", Required = false, HelpText = "Ports to bind incoming HTTP connections to. Not bound when an HTTPs certificate is configured, unless --allow-plaintext-listener is given")]
     public IEnumerable<string>? HttpPorts { get; set; }
     
     [Option("https-ports", Required = false, HelpText = "Ports to bind incoming HTTPs connections to")]
     public IEnumerable<string>? HttpsPorts { get; set; }
 
-    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead. A standalone node defaults to 2072; a node joining a cluster binds nothing unless this option is given")]
+    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead. A standalone node defaults to 2072; a node joining a cluster binds nothing unless this option is given. Not bound when an HTTPs certificate is configured, unless --allow-plaintext-listener is given")]
     public IEnumerable<string>? GrpcCleartextPorts { get; set; }
     
     [Option("https-certificate", Required = false, HelpText = "Path to the HTTPs certificate")]
@@ -512,9 +512,6 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-grpc-append-logs-max-coalesce-batch", Required = false, HelpText = "Maximum number of AppendLogs items drained into a single gRPC frame per write cycle when coalescing is enabled.", Default = 256)]
     public int RaftGrpcAppendLogsMaxCoalesceBatch { get; set; } = 256;
 
-    [Option("raft-transport-security", Required = false, HelpText = "Transport security and node authentication settings (JSON; prefer --raft-allow-insecure-certificate-validation for simple dev overrides)", Default = "")]
-    public string RaftTransportSecurity { get; set; } = "";
-
     [Option("raft-max-outbound-queue-bytes-per-peer", Required = false, HelpText = "Cap on buffered outbound bytes queued per peer; a follower that stops draining has its excess AppendLogs entries dropped rather than accumulated without bound (dropped entries are re-shipped by heartbeat/backfill retry). 0 disables the cap.", Default = 64L * 1024 * 1024)]
     public long RaftMaxOutboundQueueBytesPerPeer { get; set; } = 64L * 1024 * 1024;
 
@@ -661,6 +658,40 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-allow-insecure-certificate-validation", Required = false, HelpText = "Skip TLS certificate validation for inter-node Raft gRPC connections (use only in dev/test environments)")]
     public bool RaftAllowInsecureCertificateValidation { get; set; }
+
+    // ── Node-to-node transport security ──────────────────────────────────────────────────────
+    // Named as Kommander.Server names them. One mode covers Raft and Kahuna's own inter-node gRPC.
+
+    [Option("node-auth-mode", Required = false, HelpText = "Node-to-node authentication mode: Disabled, SharedSecret or MutualTls. MutualTls covers Raft and Kahuna's inter-node traffic; SharedSecret covers Raft only", Default = "Disabled")]
+    public string NodeAuthMode { get; set; } = "Disabled";
+
+    [Option("node-shared-secret", Required = false, HelpText = "Shared secret for node authentication (SharedSecret mode)", Default = "")]
+    public string NodeSharedSecret { get; set; } = "";
+
+    [Option("node-auth-header", Required = false, HelpText = "Header or metadata name that carries the node signature (SharedSecret mode). Empty keeps Kommander's default", Default = "")]
+    public string NodeAuthHeader { get; set; } = "";
+
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("node-require-tls", Required = false, HelpText = "Reject node-to-node requests that did not arrive over TLS: true or false (default true)")]
+    public bool? NodeRequireTls { get; set; }
+
+    [Option("node-auth-clock-skew", Required = false, HelpText = "Maximum clock skew accepted on signed node requests, in seconds (SharedSecret mode)", Default = 60)]
+    public int NodeAuthClockSkew { get; set; } = 60;
+
+    [Option("client-certificate", Required = false, HelpText = "PKCS#12 certificate this node presents to its peers in MutualTls mode. Defaults to --https-certificate", Default = "")]
+    public string ClientCertificate { get; set; } = "";
+
+    [Option("client-certificate-password", Required = false, HelpText = "Password of --client-certificate. Defaults to --https-certificate-password when --client-certificate is not set", Default = "")]
+    public string ClientCertificatePassword { get; set; } = "";
+
+    [Option("trusted-client-cert-thumbprint", Required = false, HelpText = "SHA-256 thumbprints of the peer certificates this node accepts in MutualTls mode (space-separated; colons and case are ignored)")]
+    public IEnumerable<string>? TrustedClientCertThumbprints { get; set; }
+
+    [Option("trusted-server-cert-thumbprint", Required = false, HelpText = "SHA-256 thumbprints of the peer server certificates this node pins when it dials a peer (space-separated; colons and case are ignored)")]
+    public IEnumerable<string>? TrustedServerCertThumbprints { get; set; }
+
+    [Option("allow-plaintext-listener", Required = false, HelpText = "Bind the cleartext HTTP (--http-ports) and h2c (--grpc-cleartext-ports) listeners even when an HTTPs certificate is configured. Node-only surfaces still refuse cleartext callers in MutualTls mode")]
+    public bool AllowPlaintextListener { get; set; }
 
     // ── Key-range split/merge policy ─────────────────────────────────────────────────────────
     // A 0 on the threshold knobs does not merely relax the policy: the corresponding background

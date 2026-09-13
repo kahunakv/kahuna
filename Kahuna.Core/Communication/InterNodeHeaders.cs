@@ -1,3 +1,4 @@
+
 using Grpc.Core;
 
 namespace Kahuna.Server.Communication;
@@ -19,8 +20,17 @@ internal static class InterNodeHeaders
     /// <summary>Reusable header set for forwarded calls; never mutated after construction.</summary>
     public static readonly Metadata ForwardedCall = new() { { Forwarded, "1" } };
 
-    public static bool IsForwarded(ServerCallContext context)
+    /// <summary>
+    /// True when the request claims to be forwarded by a peer. The claim skips ownership resolution, so
+    /// it is a trust boundary: an untrusted caller that asserts it is refused through
+    /// <paramref name="gate"/>, never served.
+    /// </summary>
+    public static bool IsForwarded(ServerCallContext context, NodeTransportGate gate)
     {
-        return context.RequestHeaders.GetValue(Forwarded) is not null;
+        if (context.RequestHeaders.GetValue(Forwarded) is null)
+            return false;
+
+        gate.RequirePeer(context);
+        return true;
     }
 }

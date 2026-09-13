@@ -39,4 +39,5 @@ exec dotnet /app/Kahuna.Server.dll \
   --wal-path "${DATA_DIR}/wal" \
   --wal-revision v1 \
   --disable-wal-sync-writes \
-  --raft-allow-insecure-certificate-validation
+  --raft-allow-insecure-certificate-validation \
+  --allow-plaintext-listener

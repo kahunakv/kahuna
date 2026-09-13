@@ -70,6 +70,10 @@ supply a certificate:
 kahuna-server --https-certificate /path/to/certificate.pfx --https-ports 2071
 ```
 
+With a certificate, the node does not bind the cleartext ports 2070 and 2072. Pass
+`--allow-plaintext-listener` to keep them. To authenticate traffic between nodes with mutual TLS, see
+[docs/node-transport-security-guide.md](docs/node-transport-security-guide.md).
+
 A node that joins a cluster does not bind the cleartext gRPC port. Ask for it explicitly:
 
 ```bash

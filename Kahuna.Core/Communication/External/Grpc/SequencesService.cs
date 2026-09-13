@@ -30,11 +30,14 @@ public sealed class SequencesService : Sequencer.SequencerBase
 {
     private readonly IKahuna sequences;
 
+    private readonly NodeTransportGate gate;
+
     private readonly ILogger<IKahuna> logger;
 
-    public SequencesService(IKahuna sequences, ILogger<IKahuna> logger)
+    public SequencesService(IKahuna sequences, NodeTransportGate gate, ILogger<IKahuna> logger)
     {
         this.sequences = sequences;
+        this.gate = gate;
         this.logger = logger;
     }
 
@@ -50,7 +53,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
-        (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context)
+        (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context, gate)
             ? sequences.CreateSequence(
                 request.Name,
                 request.InitialValue,
@@ -107,7 +110,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
             request.RemoveBlockSize
         );
 
-        (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context)
+        (SequenceResponseType response, long revision) = await (InterNodeHeaders.IsForwarded(context, gate)
             ? sequences.UpdateSequence(request.Name, update, (SequenceDurability)request.Durability, context.CancellationToken)
             : sequences.LocateAndUpdateSequence(request.Name, update, (SequenceDurability)request.Durability, context.CancellationToken));
 
@@ -135,7 +138,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
-        (SequenceResponseType response, ReadOnlySequenceEntry? sequence) = await (InterNodeHeaders.IsForwarded(context)
+        (SequenceResponseType response, ReadOnlySequenceEntry? sequence) = await (InterNodeHeaders.IsForwarded(context, gate)
             ? sequences.GetSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken)
             : sequences.LocateAndGetSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken));
 
@@ -166,7 +169,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
-        (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context)
+        (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context, gate)
             ? sequences.NextSequenceValue(
                 request.Name,
                 request.HasIdempotencyKey ? request.IdempotencyKey : null,
@@ -197,7 +200,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
-        (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context)
+        (SequenceResponseType response, SequenceAllocation allocation) = await (InterNodeHeaders.IsForwarded(context, gate)
             ? sequences.ReserveSequenceRange(
                 request.Name,
                 request.Count,
@@ -230,7 +233,7 @@ public sealed class SequencesService : Sequencer.SequencerBase
 
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
-        SequenceResponseType response = await (InterNodeHeaders.IsForwarded(context)
+        SequenceResponseType response = await (InterNodeHeaders.IsForwarded(context, gate)
             ? sequences.DeleteSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken)
             : sequences.LocateAndDeleteSequence(request.Name, (SequenceDurability)request.Durability, context.CancellationToken));
 

@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Kommander;
 using Kommander.Time;
@@ -240,7 +241,7 @@ public sealed class TestConflictProbeRangeLockFence : BaseCluster
             GrpcTryCheckManyWriteIntentsRequest.Parser.ParseFrom(request.ToByteArray());
 
         CapturingProbeKahuna fake = new();
-        await new KeyValuesService(fake, NullLogger<IKahuna>.Instance)
+        await new KeyValuesService(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance)
             .TryCheckManyWriteIntentsInternal(parsed, null!);
 
         Assert.NotNull(fake.Probes);
@@ -267,7 +268,7 @@ public sealed class TestConflictProbeRangeLockFence : BaseCluster
             GrpcTryCheckManyWriteIntentsRequest.Parser.ParseFrom(request.ToByteArray());
 
         CapturingProbeKahuna fake = new();
-        await new KeyValuesService(fake, NullLogger<IKahuna>.Instance)
+        await new KeyValuesService(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance)
             .TryCheckManyWriteIntentsInternal(parsed, null!);
 
         Assert.NotNull(fake.Probes);

@@ -1,0 +1,15 @@
+[ req ]
+default_md         = sha256
+prompt             = no
+distinguished_name = dn
+x509_extensions    = ext
+
+[ dn ]
+O  = Kahuna Development
+CN = kahuna1
+
+[ ext ]
+basicConstraints = critical, CA:FALSE
+keyUsage         = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName   = DNS:kahuna1, DNS:localhost, IP:172.30.0.2, IP:127.0.0.1

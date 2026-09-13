@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Grpc.Core;
 using Kahuna.Client.Routing;
@@ -86,7 +87,7 @@ public sealed class TestRoutingHints : BaseCluster
             string ownerUrl = "http://" + ownerRaft.GetLocalEndpoint();
 
             // Sent to a node that does not own the key: it forwards, and reports the destination.
-            KeyValuesService forwarding = new(otherKahuna, NullLogger<IKahuna>.Instance);
+            KeyValuesService forwarding = new(otherKahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcTrySetKeyValueResponse forwarded = await OnWire(await forwarding.TrySetKeyValue(
                 new GrpcTrySetKeyValueRequest { Key = key, Value = Payload("v1"), ExpiresMs = 0, Durability = GrpcKeyValueDurability.Persistent },
@@ -105,7 +106,7 @@ public sealed class TestRoutingHints : BaseCluster
             Assert.NotEqual(GrpcRouteProvenance.RouteProvenanceUnknown, forwarded.Route.Provenance);
 
             // Sent to the owner: it executes, and reports itself.
-            KeyValuesService owning = new(ownerKahuna, NullLogger<IKahuna>.Instance);
+            KeyValuesService owning = new(ownerKahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcTrySetKeyValueResponse executed = await OnWire(await owning.TrySetKeyValue(
                 new GrpcTrySetKeyValueRequest { Key = key, Value = Payload("v2"), ExpiresMs = 0, Durability = GrpcKeyValueDurability.Persistent },
@@ -145,7 +146,7 @@ public sealed class TestRoutingHints : BaseCluster
 
             (IRaft ownerRaft, IKahuna ownerKahuna) = await Owner(PartitionOf(key), nodes, ct);
 
-            KeyValuesService service = new(ownerKahuna, NullLogger<IKahuna>.Instance);
+            KeyValuesService service = new(ownerKahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcTryGetKeyValueResponse missing = await OnWire(await service.TryGetKeyValue(
                 new GrpcTryGetKeyValueRequest { Key = key, Revision = -1, Durability = GrpcKeyValueDurability.Persistent },
@@ -182,7 +183,7 @@ public sealed class TestRoutingHints : BaseCluster
             (IRaft ownerRaft, _) = await Owner(PartitionOf(resource), nodes, ct);
             (_, IKahuna otherKahuna) = NonOwner(ownerRaft, nodes);
 
-            LocksService service = new(otherKahuna, new KahunaConfiguration(), ownerRaft, NullLogger<IKahuna>.Instance);
+            LocksService service = new(otherKahuna, new KahunaConfiguration(), ownerRaft, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcTryLockResponse response = GrpcTryLockResponse.Parser.ParseFrom((await service.TryLock(
                 new GrpcTryLockRequest
@@ -220,7 +221,7 @@ public sealed class TestRoutingHints : BaseCluster
 
         try
         {
-            KeyValuesService writer = new(kahuna1, NullLogger<IKahuna>.Instance);
+            KeyValuesService writer = new(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             List<string> keys = [];
 
@@ -296,7 +297,7 @@ public sealed class TestRoutingHints : BaseCluster
         {
             string key = "off/" + Guid.NewGuid().ToString("N")[..8];
 
-            KeyValuesService service = new(kahuna1, NullLogger<IKahuna>.Instance);
+            KeyValuesService service = new(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcTrySetKeyValueResponse set = await OnWire(await service.TrySetKeyValue(
                 new GrpcTrySetKeyValueRequest { Key = key, Value = Payload("v"), ExpiresMs = 0, Durability = GrpcKeyValueDurability.Persistent },
@@ -343,9 +344,9 @@ public sealed class TestRoutingHints : BaseCluster
 
             Dictionary<string, KeyValuesService> services = new(StringComparer.Ordinal)
             {
-                [cluster[0]] = new KeyValuesService(kahuna1, NullLogger<IKahuna>.Instance),
-                [cluster[1]] = new KeyValuesService(kahuna2, NullLogger<IKahuna>.Instance),
-                [cluster[2]] = new KeyValuesService(kahuna3, NullLogger<IKahuna>.Instance)
+                [cluster[0]] = new KeyValuesService(kahuna1, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance),
+                [cluster[1]] = new KeyValuesService(kahuna2, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance),
+                [cluster[2]] = new KeyValuesService(kahuna3, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance)
             };
 
             ClientRouteResolver resolver = new(
@@ -434,7 +435,7 @@ public sealed class TestRoutingHints : BaseCluster
             resolver.Learn(KahunaRoutingDomain.KeyValue, key, 0, wrongUrl, KahunaRouteProvenance.Executed, 0, wrongUrl);
             Assert.Equal(wrongUrl, resolver.Select(KahunaRoutingDomain.KeyValue, key));
 
-            KeyValuesService wrongService = new(wrongKahuna, NullLogger<IKahuna>.Instance);
+            KeyValuesService wrongService = new(wrongKahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
             GrpcTryGetKeyValueResponse read = await OnWire(await wrongService.TryGetKeyValue(
                 new GrpcTryGetKeyValueRequest { Key = key, Revision = -1, Durability = GrpcKeyValueDurability.Persistent },

@@ -469,6 +469,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             InitialPartitions = options.InitialPartitions,
             HttpScheme = options.HttpScheme,
             HttpAuthBearerToken = options.HttpAuthBearerToken,
+            TransportSecurity = options.TransportSecurity ?? new(),
             HttpTimeout = options.HttpTimeout,
             HttpVersion = options.HttpVersion,
             HeartbeatInterval = options.HeartbeatInterval,

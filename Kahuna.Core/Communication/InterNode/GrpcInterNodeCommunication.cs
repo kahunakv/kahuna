@@ -1,4 +1,5 @@
 
+using Kommander;
 using Kommander.Time;
 using Kommander.Communication.Grpc;
 using Microsoft.Extensions.Logging;
@@ -35,13 +36,26 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
     private readonly KahunaConfiguration configuration;
 
+    private readonly RaftTransportSecurityOptions transportSecurity;
+
     private readonly ILogger<GrpcInterNodeCommunication> logger;
 
-    public GrpcInterNodeCommunication(KahunaConfiguration configuration, ILogger<GrpcInterNodeCommunication> logger)
+    /// <param name="configuration">Kahuna configuration.</param>
+    /// <param name="transportSecurity">
+    /// The effective options of this node's <c>RaftConfiguration</c>. Kahuna dials the same URLs Kommander
+    /// does, and <see cref="SharedChannels"/> builds each URL's pool once from the first caller's options,
+    /// so any other options would strip the client certificate from Raft traffic to that peer as well.
+    /// </param>
+    /// <param name="logger">Logger.</param>
+    public GrpcInterNodeCommunication(KahunaConfiguration configuration, RaftTransportSecurityOptions transportSecurity, ILogger<GrpcInterNodeCommunication> logger)
     {
         this.configuration = configuration;
+        this.transportSecurity = transportSecurity;
         this.logger = logger;
     }
+
+    /// <summary>The options every channel this transport opens is built with.</summary>
+    internal RaftTransportSecurityOptions TransportSecurity => transportSecurity;
 
     /// <summary>
     /// Attempts to acquire a distributed lock on a specified resource using gRPC communication.
@@ -1100,9 +1114,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         string? recordAnchorKey = null
     )
     {
-        //GrpcChannel channel = SharedChannels.GetChannel(node);
-        //KeyValuer.KeyValuerClient client = new(channel);
-
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
         GrpcTryPrepareMutationsRequest request = new()
@@ -2531,8 +2542,11 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     // Qualified: the Kahuna.Server.Sequencer namespace would otherwise shadow the generated client.
     private global::Sequencer.SequencerClient GetSequencerClient(string node)
     {
-        return new(SharedChannels.GetChannel(ResolveNodeUrl(node)));
+        return new(GetSequencerChannel(node));
     }
+
+    internal GrpcChannel GetSequencerChannel(string node) =>
+        SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity);
 
     /// <summary>
     /// Qualifies a bare peer endpoint (host:port) with the configured inter-node gRPC scheme.
@@ -2545,7 +2559,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ? node
             : configuration.InterNodeGrpcScheme + node;
 
-    private GrpcServerBatcher GetSharedBatcher(string url)
+    internal GrpcServerBatcher GetSharedBatcher(string url)
     {
         Lazy<GrpcServerBatcher> lazyBatcher = batchers.GetOrAdd(ResolveNodeUrl(url), static (u, self) => self.GetSharedBatchers(u), this);
         return lazyBatcher.Value;
@@ -2553,7 +2567,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
     private Lazy<GrpcServerBatcher> GetSharedBatchers(string url)
     {
-        return new(() => new(url, logger));
+        return new(() => new(url, transportSecurity, logger));
     }
 
     /// <summary>

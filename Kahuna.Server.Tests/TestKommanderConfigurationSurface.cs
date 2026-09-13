@@ -50,7 +50,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxDrainQuantumReplication)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumReplication),
         [nameof(RaftConfiguration.MaxDrainQuantumClient)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumClient),
         [nameof(RaftConfiguration.MaxDrainQuantumMaintenance)] = nameof(KahunaCommandLineOptions.RaftMaxDrainQuantumMaintenance),
-        [nameof(RaftConfiguration.TransportSecurity)] = nameof(KahunaCommandLineOptions.RaftTransportSecurity),
+        [nameof(RaftConfiguration.TransportSecurity)] = nameof(KahunaCommandLineOptions.NodeAuthMode),
         [nameof(RaftConfiguration.GrpcScheme)] = nameof(KahunaCommandLineOptions.RaftGrpcScheme),
         [nameof(RaftConfiguration.MaxPreAuthRequestBodyBytes)] = nameof(KahunaCommandLineOptions.RaftMaxPreAuthRequestBodyBytes),
         [nameof(RaftConfiguration.BackfillEnabled)] = nameof(KahunaCommandLineOptions.RaftBackfillEnabled),
@@ -138,6 +138,51 @@ public sealed class TestKommanderConfigurationSurface
         nameof(RaftConfiguration.EnableInternalTimers),
         nameof(RaftConfiguration.EnableInternalSchedulingThreads)
     ];
+
+    /// <summary>
+    /// Each operator-settable transport-security field and the flag that sets it. The round trip through
+    /// <see cref="NodeTransportSecurityPolicy.Build"/> is asserted in <c>TestNodeTransportSecurityPolicy</c>.
+    /// </summary>
+    private static readonly Dictionary<string, string> TransportSecurityToCliOptionProperties = new()
+    {
+        [nameof(RaftTransportSecurityOptions.NodeAuthenticationMode)] = nameof(KahunaCommandLineOptions.NodeAuthMode),
+        [nameof(RaftTransportSecurityOptions.SharedSecret)] = nameof(KahunaCommandLineOptions.NodeSharedSecret),
+        [nameof(RaftTransportSecurityOptions.HeaderName)] = nameof(KahunaCommandLineOptions.NodeAuthHeader),
+        [nameof(RaftTransportSecurityOptions.RequireTls)] = nameof(KahunaCommandLineOptions.NodeRequireTls),
+        [nameof(RaftTransportSecurityOptions.AllowInsecureCertificateValidation)] = nameof(KahunaCommandLineOptions.RaftAllowInsecureCertificateValidation),
+        [nameof(RaftTransportSecurityOptions.AllowedClockSkew)] = nameof(KahunaCommandLineOptions.NodeAuthClockSkew),
+        [nameof(RaftTransportSecurityOptions.TrustedServerCertificateThumbprints)] = nameof(KahunaCommandLineOptions.TrustedServerCertThumbprints),
+        [nameof(RaftTransportSecurityOptions.TrustedClientCertificateThumbprints)] = nameof(KahunaCommandLineOptions.TrustedClientCertThumbprints),
+        [nameof(RaftTransportSecurityOptions.ClientCertificatePath)] = nameof(KahunaCommandLineOptions.ClientCertificate),
+        [nameof(RaftTransportSecurityOptions.ClientCertificatePassword)] = nameof(KahunaCommandLineOptions.ClientCertificatePassword)
+    };
+
+    /// <summary>The pre-loaded certificate is for embedded hosts and tests; Kommander keeps it off the CLI.</summary>
+    private static readonly HashSet<string> NonCliTransportSecurityProperties =
+    [
+        nameof(RaftTransportSecurityOptions.ClientCertificate)
+    ];
+
+    [Fact]
+    public void TestServerCliExposesEveryTransportSecurityOption()
+    {
+        string[] writable = typeof(RaftTransportSecurityOptions)
+            .GetProperties()
+            .Where(property => property.SetMethod?.IsPublic == true && !NonCliTransportSecurityProperties.Contains(property.Name))
+            .Select(property => property.Name)
+            .ToArray();
+
+        Assert.Empty(writable.Except(TransportSecurityToCliOptionProperties.Keys));
+        Assert.Empty(TransportSecurityToCliOptionProperties.Keys.Except(writable));
+
+        HashSet<string> cliProperties = typeof(KahunaCommandLineOptions)
+            .GetProperties()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.All(TransportSecurityToCliOptionProperties.Values, cliProperty =>
+            Assert.Contains(cliProperty, cliProperties));
+    }
 
     [Fact]
     public void TestServerCliExposesEveryKommanderRaftConfigurationOption()

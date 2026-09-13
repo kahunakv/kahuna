@@ -1,3 +1,5 @@
+using Kommander;
+using Kahuna.Server.Communication;
 using System.Collections.Concurrent;
 using System.Reflection;
 
@@ -255,7 +257,7 @@ public sealed class TestInterNodeCoalescing
     [Fact]
     public async Task ServerBatch_UnpacksACoalescedCarrier_AndAnswersEveryInnerRequest()
     {
-        KeyValuesService service = new(new HealthyGetKahuna(), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new HealthyGetKahuna(), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         CapturingStreamWriter<GrpcBatchServerKeyValueResponse> responses = new();
 
         GrpcBatchServerKeyValueRequest carrier = new() { Type = GrpcServerBatchType.ServerCoalesced };
@@ -389,7 +391,7 @@ public sealed class TestInterNodeCoalescing
 
     private static Task InvokeRunBatch(string url, List<GrpcServerBatcherItem> requests)
     {
-        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        GrpcServerBatcher batcher = new(url, new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         MethodInfo method = BatcherType.GetMethod("RunBatch", BindingFlags.NonPublic | BindingFlags.Instance)!;
 

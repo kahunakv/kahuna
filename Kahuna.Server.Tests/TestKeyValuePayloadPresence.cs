@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using Kahuna.Server.Communication;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -125,7 +126,7 @@ public sealed class TestKeyValuePayloadPresence
         request.Items.AddRange(encoded);
 
         CapturingSetManyKahuna kahuna = new();
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         await service.TrySetManyKeyValue(OnWire(request), Context());
 
@@ -148,7 +149,7 @@ public sealed class TestKeyValuePayloadPresence
         GrpcTrySetKeyValueRequest request = new() { Key = "k", Flags = GrpcKeyValueFlags.SetIfEqualToValue };
 
         CapturingSetKahuna kahuna = new();
-        KeyValuesService service = new(kahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         await service.TrySetKeyValue(
             GrpcTrySetKeyValueRequest.Parser.ParseFrom(request.ToByteArray()), Context());
@@ -165,7 +166,7 @@ public sealed class TestKeyValuePayloadPresence
         };
 
         CapturingSetKahuna emptyKahuna = new();
-        KeyValuesService emptyService = new(emptyKahuna, NullLogger<IKahuna>.Instance);
+        KeyValuesService emptyService = new(emptyKahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         await emptyService.TrySetKeyValue(
             GrpcTrySetKeyValueRequest.Parser.ParseFrom(withEmptyValue.ToByteArray()), Context());
@@ -231,7 +232,7 @@ public sealed class TestKeyValuePayloadPresence
 
     private static async Task<GrpcTryGetKeyValueResponse> ReadEntry(ReadOnlyKeyValueEntry entry)
     {
-        KeyValuesService service = new(new FixedGetKahuna(entry), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new FixedGetKahuna(entry), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryGetKeyValueResponse response = await service.TryGetKeyValue(
             new GrpcTryGetKeyValueRequest { Key = "k", Revision = -1 }, Context());
@@ -306,7 +307,7 @@ public sealed class TestKeyValuePayloadPresence
         foreach ((KeyValueResponseType _, string key, ReadOnlyKeyValueEntry? _) in results)
             request.Items.Add(new GrpcTryManyValuesRequestItem { Key = key, Revision = -1 });
 
-        KeyValuesService service = new(new FixedBatchGetKahuna(results), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new FixedBatchGetKahuna(results), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryGetManyValuesResponse response = await service.TryGetManyValuesInternal(
             GrpcTryGetManyValuesRequest.Parser.ParseFrom(request.ToByteArray()), Context());

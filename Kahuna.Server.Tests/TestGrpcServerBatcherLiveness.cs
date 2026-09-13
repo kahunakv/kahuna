@@ -1,3 +1,4 @@
+using Kommander;
 using System.Collections.Concurrent;
 using System.Reflection;
 
@@ -241,7 +242,7 @@ public sealed class TestGrpcServerBatcherLiveness
         (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(streamId, new HangingClientStreamWriter<GrpcBatchServerKeyValueRequest>());
         Streamings()[url] = CreatedLazy(streaming);
 
-        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        GrpcServerBatcher batcher = new(url, new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         try
         {
@@ -385,7 +386,7 @@ public sealed class TestGrpcServerBatcherLiveness
         (GrpcServerSharedStreaming streaming, _) = MakeSharedStreaming(streamId, writer);
         Streamings()[url] = CreatedLazy(streaming);
 
-        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        GrpcServerBatcher batcher = new(url, new RaftTransportSecurityOptions(), NullLogger.Instance);
         List<Task<GrpcServerBatcherResponse>> pending = new(backlog + 1);
 
         try
@@ -455,7 +456,7 @@ public sealed class TestGrpcServerBatcherLiveness
         const string url = "test://dispatch-buffer-failures";
         const long streamIdBase = 9_800_020;
 
-        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        GrpcServerBatcher batcher = new(url, new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         try
         {
@@ -496,7 +497,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
         try
         {
-            GrpcServerBatcher batcher = new("test://admission-item-limit", NullLogger.Instance);
+            GrpcServerBatcher batcher = new("test://admission-item-limit", new RaftTransportSecurityOptions(), NullLogger.Instance);
             Task<GrpcServerBatcherResponse> task = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
 
             Assert.True(task.IsFaulted);
@@ -521,7 +522,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
         try
         {
-            GrpcServerBatcher batcher = new("test://admission-byte-limit", NullLogger.Instance);
+            GrpcServerBatcher batcher = new("test://admission-byte-limit", new RaftTransportSecurityOptions(), NullLogger.Instance);
             Task<GrpcServerBatcherResponse> task = batcher.Enqueue(new GrpcLookupTransactionRecordRequest());
 
             Assert.True(task.IsFaulted);
@@ -627,7 +628,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
     private static Task InvokeRunBatch(string url, List<GrpcServerBatcherItem> requests)
     {
-        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        GrpcServerBatcher batcher = new(url, new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         MethodInfo method = BatcherType.GetMethod("RunBatch", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
@@ -643,7 +644,7 @@ public sealed class TestGrpcServerBatcherLiveness
 
     private static Task InvokeWriteBounded(string url, GrpcServerSharedStreaming streaming, GrpcBatchServerKeyValueRequest request)
     {
-        GrpcServerBatcher batcher = new(url, NullLogger.Instance);
+        GrpcServerBatcher batcher = new(url, new RaftTransportSecurityOptions(), NullLogger.Instance);
 
         MethodInfo method = BatcherType
             .GetMethod("WriteBoundedAsync", BindingFlags.NonPublic | BindingFlags.Instance)!

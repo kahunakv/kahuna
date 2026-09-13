@@ -1,5 +1,6 @@
 
 using Kahuna.Server.Configuration;
+using Kommander;
 
 namespace Kahuna.Server;
 
@@ -14,8 +15,14 @@ namespace Kahuna.Server;
 /// </summary>
 public static class EmbeddedOptionsFactory
 {
-    public static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts) => new()
+    /// <param name="opts">Parsed command line.</param>
+    /// <param name="transportSecurity">
+    /// Built once by the caller from <see cref="NodeTransportSecurityPolicy.Build"/>: loading the client
+    /// certificate per call would open one key container per copy.
+    /// </param>
+    public static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts, RaftTransportSecurityOptions? transportSecurity = null) => new()
     {
+        TransportSecurity = transportSecurity,
         NodeName = opts.RaftNodeName,
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,

@@ -1,3 +1,4 @@
+using Kahuna.Server.Communication;
 using Google.Protobuf;
 using Grpc.Core;
 using Kommander;
@@ -47,7 +48,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(RetryableEscapes))]
     public async Task TrySetKeyValue_RetryableEscape_AnswersMustRetry(Exception escape)
     {
-        KeyValuesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTrySetKeyValueResponse response = await service.TrySetKeyValue(
             new GrpcTrySetKeyValueRequest { Key = "greeting", ExpiresMs = 0 }, new StubServerCallContext());
@@ -59,7 +60,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(RetryableEscapes))]
     public async Task TryGetKeyValue_RetryableEscape_AnswersMustRetry(Exception escape)
     {
-        KeyValuesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryGetKeyValueResponse response = await service.TryGetKeyValue(
             new GrpcTryGetKeyValueRequest { Key = "greeting", Revision = -1 }, new StubServerCallContext());
@@ -71,7 +72,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(NonRetryableEscapes))]
     public async Task TrySetKeyValue_NonRetryableEscape_KeepsPropagating(Exception escape)
     {
-        KeyValuesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        KeyValuesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         Exception thrown = await Assert.ThrowsAnyAsync<Exception>(() => service.TrySetKeyValue(
             new GrpcTrySetKeyValueRequest { Key = "greeting", ExpiresMs = 0 }, new StubServerCallContext()));
@@ -87,7 +88,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     public async Task TryGetManyValues_RetryableEscape_RefusesEveryRequestedKey()
     {
         KeyValuesService service = new(
-            new ThrowingKahuna(new RaftException("Invalid partition: 3")), NullLogger<IKahuna>.Instance);
+            new ThrowingKahuna(new RaftException("Invalid partition: 3")), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryGetManyValuesRequest request = new();
         request.Items.Add(new GrpcTryManyValuesRequestItem { Key = "alpha", Revision = -1 });
@@ -106,7 +107,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     public async Task TrySetKeyValue_Cancellation_KeepsPropagating()
     {
         KeyValuesService service = new(
-            new ThrowingKahuna(new OperationCanceledException()), NullLogger<IKahuna>.Instance);
+            new ThrowingKahuna(new OperationCanceledException()), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => service.TrySetKeyValue(
             new GrpcTrySetKeyValueRequest { Key = "greeting", ExpiresMs = 0 }, new StubServerCallContext()));
@@ -117,7 +118,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     public async Task TryLock_RetryableEscape_AnswersMustRetry(Exception escape)
     {
         LocksService service = new(
-            new ThrowingKahuna(escape), new KahunaConfiguration(), null!, NullLogger<IKahuna>.Instance);
+            new ThrowingKahuna(escape), new KahunaConfiguration(), null!, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcTryLockResponse response = await service.TryLock(
             new GrpcTryLockRequest { Resource = "resource", Owner = ByteString.CopyFrom([1]), ExpiresMs = 1000 },
@@ -131,7 +132,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     public async Task TryLock_NonRetryableEscape_KeepsPropagating(Exception escape)
     {
         LocksService service = new(
-            new ThrowingKahuna(escape), new KahunaConfiguration(), null!, NullLogger<IKahuna>.Instance);
+            new ThrowingKahuna(escape), new KahunaConfiguration(), null!, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         Exception thrown = await Assert.ThrowsAnyAsync<Exception>(() => service.TryLock(
             new GrpcTryLockRequest { Resource = "resource", Owner = ByteString.CopyFrom([1]), ExpiresMs = 1000 },
@@ -144,7 +145,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(RetryableEscapes))]
     public async Task NextSequenceValue_RetryableEscape_AnswersMustRetry(Exception escape)
     {
-        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        SequencesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcSequenceAllocationResponse response = await service.NextSequenceValue(
             new GrpcNextSequenceRequest { Name = "orders" }, new StubServerCallContext());
@@ -156,7 +157,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(RetryableEscapes))]
     public async Task CreateSequence_RetryableEscape_AnswersMustRetry(Exception escape)
     {
-        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        SequencesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcSequenceResponse response = await service.CreateSequence(
             new GrpcCreateSequenceRequest { Name = "orders", Increment = 1 }, new StubServerCallContext());
@@ -168,7 +169,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(RetryableEscapes))]
     public async Task UpdateSequence_RetryableEscape_AnswersMustRetry(Exception escape)
     {
-        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        SequencesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         GrpcSequenceResponse response = await service.UpdateSequence(
             new GrpcUpdateSequenceRequest { Name = "orders", CurrentValue = 10 }, new StubServerCallContext());
@@ -180,7 +181,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(NonRetryableEscapes))]
     public async Task UpdateSequence_NonRetryableEscape_KeepsPropagating(Exception escape)
     {
-        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        SequencesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         Exception thrown = await Assert.ThrowsAnyAsync<Exception>(() => service.UpdateSequence(
             new GrpcUpdateSequenceRequest { Name = "orders", CurrentValue = 10 }, new StubServerCallContext()));
@@ -192,7 +193,7 @@ public sealed class TestGrpcSurfaceMustRetryGuard
     [MemberData(nameof(NonRetryableEscapes))]
     public async Task NextSequenceValue_NonRetryableEscape_KeepsPropagating(Exception escape)
     {
-        SequencesService service = new(new ThrowingKahuna(escape), NullLogger<IKahuna>.Instance);
+        SequencesService service = new(new ThrowingKahuna(escape), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
 
         Exception thrown = await Assert.ThrowsAnyAsync<Exception>(() => service.NextSequenceValue(
             new GrpcNextSequenceRequest { Name = "orders" }, new StubServerCallContext()));

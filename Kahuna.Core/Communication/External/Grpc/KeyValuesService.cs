@@ -12,6 +12,7 @@ using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Core;
 using Kahuna.Communication.External.Grpc.KeyValues;
+using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
@@ -34,6 +35,8 @@ namespace Kahuna.Communication.External.Grpc;
 public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 {
     private readonly IKahuna keyValues;
+
+    private readonly NodeTransportGate gate;
     
     private readonly ILogger<IKahuna> logger;
     
@@ -45,12 +48,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// Constructor
     /// </summary>
     /// <param name="keyValues"></param>
-    /// <param name="configuration"></param>
-    /// <param name="raft"></param>
+    /// <param name="gate"></param>
     /// <param name="logger"></param>
-    public KeyValuesService(IKahuna keyValues, ILogger<IKahuna> logger)
+    public KeyValuesService(IKahuna keyValues, NodeTransportGate gate, ILogger<IKahuna> logger)
     {
         this.keyValues = keyValues;
+        this.gate = gate;
         this.logger = logger;
         
         clientBatcher = new(this, logger);
@@ -1327,6 +1330,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task that represents the asynchronous operation, containing the response for the mutation preparation request.</returns>
     public override async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutations(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
     {
+        // The unary 2PC participant methods are node-only: no client calls them, and they stay on the
+        // wire only because other-language clients ship this proto.
+        gate.RequirePeer(context);
+
         return await TryPrepareMutationsInternal(request, context); 
     }
 
@@ -1371,6 +1378,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task that represents the asynchronous operation. The task result contains the response object with the outcome of the mutation preparation.</returns>
     public override async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutations(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
     {
+        gate.RequirePeer(context);
+
         return await TryPrepareManyMutationsInternal(request, context);
     }
 
@@ -1441,6 +1450,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A response indicating the result of the commit attempt.</returns>
     public override async Task<GrpcTryCommitMutationsResponse> TryCommitMutations(GrpcTryCommitMutationsRequest request, ServerCallContext context)
     {
+        gate.RequirePeer(context);
+
         return await TryCommitMutationsInternal(request, context);
     }
 
@@ -1481,6 +1492,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task representing the asynchronous operation, with a response indicating the result of the commit.</returns>
     public override async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutations(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
     {
+        gate.RequirePeer(context);
+
         return await TryCommitManyMutationsInternal(request, context);
     }
 
@@ -1551,6 +1564,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryRollbackMutationsResponse> TryRollbackMutations(GrpcTryRollbackMutationsRequest request, ServerCallContext context)
     {
+        gate.RequirePeer(context);
+
         return await TryRollbackMutationsInternal(request, context);
     }
 
@@ -1591,6 +1606,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     public override async Task<GrpcTryRollbackManyMutationsResponse> TryRollbackManyMutations(GrpcTryRollbackManyMutationsRequest request, ServerCallContext context)
     {
+        gate.RequirePeer(context);
+
         return await TryRollbackManyMutationsInternal(request, context);
     }
     
@@ -2356,6 +2373,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ServerCallContext context
     )
     {
+        // Only peers open this stream: it carries forwarded key-value operations.
+        gate.RequirePeer(context);
+
         await serverBatcher.BatchServerKeyValueRequests(requestStream, responseStream, context);
     }
 

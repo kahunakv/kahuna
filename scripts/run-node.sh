@@ -16,7 +16,7 @@ mkdir -p /tmp/kh3/data
 
 pids=()
 
-dotnet Kahuna.Server.dll --raft-nodename kahuna3 --raft-nodeid 3 --raft-host 192.168.10.40 --raft-port 8086 --http-ports 8085 --https-ports 8086 --https-certificate /tmp/kahuna/certificate.pfx --initial-cluster 192.168.10.5:8082 192.168.10.42:8084 --storage rocksdb --storage-path /tmp/kh3/data --storage-revision v1 --wal-path /tmp/kh3/wal --wal-revision v1
+dotnet Kahuna.Server.dll --raft-nodename kahuna3 --raft-nodeid 3 --raft-host 192.168.10.40 --raft-port 8086 --http-ports 8085 --https-ports 8086 --https-certificate /tmp/kahuna/certificate.pfx --allow-plaintext-listener --initial-cluster 192.168.10.5:8082 192.168.10.42:8084 --storage rocksdb --storage-path /tmp/kh3/data --storage-revision v1 --wal-path /tmp/kh3/wal --wal-revision v1
 pids[${i}]=$!
 
 # wait for all pids

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 
 using Grpc.Core;
 using Grpc.Net.Client;
+using Kommander;
 using Kommander.Communication.Grpc;
 using Microsoft.Extensions.Logging;
 
@@ -100,6 +101,8 @@ internal sealed class GrpcServerBatcher
 
     private readonly string url;
 
+    private readonly RaftTransportSecurityOptions transportSecurity;
+
     private readonly ILogger logger;
 
     private readonly ConcurrentQueue<GrpcServerBatcherItem> inbox = new();
@@ -147,11 +150,18 @@ internal sealed class GrpcServerBatcher
 
     private int processing = 1;
 
-    public GrpcServerBatcher(string url, ILogger logger)
+    /// <param name="url">Peer URL.</param>
+    /// <param name="transportSecurity">The node's effective Raft transport options; see <see cref="SharedChannels"/>.</param>
+    /// <param name="logger">Logger.</param>
+    public GrpcServerBatcher(string url, RaftTransportSecurityOptions transportSecurity, ILogger logger)
     {
         this.url = url;
+        this.transportSecurity = transportSecurity;
         this.logger = logger;
     }
+
+    /// <summary>The options this batcher's channels are built with.</summary>
+    internal RaftTransportSecurityOptions TransportSecurity => transportSecurity;
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryLockRequest message)
     {
@@ -1825,7 +1835,7 @@ internal sealed class GrpcServerBatcher
 
     private List<GrpcServerSharedStreaming> CreateSharedStreamings()
     {
-        List<GrpcChannel> nodeChannels = SharedChannels.GetAllChannels(url);
+        List<GrpcChannel> nodeChannels = SharedChannels.GetAllChannels(url, transportSecurity);
 
         List<GrpcServerSharedStreaming> nodeStreamings = new(nodeChannels.Count);
 

@@ -6,6 +6,9 @@
 #   KAHUNA_RAFT_SCHEME=http:// docker compose -f docker/local.yml up -d --build
 # A node's identity is host:raft-port, so wipe the volumes first when toggling an existing
 # cluster: docker compose -f docker/local.yml down -v
+#
+# This is the development profile: no node authentication and the cleartext listeners kept beside
+# HTTPS. docker/local-mtls.yml runs the same cluster with per-node certificates and mutual TLS.
 name: kahuna
 services:
   kahuna1:
