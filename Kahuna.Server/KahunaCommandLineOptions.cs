@@ -341,6 +341,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-grpc-enable-snapshot-compression", Required = false, HelpText = "Compress Raft snapshot transfers sent over gRPC", Default = false)]
     public bool RaftGrpcEnableSnapshotCompression { get; set; }
 
+    [Option("raft-grpc-max-message-bytes", Required = false, HelpText = "Largest gRPC message, in bytes, this node accepts from a peer and sends to one. Raise on every receiver in the cluster before raising raft-max-outbound-batch-bytes or raft-max-backfill-bytes-per-round on a leader.", Default = 16 * 1024 * 1024)]
+    public int RaftGrpcMaxMessageBytes { get; set; } = 16 * 1024 * 1024;
+
     [Option("raft-snapshot-receive-session-ttl", Required = false, HelpText = "How long an idle snapshot-receive session is kept before the receiver discards it and releases its buffered bytes, in milliseconds. Bounds the memory a leader that vanishes mid-transfer can strand.", Default = 30000)]
     public int RaftSnapshotReceiveSessionTtl { get; set; } = 30000;
 
@@ -515,6 +518,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-outbound-queue-bytes-per-peer", Required = false, HelpText = "Cap on buffered outbound bytes queued per peer; a follower that stops draining has its excess AppendLogs entries dropped rather than accumulated without bound (dropped entries are re-shipped by heartbeat/backfill retry). 0 disables the cap.", Default = 64L * 1024 * 1024)]
     public long RaftMaxOutboundQueueBytesPerPeer { get; set; } = 64L * 1024 * 1024;
 
+    [Option("raft-max-outbound-batch-bytes", Required = false, HelpText = "Byte cap on log-payload packed into one BatchRequests frame to a peer, also bounding an AppendLogs-coalescing frame. Must stay below raft-grpc-max-message-bytes. Values <= 0 disable the byte cap (count cap only).", Default = 4L * 1024 * 1024)]
+    public long RaftMaxOutboundBatchBytes { get; set; } = 4L * 1024 * 1024;
+
     [Option("raft-max-backfill-bytes-per-round", Required = false, HelpText = "Byte cap on a single backfill round in addition to raft-max-backfill-entries-per-round, so a large-payload workload cannot materialize an oversized batch on the heartbeat path. Also keeps a batch under the gRPC receiver's default 4 MB message cap.", Default = 4 * 1024 * 1024)]
     public int RaftMaxBackfillBytesPerRound { get; set; } = 4 * 1024 * 1024;
 
@@ -529,6 +535,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-compaction-live-replica-lag-budget", Required = false, HelpText = "Entry-count budget within which a follower still converging after a snapshot rescue is held off the WAL compaction floor, so ordinary compaction cannot re-create the below-floor condition the rescue just repaired. Values <= 0 disable the hold.", Default = 100_000L)]
     public long RaftCompactionLiveReplicaLagBudget { get; set; } = 100_000L;
+
+    [Option("raft-compaction-durability-clamp-report-interval", Required = false, HelpText = "How often a partition whose compaction is clamped by the application-durability floor repeats its warning, and how long the floor must sit unchanged before the warning calls the flusher stalled, in milliseconds. Values <= 0 keep only the streak-start and streak-end log lines.", Default = 60000)]
+    public int RaftCompactionDurabilityClampReportInterval { get; set; } = 60000;
 
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;

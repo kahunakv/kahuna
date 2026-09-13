@@ -72,6 +72,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.GrpcChannelsPerNode)] = nameof(KahunaCommandLineOptions.RaftGrpcChannelsPerNode),
         [nameof(RaftConfiguration.GrpcEnableMultipleHttp2Connections)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableMultipleHttp2Connections),
         [nameof(RaftConfiguration.GrpcEnableSnapshotCompression)] = nameof(KahunaCommandLineOptions.RaftGrpcEnableSnapshotCompression),
+        [nameof(RaftConfiguration.GrpcMaxMessageBytes)] = nameof(KahunaCommandLineOptions.RaftGrpcMaxMessageBytes),
         [nameof(RaftConfiguration.SnapshotReceiveSessionTtl)] = nameof(KahunaCommandLineOptions.RaftSnapshotReceiveSessionTtl),
         [nameof(RaftConfiguration.SnapshotMaxPendingSessions)] = nameof(KahunaCommandLineOptions.RaftSnapshotMaxPendingSessions),
         [nameof(RaftConfiguration.SnapshotMaxPendingBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotMaxPendingBytes),
@@ -117,11 +118,13 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone),
         [nameof(RaftConfiguration.EnableLoadReports)] = nameof(KahunaCommandLineOptions.RaftEnableLoadReports),
         [nameof(RaftConfiguration.MaxOutboundQueueBytesPerPeer)] = nameof(KahunaCommandLineOptions.RaftMaxOutboundQueueBytesPerPeer),
+        [nameof(RaftConfiguration.MaxOutboundBatchBytes)] = nameof(KahunaCommandLineOptions.RaftMaxOutboundBatchBytes),
         [nameof(RaftConfiguration.MaxBackfillBytesPerRound)] = nameof(KahunaCommandLineOptions.RaftMaxBackfillBytesPerRound),
         [nameof(RaftConfiguration.SnapshotRescueMaxConsecutiveCycles)] = nameof(KahunaCommandLineOptions.RaftSnapshotRescueMaxConsecutiveCycles),
         [nameof(RaftConfiguration.SnapshotRescueProbeInterval)] = nameof(KahunaCommandLineOptions.RaftSnapshotRescueProbeInterval),
         [nameof(RaftConfiguration.SnapshotExportRetryCacheMaxBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotExportRetryCacheMaxBytes),
-        [nameof(RaftConfiguration.CompactionLiveReplicaLagBudget)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagBudget)
+        [nameof(RaftConfiguration.CompactionLiveReplicaLagBudget)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagBudget),
+        [nameof(RaftConfiguration.CompactionDurabilityClampReportInterval)] = nameof(KahunaCommandLineOptions.RaftCompactionDurabilityClampReportInterval)
     };
 
     /// <summary>

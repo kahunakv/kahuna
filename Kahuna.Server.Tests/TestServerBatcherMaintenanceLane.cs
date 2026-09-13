@@ -29,6 +29,8 @@ public sealed class TestServerBatcherMaintenanceLane
     [Fact]
     public async Task StuckMaintenanceCall_DoesNotBlockCompletedUnrelatedResponse()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         BlockingSeedKahuna kahuna = new();
         KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
@@ -52,27 +54,29 @@ public sealed class TestServerBatcherMaintenanceLane
             new StubServerCallContext(CancellationToken.None));
 
         // The seed is inside its service call and holds nothing else up.
-        await kahuna.SeedEntered.Task.WaitAsync(Timeout);
+        await kahuna.SeedEntered.Task.WaitAsync(Timeout, ct);
 
         // The completed read escapes the stream while the seed is still stuck.
-        GrpcBatchServerKeyValueResponse first = await responses.Written.ReadAsync().AsTask().WaitAsync(Timeout);
+        GrpcBatchServerKeyValueResponse first = await responses.Written.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal(2, first.RequestId);
         Assert.Equal(GrpcServerBatchType.ServerTryGetKeyValue, first.Type);
         Assert.False(batch.IsCompleted);
 
         kahuna.SeedGate.TrySetResult(true);
 
-        GrpcBatchServerKeyValueResponse second = await responses.Written.ReadAsync().AsTask().WaitAsync(Timeout);
+        GrpcBatchServerKeyValueResponse second = await responses.Written.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal(1, second.RequestId);
         Assert.Equal(GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded, second.Type);
         Assert.True(second.EnsureKeyRangeSeeded.Success);
 
-        await batch.WaitAsync(Timeout);
+        await batch.WaitAsync(Timeout, ct);
     }
 
     [Fact]
     public async Task LaneOperations_ExecuteOneAtATime_InArrivalOrder()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         OrderRecordingSeedKahuna kahuna = new(gatedKeySpace: "alpha");
         KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
@@ -95,31 +99,33 @@ public sealed class TestServerBatcherMaintenanceLane
             responses,
             new StubServerCallContext(CancellationToken.None));
 
-        string firstEntered = await kahuna.Entered.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+        string firstEntered = await kahuna.Entered.Reader.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal("alpha", firstEntered);
 
         // The second lane operation must wait for the first. A short grace period gives a broken
         // implementation the chance to start it early.
-        await Task.Delay(200);
+        await Task.Delay(200, ct);
         Assert.False(kahuna.Entered.Reader.TryRead(out _));
 
         kahuna.Gate.TrySetResult(true);
 
-        string secondEntered = await kahuna.Entered.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+        string secondEntered = await kahuna.Entered.Reader.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal("beta", secondEntered);
 
         // Lane responses keep arrival order too: the first write completes before the second runs.
-        GrpcBatchServerKeyValueResponse first = await responses.Written.ReadAsync().AsTask().WaitAsync(Timeout);
-        GrpcBatchServerKeyValueResponse second = await responses.Written.ReadAsync().AsTask().WaitAsync(Timeout);
+        GrpcBatchServerKeyValueResponse first = await responses.Written.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
+        GrpcBatchServerKeyValueResponse second = await responses.Written.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal(1, first.RequestId);
         Assert.Equal(2, second.RequestId);
 
-        await batch.WaitAsync(Timeout);
+        await batch.WaitAsync(Timeout, ct);
     }
 
     [Fact]
     public async Task FaultedLaneOperation_IsRefused_AndReleasesTheLane()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         ThrowingSeedKahuna kahuna = new(poisonedKeySpace: "poisoned");
         KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
         ChannelStreamWriter responses = new();
@@ -140,15 +146,15 @@ public sealed class TestServerBatcherMaintenanceLane
                 }
             ]),
             responses,
-            new StubServerCallContext(CancellationToken.None)).WaitAsync(Timeout);
+            new StubServerCallContext(CancellationToken.None)).WaitAsync(Timeout, ct);
 
         // The faulted operation answers first, with the None-envelope refusal a seed response
         // cannot express any other way; the successor is untouched by the fault.
-        GrpcBatchServerKeyValueResponse refused = await responses.Written.ReadAsync().AsTask().WaitAsync(Timeout);
+        GrpcBatchServerKeyValueResponse refused = await responses.Written.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal(1, refused.RequestId);
         Assert.Equal(GrpcServerBatchType.ServerTypeNone, refused.Type);
 
-        GrpcBatchServerKeyValueResponse served = await responses.Written.ReadAsync().AsTask().WaitAsync(Timeout);
+        GrpcBatchServerKeyValueResponse served = await responses.Written.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal(2, served.RequestId);
         Assert.Equal(GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded, served.Type);
         Assert.True(served.EnsureKeyRangeSeeded.Success);
@@ -157,6 +163,8 @@ public sealed class TestServerBatcherMaintenanceLane
     [Fact]
     public async Task CancelledStream_DrainsQueuedLaneWorkWithoutRunningIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         using CancellationTokenSource cancellation = new();
 
         OrderRecordingSeedKahuna kahuna = new(gatedKeySpace: "alpha");
@@ -181,7 +189,7 @@ public sealed class TestServerBatcherMaintenanceLane
             responses,
             new StubServerCallContext(cancellation.Token));
 
-        string firstEntered = await kahuna.Entered.Reader.ReadAsync().AsTask().WaitAsync(Timeout);
+        string firstEntered = await kahuna.Entered.Reader.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct);
         Assert.Equal("alpha", firstEntered);
 
         // The caller is gone. The stuck call still finishes, and the batcher drains: the queued
@@ -189,7 +197,7 @@ public sealed class TestServerBatcherMaintenanceLane
         cancellation.Cancel();
         kahuna.Gate.TrySetResult(true);
 
-        await batch.WaitAsync(Timeout);
+        await batch.WaitAsync(Timeout, ct);
 
         Assert.False(kahuna.Entered.Reader.TryRead(out _));
         Assert.False(responses.Written.TryRead(out _));

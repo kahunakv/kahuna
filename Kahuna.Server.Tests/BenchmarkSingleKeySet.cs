@@ -173,13 +173,15 @@ public sealed class BenchmarkSingleKeySet
     [Fact]
     public async Task Benchmark_TaskDelayResolution()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         List<double> d1 = new(200);
         Stopwatch sw = new();
 
         for (int i = 0; i < 200; i++)
         {
             sw.Restart();
-            await Task.Delay(TimeSpan.FromMilliseconds(1), TimeProvider.System);
+            await Task.Delay(TimeSpan.FromMilliseconds(1), TimeProvider.System, ct);
             d1.Add(sw.Elapsed.TotalMilliseconds);
         }
 

@@ -255,7 +255,7 @@ public sealed class TestTargetedRevisionCleanupBudget
         // the pause the backend reports on the first sweep call.
         using WriterHarness harness = new(MakeLeaderRaft(1), Config(budget, sweepInterval: TimeSpan.FromMilliseconds(1)), backend);
 
-        await Task.Delay(5);
+        await Task.Delay(5, TestContext.Current.CancellationToken);
 
         // Nothing queued: the targeted prune costs nothing, the sweep gets the whole cycle budget and
         // reports a pause.

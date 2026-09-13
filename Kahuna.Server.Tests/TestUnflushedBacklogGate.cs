@@ -59,6 +59,8 @@ public sealed class TestUnflushedBacklogGate
     [Fact]
     public async Task OrdinaryWritesAreRefusedWhileOverBudget_TerminalPasses_AdmissionResumesWhenItClears()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         bool overBudget = false;
         SucceedingExecutor executor = new();
         ActorSystem actorSystem = new();
@@ -74,7 +76,7 @@ public sealed class TestUnflushedBacklogGate
         {
             Submission before = new(1, 1, WriteAdmissionClass.Ordinary);
             Assert.True(aggregator.TryEnqueue(before));
-            Assert.True(await before.Done.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(await before.Done.Task.WaitAsync(TimeSpan.FromSeconds(5), ct));
 
             overBudget = true;
 
@@ -85,13 +87,13 @@ public sealed class TestUnflushedBacklogGate
 
             Submission terminal = new(1, 3, WriteAdmissionClass.Terminal);
             Assert.True(aggregator.TryEnqueue(terminal));
-            Assert.True(await terminal.Done.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(await terminal.Done.Task.WaitAsync(TimeSpan.FromSeconds(5), ct));
 
             overBudget = false;
 
             Submission after = new(1, 4, WriteAdmissionClass.Ordinary);
             Assert.True(aggregator.TryEnqueue(after));
-            Assert.True(await after.Done.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(await after.Done.Task.WaitAsync(TimeSpan.FromSeconds(5), ct));
 
             Assert.Equal(3, executor.Calls);
         }

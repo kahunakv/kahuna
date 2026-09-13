@@ -499,6 +499,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         GrpcChannelsPerNode = opts.RaftGrpcChannelsPerNode,
         GrpcEnableMultipleHttp2Connections = opts.RaftGrpcEnableMultipleHttp2Connections,
         GrpcEnableSnapshotCompression = opts.RaftGrpcEnableSnapshotCompression,
+        GrpcMaxMessageBytes = opts.RaftGrpcMaxMessageBytes,
         SnapshotReceiveSessionTtl = TimeSpan.FromMilliseconds(opts.RaftSnapshotReceiveSessionTtl),
         SnapshotMaxPendingSessions = opts.RaftSnapshotMaxPendingSessions,
         SnapshotMaxPendingBytes = opts.RaftSnapshotMaxPendingBytes,
@@ -568,10 +569,12 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         Zone = opts.RaftZone,
         EnableLoadReports = opts.RaftEnableLoadReports,
         MaxOutboundQueueBytesPerPeer = opts.RaftMaxOutboundQueueBytesPerPeer,
+        MaxOutboundBatchBytes = opts.RaftMaxOutboundBatchBytes,
         MaxBackfillBytesPerRound = opts.RaftMaxBackfillBytesPerRound,
         SnapshotRescueMaxConsecutiveCycles = opts.RaftSnapshotRescueMaxConsecutiveCycles,
         SnapshotRescueProbeInterval = TimeSpan.FromMilliseconds(opts.RaftSnapshotRescueProbeInterval),
         SnapshotExportRetryCacheMaxBytes = opts.RaftSnapshotExportRetryCacheMaxBytes,
-        CompactionLiveReplicaLagBudget = opts.RaftCompactionLiveReplicaLagBudget
+        CompactionLiveReplicaLagBudget = opts.RaftCompactionLiveReplicaLagBudget,
+        CompactionDurabilityClampReportInterval = TimeSpan.FromMilliseconds(opts.RaftCompactionDurabilityClampReportInterval)
     };
 }
