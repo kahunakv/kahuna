@@ -199,7 +199,10 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         if (unflushedWrites.IsEmpty)
             return items;
 
-        return MergeScan(items, unflushedWrites.Collect(prefixKeyName), KeyValueScanLimits.MaxPrefixScanResults);
+        return MergeScan(
+            items,
+            unflushedWrites.Collect(prefixKeyName, null, KeyValueScanLimits.MaxPrefixScanResults, PageCeiling(items, KeyValueScanLimits.MaxPrefixScanResults)),
+            KeyValueScanLimits.MaxPrefixScanResults);
     }
 
     public List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> GetKeyValueByPrefixAtOrBefore(
@@ -211,7 +214,15 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         if (unflushedWrites.IsEmpty)
             return items;
 
-        List<KeyValuePair<string, UnflushedKeyValueWrite>> queuedItems = unflushedWrites.Collect(prefixKeyName);
+        // The candidate selection is bounded exactly as for the latest-read scans: the page is the
+        // first MaxPrefixScanResults keys of the ordinal union, whichever version each key resolves
+        // to below. Only the selection is bounded; the per-key as-of merge is unchanged.
+        string? ceiling = items.Count >= KeyValueScanLimits.MaxPrefixScanResults && items.Count > 0
+            ? items[^1].Key
+            : null;
+
+        List<KeyValuePair<string, UnflushedKeyValueWrite>> queuedItems =
+            unflushedWrites.Collect(prefixKeyName, null, KeyValueScanLimits.MaxPrefixScanResults, ceiling);
         if (queuedItems.Count == 0)
             return items;
 
@@ -288,8 +299,19 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         // Mirror the inner seek: start at the greater of prefix and startKey, inclusive.
         string? effectiveStart = startKey is not null && string.CompareOrdinal(startKey, prefix) > 0 ? startKey : null;
 
-        return MergeScan(items, unflushedWrites.Collect(prefix, effectiveStart), limit);
+        return MergeScan(items, unflushedWrites.Collect(prefix, effectiveStart, limit, PageCeiling(items, limit)), limit);
     }
+
+    /// <summary>
+    /// The last key of a full inner page: no overlay key above it can enter a page of
+    /// <paramref name="limit"/> rows, because the inner rows at or below it already fill the page.
+    /// Null when the inner page is short (the inner side is exhausted, so every larger overlay key
+    /// is still a candidate) or when the page size is unbounded.
+    /// </summary>
+    private static string? PageCeiling(List<(string, ReadOnlyKeyValueEntry)> items, int limit) =>
+        limit >= 0 && limit < int.MaxValue && items.Count >= limit && items.Count > 0
+            ? items[^1].Item1
+            : null;
 
     // Whole-family scans are a physical-family primitive (replica seeding / un-host purging), not a
     // read-your-writes path: the opaque, stateless cursor cannot window the unflushed set without
@@ -348,6 +370,14 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
     /// Overlays queued heads onto a scan page: newest wins per key, results stay in ordinal key
     /// order, and the page size cap is preserved. Deleted heads are kept in the result with their
     /// state, matching how the inner backends surface persisted tombstones.
+    ///
+    /// <para>
+    /// Both inputs are ordinal-ordered — the inner backends seek and iterate in key order, and
+    /// <see cref="UnflushedKeyValueWritesIndex.Collect"/> sorts its bounded selection — so the union
+    /// is a single two-way merge that allocates only the result and one entry per selected overlay
+    /// row. An inner page that is not strictly ascending (a contract violation) is normalised first
+    /// rather than merged wrongly.
+    /// </para>
     /// </summary>
     private static List<(string, ReadOnlyKeyValueEntry)> MergeScan(
         List<(string, ReadOnlyKeyValueEntry)> diskItems,
@@ -357,35 +387,93 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         if (queuedItems.Count == 0)
             return diskItems;
 
-        Dictionary<string, ReadOnlyKeyValueEntry> merged = new(diskItems.Count + queuedItems.Count, StringComparer.Ordinal);
-
-        foreach ((string key, ReadOnlyKeyValueEntry entry) in diskItems)
-            merged[key] = entry;
-
-        foreach ((string key, UnflushedKeyValueWrite queued) in queuedItems)
-        {
-            if (merged.TryGetValue(key, out ReadOnlyKeyValueEntry? existing)
-                && (existing.Revision > queued.Revision
-                    || (existing.Revision == queued.Revision && existing.LastModified > queued.LastModified)))
-                continue;
-
-            merged[key] = new(queued.Value, queued.Revision, queued.Expires, queued.LastUsed, queued.LastModified, queued.State);
-        }
-
         // Defensive: a caller-side unbounded page size must never become a negative capacity or an
         // instantly-exhausted page here.
         if (limit < 0)
             limit = int.MaxValue;
 
-        List<(string, ReadOnlyKeyValueEntry)> result = new(Math.Min(merged.Count, limit));
-        foreach (string key in merged.Keys.OrderBy(static k => k, StringComparer.Ordinal))
+        if (!IsStrictlyAscending(diskItems))
         {
-            if (result.Count >= limit)
-                break;
-            result.Add((key, merged[key]));
+            KeyValueScanMetrics.MergePagesReordered.Add(1);
+            diskItems = NormalizeDiskPage(diskItems);
+        }
+
+        int diskCount = diskItems.Count;
+        int queuedCount = queuedItems.Count;
+        long unionBound = (long)diskCount + queuedCount;
+        List<(string, ReadOnlyKeyValueEntry)> result = new((int)Math.Min(unionBound, limit));
+
+        int i = 0, j = 0;
+        while (result.Count < limit && (i < diskCount || j < queuedCount))
+        {
+            if (j >= queuedCount)
+            {
+                result.Add(diskItems[i++]);
+                continue;
+            }
+
+            if (i >= diskCount)
+            {
+                result.Add(MaterializeRow(queuedItems[j++]));
+                continue;
+            }
+
+            int cmp = string.CompareOrdinal(diskItems[i].Item1, queuedItems[j].Key);
+            if (cmp < 0)
+            {
+                result.Add(diskItems[i++]);
+            }
+            else if (cmp > 0)
+            {
+                result.Add(MaterializeRow(queuedItems[j++]));
+            }
+            else
+            {
+                (string key, ReadOnlyKeyValueEntry existing) = diskItems[i];
+                UnflushedKeyValueWrite queued = queuedItems[j].Value;
+
+                bool innerWins = existing.Revision > queued.Revision
+                    || (existing.Revision == queued.Revision && existing.LastModified > queued.LastModified);
+
+                result.Add(innerWins ? (key, existing) : MaterializeRow(queuedItems[j]));
+                i++;
+                j++;
+            }
         }
 
         return result;
+    }
+
+    private static (string, ReadOnlyKeyValueEntry) MaterializeRow(in KeyValuePair<string, UnflushedKeyValueWrite> queued) =>
+        (queued.Key, new ReadOnlyKeyValueEntry(
+            queued.Value.Value, queued.Value.Revision, queued.Value.Expires, queued.Value.LastUsed,
+            queued.Value.LastModified, queued.Value.State));
+
+    private static bool IsStrictlyAscending(List<(string, ReadOnlyKeyValueEntry)> items)
+    {
+        for (int i = 1; i < items.Count; i++)
+        {
+            if (string.CompareOrdinal(items[i - 1].Item1, items[i].Item1) >= 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Sorts an out-of-order inner page and collapses duplicate keys to their last row —
+    /// the same result the previous dictionary-based union produced for such input.</summary>
+    private static List<(string, ReadOnlyKeyValueEntry)> NormalizeDiskPage(List<(string, ReadOnlyKeyValueEntry)> items)
+    {
+        Dictionary<string, ReadOnlyKeyValueEntry> byKey = new(items.Count, StringComparer.Ordinal);
+        foreach ((string key, ReadOnlyKeyValueEntry entry) in items)
+            byKey[key] = entry;
+
+        List<(string, ReadOnlyKeyValueEntry)> normalized = new(byKey.Count);
+        foreach (KeyValuePair<string, ReadOnlyKeyValueEntry> kv in byKey)
+            normalized.Add((kv.Key, kv.Value));
+
+        normalized.Sort(static (a, b) => string.CompareOrdinal(a.Item1, b.Item1));
+        return normalized;
     }
 
     /// <summary>Materialises a fresh entry per read — callers mutate returned entries and insert them into actor stores.</summary>

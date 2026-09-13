@@ -62,4 +62,14 @@ internal static class KeyValueScanMetrics
         Meter.CreateCounter<long>(
             "kahuna.scan.revision_run_seeks_total",
             description: "Seeks that jumped a scan over the rest of a key's revision rows.");
+
+    /// <summary>
+    /// Scan pages that reached a merge out of ordinal order and had to be re-sorted before the
+    /// merge. Every producer sorts its page, so a non-zero value is a contract violation upstream
+    /// of the merge — the result stays correct, but the producer needs fixing.
+    /// </summary>
+    internal static readonly Counter<long> MergePagesReordered =
+        Meter.CreateCounter<long>(
+            "kahuna.scan.merge_pages_reordered_total",
+            description: "Scan pages re-sorted before an overlay or intent merge because they arrived out of ordinal order.");
 }

@@ -2129,7 +2129,11 @@ internal sealed class PreparedIntentStore
     // ── state transfer (split/merge) ────────────────────────────────────────────────
 
     /// <summary>Intents whose key routes into <c>[startKey, endKey)</c> (ordinal, half-open) — the set a range
-    /// split/merge hands to the destination partition.</summary>
+    /// split/merge hands to the destination partition, and the set a whole-partition export serialises.
+    /// Deliberately a consistent cut (<c>Values</c> copies the map under every bucket lock): the receiver judges
+    /// later commits against this set together with the ledger and the records captured around it, and that
+    /// reasoning needs one instant at which all of these were true at once. The scan captures below do not — see
+    /// <see cref="SnapshotScanWindow"/>.</summary>
     public IReadOnlyList<PreparedIntent> SnapshotRange(string? startKey, string? endKey)
     {
         List<PreparedIntent> result = [];
@@ -2156,10 +2160,11 @@ internal sealed class PreparedIntentStore
     {
         List<PreparedIntent> result = [];
 
-        foreach (PreparedIntent intent in intents.Values)
+        // Lock-free per-key capture; the argument is the one on SnapshotScanWindow.
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
-            if (string.Equals(intent.Bucket, bucket, StringComparison.Ordinal))
-                result.Add(intent);
+            if (string.Equals(kv.Value.Bucket, bucket, StringComparison.Ordinal))
+                result.Add(kv.Value);
         }
 
         return result;
@@ -2170,13 +2175,27 @@ internal sealed class PreparedIntentStore
     /// which the prior page already emitted) and end-inclusivity (<paramref name="endInclusive"/> true keeps an intent
     /// exactly at <paramref name="endKey"/>). This is distinct from <see cref="SnapshotRange"/>'s fixed half-open
     /// <c>[start, end)</c> so the overlaid intent set matches exactly the window the scan's KV rows were drawn from —
-    /// without it a boundary intent is re-emitted across pages or an inclusive-end intent is missed.</summary>
+    /// without it a boundary intent is re-emitted across pages or an inclusive-end intent is missed.
+    ///
+    /// <para>The map is enumerated directly rather than through <c>Values</c>. <c>Values</c> takes every bucket lock
+    /// and copies the whole map, so each scan page stalled every concurrent prepare and settle apply for the copy
+    /// and allocated in proportion to the node-wide intent population instead of the window. The direct enumerator
+    /// is lock-free and allocation-free but is not a consistent cut: an intent present for the whole enumeration is
+    /// always seen exactly once, while one added, replaced or removed during it may be seen in either state. That
+    /// is sufficient here because the merge judges each key independently — a key's outcome depends only on its
+    /// own intent, so any state the enumerator observes for a key is a state that key really had at some instant
+    /// after the KV rows were read, exactly as a copy taken at that instant would show it. The only cross-key
+    /// effect, a pending intent making the whole page retry, is monotone-safe: observing a stale pending node
+    /// causes a retry, never a wrong row. State-transfer captures need a true cut and keep <c>Values</c>.</para>
+    /// </summary>
     public IReadOnlyList<PreparedIntent> SnapshotScanWindow(string? startKey, bool startInclusive, string? endKey, bool endInclusive)
     {
         List<PreparedIntent> result = [];
 
-        foreach (PreparedIntent intent in intents.Values)
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
+            PreparedIntent intent = kv.Value;
+
             if (startKey is not null)
             {
                 int cmpStart = string.CompareOrdinal(intent.Key, startKey);

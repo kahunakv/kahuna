@@ -56,8 +56,10 @@ internal static class PreparedIntentScanMerge
         Func<PreparedIntent, TransactionDecision>? decisionLookup = null,
         Func<string, bool>? readerHasOwnVersion = null)
     {
-        Dictionary<string, PreparedIntent> overrides = [];
-        HashSet<string> excludes = [];
+        // Both sets are small (the window is clamped to the page) and usually empty, so they are
+        // allocated on first use only.
+        List<PreparedIntent>? overrides = null;
+        HashSet<string>? excludes = null;
 
         foreach (PreparedIntent intent in intents)
         {
@@ -82,9 +84,9 @@ internal static class PreparedIntentScanMerge
                     // A committed delete, or a committed value whose TTL has elapsed, removes the key from the page —
                     // the same result an expired MVCC head entry produces on the ordinary scan.
                     if (intent.State == KeyValueState.Deleted || PreparedIntentVisibility.IsExpired(intent, currentTime))
-                        excludes.Add(intent.Key);
+                        (excludes ??= []).Add(intent.Key);
                     else
-                        overrides[intent.Key] = intent;
+                        (overrides ??= []).Add(intent);
                     break;
 
                 case ReadVisibilityAction.UseExisting:
@@ -96,25 +98,66 @@ internal static class PreparedIntentScanMerge
         // Ordinal union of the KV rows (committed deletes removed, committed values overridden) and any intent-only
         // committed keys injected at their ordinal position. The window fetch already bounds the injected keys to
         // this page, so injecting every surviving override here and capping the union at limit+1 below is exact.
-        SortedDictionary<string, ReadOnlyKeyValueEntry> merged = new(StringComparer.Ordinal);
-
-        foreach ((string key, ReadOnlyKeyValueEntry entry) in items)
+        //
+        // The KV rows arrive ordinal-ordered (the in-memory tree walk, the K-way disk merge, and the bucket path's
+        // explicit sort all produce that order), so the union is a two-way merge of the rows with the sorted
+        // overrides: O(n + k log k) with only the result list allocated, instead of a rebuilt O((n + k) log (n + k))
+        // tree. The order precondition is checked in one linear pass; a misordered page is restored and counted so
+        // the contract violation is visible to operators, and never merged into a wrong result silently.
+        if (!IsOrdinalAscending(items))
         {
-            if (excludes.Contains(key))
+            KeyValueScanMetrics.MergePagesReordered.Add(1);
+            items.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
+        }
+
+        overrides?.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
+
+        int rowCount = items.Count;
+        int overrideCount = overrides?.Count ?? 0;
+
+        // Emit at most limit + 1 items: the extra one is enough to decide the page is full and to derive the cursor.
+        long emitCap = limit == int.MaxValue ? (long)rowCount + overrideCount : (long)limit + 1;
+        List<(string Key, ReadOnlyKeyValueEntry Entry)> result = new((int)Math.Min((long)rowCount + overrideCount, emitCap));
+
+        int i = 0, j = 0;
+        while (result.Count < emitCap && (i < rowCount || j < overrideCount))
+        {
+            if (j >= overrideCount)
+            {
+                (string key, ReadOnlyKeyValueEntry entry) = items[i++];
+                if (excludes is null || !excludes.Contains(key))
+                    result.Add((key, entry));
                 continue;
+            }
 
-            merged[key] = overrides.TryGetValue(key, out PreparedIntent? ov) ? ToEntry(ov) : entry;
+            PreparedIntent ov = overrides![j];
+
+            if (i >= rowCount)
+            {
+                result.Add((ov.Key, ToEntry(ov))); // intent-only committed key injected at its ordinal position.
+                j++;
+                continue;
+            }
+
+            int cmp = string.CompareOrdinal(items[i].Key, ov.Key);
+            if (cmp < 0)
+            {
+                (string key, ReadOnlyKeyValueEntry entry) = items[i++];
+                if (excludes is null || !excludes.Contains(key))
+                    result.Add((key, entry));
+            }
+            else if (cmp > 0)
+            {
+                result.Add((ov.Key, ToEntry(ov)));
+                j++;
+            }
+            else
+            {
+                result.Add((ov.Key, ToEntry(ov))); // committed override of an existing row.
+                i++;
+                j++;
+            }
         }
-
-        foreach ((string key, PreparedIntent ov) in overrides)
-        {
-            if (!merged.ContainsKey(key))
-                merged[key] = ToEntry(ov); // intent-only committed key injected at its ordinal position.
-        }
-
-        List<(string Key, ReadOnlyKeyValueEntry Entry)> result = new(merged.Count);
-        foreach (KeyValuePair<string, ReadOnlyKeyValueEntry> kv in merged)
-            result.Add((kv.Key, kv.Value));
 
         // Cap at exactly limit and derive the cursor from the merged sequence. A full merged page (> limit) keeps
         // its first limit items and resumes after the limit-th key; a merged page that fits but whose KV side had
@@ -137,4 +180,15 @@ internal static class PreparedIntentScanMerge
 
     private static ReadOnlyKeyValueEntry ToEntry(PreparedIntent i) =>
         new(i.Value, i.Revision, i.Expires, i.CommitTimestamp, i.CommitTimestamp, i.State);
+
+    private static bool IsOrdinalAscending(List<(string Key, ReadOnlyKeyValueEntry Entry)> items)
+    {
+        for (int i = 1; i < items.Count; i++)
+        {
+            if (string.CompareOrdinal(items[i - 1].Key, items[i].Key) > 0)
+                return false;
+        }
+
+        return true;
+    }
 }

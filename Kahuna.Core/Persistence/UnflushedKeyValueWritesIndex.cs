@@ -81,13 +81,33 @@ internal sealed class UnflushedKeyValueWritesIndex
     public bool TryGet(string key, out UnflushedKeyValueWrite write) => entries.TryGetValue(key, out write);
 
     /// <summary>
-    /// Snapshot of overlay entries whose key starts with <paramref name="prefix"/> and, when
-    /// <paramref name="startKey"/> is given, sorts at or after it (ordinal — matching the backend
-    /// scans' inclusive lower-bound seek).
+    /// The overlay entries a scan page can contain, in ordinal key order: keys that start with
+    /// <paramref name="prefix"/>, sort at or after <paramref name="startKey"/> when it is given
+    /// (inclusive — matching the backend scans' lower-bound seek), and sort at or before
+    /// <paramref name="ceilingKey"/> when it is given.
+    ///
+    /// <para>
+    /// The selection is bounded to the <paramref name="limit"/> smallest matching keys. A page is the
+    /// first <c>limit</c> keys of the ordinal union of the inner page and the overlay, so an overlay
+    /// key outside its own <c>limit</c> smallest can never reach the page — the bound is exact, and it
+    /// keeps the temporary storage proportional to the page rather than to the unflushed backlog.
+    /// The ceiling is the same argument from the inner side: when the inner page is full, every key
+    /// above its last row is displaced by the rows already below it. The enumeration itself still
+    /// visits the whole overlay — dictionary order is arbitrary, so no entry can be skipped unseen.
+    /// </para>
     /// </summary>
-    public List<KeyValuePair<string, UnflushedKeyValueWrite>> Collect(string prefix, string? startKey = null)
+    /// <param name="limit">Page size; a negative value or <see cref="int.MaxValue"/> means unbounded.</param>
+    /// <param name="ceilingKey">Largest key that can still enter the page, or null when the inner page
+    /// was not full and every larger overlay key remains a candidate.</param>
+    public List<KeyValuePair<string, UnflushedKeyValueWrite>> Collect(
+        string prefix, string? startKey, int limit, string? ceilingKey)
     {
-        List<KeyValuePair<string, UnflushedKeyValueWrite>> matches = [];
+        bool bounded = limit >= 0 && limit < int.MaxValue;
+
+        // Bounded selection keeps the `limit` smallest keys in a max-heap keyed by the key itself,
+        // so each candidate beyond the bound costs one comparison against the current largest.
+        PriorityQueue<KeyValuePair<string, UnflushedKeyValueWrite>, string>? heap = null;
+        List<KeyValuePair<string, UnflushedKeyValueWrite>>? unbounded = null;
 
         foreach (KeyValuePair<string, UnflushedKeyValueWrite> kv in entries)
         {
@@ -95,10 +115,53 @@ internal sealed class UnflushedKeyValueWritesIndex
                 continue;
             if (startKey is not null && string.CompareOrdinal(kv.Key, startKey) < 0)
                 continue;
-            matches.Add(kv);
+            if (ceilingKey is not null && string.CompareOrdinal(kv.Key, ceilingKey) > 0)
+                continue;
+
+            if (!bounded)
+            {
+                (unbounded ??= []).Add(kv);
+                continue;
+            }
+
+            if (limit == 0)
+                break;
+
+            heap ??= new(Math.Min(limit, 64), DescendingOrdinal.Instance);
+
+            if (heap.Count < limit)
+                heap.Enqueue(kv, kv.Key);
+            else if (string.CompareOrdinal(kv.Key, heap.Peek().Key) < 0)
+                heap.EnqueueDequeue(kv, kv.Key);
         }
 
-        return matches;
+        if (!bounded)
+        {
+            if (unbounded is null)
+                return [];
+
+            unbounded.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
+            return unbounded;
+        }
+
+        if (heap is null)
+            return [];
+
+        // Drain largest-first into the tail of a pre-sized list, so the result is ascending.
+        int count = heap.Count;
+        KeyValuePair<string, UnflushedKeyValueWrite>[] ordered = new KeyValuePair<string, UnflushedKeyValueWrite>[count];
+        for (int i = count - 1; i >= 0; i--)
+            ordered[i] = heap.Dequeue();
+
+        return new List<KeyValuePair<string, UnflushedKeyValueWrite>>(ordered);
+    }
+
+    /// <summary>Reverses ordinal order so the priority queue's root is the largest key of the selection.</summary>
+    private sealed class DescendingOrdinal : IComparer<string>
+    {
+        public static readonly DescendingOrdinal Instance = new();
+
+        public int Compare(string? x, string? y) => string.CompareOrdinal(y, x);
     }
 
     /// <summary>Newest-head ordering: revision first, commit HLC as the same-revision tiebreak.</summary>
