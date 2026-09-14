@@ -1,15 +1,18 @@
 
 using Nixie;
-using Nixie.Routers;
 
 using Kommander;
 using Kommander.Time;
 using Kommander.WAL.IO;
 
+using Google.Protobuf;
 using System.Diagnostics;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kahuna.Server.Locks.Logging;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
@@ -36,7 +39,12 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
 
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
-    private readonly IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter;
+    /// <summary>
+    /// Shared per-partition write scheduler. A persistent mutation is handed to it as a single-entry
+    /// submission so it shares one Raft proposal (one AppendEntries round trip, one group-committed
+    /// WAL flush) with every other lock and key/value record queued for the same partition.
+    /// </summary>
+    private readonly PartitionWriteAggregator writeAggregator;
 
     private readonly IPersistenceBackend persistenceBackend;
 
@@ -74,7 +82,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     public LockActor(
         IActorContext<LockActor, LockRequest, LockResponse> actorContext,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
-        IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter,
+        PartitionWriteAggregator writeAggregator,
         IPersistenceBackend persistenceBackend,
         IRaft raft,
         IRaftReadScheduler backendReadScheduler,
@@ -84,7 +92,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         this.actorContext = actorContext;
         this.backgroundWriter = backgroundWriter;
-        this.proposalRouter = proposalRouter;
+        this.writeAggregator = writeAggregator;
         this.persistenceBackend = persistenceBackend;
         // Overlay of committed-but-unflushed lock mutations, carried by the decorated backend; the
         // commit path records into it so reads observe the mutation before the flush lands. Null for
@@ -203,7 +211,11 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         LockEntry? entry = await backendReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
 
-        entry ??= new() { FencingToken = -1 };
+        // A brand-new entry must carry a real last-used stamp from the start: its grant proposal is
+        // in flight until the commit completes, and the periodic collect sweep evicts anything whose
+        // last use is older than the cache TTL — a zero stamp always is, so the sweep would drop the
+        // entry mid-flight and the completion would find nothing to install.
+        entry ??= new() { FencingToken = -1, LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) };
 
         locks.Add(message.Resource, entry);
 
@@ -502,7 +514,12 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         {
             if ((currentTime - key.Value.LastUsed) < range)
                 continue;
-            
+
+            // An entry with a live replication intent owns an in-flight proposal; CompleteProposal /
+            // ReleaseProposal must find it to install the committed values or unwind the intent.
+            if (key.Value.ReplicationIntent is not null)
+                continue;
+
             keysToEvict.Add(key.Key);
             number++;
             
@@ -570,7 +587,11 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     }
 
     /// <summary>
-    /// Creates a proposal for a lock operation and sends it to the proposal actor for replication.
+    /// Creates a proposal for a lock operation and hands it to the partition write scheduler, which
+    /// replicates it through Raft in a shared per-partition proposal and reports back with
+    /// <c>CompleteProposal</c> or <c>ReleaseProposal</c>. A rejected admission (queue full, oversized
+    /// record, unflushed backlog, shutdown) unwinds the just-installed intent and answers
+    /// <c>MustRetry</c> synchronously — no completion message will arrive for it.
     /// </summary>
     /// <param name="message"></param>
     /// <param name="entry"></param>
@@ -581,29 +602,69 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     {
         if (!actorContext.Reply.HasValue)
             return LockStaticResponses.ErroredResponse;
-            
+
         int currentProposalId = Interlocked.Increment(ref proposalId);
 
         entry.ReplicationIntent = new()
         {
-            ProposalId = currentProposalId, 
+            ProposalId = currentProposalId,
             Expires = currentTime + ProposalWaitTimeout
         };
-            
+
         proposals.Add(currentProposalId, proposal);
-            
-        proposalRouter.Send(new(
-            message.Type,
-            currentProposalId, 
-            proposal, 
-            actorContext.Self, 
-            actorContext.Reply.Value.Promise!,
-            currentTime
-        ));
+
+        LockProposalSubmission submission = new(
+            proposal.Resource,
+            message.PartitionId,
+            currentProposalId,
+            proposal.Durability,
+            SerializeProposal(message.Type, proposal, currentTime),
+            actorContext.Self,
+            actorContext.Reply.Value.Promise
+        );
+
+        if (!writeAggregator.TryEnqueue(submission))
+        {
+            entry.ReplicationIntent = null;
+            proposals.Remove(currentProposalId);
+
+            return LockStaticResponses.MustRetryResponse;
+        }
 
         actorContext.ByPassReply = true;
-            
+
         return LockStaticResponses.WaitingForReplication;
+    }
+
+    /// <summary>
+    /// Encodes the replicated lock record: the proposal's committed values plus the HLC at which the
+    /// mutation was minted, so followers and restorers replay it in the same order the leader chose.
+    /// </summary>
+    private static byte[] SerializeProposal(LockRequestType type, LockProposal proposal, HLCTimestamp currentTime)
+    {
+        LockMessage lockMessage = new()
+        {
+            Type = (int)type,
+            Resource = proposal.Resource,
+            FencingToken = proposal.FencingToken,
+            ExpireNode = proposal.Expires.N,
+            ExpirePhysical = proposal.Expires.L,
+            ExpireCounter = proposal.Expires.C,
+            LastUsedNode = proposal.LastUsed.N,
+            LastUsedPhysical = proposal.LastUsed.L,
+            LastUsedCounter = proposal.LastUsed.C,
+            LastModifiedNode = proposal.LastModified.N,
+            LastModifiedPhysical = proposal.LastModified.L,
+            LastModifiedCounter = proposal.LastModified.C,
+            TimeNode = currentTime.N,
+            TimePhysical = currentTime.L,
+            TimeCounter = currentTime.C
+        };
+
+        if (proposal.Owner is not null)
+            lockMessage.Owner = UnsafeByteOperations.UnsafeWrap(proposal.Owner);
+
+        return ReplicationSerializer.Serialize(lockMessage);
     }
 
     /// <summary>
@@ -794,8 +855,14 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         if (message.Promise is null)
             return LockStaticResponses.LockedResponse;
 
-        message.Promise.TrySetResult(LockStaticResponses.ErroredResponse);
+        // A transient failure (backpressure, leadership moved, a cancelled round trip) is safe to
+        // retry: the mutation did not commit and the caller's next attempt re-reads the entry.
+        LockResponse response = message.TransientRelease
+            ? LockStaticResponses.MustRetryResponse
+            : LockStaticResponses.ErroredResponse;
 
-        return LockStaticResponses.ErroredResponse;
+        message.Promise.TrySetResult(response);
+
+        return response;
     }
 }

@@ -12,6 +12,7 @@ using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -33,8 +34,11 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// reflected in the snapshot converges (in-order replay ends at the log tail). To guarantee the
 /// floor, the export first drains the background writer: every applied entry's row is then visible
 /// to the physical-family scan the enumerator reads. The export is not one consistent cut — keys
-/// read late in the paged scan may reflect later applies than keys read early — which the
-/// at-least contract explicitly permits.
+/// read late in the paged scan may reflect later applies than keys read early, and the durable
+/// stores' slices are walked lock-free with the ownership filter inside the walk — which the
+/// at-least contract explicitly permits. The export costs O(partition) memory, not O(node): each
+/// store streams only its owned rows, and the snapshot is built in pooled 64 KB segments rather
+/// than one doubling buffer.
 /// </para>
 ///
 /// <para>
@@ -152,76 +156,151 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         RangeMap map = currentMap();
 
-        MemoryStream stream = new();
+        // Segmented and pooled: the snapshot grows one 64 KB segment at a time, so an export of any size
+        // allocates no doubling-growth ladder of ever-larger large-object-heap buffers, and an export that
+        // repeats on a cadence (a rescue loop re-seeding a follower) reuses the segments it returned.
+        SegmentedBufferStream stream = new();
 
-        new PartitionStateHeader { PartitionId = partitionId, UpToIndex = upToIndex }.WriteDelimitedTo(stream);
+        try
+        {
+            new PartitionStateHeader { PartitionId = partitionId, UpToIndex = upToIndex }.WriteDelimitedTo(stream);
 
-        await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
-            enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, ct).ConfigureAwait(false))
-            KvStateMachineTransfer.WritePage(stream, page, hasMore: true);
+            await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
+                enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, ct).ConfigureAwait(false))
+                KvStateMachineTransfer.WritePage(stream, page, hasMore: true);
 
-        KvStateMachineTransfer.WritePage(stream, [], hasMore: false);
+            KvStateMachineTransfer.WritePage(stream, [], hasMore: false);
 
-        await foreach (IReadOnlyList<(string Resource, LockEntry Entry)> lockPage in
-            enumerator.EnumerateLocksAsync(partitionId, PageSize, ct).ConfigureAwait(false))
-            WriteLockPage(stream, lockPage, hasMore: true);
+            await foreach (IReadOnlyList<(string Resource, LockEntry Entry)> lockPage in
+                enumerator.EnumerateLocksAsync(partitionId, PageSize, ct).ConfigureAwait(false))
+                WriteLockPage(stream, lockPage, hasMore: true);
 
-        WriteLockPage(stream, [], hasMore: false);
+            WriteLockPage(stream, [], hasMore: false);
 
-        WriteStoreSection(stream, partitionId, map);
+            WriteStoreSection(stream, partitionId, map);
+        }
+        catch
+        {
+            // A refused page or a cancellation abandons the export: hand the segments back to the pool now
+            // rather than when the garbage collector gets to the half-built stream.
+            stream.Dispose();
+            throw;
+        }
 
         logger.LogExportedPartitionState(partitionId, upToIndex, stream.Length);
 
-        stream.Position = 0;
         return stream;
     }
 
     private void WriteStoreSection(Stream stream, int partitionId, RangeMap map)
     {
+        // Each store streams its owned slice straight into a pooled payload buffer through one reused entry
+        // message, with the ownership filter inside the walk: an export reads every entry the node holds
+        // once (the walk) but materialises only the partition's rows (the payload), and never copies a whole
+        // store or builds one protobuf object per row. The three payloads are then spliced into the section
+        // by hand, byte-for-byte what serialising a PartitionStateStoreSection over them would produce, so
+        // no exact-size copy of a payload is ever taken.
+        //
         // The intent side (intents plus the partition's committed-head ledger) is captured BEFORE the record
         // side, and the order is load-bearing: the installing replica re-judges every bundled commit delivered
         // after the boundary against the installed intent set and ledger, unless the installed record already
         // carries the outcome. Capturing the intent side first puts its position at or before the record
         // side's, so each such commit is either already decided in the records or judged against intent/ledger
-        // state that is exact at its position once the entries between them are applied.
-        List<PreparedIntent> intents = [];
-        foreach (PreparedIntent intent in preparedIntentStore.SnapshotRange(null, null))
-        {
-            if (PartitionDataEnumerator.OwnerOfKey(map, intent.Key, hashPoolSize) == partitionId)
-                intents.Add(intent);
-        }
+        // state that is exact at its position once the entries between them are applied. The walks are not
+        // point-in-time cuts (see each store's writer); the argument holds per key because every entry above
+        // the boundary — which precedes every walk — is replayed in order on top of what was captured.
+        Func<string, bool> isOwned = key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
 
-        byte[] intentSection = preparedIntentStore.SerializePartitionIntents(partitionId, intents);
+        using SegmentedBufferStream intents = new();
+        using SegmentedBufferStream records = new();
+        using SegmentedBufferStream receipts = new();
 
-        List<TransactionRecord> records = [];
-        foreach (TransactionRecord record in transactionRecordStore.SnapshotRange(null, null))
-        {
-            if (PartitionDataEnumerator.OwnerOfKey(map, record.RecordAnchorKey, hashPoolSize) == partitionId)
-                records.Add(record);
-        }
+        // Always written, even with no intents: the section carries the ledger (possibly empty) and the
+        // marker that tells the importer it was written by a build that has one.
+        preparedIntentStore.WritePartitionSection(intents, partitionId, isOwned);
+        int recordCount = transactionRecordStore.WritePartitionRecords(records, isOwned);
+        int receiptCount = completionReceiptStore.WritePartitionReceipts(receipts, partitionId, isOwned);
 
-        List<CompletionReceiptRecord> receipts = [];
-        foreach (CompletionReceiptRecord record in completionReceiptStore.SnapshotRange(null, null))
-        {
-            if (PartitionDataEnumerator.OwnerOfKey(map, record.Key, hashPoolSize) == partitionId)
-                receipts.Add(record);
-        }
+        // A payload field is present only when it carries rows: an empty bytes field is omitted from the
+        // wire exactly as proto3 omits it, and the importer treats an absent field as no rows.
+        WriteDelimitedStoreSection(
+            stream,
+            receiptCount > 0 ? receipts : null,
+            recordCount > 0 ? records : null,
+            intents);
+    }
 
-        PartitionStateStoreSection section = new()
-        {
-            CompletionReceipts = receipts.Count > 0
-                ? UnsafeByteOperations.UnsafeWrap(CompletionReceiptStore.SerializeImport(receipts, partitionId))
-                : ByteString.Empty,
-            TransactionRecords = records.Count > 0
-                ? UnsafeByteOperations.UnsafeWrap(TransactionRecordStore.SerializeRecords(records))
-                : ByteString.Empty,
-            // Always written, even with no intents: the section carries the ledger (possibly empty) and the
-            // marker that tells the importer it was written by a build that has one.
-            PreparedIntents = UnsafeByteOperations.UnsafeWrap(intentSection)
-        };
+    /// <summary>
+    /// Writes a length-delimited <see cref="PartitionStateStoreSection"/> whose payload fields are the given
+    /// buffers (null = absent) and whose checksum is FNV-1a 64 over the payload bytes in field order — the
+    /// same bytes <c>WriteDelimitedTo</c> would produce for a section message wrapping those payloads, without
+    /// ever holding a payload in one contiguous array.
+    /// </summary>
+    private static void WriteDelimitedStoreSection(
+        Stream stream, SegmentedBufferStream? receipts, SegmentedBufferStream? records, SegmentedBufferStream intents)
+    {
+        KvStateMachineTransfer.FnvHashStream hasher = new();
+        HashPayload(hasher, receipts);
+        HashPayload(hasher, records);
+        HashPayload(hasher, intents);
+        ulong checksum = hasher.Hash;
 
-        section.Checksum = StoreChecksumOf(section);
-        section.WriteDelimitedTo(stream);
+        int size =
+            PayloadFieldSize(PartitionStateStoreSection.CompletionReceiptsFieldNumber, receipts)
+            + PayloadFieldSize(PartitionStateStoreSection.TransactionRecordsFieldNumber, records)
+            + PayloadFieldSize(PartitionStateStoreSection.PreparedIntentsFieldNumber, intents)
+            + CodedOutputStream.ComputeTagSize(PartitionStateStoreSection.ChecksumFieldNumber)
+            + CodedOutputStream.ComputeUInt64Size(checksum);
+
+        using CodedOutputStream output = new(stream, leaveOpen: true);
+
+        output.WriteLength(size);
+        WritePayloadField(output, stream, PartitionStateStoreSection.CompletionReceiptsFieldNumber, receipts);
+        WritePayloadField(output, stream, PartitionStateStoreSection.TransactionRecordsFieldNumber, records);
+        WritePayloadField(output, stream, PartitionStateStoreSection.PreparedIntentsFieldNumber, intents);
+        output.WriteTag(PartitionStateStoreSection.ChecksumFieldNumber, WireFormat.WireType.Varint);
+        output.WriteUInt64(checksum);
+    }
+
+    private static void HashPayload(KvStateMachineTransfer.FnvHashStream hasher, SegmentedBufferStream? payload)
+    {
+        if (payload is null)
+            return;
+
+        for (int i = 0; i < payload.SegmentCount; i++)
+            hasher.Write(payload.GetSegment(i).AsSpan());
+    }
+
+    private static int PayloadLength(SegmentedBufferStream payload)
+    {
+        if (payload.Length > int.MaxValue)
+            throw new KahunaServerException($"ExportPartitionState: a store payload of {payload.Length} bytes exceeds the protobuf field limit.");
+
+        return (int)payload.Length;
+    }
+
+    private static int PayloadFieldSize(int fieldNumber, SegmentedBufferStream? payload)
+    {
+        if (payload is null)
+            return 0;
+
+        int length = PayloadLength(payload);
+        return CodedOutputStream.ComputeTagSize(fieldNumber) + CodedOutputStream.ComputeLengthSize(length) + length;
+    }
+
+    // Writes the field's tag and length through the encoder, then hands the payload segments to the
+    // underlying stream directly: the encoder is flushed first so the two writers never interleave.
+    private static void WritePayloadField(CodedOutputStream output, Stream stream, int fieldNumber, SegmentedBufferStream? payload)
+    {
+        if (payload is null)
+            return;
+
+        output.WriteTag(fieldNumber, WireFormat.WireType.LengthDelimited);
+        output.WriteLength(PayloadLength(payload));
+        output.Flush();
+
+        payload.Position = 0;
+        payload.CopyTo(stream);
     }
 
     // ── import ───────────────────────────────────────────────────────────────────

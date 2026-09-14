@@ -1,6 +1,5 @@
 
 using Nixie;
-using Nixie.Routers;
 
 using Kommander;
 using Kommander.Data;
@@ -15,6 +14,7 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks.Data;
 
 namespace Kahuna.Server.Locks;
@@ -46,9 +46,11 @@ internal sealed class LockManager
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
     /// <summary>
-    /// 
+    /// The node's shared per-partition write scheduler (owned by the key-value manager). Persistent
+    /// lock mutations are submitted to it so they coalesce with each other and with key/value writes
+    /// into one Raft proposal per partition batch.
     /// </summary>
-    private readonly IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> proposalRouter;
+    private readonly PartitionWriteAggregator writeAggregator;
 
     /// <summary>
     /// The ring of ephemeral lock actors. The ring resolves the owning actor by consistent hash
@@ -110,6 +112,7 @@ internal sealed class LockManager
         IInterNodeCommunication interNodeCommunication,
         IPersistenceBackend persistenceBackend,
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        PartitionWriteAggregator writeAggregator,
         KahunaConfiguration configuration,
         ILogger<IKahuna> logger,
         PartitionDurabilityTracker? durabilityTracker = null
@@ -119,13 +122,13 @@ internal sealed class LockManager
         this.raft = raft;
         this.backendReadScheduler = backendReadScheduler;
         this.backgroundWriter = backgroundWriter;
+        this.writeAggregator = writeAggregator;
         this.durabilityTracker = durabilityTracker;
         this.logger = logger;
 
         dataPartitionRouter = new(raft);
         locator = new(this, configuration, raft, interNodeCommunication, logger);
 
-        proposalRouter = GetProposalRouter(persistenceBackend, configuration);
         ephemeralLocksRouter = GetEphemeralRouter(persistenceBackend, configuration);
         persistentLocksRouter = GetPersistentRouter(persistenceBackend, configuration);
 
@@ -180,7 +183,7 @@ internal sealed class LockManager
             ephemeralLockInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "ephemeral-lock-" + i,
                 backgroundWriter,
-                proposalRouter,
+                writeAggregator,
                 persistenceBackend,
                 raft,
                 backendReadScheduler,
@@ -207,7 +210,7 @@ internal sealed class LockManager
             persistentLockInstances.Add(actorSystem.Spawn<LockActor, LockRequest, LockResponse>(
                 "persistent-lock-" + i,
                 backgroundWriter,
-                proposalRouter,
+                writeAggregator,
                 persistenceBackend,
                 raft,
                 backendReadScheduler,
@@ -218,25 +221,6 @@ internal sealed class LockManager
         return new(persistentLockInstances);
     }
 
-    private IActorRef<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest> GetProposalRouter(
-        IPersistenceBackend persistenceBackend, 
-        KahunaConfiguration configuration
-    )
-    {
-        List<IActorRef<LockProposalActor, LockProposalRequest>> proposalInstances = new(configuration.LocksWorkers);
-
-        for (int i = 0; i < configuration.LocksWorkers; i++)
-            proposalInstances.Add(actorSystem.Spawn<LockProposalActor, LockProposalRequest>(
-                "proposal-lock-" + i,
-                raft,
-                persistenceBackend,
-                configuration,
-                logger
-            ));
-        
-        return actorSystem.Spawn<BalancingActor<LockProposalActor, LockProposalRequest>, LockProposalRequest>(null, proposalInstances);
-    }
-    
     /// <summary>
     /// Receives restore messages that haven't been checkpointed yet.
     /// </summary>

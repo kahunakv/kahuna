@@ -71,13 +71,13 @@ internal sealed class PartitionDataEnumerator
     /// </summary>
     public static int OwnerOfKey(RangeMap map, string key, int hashPoolSize)
     {
-        string keySpace = KeySpaceRegistry.ExtractKeySpace(key);
-
-        RangeDescriptor? descriptor = map.Find(keySpace, key);
+        // Range-routed keys resolve without allocating: the covering lookup takes the key space as a span.
+        // Only a hash-routed key materialises its key space, because the placement digest takes a string.
+        RangeDescriptor? descriptor = map.FindCovering(key);
         if (descriptor is not null)
             return descriptor.PartitionId;
 
-        return HashPartitionOfKeySpace(keySpace, hashPoolSize);
+        return HashPartitionOfKeySpace(KeySpaceRegistry.ExtractKeySpace(key), hashPoolSize);
     }
 
     /// <summary>

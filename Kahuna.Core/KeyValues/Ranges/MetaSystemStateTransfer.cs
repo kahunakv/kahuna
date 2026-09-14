@@ -4,6 +4,7 @@ using Kommander;
 
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -54,20 +55,33 @@ internal sealed class MetaSystemStateTransfer : IRaftSystemStateTransfer
             SnapshotFloor = UnsafeByteOperations.UnsafeWrap(snapshotFloorStore.SerializeState()),
         };
 
-        Stream stream = new MemoryStream(ReplicationSerializer.Serialize(message), writable: false);
-        return Task.FromResult(stream);
+        // The message is serialised straight into pooled 64 KB segments: no exact-size array for the whole
+        // blob and no doubling buffer, the same shape as the user-partition export.
+        SegmentedBufferStream stream = new();
+
+        try
+        {
+            message.WriteTo(stream);
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+
+        return Task.FromResult<Stream>(stream);
     }
 
     public async Task ImportPartitionState(int partitionId, Stream snapshot, CancellationToken ct)
     {
-        byte[] data;
-        using (MemoryStream buffer = new())
+        // Buffer the delivery in pooled segments and parse from them directly: no doubling buffer and no
+        // exact-size copy of the blob before decoding.
+        MetaSystemStateMessage message;
+        using (SegmentedBufferStream buffer = new())
         {
             await snapshot.CopyToAsync(buffer, ct).ConfigureAwait(false);
-            data = buffer.ToArray();
+            message = ReplicationSerializer.UnserializeMetaSystemStateMessage(buffer);
         }
-
-        MetaSystemStateMessage message = ReplicationSerializer.UnserializeMetaSystemStateMessage(data);
 
         // Parse and validate BOTH sub-states before installing either: a decode/validation failure
         // here throws before any swap, leaving the node's prior state intact so Kommander retries.

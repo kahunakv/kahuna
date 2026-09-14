@@ -2129,10 +2129,10 @@ internal sealed class PreparedIntentStore
     // ── state transfer (split/merge) ────────────────────────────────────────────────
 
     /// <summary>Intents whose key routes into <c>[startKey, endKey)</c> (ordinal, half-open) — the set a range
-    /// split/merge hands to the destination partition, and the set a whole-partition export serialises.
-    /// Deliberately a consistent cut (<c>Values</c> copies the map under every bucket lock): the receiver judges
-    /// later commits against this set together with the ledger and the records captured around it, and that
-    /// reasoning needs one instant at which all of these were true at once. The scan captures below do not — see
+    /// split/merge hands to the destination partition. Deliberately a consistent cut (<c>Values</c> copies the map
+    /// under every bucket lock): the moved keys' log entries stay on the source partition, so the destination has
+    /// no replay tail to converge a torn capture with. The whole-partition export does have that tail and streams
+    /// its slice lock-free instead (<see cref="WritePartitionSection"/>); the scan captures are lock-free too — see
     /// <see cref="SnapshotScanWindow"/>.</summary>
     public IReadOnlyList<PreparedIntent> SnapshotRange(string? startKey, string? endKey)
     {
@@ -2150,6 +2150,49 @@ internal sealed class PreparedIntentStore
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Writes one partition's intents together with its committed-head ledger slice to <paramref name="output"/> in
+    /// the <see cref="SerializePartitionIntents"/> wire format and returns how many intents were written. The
+    /// whole-partition export streams the slice through this instead of copying the store: the filter runs inside
+    /// one lock-free walk of the map and each owned intent goes through one reused entry message, so the cost is
+    /// the walk plus the owned rows — never a copy of every intent the node holds, and never one protobuf object
+    /// per intent.
+    ///
+    /// <para>The ledger is captured before the walk, so its position is no later than any intent's (the order
+    /// <see cref="PersistSnapshot"/> keeps for the same reason). The walk itself is not a point-in-time cut: each
+    /// key's intent is written in a state that key really had at some instant during the walk, and a key prepared
+    /// or settled during the walk may or may not appear. The export tolerates that per-key tear because the
+    /// receiver replays every log entry above the snapshot boundary — which precedes the walk — on top of the
+    /// installed set in order: an already-reflected prepare or settle folds idempotently, a missed one is applied,
+    /// so by the time any entry is judged against a key's intent that intent is exact at its position. The
+    /// committed-head ledger and the transaction records are captured at or after the intents, which is what the
+    /// bundled-commit gate needs (see the record-side ordering in the exporter).</para>
+    /// </summary>
+    public int WritePartitionSection(Stream output, int partitionId, Func<string, bool> isOwnedKey)
+    {
+        (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger = CaptureLedger(partitionId);
+
+        int written = 0;
+
+        using CodedOutputStream coded = new(output, leaveOpen: true);
+        PreparedIntentCommandMessage entry = new();
+
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+        {
+            if (!isOwnedKey(kv.Key))
+                continue;
+
+            FillPrepareProto(entry, kv.Value);
+            coded.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
+            coded.WriteMessage(entry);
+            written++;
+        }
+
+        WriteLedgerSection(coded, partitionId, ledger);
+
+        return written;
     }
 
     /// <summary>Intents whose key belongs to <paramref name="bucket"/> (its parent prefix) — the set a bucket scan

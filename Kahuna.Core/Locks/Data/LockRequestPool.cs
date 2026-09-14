@@ -84,8 +84,8 @@ internal static class LockRequestPool
     }
 
     /// <summary>
-    /// Rents a <c>CompleteProposal</c> message: the proposal actor notifying the owning lock actor
-    /// that its proposal committed, so the actor installs it and resolves
+    /// Rents a <c>CompleteProposal</c> message: the partition write scheduler notifying the owning
+    /// lock actor that its proposal committed, so the actor installs it and resolves
     /// <paramref name="promise"/>. Fire-and-forget with ownership transfer — the sender keeps no
     /// reference after the send and the receiving actor returns the request to the pool.
     /// </summary>
@@ -114,9 +114,10 @@ internal static class LockRequestPool
     }
 
     /// <summary>
-    /// Rents a <c>ReleaseProposal</c> message: the proposal actor notifying the owning lock actor
-    /// that its proposal did not commit, so the actor unwinds the replication intent and resolves
-    /// <paramref name="promise"/>. Fire-and-forget with ownership transfer — the sender keeps no
+    /// Rents a <c>ReleaseProposal</c> message: the partition write scheduler notifying the owning
+    /// lock actor that its proposal did not commit, so the actor unwinds the replication intent and
+    /// resolves <paramref name="promise"/> — <c>MustRetry</c> when <paramref name="transient"/>,
+    /// <c>Errored</c> otherwise. Fire-and-forget with ownership transfer — the sender keeps no
     /// reference after the send and the receiving actor returns the request to the pool.
     /// </summary>
     public static LockRequest RentReleaseProposal(
@@ -124,7 +125,8 @@ internal static class LockRequestPool
         LockDurability durability,
         int proposalId,
         int partitionId,
-        TaskCompletionSource<LockResponse?>? promise)
+        TaskCompletionSource<LockResponse?>? promise,
+        bool transient)
     {
         LockRequest request = Rent(
             LockRequestType.ReleaseProposal,
@@ -137,6 +139,7 @@ internal static class LockRequestPool
             promise);
 
         request.ReturnToPoolOnReceive = true;
+        request.TransientRelease = transient;
 
         return request;
     }

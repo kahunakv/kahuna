@@ -148,8 +148,10 @@ internal static class KahunaNodeComposer
         // and when the back-pressure actually engages.
         PersistenceBacklogMonitor backlogMonitor = new(backgroundWriter, configuration, logger);
 
-        LockManager locks = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, durabilityTracker);
+        // The key-value manager owns the per-partition write scheduler; it is built first so the lock
+        // manager can submit persistent lock mutations into the same per-partition proposals.
         KeyValuesManager keyValues = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, configuration, logger, snapshotFloorStore, completionReceiptStore, transactionRecordStore, preparedIntentStore, writeBatchExecutorDecorator, durabilityTracker, backlogMonitor);
+        LockManager locks = new(actorSystem, raft, backendReadScheduler, interNodeCommunication, persistenceBackend, backgroundWriter, keyValues.WriteAggregator, configuration, logger, durabilityTracker);
 
         // Now that the key-value router exists, route flush acknowledgements to the owning actor so
         // it can advance FlushedRevision (making committed-but-unflushed entries eligible for eviction).

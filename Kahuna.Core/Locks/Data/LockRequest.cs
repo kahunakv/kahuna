@@ -108,6 +108,13 @@ internal sealed class LockRequest : IConsistentHashable
     public bool ReturnToPoolOnReceive { get; internal set; }
 
     /// <summary>
+    /// For a <c>ReleaseProposal</c> message: true when the proposal failed for a transient reason
+    /// (backpressure, leadership change, a cancelled round trip) and the caller should be answered
+    /// <c>MustRetry</c>; false when the failure is definite and the caller is answered <c>Errored</c>.
+    /// </summary>
+    public bool TransientRelease { get; internal set; }
+
+    /// <summary>
     /// Constructor
     /// </summary>
     /// <param name="type"></param>
@@ -172,6 +179,7 @@ internal sealed class LockRequest : IConsistentHashable
         ProposalLogIndex = proposalLogIndex;
         InvalidateOrApplyData = invalidateOrApplyData;
         ReturnToPoolOnReceive = false;
+        TransientRelease = false;
     }
 
     /// <summary>
@@ -191,6 +199,7 @@ internal sealed class LockRequest : IConsistentHashable
         ProposalLogIndex = -1;
         InvalidateOrApplyData = null;
         ReturnToPoolOnReceive = false;
+        TransientRelease = false;
     }
 
     /// <summary>

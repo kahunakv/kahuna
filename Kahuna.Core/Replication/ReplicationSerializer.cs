@@ -125,6 +125,10 @@ public static class ReplicationSerializer
     public static MetaSystemStateMessage UnserializeMetaSystemStateMessage(ReadOnlySpan<byte> serializedData) =>
         MetaSystemStateMessage.Parser.ParseFrom(serializedData);
 
+    /// <summary>Decodes a meta-state blob straight from a stream, so a buffered delivery need not be copied into one array first.</summary>
+    public static MetaSystemStateMessage UnserializeMetaSystemStateMessage(Stream serializedData) =>
+        MetaSystemStateMessage.Parser.ParseFrom(serializedData);
+
     public static byte[] Serialize(CoordinatorDecisionDeltaMessage message)
     {
         return Encode(message);

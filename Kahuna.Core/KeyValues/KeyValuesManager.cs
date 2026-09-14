@@ -73,6 +73,11 @@ internal sealed partial class KeyValuesManager : IDisposable
     
     private readonly Writes.PartitionWriteAggregator writeAggregator;
 
+    /// <summary>The node's shared per-partition write scheduler. Exposed so other producers of
+    /// replicated records (persistent lock mutations) submit into the same per-partition proposals
+    /// as key/value writes instead of running their own Raft round trips.</summary>
+    internal Writes.PartitionWriteAggregator WriteAggregator => writeAggregator;
+
     /// <summary>The two consistent-hash rings of key-value actors and the send path into them.</summary>
     private readonly KeyValueActorRouters routers;
 

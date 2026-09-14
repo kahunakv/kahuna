@@ -709,6 +709,43 @@ internal sealed class TransactionRecordStore
     }
 
     /// <summary>
+    /// Writes the records whose anchor satisfies <paramref name="isOwnedAnchor"/> to <paramref name="output"/> in the
+    /// <see cref="SerializeRecords"/> wire format and returns how many were written. The whole-partition export
+    /// streams a partition's slice through this instead of copying the store: the filter runs inside one lock-free
+    /// walk of the map and each owned record goes through one reused entry message, so the cost is the walk plus
+    /// the owned rows — never a copy of every record the node holds, and never one protobuf object per record.
+    ///
+    /// <para>The walk is not a point-in-time cut: a record present for the whole walk is written in a state it
+    /// really had at some instant during the walk; one created or removed during the walk may or may not be. That
+    /// matches the export's at-least contract — every transition applied before the export began is reflected,
+    /// and the log entries after that are replayed on the receiver above the snapshot boundary through the same
+    /// deterministic state machine, which folds an already-reflected transition idempotently.</para>
+    /// </summary>
+    public int WritePartitionRecords(Stream output, Func<string, bool> isOwnedAnchor)
+    {
+        int written = 0;
+
+        using CodedOutputStream coded = new(output, leaveOpen: true);
+        TransactionRecordSnapshotEntry entry = new();
+        List<TransactionParticipantRefMessage> participantPool = [];
+
+        foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+        {
+            TransactionRecord record = kv.Value;
+
+            if (!isOwnedAnchor(record.RecordAnchorKey))
+                continue;
+
+            FillSnapshotEntry(entry, participantPool, record);
+            coded.WriteTag(TransactionRecordSnapshotMessage.RecordsFieldNumber, WireFormat.WireType.LengthDelimited);
+            coded.WriteMessage(entry);
+            written++;
+        }
+
+        return written;
+    }
+
+    /// <summary>
     /// Drops every record whose anchor satisfies <paramref name="shouldRemoveAnchor"/> and returns how many
     /// were removed. This is the un-host purge: when this node stops being a replica of the anchors'
     /// partition, the canonical decisions live on the partition's replicas (and return in a seeding snapshot

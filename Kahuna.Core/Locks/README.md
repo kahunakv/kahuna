@@ -8,7 +8,7 @@ The typical path is:
 2. `LockManager` validates and routes the operation.
 3. `LockLocator` forwards to the Raft leader for the lock's partition when needed.
 4. `LockActor` owns the in-memory lock state for its consistent-hash shard.
-5. Persistent changes are proposed through `LockProposalActor`, replicated through Raft, and then completed by the actor.
+5. Persistent changes are submitted to the shared `PartitionWriteAggregator` (owned by the key-value manager), which coalesces them with other lock and key/value records for the same partition into one Raft proposal, and are then completed by the actor.
 
 There are separate routers for ephemeral and persistent locks. Ephemeral locks are local actor state; persistent locks are replicated and restored through Raft/persistence.
 

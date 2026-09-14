@@ -485,6 +485,51 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>
+    /// Writes the receipts whose key satisfies <paramref name="isOwnedKey"/> to <paramref name="output"/> in the
+    /// <see cref="SerializeImport"/> wire format (a record batch addressed to <paramref name="destinationPartitionId"/>)
+    /// and returns how many were written. The whole-partition export streams a partition's slice through this
+    /// instead of copying the store: the filter runs inside one lock-free walk of the map and each owned receipt
+    /// goes through one reused entry message, so the cost is the walk plus the owned rows — never a copy of every
+    /// receipt the node holds, and never one protobuf object per receipt.
+    ///
+    /// <para>The walk is not a point-in-time cut: a receipt present for the whole walk is always written; one
+    /// recorded or forgotten during the walk may or may not be. That matches the export's at-least contract —
+    /// every receipt applied before the export began is written, and the log entries that record or forget
+    /// receipts after that are replayed on the receiver above the snapshot boundary, where a re-recorded receipt
+    /// keeps the first copy and forgetting an absent receipt is a no-op.</para>
+    /// </summary>
+    public int WritePartitionReceipts(Stream output, int destinationPartitionId, Func<string, bool> isOwnedKey)
+    {
+        int written = 0;
+
+        using CodedOutputStream coded = new(output, leaveOpen: true);
+        GrpcCompletionReceiptEntry entry = new();
+
+        foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
+        {
+            string key = receipt.Key.Key;
+
+            if (!isOwnedKey(key))
+                continue;
+
+            FillSnapshotEntry(entry, new CompletionReceiptRecord(receipt.Key.TransactionId, key, receipt.Value.RecordAnchorKey, receipt.Value.Durability));
+            coded.WriteTag(GrpcImportCompletionReceiptsRequest.ReceiptsFieldNumber, WireFormat.WireType.LengthDelimited);
+            coded.WriteMessage(entry);
+            written++;
+        }
+
+        // Canonical field order: the repeated entries (field 1) precede the destination partition (field 2), and a
+        // zero partition is omitted exactly as proto3 omits a default scalar, so the bytes equal SerializeImport's.
+        if (destinationPartitionId != 0)
+        {
+            coded.WriteTag(GrpcImportCompletionReceiptsRequest.DestinationPartitionIdFieldNumber, WireFormat.WireType.Varint);
+            coded.WriteInt32(destinationPartitionId);
+        }
+
+        return written;
+    }
+
+    /// <summary>
     /// Writes the receipts whose key routes to <paramref name="partitionId"/> to that partition's on-disk
     /// snapshot (atomic tmp-then-move) and reports whether the write is durable. Called at checkpoint time —
     /// after every dirty key-value write has flushed and before the partition's WAL retention floor advances —
