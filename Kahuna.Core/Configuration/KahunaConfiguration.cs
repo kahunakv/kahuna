@@ -177,7 +177,29 @@ public sealed class KahunaConfiguration
     /// away.</para>
     /// </summary>
     public int MaxScriptDepth { get; set; } = 256;
-    
+
+    /// <summary>
+    /// User-defined functions this node makes callable from Kahuna script. A host fills it before the
+    /// node is built; the script engine then freezes it, and a later registration throws.
+    ///
+    /// <para>It is not replicated. Every node of a cluster must register an identical set, the same
+    /// way every node must run the same binary. A node that lacks a function still applies, restores
+    /// and serves values another node's function produced, because replication carries the result and
+    /// never the call. It only refuses to coordinate a script that calls what it does not have.</para>
+    /// </summary>
+    public Extensibility.KahunaFunctionRegistry Functions { get; set; } = new();
+
+    /// <summary>
+    /// A user-defined function slower than this many milliseconds is logged as a warning. Zero
+    /// disables the warning.
+    ///
+    /// <para>The call is synchronous and blocks a request path while the transaction holds its locks
+    /// and write intents, so a slow function shows up as unexplained latency on unrelated keys. No
+    /// attempt is made to abort one: .NET cannot preempt a running call, and the transaction timeout
+    /// is already the backstop that reclaims the session.</para>
+    /// </summary>
+    public int FunctionSlowWarnMs { get; set; } = 50;
+
     public int DefaultTransactionTimeout { get; set; } = 5000;
 
     /// <summary>

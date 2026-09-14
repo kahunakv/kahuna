@@ -24,6 +24,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Benchmark.Tests", "K
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Microbenchmarks", "Kahuna.Microbenchmarks\Kahuna.Microbenchmarks.csproj", "{B2162E3D-6822-4D10-BC96-532ED6811C8F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.TestExtension", "Kahuna.TestExtension\Kahuna.TestExtension.csproj", "{2CBF186A-F640-4AA4-A460-14A0B74A90E5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -154,6 +156,18 @@ Global
 		{B2162E3D-6822-4D10-BC96-532ED6811C8F}.Release|x64.Build.0 = Release|Any CPU
 		{B2162E3D-6822-4D10-BC96-532ED6811C8F}.Release|x86.ActiveCfg = Release|Any CPU
 		{B2162E3D-6822-4D10-BC96-532ED6811C8F}.Release|x86.Build.0 = Release|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Debug|x64.Build.0 = Debug|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Debug|x86.Build.0 = Debug|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Release|x64.ActiveCfg = Release|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Release|x64.Build.0 = Release|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Release|x86.ActiveCfg = Release|Any CPU
+		{2CBF186A-F640-4AA4-A460-14A0B74A90E5}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

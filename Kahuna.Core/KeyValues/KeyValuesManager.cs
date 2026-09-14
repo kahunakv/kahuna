@@ -294,6 +294,8 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     private readonly System.Diagnostics.Metrics.Meter admissionGaugeMeter;
 
+    private readonly System.Diagnostics.Metrics.Meter functionGaugeMeter;
+
     /// <summary>The durable-intent 2PC stores and key→partition routing, exposed to the transaction coordinator's
     /// durable finalize path (the sole durable-persistent finalize path).</summary>
     internal TransactionRecordStore DurableTransactionRecordStore => transactionRecordStore;
@@ -483,6 +485,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         this.scriptExecutor = built.scriptExecutor;
         this.durableGaugeMeter = built.durableGaugeMeter;
         this.admissionGaugeMeter = built.admissionGaugeMeter;
+        this.functionGaugeMeter = built.functionGaugeMeter;
         this.locator = built.locator;
         this.preparedIntentRecovery = built.preparedIntentRecovery;
         this.restorer = built.restorer;
@@ -532,6 +535,12 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Enumerates the backend data owned by one partition (snapshot export / un-host purge).</summary>
     internal PartitionDataEnumerator PartitionDataEnumerator => partitionDataEnumerator;
 
+    /// <summary>
+    /// The node's script function table: the built-ins merged with whatever the host registered.
+    /// Diagnostics and the status surface read the fingerprint and the per-function counters from it.
+    /// </summary>
+    internal Transactions.Functions.ScriptFunctionTable ScriptFunctionTable => scriptExecutor.FunctionTable;
+
     /// <summary>Whole-partition state transfer, registered with Kommander for replica seeding.</summary>
     internal PartitionStateTransfer PartitionStateTransfer => partitionStateTransfer;
 
@@ -553,6 +562,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         rangeSplitTrigger?.Dispose();
         durableGaugeMeter.Dispose();
         admissionGaugeMeter.Dispose();
+        functionGaugeMeter.Dispose();
 
         // Fail anything still waiting for a slot rather than leaving callers awaiting an admission that a
         // torn-down node will never grant.

@@ -381,6 +381,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             ScriptCacheExpiration = options.ScriptCacheExpiration,
             MaxScriptLength = options.MaxScriptLength,
             MaxScriptDepth = options.MaxScriptDepth,
+            Functions = options.Functions,
+            FunctionSlowWarnMs = options.FunctionSlowWarnMs,
             RevisionsToKeepCached = options.RevisionsToKeepCached,
             CacheEntryTtl = options.CacheEntryTtl,
             CacheEntriesToRemove = options.CacheEntriesToRemove,

@@ -6,6 +6,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions.Commands;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Transactions.Functions;
 using Kahuna.Server.KeyValues.Transactions.Operators;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
@@ -36,6 +37,13 @@ internal sealed class ScriptTransactionExecutor
     /// script transaction holds its slot only for its own bounded execution.</summary>
     private readonly TransactionPriorityOrderer orderer;
 
+    /// <summary>
+    /// Every function scripts on this node can call: the built-ins merged with whatever the host
+    /// registered. It is built once here and never changes, which is what lets a call resolve with a
+    /// lock-free probe and lets the parsed-script cache stay independent of it.
+    /// </summary>
+    private readonly ScriptFunctionTable functionTable;
+
     public ScriptTransactionExecutor(
         KeyValuesManager manager,
         KahunaConfiguration configuration,
@@ -52,7 +60,18 @@ internal sealed class ScriptTransactionExecutor
         this.coordinator = coordinator;
         this.orderer = orderer;
         this.scriptParserProcessor = new(this.configuration, logger);
+
+        // Freezing the registry here is what makes a later Register throw: a host must finish
+        // registering before it builds the node, because a table that changed under a running script
+        // would let one transaction see a different language than the next.
+        this.functionTable = new(configuration.Functions, raft.GetLocalNodeName(), configuration.FunctionSlowWarnMs, logger);
+
+        if (functionTable.CustomCount > 0)
+            logger.LogUserFunctionsRegistered(functionTable.CustomCount, functionTable.NodeName, functionTable.Fingerprint);
     }
+
+    /// <summary>The node's function table, for the metrics surface and for diagnostics.</summary>
+    internal ScriptFunctionTable FunctionTable => functionTable;
 
     /// <summary>
     /// Executes a single or multi-command transaction in an atomic manner.
@@ -246,8 +265,12 @@ internal sealed class ScriptTransactionExecutor
 
     /// <summary>
     /// Returns a temporary script transaction context for executing a single non-transactional command.
+    ///
+    /// <para>It is an instance method because it must attach the node's function table, the same as
+    /// the transaction path below. A single command such as <c>SET k acme_f(1)</c> runs here, so a
+    /// static context would leave the most common shape of this feature without a table.</para>
     /// </summary>
-    private static ScriptTransactionContext GetTempTransactionContext(List<KeyValueParameter>? parameters)
+    private ScriptTransactionContext GetTempTransactionContext(List<KeyValueParameter>? parameters)
     {
         return new()
         {
@@ -255,7 +278,10 @@ internal sealed class ScriptTransactionExecutor
             Locking = KeyValueTransactionLocking.Pessimistic,
             Action = KeyValueTransactionAction.Commit,
             AsyncRelease = true,
-            Parameters = parameters
+            Parameters = parameters,
+            FunctionTable = functionTable,
+            HybridLogicalClock = raft.HybridLogicalClock,
+            LocalNodeId = raft.GetLocalNodeId()
         };
     }
 
@@ -430,7 +456,10 @@ internal sealed class ScriptTransactionExecutor
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
             AsyncRelease = asyncRelease,
             Result = new() { Type = KeyValueResponseType.Aborted },
-            Parameters = parameters
+            Parameters = parameters,
+            FunctionTable = functionTable,
+            HybridLogicalClock = raft.HybridLogicalClock,
+            LocalNodeId = raft.GetLocalNodeId()
         };
 
         HashSet<string> ephemeralLocksToAcquire = [];

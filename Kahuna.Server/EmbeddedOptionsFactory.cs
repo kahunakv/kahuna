@@ -20,9 +20,20 @@ public static class EmbeddedOptionsFactory
     /// Built once by the caller from <see cref="NodeTransportSecurityPolicy.Build"/>: loading the client
     /// certificate per call would open one key container per copy.
     /// </param>
-    public static EmbeddedKahunaOptions CreateEmbeddedOptions(KahunaCommandLineOptions opts, RaftTransportSecurityOptions? transportSecurity = null) => new()
+    /// <param name="functions">
+    /// User-defined script functions already loaded from the <c>--extension-assembly</c> paths. The
+    /// server loads them once and hands the same registry to whichever node shape it builds, so a
+    /// standalone node and a clustered node cannot end up with different function sets from one
+    /// command line. Null leaves the node with built-ins only.
+    /// </param>
+    public static EmbeddedKahunaOptions CreateEmbeddedOptions(
+        KahunaCommandLineOptions opts,
+        RaftTransportSecurityOptions? transportSecurity = null,
+        Kahuna.Extensibility.KahunaFunctionRegistry? functions = null) => new()
     {
         TransportSecurity = transportSecurity,
+        Functions = functions ?? new(),
+        FunctionSlowWarnMs = opts.FunctionSlowWarnMs,
         NodeName = opts.RaftNodeName,
         NodeId = opts.RaftNodeId,
         Host = opts.RaftHost,

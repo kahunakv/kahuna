@@ -28,7 +28,13 @@ Kahuna generates globally ordered identifiers. Distributed databases, message qu
 
 [More](https://kahunakv.github.io/docs/distributed-sequencer)
 
-These three capabilities work together. They give you a foundation for reliable and scalable distributed applications.
+### **User-Defined Functions**
+
+Kahuna Script can call custom C# functions registered by the operator or embedded host. This is useful when a .NET application needs cluster-side business logic without adding extra client round trips or moving the decision outside the transaction.
+
+[More](https://kahunakv.github.io/docs/scripts/user-defined-functions)
+
+These capabilities work together. They give you a foundation for reliable and scalable distributed applications.
 
 > _Kahuna_ is a Hawaiian word for an expert in any field.
 Historically, it referred to doctors, surgeons, dentists, priests, ministers, and sorcerers.

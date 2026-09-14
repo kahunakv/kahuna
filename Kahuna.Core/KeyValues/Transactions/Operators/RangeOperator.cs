@@ -5,14 +5,6 @@ namespace Kahuna.Server.KeyValues.Transactions.Operators;
 
 internal sealed class RangeOperator
 {
-    /// <summary>
-    /// Upper bound on the elements one range may produce. The range is materialized, so without a bound a
-    /// twenty-byte script asks for a multi-gigabyte allocation, and the transaction timeout cannot stop it
-    /// because it is one uninterrupted statement. A hundred thousand iterations is already far past any
-    /// sensible loop inside a transaction.
-    /// </summary>
-    private const long MaxRangeElements = 100_000;
-
     public static KeyValueExpressionResult Eval(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.leftAst is null)
@@ -40,8 +32,8 @@ internal sealed class RangeOperator
         // subtraction before the limit can reject it. The bounds are ordered, so the cast is exact.
         ulong span = (ulong)to - (ulong)from;
 
-        if (span >= MaxRangeElements)
-            throw new KahunaScriptException($"Range of {span + 1} elements exceeds the limit of {MaxRangeElements}", ast.yyline);
+        if (span >= ScriptArrayLimits.MaxElements)
+            throw new KahunaScriptException($"Range of {span + 1} elements exceeds the limit of {ScriptArrayLimits.MaxElements}", ast.yyline);
 
         int count = (int)span + 1;
 

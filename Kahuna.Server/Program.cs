@@ -68,6 +68,15 @@ if (!DataPathResolver.IsInMemory(opts.WalStorage))
 // there, silent data loss here.
 opts.StorageRevision = DataPathResolver.ResolveStorageRevision(opts.StorageRevision);
 
+// Extension assemblies are loaded once, here, before either node shape is built. Both shapes then
+// share the one registry, so a standalone node and a clustered node cannot end up with different
+// function sets from the same command line. Any failure throws and the node does not start: a node
+// that came up missing one function would answer scripts that call it with Errored while its peers
+// answered normally, which is the hardest kind of failure to diagnose in a cluster.
+Kahuna.Extensibility.KahunaFunctionRegistry extensionFunctions = ExtensionAssemblyLoader.Load(
+    opts.ExtensionAssemblies,
+    LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.Extensions"));
+
 bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertificate, opts.HttpsPorts);
 
 // One options object for Raft and Kahuna's inter-node traffic, built and validated before anything binds.
@@ -82,7 +91,7 @@ bool bindPlaintextListeners = NodeTransportSecurityPolicy.ShouldBindPlaintextLis
 if (standalone)
 {
     builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
-        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity), services.GetRequiredService<ILoggerFactory>()));
+        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity, extensionFunctions), services.GetRequiredService<ILoggerFactory>()));
 
     builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
     builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
@@ -282,6 +291,8 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
     MaxScriptLength = opts.MaxScriptLength,
     MaxScriptDepth = opts.MaxScriptDepth,
+    Functions = extensionFunctions,
+    FunctionSlowWarnMs = opts.FunctionSlowWarnMs,
     CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
     CacheEntriesToRemove = opts.CacheEntriesToRemove,
     KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,

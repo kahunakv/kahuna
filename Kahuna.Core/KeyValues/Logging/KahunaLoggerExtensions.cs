@@ -304,4 +304,13 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Stopped hosting {Count} partition(s): {PartitionIds}")]
     public static partial void LogHostedPartitionsLost(this ILogger<IKahuna> logger, int count, string partitionIds);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Script engine registered {Count} user-defined function(s) on node {Node} (functions {Fingerprint}). Every node of the cluster must register the same set")]
+    public static partial void LogUserFunctionsRegistered(this ILogger<IKahuna> logger, int count, string node, string fingerprint);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "User function {Name} took {ElapsedMs}ms for transaction {TransactionId}, over the {ThresholdMs}ms threshold. The call blocks the request path while the transaction holds its locks")]
+    public static partial void LogUserFunctionSlow(this ILogger<IKahuna> logger, string name, double elapsedMs, HLCTimestamp transactionId, int thresholdMs);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "User function {Name} threw for transaction {TransactionId}. The transaction is rolled back and the client sees Errored")]
+    public static partial void LogUserFunctionThrew(this ILogger<IKahuna> logger, Exception exception, string name, HLCTimestamp transactionId);
 }

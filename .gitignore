@@ -33,6 +33,8 @@ Kahuna.Control/.idea
 Kahuna.Microbenchmarks/obj
 Kahuna.Microbenchmarks/bin
 Kahuna.Server.Tests/TestResults/
+Kahuna.TestExtension/bin
+Kahuna.TestExtension/obj
 Radline/Radline/obj
 Radline/Radline/bin
 Radline/RadLine/obj

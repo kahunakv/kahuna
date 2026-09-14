@@ -72,6 +72,8 @@ internal sealed class KeyValuesManagerBuilder
     internal ScriptTransactionExecutor scriptExecutor = null!;
     internal System.Diagnostics.Metrics.Meter durableGaugeMeter = null!;
     internal System.Diagnostics.Metrics.Meter admissionGaugeMeter = null!;
+
+    internal System.Diagnostics.Metrics.Meter functionGaugeMeter = null!;
     internal KeyValueLocator locator = null!;
     internal IActorRef<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest> preparedIntentRecovery = null!;
     internal KeyValueRestorer restorer = null!;
@@ -322,6 +324,10 @@ internal sealed class KeyValuesManagerBuilder
         // Admission-gate gauges on their own instance-owned meter, for the same reason: a disposed node's
         // orderers must not stay reachable through gauge callbacks.
         admissionGaugeMeter = Transactions.TransactionPriorityMetrics.RegisterGauges(scriptOrderer, sessionOrderer);
+
+        // The registered function surface and per-function cost, on their own instance-owned meter so a
+        // disposed node's table is not kept reachable through a gauge callback.
+        functionGaugeMeter = Transactions.Functions.ScriptFunctionMetrics.RegisterGauges(scriptExecutor.FunctionTable);
 
         // Periodic reaper for interactive transaction sessions abandoned without commit/rollback.
         actorSystem.Spawn<TransactionReaperActor, TransactionReaperRequest>(

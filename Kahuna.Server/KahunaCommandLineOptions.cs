@@ -548,6 +548,16 @@ public sealed class KahunaCommandLineOptions
     [Option("max-script-depth", Required = false, HelpText = "Deepest transaction script syntax tree accepted, counting both nested expressions and the length of a statement list; the walkers use one stack frame per level, so raising this trades away the margin that keeps a hostile script from aborting the node", Default = 256)]
     public int MaxScriptDepth { get; set; } = 256;
 
+    // Absent, the node loads nothing: no plugin directory, no probing, no discovery. An extension
+    // assembly runs in this process with the node's privileges and nothing sandboxes it, so loading
+    // one is an explicit decision the operator makes on the command line, and the startup log records
+    // the SHA-256 of every file loaded.
+    [Option("extension-assembly", Required = false, HelpText = "Path to an assembly publishing user-defined script functions through IKahunaFunctionProvider. Repeatable. Every node of a cluster must load the same set, because the functions are not replicated. An extension assembly is fully trusted code: it runs in the server process with the server's privileges")]
+    public IEnumerable<string>? ExtensionAssemblies { get; set; }
+
+    [Option("function-slow-warn-ms", Required = false, HelpText = "Log a warning when a user-defined script function takes longer than this many milliseconds. The call is synchronous and blocks a request path while the transaction holds its locks. 0 disables the warning", Default = 50)]
+    public int FunctionSlowWarnMs { get; set; } = 50;
+
     [Option("revisions-to-cache", Required = false, HelpText = "Number of revisions to keep cached in memory", Default = 4)]
     public int RevisionsToKeepCached { get; set; } = 4;
 

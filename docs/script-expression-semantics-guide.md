@@ -195,6 +195,101 @@ A fractional index such as `arr[1.9]` is a script error rather than being trunca
 empty string is a script error rather than being read as `arr[0]`. Both are far more likely to be an
 arithmetic mistake or an unset variable than a deliberate request for that element.
 
+## String functions
+
+Seven functions read inside a string. Every one of them compares characters ordinally: it compares the
+characters themselves, never a locale's idea of how they sort or fold. Keys, identifiers and packed field
+values are not language, and a culture-aware comparison would make one script answer differently on two
+nodes whose locales differ.
+
+| Function | Result |
+| --- | --- |
+| `substring(s, start)` | the rest of `s` from `start` |
+| `substring(s, start, length)` | `length` characters of `s` from `start` |
+| `starts_with(s, prefix)` | `true` when `s` begins with `prefix` |
+| `ends_with(s, suffix)` | `true` when `s` ends with `suffix` |
+| `index_of(s, needle)` | the position of the first `needle`, counted from zero, or `-1` |
+| `split(s, separator)` | an array of the parts between the separators |
+| `trim(s)` | `s` without its leading and trailing whitespace |
+
+Every argument must be a string. A number or a boolean where a string belongs is a script error, which is
+the rule `concat`, `upper` and `length` already follow.
+
+Positions count characters from zero. A start equal to the length of the string is the position just past
+the last character, and it reads as the empty string, so this works when the separator is the last
+character:
+
+```
+RETURN substring('a:b:', index_of('a:b:', ':') + 1)   -- 'b:'
+RETURN substring('hello', 5)                          -- ''
+```
+
+A start past that point, a length that runs past the end, a negative length, and a fractional position are
+all script errors that name the line:
+
+```
+RETURN substring('hello', 6)        -- error: Start index must be between 0 and 5
+RETURN substring('hello', 2, 4)     -- error: Length must not exceed the 3 characters after index 2
+RETURN substring('hello', 1, -1)    -- error: Length must not be negative
+RETURN substring('hello', 1.5)      -- error: Start index must be a whole number
+```
+
+The refusal is deliberate, for the same reason a fractional subscript is refused. A clamp would answer
+with a part of the string the arithmetic never asked for, and the author would read a wrong value instead
+of seeing the mistake that produced it.
+
+`split` returns the array type the language already has, the one `GET BY BUCKET` and the range operator
+produce, so `count()`, subscripting and `FOR … IN` all accept it:
+
+```
+LET parts = split(raw, ':')
+LET epoch = to_int(parts[0])
+FOR p IN split(raw, ':') DO … END
+```
+
+Four rules fix what `split` returns:
+
+1. A string with no separator in it is one part, not an empty array.
+2. A split of the empty string is one empty part.
+3. Every empty part is kept. A leading separator, a trailing separator and two adjacent separators each
+   produce an empty part, so the position of a field never depends on whether an earlier field was empty.
+4. An empty separator is a script error. One part per character and no cut at all are both plausible
+   readings of it, and either guess is wrong half the time.
+
+The parts are counted before any of them is built, so the array is sized once and a string that would
+produce more than 100,000 parts is refused before the list is allocated. That is the same limit a range
+is held to, for the same reason.
+
+## The cluster clock: `hlc()` and `current_time()`
+
+`current_time()` is the wall clock of the node that ran the script, in milliseconds since the unix epoch.
+`hlc()` is the physical component of the cluster's hybrid logical clock, on the same scale.
+`hlc_counter()` is the logical counter of the same reading, which separates events that fall inside one
+millisecond.
+
+The rule is short. Any comparison that decides an order, an expiry or a deadline across nodes reads
+`hlc()`. A stamp a person will read is what `current_time()` is for.
+
+```
+SET lease/{@id} hlc() + 30000          -- a deadline other nodes will compare
+SET audit/{@id} current_time()         -- a stamp for a human to read
+```
+
+The difference matters because two nodes' wall clocks disagree, and a script does not choose which node
+answers it. A deadline written on one node and compared on another is safe only while one node answers
+every call for that key, and it changes clock source silently on a leader change. The hybrid logical clock
+is the one both nodes advance, so a reading taken after another reading is never below it, wherever each
+was taken.
+
+One script execution observes one reading. Two calls to `hlc()` in one script return the same value, and
+`hlc_counter()` always describes the same instant `hlc()` does, so a script cannot pair the milliseconds of
+one timestamp with the counter of another. Reading the clock also advances it: a timestamp a node hands out
+but does not record could be minted again, and two events that share one timestamp cannot be ordered.
+
+Both functions take no argument. An argument is a script error that names the line.
+
+`current_time()` is unchanged and is not deprecated.
+
 ## Statements a transaction refuses
 
 `SCAN BY PREFIX` and `ESCAN BY PREFIX` run outside a transaction only. Inside `BEGIN … END` they are a
@@ -207,3 +302,32 @@ violates both properties is not.
 
 `GET BY BUCKET` is the prefix read that does work inside a transaction. It carries the transaction id, so
 it sees the transaction's own writes and records what it read.
+
+## User-defined functions
+
+A deployment can extend the language with its own C# functions. A registered function is called
+exactly like a built-in:
+
+```
+LET total = acme_price_with_tax(@amount, 'ES')
+SET users/{@id}/checksum acme_crc32(@payload)
+```
+
+Three rules apply to every call site.
+
+1. **Built-in names are reserved.** A registration under `abs`, `concat`, `to_int` or any other
+   built-in name — including every alias, such as `to_integer` and `to_long` for the same function —
+   is refused when the node starts. A script's built-ins therefore mean one fixed thing on every
+   node, whatever a deployment registers.
+2. **An unknown function is a deterministic `Errored`.** It is never `MustRetry` and never `Aborted`,
+   so a client does not retry it. The message names the node and the fingerprint of its registered
+   set, because the usual cause is one node of a cluster that loaded a different extension build.
+3. **A function cannot appear in key position.** `SET acme_key() 'v'` is a syntax error. A key is an
+   identifier, a quoted string or a placeholder, which is what lets a transaction plan its locks
+   before it runs any expression.
+
+A function that fails — it throws, or it receives the wrong number of arguments — rolls its
+transaction back and returns `Errored` with the function named. Nothing is written and no lock is
+held afterwards.
+
+See the user-defined functions guide for how to write and install one.

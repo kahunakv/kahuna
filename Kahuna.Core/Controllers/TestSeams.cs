@@ -24,6 +24,18 @@ public sealed partial class KahunaManager
     internal LockManager Locks => locks;
 
     /// <summary>
+    /// The fingerprint of this node's user-defined function registry. Two nodes of one cluster must
+    /// report the same value; a difference means they loaded different extension builds.
+    /// </summary>
+    internal string UserFunctionFingerprint => keyValues.ScriptFunctionTable.Fingerprint;
+
+    /// <summary>Per-function call counters, for the status surface and for tests.</summary>
+    internal IReadOnlyList<Server.KeyValues.Transactions.Functions.ScriptFunctionStats> GetUserFunctionStats()
+    {
+        return keyValues.ScriptFunctionTable.CustomStats;
+    }
+
+    /// <summary>
     /// Exposes the persistence backend for PITR bootstrap tests that need to extract a
     /// checkpoint from an already-running node before seeding a joining peer.
     /// </summary>

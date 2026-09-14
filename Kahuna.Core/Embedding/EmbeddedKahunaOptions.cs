@@ -222,6 +222,26 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int MaxScriptDepth { get; set; } = 256;
 
+    /// <summary>
+    /// User-defined functions this node makes callable from Kahuna script. Register them before the
+    /// node is constructed: the script engine freezes the registry at construction, and a later
+    /// registration throws.
+    ///
+    /// <code>
+    /// options.Functions.Register("acme_double", static (in ctx, args) => KahunaValue.From(args[0].AsLong() * 2), 1, 1);
+    /// </code>
+    ///
+    /// <para>Read <see cref="Extensibility.KahunaFunctionDelegate"/> before writing one: a function
+    /// must be synchronous, fast, thread-safe, and must never call back into Kahuna.</para>
+    /// </summary>
+    public Extensibility.KahunaFunctionRegistry Functions { get; set; } = new();
+
+    /// <summary>
+    /// A user-defined function slower than this many milliseconds is logged as a warning. Zero
+    /// disables the warning.
+    /// </summary>
+    public int FunctionSlowWarnMs { get; set; } = 50;
+
     public int RevisionsToKeepCached { get; set; } = 100;
 
     public TimeSpan CacheEntryTtl { get; set; } = TimeSpan.FromMinutes(5);

@@ -33,6 +33,10 @@
     <ItemGroup>
       <ProjectReference Include="..\Kahuna.Client\Kahuna.Client.csproj" />
       <ProjectReference Include="..\Kahuna.Server\Kahuna.Server.csproj" />
+      <!-- Built and copied so the extension-assembly loader tests have a real assembly to point at.
+           It is not referenced for compilation: the loader must find its provider by reflection,
+           exactly as it would for an assembly the server has never seen. -->
+      <ProjectReference Include="..\Kahuna.TestExtension\Kahuna.TestExtension.csproj" ReferenceOutputAssembly="false" />
     </ItemGroup>
 
     <ItemGroup>

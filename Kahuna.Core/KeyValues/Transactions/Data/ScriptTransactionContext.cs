@@ -1,5 +1,8 @@
 
+using Kommander.Time;
+
 using Kahuna.Server.ScriptParser;
+using Kahuna.Server.KeyValues.Transactions.Functions;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
@@ -20,6 +23,60 @@ internal sealed class ScriptTransactionContext : TransactionContext
     /// Script parameters (placeholders) passed into the script at execution time.
     /// </summary>
     public List<KeyValueParameter>? Parameters { get; init; }
+
+    /// <summary>
+    /// The node's frozen table of callable functions, built-in and user-defined.
+    ///
+    /// <para>It rides on the context because a function call is evaluated deep inside the expression
+    /// walk, which has no other route back to the node that is running the script. Every path that
+    /// builds a context must set it: a call with no table raises a clear internal error rather than
+    /// reporting a registered function as undefined.</para>
+    /// </summary>
+    internal ScriptFunctionTable? FunctionTable { get; init; }
+
+    /// <summary>
+    /// The hybrid logical clock of the node that runs this script, and the node id its readings carry.
+    ///
+    /// <para>The clock rides on the context because a function call is evaluated deep inside the
+    /// expression walk, which has no other route back to the node. Only the clock itself is carried,
+    /// not the raft handle that owns it: a script reads the time, and nothing more.</para>
+    /// </summary>
+    internal HybridLogicalClock? HybridLogicalClock { get; init; }
+
+    /// <summary>The id this node stamps on the timestamps it mints.</summary>
+    internal int LocalNodeId { get; init; }
+
+    /// <summary>
+    /// The one clock reading this script execution observes, minted on the first call that asks for it.
+    /// </summary>
+    private HLCTimestamp clockReading;
+
+    /// <summary>
+    /// The clock reading for this script execution.
+    ///
+    /// <para>One execution observes one reading. That is what makes the physical component and the
+    /// counter describe the same instant, so a script that reads both cannot pair the milliseconds of
+    /// one timestamp with the counter of another. It also matches how the rest of a transaction
+    /// behaves: reads come from one snapshot, and the clock is no different.</para>
+    ///
+    /// <para>The reading is minted with <c>TrySendOrLocalEvent</c>, so it is installed in the clock
+    /// rather than only observed. A timestamp a node hands out but does not record could be minted
+    /// again by the next event, and two events with one timestamp cannot be ordered.</para>
+    /// </summary>
+    internal HLCTimestamp GetClockReading(NodeAst ast)
+    {
+        // A minted reading never has a zero physical component: it is milliseconds since the unix epoch,
+        // and the clock refuses to pack a non-positive value. So zero is an unambiguous "not yet read".
+        if (clockReading.L != 0)
+            return clockReading;
+
+        if (HybridLogicalClock is null)
+            throw new KahunaScriptException("Internal error: no clock is attached to this transaction context", ast.yyline);
+
+        clockReading = HybridLogicalClock.TrySendOrLocalEvent(LocalNodeId);
+
+        return clockReading;
+    }
 
     /// <summary>
     /// The statement-list subtree the current descent should execute as one batched
