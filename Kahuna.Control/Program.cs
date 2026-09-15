@@ -321,9 +321,12 @@ static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
 // while reporting cluster-wide success.
 static string[] ConfiguredEndpoints(KahunaControlOptions opts) => ResolveConnectionPool(opts);
 
+// The endpoint used when no connection source was given: the cleartext HTTP listener of a node on
+// the local machine. A single endpoint, so a cluster command that needs one target node gets an
+// unambiguous one without --node.
 static string[] ResolveConnectionPool(KahunaControlOptions opts) =>
     string.IsNullOrEmpty(opts.ConnectionSource)
-        ? ["https://localhost:8082", "https://localhost:8084", "https://localhost:8086"]
+        ? ["http://127.0.0.1:8083"]
         : opts.ConnectionSource.Split(",", StringSplitOptions.RemoveEmptyEntries).ToArray();
 
 // Resolves which node a cluster command acts on. --node wins; otherwise the single configured
@@ -334,7 +337,7 @@ static string? ResolveTargetNode(KahunaControlOptions opts)
     if (!string.IsNullOrEmpty(opts.Node))
         return opts.Node;
 
-    string[] pool = (opts.ConnectionSource ?? "").Split(",", StringSplitOptions.RemoveEmptyEntries);
+    string[] pool = ResolveConnectionPool(opts);
     return pool.Length == 1 ? pool[0] : null;
 }
 

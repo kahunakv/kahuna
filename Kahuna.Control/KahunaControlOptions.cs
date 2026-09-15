@@ -10,7 +10,7 @@ namespace Kahuna.Control;
 /// </summary>
 public sealed class KahunaControlOptions
 {
-    [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
+    [Option('c', "connection-source", Required = false, HelpText = "Set the connection string, a comma-separated list of endpoints. Defaults to http://127.0.0.1:8083")]
     public string? ConnectionSource { get; set; }
 
     [Option('t', "default-timeout", Required = false, HelpText = "Sets the default client-side timeout in seconds")]
