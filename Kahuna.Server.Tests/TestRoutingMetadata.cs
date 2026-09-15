@@ -125,15 +125,19 @@ public sealed class TestRoutingMetadata : BaseCluster
 
             foreach (string key in GoldenKeys)
             {
-                GrpcTrySetKeyValueResponse set = await keyValues.TrySetKeyValue(
-                    new GrpcTrySetKeyValueRequest
-                    {
-                        Key = key,
-                        Value = ByteString.CopyFromUtf8("v"),
-                        ExpiresMs = 0,
-                        Durability = GrpcKeyValueDurability.Persistent
-                    },
-                    Context());
+                // See the note on the ranged-split test: a write that races a leadership change
+                // answers MustRetry with no durable effect, and is re-issued rather than failed.
+                GrpcTrySetKeyValueResponse set = await RetryOnMustRetryAsync(
+                    () => keyValues.TrySetKeyValue(
+                        new GrpcTrySetKeyValueRequest
+                        {
+                            Key = key,
+                            Value = ByteString.CopyFromUtf8("v"),
+                            ExpiresMs = 0,
+                            Durability = GrpcKeyValueDurability.Persistent
+                        },
+                        Context()),
+                    static set => (KeyValueResponseType)set.Type);
 
                 Assert.Equal(GrpcKeyValueResponseType.TypeSet, set.Type);
                 Assert.NotNull(set.Route);
@@ -248,9 +252,15 @@ public sealed class TestRoutingMetadata : BaseCluster
 
             foreach (string key in new[] { lower, upper })
             {
-                GrpcTrySetKeyValueResponse set = await keyValues.TrySetKeyValue(
-                    new GrpcTrySetKeyValueRequest { Key = key, Value = ByteString.CopyFromUtf8("v"), ExpiresMs = 0, Durability = GrpcKeyValueDurability.Persistent },
-                    Context());
+                // A write that races a leadership change on its partition answers MustRetry. That
+                // attempt had no durable effect, so re-issuing it is what a real client does. This
+                // seeds the two keys the agreement check reads; a transient blip here says nothing
+                // about routing.
+                GrpcTrySetKeyValueResponse set = await RetryOnMustRetryAsync(
+                    () => keyValues.TrySetKeyValue(
+                        new GrpcTrySetKeyValueRequest { Key = key, Value = ByteString.CopyFromUtf8("v"), ExpiresMs = 0, Durability = GrpcKeyValueDurability.Persistent },
+                        Context()),
+                    static set => (KeyValueResponseType)set.Type);
 
                 Assert.Equal(GrpcKeyValueResponseType.TypeSet, set.Type);
             }
@@ -313,9 +323,13 @@ public sealed class TestRoutingMetadata : BaseCluster
 
     private static async Task<int> ServerPartitionOf(KeyValuesService keyValues, string key)
     {
-        GrpcTryGetKeyValueResponse read = await keyValues.TryGetKeyValue(
-            new GrpcTryGetKeyValueRequest { Key = key, Revision = -1, Durability = GrpcKeyValueDurability.Persistent },
-            Context());
+        // A read answered with MustRetry carries no settled owner for the key, so its route hint is
+        // not the server's answer to compare the client against. Retry until the partition settles.
+        GrpcTryGetKeyValueResponse read = await RetryOnMustRetryAsync(
+            () => keyValues.TryGetKeyValue(
+                new GrpcTryGetKeyValueRequest { Key = key, Revision = -1, Durability = GrpcKeyValueDurability.Persistent },
+                Context()),
+            static read => (KeyValueResponseType)read.Type);
 
         Assert.NotNull(read.Route);
 
