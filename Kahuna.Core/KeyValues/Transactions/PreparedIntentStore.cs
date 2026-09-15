@@ -75,6 +75,13 @@ internal sealed class PreparedIntentStore
 
         // Approximate retained bytes (keys plus entries), for the ledger gauge. Maintained under applyGate.
         public long Bytes;
+
+        // The partition's highest applied log index this slice is known to reflect: set when the slice was
+        // installed from a whole-partition snapshot (the exporter's applied position when it wrote the section)
+        // and persisted with the slice, so it survives a restart mid catch-up. Entries at or below it are
+        // history the installed state already accounts for — see IsHistoricalApply. Zero for a slice that was
+        // never installed. Written under applyGate, read lock-free.
+        public long ReflectedThroughIndex;
     }
 
     /// <summary>The slice key used when an apply cannot be attributed to a partition's log — the pure/in-memory
@@ -95,6 +102,12 @@ internal sealed class PreparedIntentStore
     // would then judge differently from replicas that persisted the ledger — so enabling the gate over such a
     // snapshot fails closed (see ConfigureOnePhaseApplyTimeValidation).
     private readonly List<int> ledgerMissingPartitions = [];
+
+    // Highest log index applied through this store per partition (ApplyLog / ApplyDeltaAckPrepares). Read by
+    // the whole-partition export after its intent walk: every entry at or below it was applied here before the
+    // section was written, so a replica installing that section may treat the replay of those entries as
+    // history rather than live catch-up (see IsHistoricalApply).
+    private readonly ConcurrentDictionary<int, long> appliedLogIndexByPartition = new();
 
     /// <summary>Default staged-base fence retention (ms). Must comfortably exceed the longest possible
     /// transaction lifetime (begin → prepare), because the staleness gate refuses to acknowledge a
@@ -347,7 +360,14 @@ internal sealed class PreparedIntentStore
     /// selects the committed-head ledger slice a commit settlement feeds — the slice the one-phase bundled
     /// commit gate later judges bundles of that partition against — so it must be the log's partition, never a
     /// routing guess: routing changes with the range map while the log's partition is fixed.</summary>
-    public PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId)
+    public PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId) =>
+        Apply(command, partitionId, judgeFence: true);
+
+    /// <param name="judgeFence">Whether the advisory staged-base fence judges a validated-base prepare in this
+    /// apply. False for history the partition's installed ledger already reflects (<see cref="IsHistoricalApply"/>):
+    /// the transition still applies identically, but no refusal, veto, wedge streak or metric is produced from a
+    /// ledger that is ahead of the entry by construction.</param>
+    private PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId, bool judgeFence)
     {
         string key = KeyOf(command);
 
@@ -425,21 +445,31 @@ internal sealed class PreparedIntentStore
             if ((freshValidatedInstall || pendingSameIdentityReprepare)
                 && command is PrepareIntentCommand { Intent.HasValidatedBase: true } fencedPrepare)
             {
-                string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent);
-                if (fenceConflict is not null)
+                if (!judgeFence)
                 {
-                    DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
-                    wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent, out wedgeHeadRevision);
-                    wedgeBaseRevision = fencedPrepare.Intent.BaseRevision;
-
-                    logger?.LogWarning(
-                        "Staged base for {Key} moved before the prepare of transaction {TransactionId} applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
-                        fencedPrepare.Intent.Key, fencedPrepare.Intent.TransactionId, fenceConflict);
-
-                    result = result with { StaleBase = true };
+                    // History below an installed snapshot's reflected position: the ledger already holds this
+                    // transaction's own settlement (or a later one), so any verdict here would be a false
+                    // refusal. Counted, never judged.
+                    DurableTransactionMetrics.StagedBaseFenceHistoryReplays.Add(1);
                 }
                 else
-                    fenceRefusalStreaks.TryRemove(key, out _);
+                {
+                    string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent);
+                    if (fenceConflict is not null)
+                    {
+                        DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
+                        wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent, out wedgeHeadRevision);
+                        wedgeBaseRevision = fencedPrepare.Intent.BaseRevision;
+
+                        logger?.LogWarning(
+                            "Staged base for {Key} moved before the prepare of transaction {TransactionId} applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
+                            fencedPrepare.Intent.Key, fencedPrepare.Intent.TransactionId, fenceConflict);
+
+                        result = result with { StaleBase = true };
+                    }
+                    else
+                        fenceRefusalStreaks.TryRemove(key, out _);
+                }
             }
         }
 
@@ -1034,9 +1064,27 @@ internal sealed class PreparedIntentStore
     /// the installed slice is the exporter's state at the snapshot boundary, which the entries that follow the
     /// boundary then advance exactly as they did on the exporter. Under the apply gate so an apply cannot
     /// interleave with the swap.</summary>
-    private void InstallLedger(int partitionId, IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads, HLCTimestamp watermark)
+    private void InstallLedger(
+        int partitionId, IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads,
+        HLCTimestamp watermark, long reflectedThroughIndex)
     {
-        PartitionLedger ledger = new() { Watermark = watermark, PrunedBucket = watermark.L / LedgerPruneBucketMs };
+        PartitionLedger ledger = BuildLedger(heads, watermark, reflectedThroughIndex);
+
+        lock (applyGate)
+            InstallLedgerLocked(partitionId, ledger);
+    }
+
+    /// <summary>Materializes an installed slice outside the gate (the heads are copied in before the swap).</summary>
+    private PartitionLedger BuildLedger(
+        IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads,
+        HLCTimestamp watermark, long reflectedThroughIndex)
+    {
+        PartitionLedger ledger = new()
+        {
+            Watermark = watermark,
+            PrunedBucket = watermark.L / LedgerPruneBucketMs,
+            ReflectedThroughIndex = Math.Max(0, reflectedThroughIndex)
+        };
 
         foreach ((string key, long revision, KeyValueState state, HLCTimestamp committedAt) in heads)
         {
@@ -1044,16 +1092,66 @@ internal sealed class PreparedIntentStore
                 ledger.Bytes += LedgerEntryBytes(key);
         }
 
-        lock (applyGate)
-        {
-            ledgers[partitionId] = ledger;
-
-            if (watermark > ledgerWatermark)
-                ledgerWatermark = watermark;
-
-            StampPartitionDirty(partitionId);
-        }
+        return ledger;
     }
+
+    /// <summary>Swaps a built slice in. The reflected position never regresses across the swap: a re-delivered
+    /// or older section cannot re-open the history window a newer install closed. Caller holds <see cref="applyGate"/>.</summary>
+    private void InstallLedgerLocked(int partitionId, PartitionLedger ledger)
+    {
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? previous) && previous.ReflectedThroughIndex > ledger.ReflectedThroughIndex)
+            ledger.ReflectedThroughIndex = previous.ReflectedThroughIndex;
+
+        ledgers[partitionId] = ledger;
+
+        if (ledger.Watermark > ledgerWatermark)
+            ledgerWatermark = ledger.Watermark;
+
+        StampPartitionDirty(partitionId);
+    }
+
+    /// <summary>
+    /// Whether the entry at <paramref name="logIndex"/> on <paramref name="partitionId"/>'s log is history the
+    /// partition's installed state already reflects: the slice was installed from a whole-partition snapshot
+    /// whose exporter had applied through at least that index when it wrote the section.
+    ///
+    /// <para>A whole-partition snapshot is newer than the WAL boundary it is installed at — the exporter walks
+    /// its state well after the boundary (the boundary is its compaction floor, minutes of traffic behind), and
+    /// the receiver replays every retained entry above the boundary on top of the installed state. That replay
+    /// runs the live apply path against a ledger that is already ahead of it. The replicated transitions are
+    /// unaffected (an already-reflected prepare or settle folds idempotently), but every ADVISORY reading of the
+    /// ledger at those positions is a false alarm: the staged-base fence "proves" a base moved that moved only
+    /// after the prepare; the stale-base veto drives aborts for transactions long since committed, each counted
+    /// as a late veto — the loss witness; and the below-head materialization witness fires for every replayed
+    /// record. This predicate is what those readers consult to stay silent on history. Lock-free; a per-apply
+    /// probe.</para>
+    /// </summary>
+    internal bool IsHistoricalApply(int partitionId, long logIndex) =>
+        logIndex > 0
+        && ledgers.TryGetValue(partitionId, out PartitionLedger? ledger)
+        && logIndex <= Volatile.Read(ref ledger.ReflectedThroughIndex);
+
+    /// <summary>The reflected position of a partition's installed slice (0 when none). Test seam.</summary>
+    internal long GetLedgerReflectedThroughIndex(int partitionId) =>
+        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? Volatile.Read(ref ledger.ReflectedThroughIndex) : 0;
+
+    /// <summary>Records <paramref name="logIndex"/> as applied through this store on <paramref name="partitionId"/>'s
+    /// log and reports whether the entry is history its installed ledger already reflects. An unindexed log
+    /// (the pure/in-memory test configuration) is never history.</summary>
+    private bool NoteApplied(int partitionId, long logIndex)
+    {
+        if (logIndex <= 0)
+            return false;
+
+        appliedLogIndexByPartition.AddOrUpdate(
+            partitionId, static (_, index) => index, static (_, current, index) => index > current ? index : current, logIndex);
+
+        return IsHistoricalApply(partitionId, logIndex);
+    }
+
+    /// <summary>The highest log index applied through this store for the partition (0 when none).</summary>
+    private long AppliedLogIndexOf(int partitionId) =>
+        appliedLogIndexByPartition.TryGetValue(partitionId, out long index) ? index : 0;
 
     /// <summary>Drops one partition's ledger slice — the un-host purge: when this node stops replicating the
     /// partition its slice is dead retention (a re-gain installs the current one with the seeding snapshot).</summary>
@@ -1074,7 +1172,7 @@ internal sealed class PreparedIntentStore
     /// are harmless in the capture: the log entries that recorded them are replayed on top of it. Null when the
     /// partition has no slice.
     /// </summary>
-    private (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? CaptureLedger(int partitionId)
+    private LedgerCapture? CaptureLedger(int partitionId)
     {
         if (!ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
             return null;
@@ -1083,10 +1181,12 @@ internal sealed class PreparedIntentStore
         {
             HLCTimestamp watermark;
             long generation;
+            long reflectedThroughIndex;
             lock (applyGate)
             {
                 watermark = ledger.Watermark;
                 generation = ledger.PruneGeneration;
+                reflectedThroughIndex = ledger.ReflectedThroughIndex;
             }
 
             List<KeyValuePair<string, CommittedHead>> heads = new(ledger.Heads.Count);
@@ -1096,7 +1196,7 @@ internal sealed class PreparedIntentStore
             lock (applyGate)
             {
                 if (generation == ledger.PruneGeneration)
-                    return (watermark, heads);
+                    return new LedgerCapture(watermark, reflectedThroughIndex, heads);
 
                 // A prune tore the capture. Prunes are rare (once per retention bucket), so a rescan almost
                 // always succeeds; past a few attempts take the gate for the scan itself.
@@ -1105,11 +1205,15 @@ internal sealed class PreparedIntentStore
                     heads.Clear();
                     foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
                         heads.Add(entry);
-                    return (ledger.Watermark, heads);
+                    return new LedgerCapture(ledger.Watermark, ledger.ReflectedThroughIndex, heads);
                 }
             }
         }
     }
+
+    /// <summary>One slice as captured for persistence or transfer: its watermark, its reflected position and its
+    /// heads, consistent with respect to physical pruning (see <see cref="CaptureLedger"/>).</summary>
+    private readonly record struct LedgerCapture(HLCTimestamp Watermark, long ReflectedThroughIndex, List<KeyValuePair<string, CommittedHead>> Heads);
 
     /// <summary>The current intent at <paramref name="key"/>, or null. The emptiness pre-check is
     /// deliberate: this runs on every point read/write in the actor hot path, and on workloads with
@@ -1212,7 +1316,9 @@ internal sealed class PreparedIntentStore
     /// replicas refuse (the fsync-gate fork producer). The hook runs after the applies, outside the gate. The
     /// restore path (<see cref="Restore"/>) deliberately bypasses this method, so replayed history never
     /// vetoes; ordered live catch-up cannot produce a false flag, because heads advance in the same log order
-    /// the prepares apply in.</para></summary>
+    /// the prepares apply in — with one exception this method handles itself: the catch-up window right after
+    /// a whole-partition snapshot install, whose entries are history the installed ledger already reflects
+    /// (<see cref="IsHistoricalApply"/>) and which therefore apply without the fence.</para></summary>
     // Leader-local, advisory: why this node's apply refused a prepare's acknowledgement, keyed by the prepare's
     // identity and key, for the finalizer that proposed it to classify its retry — a stale base is final (heads
     // only advance, so every re-ask answers the same), a held key is settlement lag or a live conflict. Taken
@@ -1288,9 +1394,14 @@ internal sealed class PreparedIntentStore
         bool allPreparesAccepted = true;
         List<PreparedIntent>? staleFlagged = null;
 
+        // History below an installed snapshot's reflected position applies without the advisory fence: the
+        // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
+        // a false veto (see IsHistoricalApply).
+        bool judgeFence = !NoteApplied(partitionId, log.Id);
+
         foreach (PreparedIntentCommand command in commands)
         {
-            PreparedIntentApplyResult result = Apply(command, partitionId);
+            PreparedIntentApplyResult result = Apply(command, partitionId, judgeFence);
             if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
             {
                 allPreparesAccepted = false;
@@ -1333,8 +1444,10 @@ internal sealed class PreparedIntentStore
         if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
             commands = DecodeDelta(log.LogData);
 
+        bool judgeFence = !NoteApplied(partitionId, log.Id);
+
         foreach (PreparedIntentCommand command in commands)
-            Apply(command, partitionId);
+            Apply(command, partitionId, judgeFence);
 
         return true;
     }
@@ -1958,7 +2071,7 @@ internal sealed class PreparedIntentStore
             {
                 string tmp = path + ".tmp";
 
-                (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger = CaptureLedger(partitionId);
+                LedgerCapture? ledger = CaptureLedger(partitionId);
 
                 using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
                 using (CodedOutputStream output = new(file))
@@ -1975,7 +2088,9 @@ internal sealed class PreparedIntentStore
                         output.WriteMessage(entry);
                     }
 
-                    WriteLedgerSection(output, partitionId, ledger);
+                    // The checkpoint persists the slice's reflected position as installed, so a restart mid
+                    // catch-up after a snapshot install keeps treating the remaining window as history.
+                    WriteLedgerSection(output, partitionId, ledger, ledger?.ReflectedThroughIndex ?? 0);
                 }
 
                 File.Move(tmp, path, overwrite: true);
@@ -2028,7 +2143,7 @@ internal sealed class PreparedIntentStore
                 MergeLoad(IntentOf(entry));
 
             if (message.LedgerPresent)
-                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message));
+                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex);
             else if (TryParsePartitionFromSnapshotPath(path, out int partitionId))
                 ledgerMissingPartitions.Add(partitionId);
         }
@@ -2046,8 +2161,7 @@ internal sealed class PreparedIntentStore
     /// <summary>Streams a partition's ledger slice (or an explicitly empty one) after the intents: each head
     /// under the repeated field's tag, then the scalar trailer. The writer always marks the ledger present so a
     /// reader can tell "empty ledger" from "written before the ledger existed".</summary>
-    private static void WriteLedgerSection(
-        CodedOutputStream output, int partitionId, (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger)
+    private static void WriteLedgerSection(CodedOutputStream output, int partitionId, LedgerCapture? ledger, long reflectedThroughIndex)
     {
         HLCTimestamp watermark = HLCTimestamp.Zero;
 
@@ -2070,7 +2184,8 @@ internal sealed class PreparedIntentStore
             LedgerPartitionId = partitionId,
             LedgerWatermarkNode = watermark.N,
             LedgerWatermarkPhysical = watermark.L,
-            LedgerWatermarkCounter = watermark.C
+            LedgerWatermarkCounter = watermark.C,
+            LedgerReflectedThroughIndex = Math.Max(0, reflectedThroughIndex)
         };
 
         trailer.WriteTo(output);
@@ -2172,7 +2287,7 @@ internal sealed class PreparedIntentStore
     /// </summary>
     public int WritePartitionSection(Stream output, int partitionId, Func<string, bool> isOwnedKey)
     {
-        (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger = CaptureLedger(partitionId);
+        LedgerCapture? ledger = CaptureLedger(partitionId);
 
         int written = 0;
 
@@ -2190,10 +2305,20 @@ internal sealed class PreparedIntentStore
             written++;
         }
 
-        WriteLedgerSection(coded, partitionId, ledger);
+        // The reflected position is read AFTER the walk: every entry at or below it was applied through this
+        // store before the section was complete, so the installing replica may treat its replay of those
+        // entries as history (see IsHistoricalApply). An entry applied during the walk may or may not be in the
+        // captured ledger or intents; either way its replay folds idempotently, and the only thing withheld
+        // from it on the receiver is an advisory verdict on a decision that predates the transfer.
+        WriteLedgerSection(coded, partitionId, ledger, ReflectedPositionForExport(partitionId, ledger));
 
         return written;
     }
+
+    /// <summary>The reflected position a whole-partition section advertises: the highest log index applied through
+    /// this store for the partition, never below what the slice itself was installed with.</summary>
+    private long ReflectedPositionForExport(int partitionId, LedgerCapture? ledger) =>
+        Math.Max(AppliedLogIndexOf(partitionId), ledger?.ReflectedThroughIndex ?? 0);
 
     /// <summary>Intents whose key belongs to <paramref name="bucket"/> (its parent prefix) — the set a bucket scan
     /// (<c>GetByBucket</c>) reconciles against. Uses the intent's own bucket, which the freeze sources from the key
@@ -2315,7 +2440,8 @@ internal sealed class PreparedIntentStore
     internal sealed record PartitionIntentSection(
         IReadOnlyList<PreparedIntent> Intents,
         IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)>? Ledger,
-        HLCTimestamp LedgerWatermark);
+        HLCTimestamp LedgerWatermark,
+        long ReflectedThroughIndex = 0);
 
     /// <summary>Serializes one partition's intents together with its committed-head ledger slice, for
     /// whole-partition state transfer. The ledger is captured first so its position is no later than the
@@ -2323,7 +2449,7 @@ internal sealed class PreparedIntentStore
     /// that is exact at or before each of them.</summary>
     public byte[] SerializePartitionIntents(int partitionId, IReadOnlyList<PreparedIntent> partitionIntents)
     {
-        (HLCTimestamp Watermark, List<KeyValuePair<string, CommittedHead>> Heads)? ledger = CaptureLedger(partitionId);
+        LedgerCapture? ledger = CaptureLedger(partitionId);
 
         PreparedIntentSnapshotMessage message = new()
         {
@@ -2348,6 +2474,8 @@ internal sealed class PreparedIntentStore
             }
         }
 
+        message.LedgerReflectedThroughIndex = ReflectedPositionForExport(partitionId, ledger);
+
         return ReplicationSerializer.Serialize(message);
     }
 
@@ -2364,7 +2492,8 @@ internal sealed class PreparedIntentStore
         return new PartitionIntentSection(
             result,
             message.LedgerPresent ? LedgerEntriesOf(message) : null,
-            message.LedgerPresent ? LedgerWatermarkOf(message) : HLCTimestamp.Zero);
+            message.LedgerPresent ? LedgerWatermarkOf(message) : HLCTimestamp.Zero,
+            message.LedgerPresent ? message.LedgerReflectedThroughIndex : 0);
     }
 
     /// <summary>
@@ -2387,9 +2516,80 @@ internal sealed class PreparedIntentStore
             PurgePartitionLedger(partitionId);
         }
         else
-            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark);
+            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex);
 
         ImportIntents(section.Intents);
+    }
+
+    /// <summary>
+    /// Installs a whole-partition snapshot's intents and ledger slice as a REPLACEMENT of everything this node
+    /// holds for the partition — the seeding install's purge-then-apply discipline applied to the intent set.
+    /// Every intent whose key <paramref name="isOwned"/> assigns to the partition is dropped and the section's
+    /// intents and ledger are installed in the same critical section, so no verdict read or apply can observe
+    /// the half-way state.
+    ///
+    /// <para>Why a merge is wrong here: an intent this node still held as pending — a transaction whose
+    /// settlement applied while this node was down or behind, below the snapshot boundary and therefore
+    /// compacted away, never to be replayed here — survived a merging install as a phantom holder of its key.
+    /// From then on every prepare of the key by a later transaction was rejected on this node as a foreign
+    /// holder while its replicas admitted it, every bundled commit of the key was refused at apply, every
+    /// by-reference materialization of it found no intent, the key's row and committed head froze here, and the
+    /// node answered <c>NotApplied</c> to every fence ask about the key — which kept the leader's commits
+    /// waiting on a replica that could never attest. Idempotent for a re-delivered snapshot. The ledger
+    /// contract is that of <see cref="ImportPartitionIntents"/>.</para>
+    /// </summary>
+    public void ReplacePartitionIntents(int partitionId, PartitionIntentSection section, bool requireLedger, Func<string, bool> isOwned)
+    {
+        if (section.Ledger is null && requireLedger)
+            throw new InvalidDataException(
+                $"Partition {partitionId} snapshot carries no committed-head ledger (written by a build that predates it); " +
+                "refusing to install it while OnePhaseApplyTimeValidation is enabled, because this node would judge bundled commits differently from its replicas.");
+
+        PartitionLedger? ledger = section.Ledger is null
+            ? null
+            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex);
+
+        int purged = 0;
+
+        lock (applyGate)
+        {
+            List<string>? owned = null;
+            foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+            {
+                if (isOwned(kv.Key))
+                    (owned ??= []).Add(kv.Key);
+            }
+
+            if (owned is not null)
+            {
+                foreach (string key in owned)
+                {
+                    if (!intents.TryRemove(key, out PreparedIntent? removed))
+                        continue;
+
+                    Interlocked.Add(ref totalBytes, -IntentBytes(removed));
+                    fenceRefusalStreaks.TryRemove(key, out _);
+                    purged++;
+                }
+            }
+
+            if (ledger is null)
+                ledgers.TryRemove(partitionId, out _);
+            else
+                InstallLedgerLocked(partitionId, ledger);
+
+            foreach (PreparedIntent intent in section.Intents)
+                MergeLoad(intent);
+
+            StampAllDirty();
+        }
+
+        SignalFenceWaiters();
+
+        if (purged > 0 && logger is not null && logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation(
+                "Snapshot install for partition {PartitionId} replaced {Purged} locally held intent(s) with the {Installed} the snapshot carries (reflected through log index {ReflectedThroughIndex})",
+                partitionId, purged, section.Intents.Count, section.ReflectedThroughIndex);
     }
 
     public static byte[] SerializeIntents(IEnumerable<PreparedIntent> intents)
