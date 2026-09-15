@@ -216,6 +216,65 @@ public sealed class TestPartitionStateTransfer : IDisposable
     }
 
     [Fact]
+    public async Task Import_ReplacesTheDurableStoreSlices_APendingIntentFromBeforeTheInstallDoesNotSurvive()
+    {
+        // The source applied the partition's log through entry 77 and holds one live intent.
+        Node source = MakeNode();
+        HLCTimestamp live = Ts(2000);
+        Assert.True(source.Intents.Replicate(2, new RaftLog
+        {
+            Id = 77,
+            LogType = ReplicationTypes.PreparedIntent,
+            LogData = [.. PreparedIntentStore.SerializeDelta([new PrepareIntentCommand(PendingIntent(live, "ranged1/live"))])]
+        }));
+
+        byte[] snapshot = await Export(source, 2);
+
+        // The target held partition 2 before it fell behind: a transaction it saw prepare but whose settlement
+        // applied below the snapshot boundary — never to be replayed here — left it a pending intent, a
+        // receipt and an undecided record. Merged over the install, the intent is a permanent phantom holder
+        // of its key (the leader-kill runs: 400 keys rejecting every commit for the rest of the run). Other
+        // partitions' slices must not be touched.
+        HLCTimestamp stale = Ts(1000);
+        Node target = MakeNode();
+        target.Intents.Apply(new PrepareIntentCommand(PendingIntent(stale, "ranged1/phantom")));
+        target.Intents.Apply(new PrepareIntentCommand(PendingIntent(stale, "ranged2/keep")));
+        target.Receipts.Record(stale, "ranged1/phantom", "ranged1/phantom", KeyValueDurability.Persistent);
+        target.Receipts.Record(stale, "ranged2/keep", "ranged2/keep", KeyValueDurability.Persistent);
+        List<TransactionParticipantRef> manifest = [new("ranged1/phantom", KeyValueDurability.Persistent)];
+        target.Records.Apply(new InitializeTransactionCommand(stale, 1, "coord", "ranged1/phantom", Ts(1100), Ts(9000), 42, manifest, stale, stale));
+        List<TransactionParticipantRef> keepManifest = [new("ranged2/keep", KeyValueDurability.Persistent)];
+        target.Records.Apply(new InitializeTransactionCommand(Ts(1001), 1, "coord", "ranged2/keep", Ts(1100), Ts(9000), 42, keepManifest, Ts(1001), Ts(1001)));
+
+        await Import(target, 2, snapshot);
+
+        Assert.Null(target.Intents.Get("ranged1/phantom"));
+        Assert.False(target.Receipts.Contains(stale, "ranged1/phantom", KeyValueDurability.Persistent));
+        Assert.Null(target.Records.Get(stale, 1));
+
+        Assert.NotNull(target.Intents.Get("ranged1/live"));
+        Assert.NotNull(target.Intents.Get("ranged2/keep"));
+        Assert.True(target.Receipts.Contains(stale, "ranged2/keep", KeyValueDurability.Persistent));
+        Assert.NotNull(target.Records.Get(Ts(1001), 1));
+
+        // The installed slice carries the exporter's applied position: the tail the target replays below it is
+        // history for the advisory fence.
+        Assert.Equal(77, target.Intents.GetLedgerReflectedThroughIndex(2));
+        Assert.True(target.Intents.IsHistoricalApply(2, 77));
+        Assert.False(target.Intents.IsHistoricalApply(2, 78));
+
+        // The key is free: a later transaction's prepare is admitted, as on every other replica.
+        Assert.Equal(TransactionApplyOutcome.Applied,
+            target.Intents.Apply(new PrepareIntentCommand(PendingIntent(Ts(3000), "ranged1/phantom")), 2).Outcome);
+    }
+
+    private static PreparedIntent PendingIntent(HLCTimestamp txId, string key) => new(
+        txId, 1, key, ManifestHash: 42, RecordAnchorKey: key, CommitTimestamp: new HLCTimestamp(txId.N, txId.L + 100, txId.C),
+        State: KeyValueState.Set, Value: [7], Bucket: null, Revision: 3, Expires: HLCTimestamp.Zero,
+        NoRevision: false, BaseRevision: 2, BaseState: KeyValueState.Set, RecoveryDeadline: Ts(6000),
+        Resolution: PreparedIntentResolution.Pending);
+
+    [Fact]
     public async Task Import_IsIdempotentOnRedelivery()
     {
         Node source = MakeNode();

@@ -111,9 +111,15 @@ internal sealed class KeyValueReplicator
     /// below settled history — the permanent-overwrite shape of a lost update — and this line is what lets a
     /// conserved-total drift in a soak run attribute to its producing transaction from the node log alone.
     /// </summary>
-    private void WitnessBelowHeadMaterialization(KeyValueMessage keyValueMessage, long logIndex)
+    private void WitnessBelowHeadMaterialization(int partitionId, KeyValueMessage keyValueMessage, long logIndex)
     {
         if (committedHeadRevisionProbe is null || keyValueMessage.NoRevision)
+            return;
+
+        // History below an installed snapshot's reflected position: the installed ledger is ahead of this entry
+        // by construction, so "below the remembered head" is the expected shape of every replayed record there,
+        // not a fork. The apply itself proceeds unchanged; only the witness stays silent.
+        if (preparedIntentStore is not null && preparedIntentStore.IsHistoricalApply(partitionId, logIndex))
             return;
 
         long headRevision = committedHeadRevisionProbe(keyValueMessage.Key);
@@ -827,7 +833,7 @@ internal sealed class KeyValueReplicator
         RegisterPendingApply(partitionId, log.Id, keyValueMessage);
 
         if (witnessBelowHead)
-            WitnessBelowHeadMaterialization(keyValueMessage, log.Id);
+            WitnessBelowHeadMaterialization(partitionId, keyValueMessage, log.Id);
 
         // Collision witness: this apply is about to become durable unconditionally (the overlay
         // record and the queued flush below run for every committed entry; the actor's head

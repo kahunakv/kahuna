@@ -108,4 +108,10 @@ message PreparedIntentSnapshotMessage {
   int32  ledgerWatermarkNode     = 5;
   int64  ledgerWatermarkPhysical = 6;
   uint32 ledgerWatermarkCounter  = 7;
+  // The partition's highest applied log index the slice is known to reflect. Set by a whole-partition
+  // export (the exporter's applied position when the section was written) and carried by the installing
+  // replica: log entries at or below it are history the installed state already accounts for, so the
+  // advisory staged-base fence does not judge them and the below-head witness does not fire on them.
+  // Zero when unknown (a checkpoint snapshot of a slice that was never installed, or an older writer).
+  int64  ledgerReflectedThroughIndex = 8;
 }

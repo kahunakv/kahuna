@@ -47,6 +47,9 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// drain-then-purge-then-apply: the background writer is drained first so a queued pre-snapshot
 /// flush cannot land after the install and blindly overwrite an installed row, and the purge
 /// (rather than a merge) prevents resurrecting keys deleted while this node was not a replica.
+/// The durable stores' slices are purged the same way before their installed slices land, so a
+/// receipt, record or still-pending intent this node retained from before the install cannot
+/// outlive it (a merged-over pending intent is a permanent phantom holder of its key).
 /// The sequence is bracketed by a durable install marker: the marker is created before the
 /// purge and removed only after the apply, the stores' durable snapshots, and the resident-state
 /// invalidation complete, so a crash mid-install leaves the partition observably incomplete
@@ -401,6 +404,19 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             await PurgePartitionBackendRowsAsync(partitionId, ct).ConfigureAwait(false);
 
+            // The durable stores' slices follow the same purge-then-apply discipline as the rows, for the
+            // same reason: whatever this node retained for the partition from before the install — a receipt,
+            // a record, above all a still-pending intent — describes history whose continuation lies below the
+            // snapshot boundary, compacted away and never to be replayed here. Merged over the installed state,
+            // that retention does not age out: a pending intent whose settlement this node never saw stays a
+            // phantom holder of its key for good, rejecting every later prepare of the key as a foreign holder,
+            // refusing every bundled commit of it at apply, freezing the key's row and committed head on this
+            // node and answering NotApplied to every fence ask about it (the shape of the leader-kill runs,
+            // where the restarted node re-attested to the fence at half throughput for the rest of the run).
+            Func<string, bool> isOwned = OwnedKeyPredicate(currentMap(), partitionId);
+            completionReceiptStore.PurgeWhere(isOwned);
+            transactionRecordStore.PurgeWhere(isOwned);
+
             if (kvItems.Count > 0 && !persistenceBackend.StoreKeyValues(kvItems))
                 throw new KahunaServerException("ImportPartitionState: StoreKeyValues failed to persist the snapshot.");
 
@@ -415,7 +431,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 throw new KahunaServerException("ImportPartitionState: completion-receipt apply failed.");
 
             transactionRecordStore.ImportRecords(records);
-            preparedIntentStore.ImportPartitionIntents(partitionId, intentSection, requireLedgerOnInstall);
+            preparedIntentStore.ReplacePartitionIntents(partitionId, intentSection, requireLedgerOnInstall, isOwned);
 
             // The WAL boundary installed right after this import compacts the log entries the imported
             // receipts/records/intents were originally replicated through — a cold restart could never
@@ -476,11 +492,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             if (!await PurgePartitionBackendRowsAsync(partitionId, ct, stillUnhosted).ConfigureAwait(false))
                 return false;
 
-            RangeMap map = currentMap();
+            Func<string, bool> isOwned = OwnedKeyPredicate(currentMap(), partitionId);
 
-            completionReceiptStore.PurgeWhere(key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId);
-            transactionRecordStore.PurgeWhere(anchor => PartitionDataEnumerator.OwnerOfKey(map, anchor, hashPoolSize) == partitionId);
-            preparedIntentStore.PurgeWhere(key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId);
+            completionReceiptStore.PurgeWhere(isOwned);
+            transactionRecordStore.PurgeWhere(isOwned);
+            preparedIntentStore.PurgeWhere(isOwned);
             preparedIntentStore.PurgePartitionLedger(partitionId);
 
             // Re-persist the emptied slices: without this, a cold restart would reload the purged
@@ -542,6 +558,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         return true;
     }
+
+    /// <summary>The ownership filter both the install and the un-host purge scope their durable-store purges
+    /// with: a key (or record anchor) the given map assigns to <paramref name="partitionId"/>.</summary>
+    private Func<string, bool> OwnedKeyPredicate(RangeMap map, int partitionId) =>
+        key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
 
     // ── install marker ───────────────────────────────────────────────────────────
 

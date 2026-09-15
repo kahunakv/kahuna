@@ -168,6 +168,19 @@ internal static class DurableTransactionMetrics
             description: "Prepare acknowledgements refused because the written key's committed base moved before the prepare applied.");
 
     /// <summary>
+    /// Validated-base prepares the staged-base fence declined to judge because the entry was history the
+    /// partition's installed ledger already reflected: a replica replaying the window between a whole-partition
+    /// snapshot's WAL boundary and the exporter's position when it walked the state (see
+    /// <c>PreparedIntentStore.IsHistoricalApply</c>). Each would otherwise have been a false refusal, a false
+    /// stale-base veto and — once the veto found the commit — a false late veto in the loss witness. Expect a
+    /// burst on a node right after it installs a snapshot of a busy partition, never in steady state.
+    /// </summary>
+    internal static readonly Counter<long> StagedBaseFenceHistoryReplays =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.staged_base_fence_history_replays",
+            description: "Validated-base prepares replayed below an installed snapshot's reflected position, which the fence does not judge.");
+
+    /// <summary>
     /// Cache-miss hydrations refused because the loaded persistent row (or its absence) sits strictly below the
     /// staged-base fence's committed-head memory for the key. That state is provably stale: every recorded head
     /// is a real durable-transaction commit, so a lower local row means this node's visible state lost committed

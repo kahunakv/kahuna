@@ -1507,7 +1507,7 @@ internal sealed class DurableMaintenanceService
         if (!plan.Score)
             return;
 
-        bool? transition = fenceLagTracker.Observe(endpoint, attested, Stopwatch.GetTimestamp(), out double laggingMs);
+        bool? transition = fenceLagTracker.Observe(endpoint, attested, Stopwatch.GetTimestamp(), plan.IsProbe, out double laggingMs);
 
         if (transition is null)
             return;
@@ -1516,15 +1516,15 @@ internal sealed class DurableMaintenanceService
         {
             DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: true);
             logger.LogWarning(
-                "Replica fence: node {Endpoint} failed to attest {Threshold} consecutive verdict requests within the {WaitMs} ms apply wait — treating it as lagging: commits keep asking it without the wait ({BudgetMs} ms budget) and probe it with the full wait every {ProbeInterval} until it attests again",
-                endpoint, ReplicaFenceLagTracker.LaggingThreshold, ReplicaFenceApplyWaitMs, ReplicaFenceLaggingCallBudgetMs, ReplicaFenceLagTracker.ProbeInterval);
+                "Replica fence: node {Endpoint} failed to attest {Threshold} consecutive verdict requests within the {WaitMs} ms apply wait — treating it as lagging: commits keep asking it without the wait ({BudgetMs} ms budget) and probe it with the full wait every {ProbeInterval} until it attests {RecoveryProbes} consecutive probes",
+                endpoint, ReplicaFenceLagTracker.LaggingThreshold, ReplicaFenceApplyWaitMs, ReplicaFenceLaggingCallBudgetMs, ReplicaFenceLagTracker.ProbeInterval, fenceLagTracker.RequiredRecoveryStreak(endpoint));
         }
         else
         {
             DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: false);
             logger.LogWarning(
-                "Replica fence: node {Endpoint} attested again after lagging for {LaggingMs:F0} ms — commits wait for its verdict again",
-                endpoint, laggingMs);
+                "Replica fence: node {Endpoint} attested {RecoveryProbes} consecutive probes after lagging for {LaggingMs:F0} ms — commits wait for its verdict again",
+                endpoint, fenceLagTracker.RequiredRecoveryStreak(endpoint), laggingMs);
         }
     }
 
