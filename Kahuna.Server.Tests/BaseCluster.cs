@@ -257,10 +257,10 @@ public abstract class BaseCluster
     /// <param name="decorateWriteBatchExecutor">Optional per-node decorator over the key/value write aggregator's
     /// Raft batch executor, keyed by node id (1..3), so a test can capture, stall or replay a node's batches
     /// while driving the real public entry points. Null for a node keeps the real executor.</param>
-    internal static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null, Func<int, Func<Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor, Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor>?>? decorateWriteBatchExecutor = null)
+    internal static async Task<(IRaft, IRaft, IRaft, IKahuna, IKahuna, IKahuna)> AssembleThreNodeCluster(string walStorage, int partitions, ILogger<IRaft> raftLogger, ILogger<IKahuna> kahunaLogger, Action<KahunaConfiguration>? configure = null, Func<int, Func<Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor, Kahuna.Server.KeyValues.Writes.IPartitionBatchExecutor>?>? decorateWriteBatchExecutor = null, MemoryInterNodeCommmunication? interNode = null)
     {
         InMemoryCommunication raftCommunication = new();
-        MemoryInterNodeCommmunication interNodeCommmunication = new();
+        MemoryInterNodeCommmunication interNodeCommmunication = interNode ?? new();
 
         (IRaft raft1, IKahuna kahuna1) = GetNode1(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure, decorateWriteBatchExecutor?.Invoke(1));
         (IRaft raft2, IKahuna kahuna2) = GetNode2(interNodeCommmunication, raftCommunication, walStorage, partitions, raftLogger, kahunaLogger, configure, decorateWriteBatchExecutor?.Invoke(2));

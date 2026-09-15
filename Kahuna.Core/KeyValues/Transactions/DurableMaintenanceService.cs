@@ -295,6 +295,18 @@ internal sealed class DurableMaintenanceService
                 logger.LogError(ex, "Prepared-intent recovery sweep failed for partition {Partition}", partitionId);
             }
         }
+
+        // Visibility for the one outcome the sweep cannot resolve: a record-less intent past the retention horizon
+        // with no receipt. Each holds its key read-only, so the count is a gauge and one line per pass names it —
+        // 30 such holds wedged a whole partition for the rest of CamusDB run sd6 with nothing but per-key error
+        // lines to show for it.
+        DurableTransactionMetrics.SetRecordlessIntentsHeld(recovery.HeldRecordlessIntents);
+
+        if (recovery.HeldRecordlessIntents > 0)
+            logger.LogWarning(
+                "Recovery is holding {Count} prepared intent(s) whose canonical record is absent past the retention horizon and whose leg carries no completion receipt (e.g. {Samples}); their keys stay read-only until the outcome can be proven — see kahuna.transactions.recordless_intents_held",
+                recovery.HeldRecordlessIntents,
+                string.Join(", ", recovery.HeldRecordlessSamples.Select(s => $"{s.Key}@{s.TransactionId}")));
     }
 
     /// <summary>
@@ -1084,7 +1096,11 @@ internal sealed class DurableMaintenanceService
         maxMaterializationBatchBytes: Math.Min(
             runtime.Configuration.KeyValueWriteMaxBatchBytes,
             runtime.Configuration.KeyValueWriteMaxQueuedBytesPerPartition),
-        localApplyGate: runtime.DurableLocalApplyGate);
+        localApplyGate: runtime.DurableLocalApplyGate,
+        // The durable artifact a record-less intent past the retention horizon is judged by: a completion receipt
+        // for the leg proves its value materialized, so the reclaimed record was a commit.
+        legMaterialized: intent => runtime.CompletionReceiptStore.Contains(
+            intent.TransactionId, intent.Key, KeyValueDurability.Persistent, intent.RecordAnchorKey));
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {
@@ -1210,6 +1226,18 @@ internal sealed class DurableMaintenanceService
     // mid-wait, but far below the transport deadline so an unreachable node cannot stall the commit path.
     private const int ReplicaFenceCallBudgetMs = 1500;
 
+    // Caller-side cap for an ask to a replica the lag tracker holds as lagging. Such an ask carries a zero
+    // apply wait, so a live replica answers in one network round trip; the cap only bounds a replica whose
+    // process is wedged as well as its apply, and it is what keeps a stalled replica from pacing commits.
+    internal const int ReplicaFenceLaggingCallBudgetMs = 100;
+
+    // Per-replica breaker for the fence (see ReplicaFenceLagTracker): a replica that keeps failing to attest
+    // within the apply wait is asked without the wait until a periodic probe sees it attest again.
+    private readonly ReplicaFenceLagTracker fenceLagTracker = new(ReplicaFenceApplyWaitMs, ReplicaFenceCallBudgetMs, ReplicaFenceLaggingCallBudgetMs);
+
+    /// <summary>The fence's per-replica lag breaker, exposed for the metrics gauge and for tests.</summary>
+    internal ReplicaFenceLagTracker FenceLagTracker => fenceLagTracker;
+
     /// <summary>
     /// Answers THIS node's staged-base fence verdict for one transaction's validated-base prepares.
     /// Deliberately not leader-gated: the verdict is about this node's own memory, and a follower's refusal
@@ -1305,7 +1333,7 @@ internal sealed class DurableMaintenanceService
             if (fenced is null)
                 return true;
 
-            List<Task<bool>>? calls = null;
+            List<Task<bool?>>? calls = null;
 
             foreach ((int partitionId, List<string> fencedKeys, List<PreparedIntent> fencedIntents, bool localAttested) in fenced)
             {
@@ -1313,7 +1341,7 @@ internal sealed class DurableMaintenanceService
                 // own verdict joins the wait-based round too: the instant read above may have run before the
                 // prepare applied here, and this node can be the only current-memory replica left.
                 if (!localAttested && raft.HostsPartition(partitionId))
-                    (calls ??= []).Add(AskLocalFenceVerdictAsync(partitionId, input, fencedKeys, fencedIntents, localEndpoint, cancellationToken));
+                    (calls ??= []).Add(WrapReplicaCall(AskLocalFenceVerdictAsync(partitionId, input, fencedKeys, fencedIntents, localEndpoint, cancellationToken)));
 
                 foreach (string endpoint in ResolveReplicaEndpoints(partitionId, localEndpoint))
                 {
@@ -1325,12 +1353,8 @@ internal sealed class DurableMaintenanceService
             if (calls is null)
                 return true;
 
-            Task<bool?>[] wrapped = new Task<bool?>[calls.Count];
-            for (int i = 0; i < calls.Count; i++)
-                wrapped[i] = WrapReplicaCall(calls[i]);
-
             bool refused = false;
-            foreach (bool? answer in await Task.WhenAll(wrapped).ConfigureAwait(false))
+            foreach (bool? answer in await Task.WhenAll(calls).ConfigureAwait(false))
             {
                 if (answer is null)
                     unattested = true;
@@ -1410,30 +1434,98 @@ internal sealed class DurableMaintenanceService
         return AnyStaleBaseVerdict(input, localEndpoint, fencedIntents, verdicts);
     }
 
-    private async Task<bool> AskReplicaFenceVerdictAsync(
+    /// <summary>
+    /// Asks one replica for its verdicts under the lag tracker's plan for it. Three-way outcome: true = refused
+    /// (stale base proven), false = clear, null = no verdict (timeout, transport failure, unserviced reply —
+    /// never an objection). A full-wait ask is scored on whether the replica attested at all; an ask to a
+    /// lagging replica carries no wait, so its expected <c>NotApplied</c> is not scored.
+    /// </summary>
+    private async Task<bool?> AskReplicaFenceVerdictAsync(
         string endpoint, int partitionId, DurableFinalizeInput input,
         List<string> fencedKeys, List<PreparedIntent> fencedIntents, CancellationToken cancellationToken)
     {
+        ReplicaFenceLagTracker.AskPlan plan = fenceLagTracker.Plan(endpoint, Stopwatch.GetTimestamp());
+
+        if (plan.Lagging)
+            DurableTransactionMetrics.ReplicaFenceAskedLagging(plan.IsProbe);
+
         bool serviced;
         IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts;
         try
         {
-            (serviced, verdicts) = await interNodeCommunication.GetStagedBaseVerdicts(
-                endpoint, partitionId, input.TransactionId, input.Epoch, fencedKeys, ReplicaFenceApplyWaitMs, cancellationToken).ConfigureAwait(false);
+            Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> call = interNodeCommunication.GetStagedBaseVerdicts(
+                endpoint, partitionId, input.TransactionId, input.Epoch, fencedKeys, plan.WaitMs, cancellationToken);
+
+            try
+            {
+                (serviced, verdicts) = await call.WaitAsync(TimeSpan.FromMilliseconds(plan.CallBudgetMs)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                // A timeout abandons the underlying call still in flight; observe its eventual fault so an
+                // unreachable replica cannot surface as an unobserved-task exception later.
+                _ = call.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                throw;
+            }
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             DurableTransactionMetrics.ReplicaFenceRequestThrew();
-            throw;
+            ScoreReplicaFenceAsk(endpoint, plan, attested: false);
+            return null;
         }
 
         bool answered = serviced && verdicts.Count == fencedKeys.Count;
         DurableTransactionMetrics.ReplicaFenceRequested(answered);
 
         if (!answered)
-            throw new KahunaServerException($"Node {endpoint} did not answer the staged-base verdict request.");
+        {
+            ScoreReplicaFenceAsk(endpoint, plan, attested: false);
+            return null;
+        }
+
+        ScoreReplicaFenceAsk(endpoint, plan, attested: AnyAttestedVerdict(verdicts));
 
         return AnyStaleBaseVerdict(input, endpoint, fencedIntents, verdicts);
+    }
+
+    /// <summary>A serviced reply attests when at least one key carries a verdict other than <c>NotApplied</c>:
+    /// the replica had applied the prepare (or proved the base moved) within the wait.</summary>
+    private static bool AnyAttestedVerdict(IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts)
+    {
+        foreach (KeyValueStagedBaseVerdictEntry verdict in verdicts)
+        {
+            if (verdict.Verdict != KeyValueStagedBaseVerdict.NotApplied)
+                return true;
+        }
+
+        return false;
+    }
+
+    private void ScoreReplicaFenceAsk(string endpoint, ReplicaFenceLagTracker.AskPlan plan, bool attested)
+    {
+        if (!plan.Score)
+            return;
+
+        bool? transition = fenceLagTracker.Observe(endpoint, attested, Stopwatch.GetTimestamp(), out double laggingMs);
+
+        if (transition is null)
+            return;
+
+        if (transition.Value)
+        {
+            DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: true);
+            logger.LogWarning(
+                "Replica fence: node {Endpoint} failed to attest {Threshold} consecutive verdict requests within the {WaitMs} ms apply wait — treating it as lagging: commits keep asking it without the wait ({BudgetMs} ms budget) and probe it with the full wait every {ProbeInterval} until it attests again",
+                endpoint, ReplicaFenceLagTracker.LaggingThreshold, ReplicaFenceApplyWaitMs, ReplicaFenceLaggingCallBudgetMs, ReplicaFenceLagTracker.ProbeInterval);
+        }
+        else
+        {
+            DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: false);
+            logger.LogWarning(
+                "Replica fence: node {Endpoint} attested again after lagging for {LaggingMs:F0} ms — commits wait for its verdict again",
+                endpoint, laggingMs);
+        }
     }
 
     private bool AnyStaleBaseVerdict(

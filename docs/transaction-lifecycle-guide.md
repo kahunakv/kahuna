@@ -235,8 +235,70 @@ metrics scrape.
 Each finalize freezes `deadline = commitTimestamp + clamp(multiplier × observed-finalize-p99, floor,
 ceiling)`. The p99 is a rolling *local* stopwatch measure (a duration, not a distributed event), so the
 deadline tracks real load. A commit attempt whose fresh attempt-HLC has passed the frozen deadline is
-rejected by the state machine — the record stays `Undecided` and yields to presumed-abort recovery — and
-increments `kahuna.durable_tx.late_commit_rejections`. A rising rate means the deadline is too tight.
+rejected by the state machine and increments `kahuna.durable_tx.late_commit_rejections`. A rising rate
+means the deadline is too tight.
+
+The rejection is final, not transient: attempt HLCs only advance, so every later commit of the same
+frozen input is rejected the same way. The finalizer therefore does not answer `MustRetry` and leave the
+record to the recovery sweep — that produced a client retry loop that could never terminate (a
+coordinator whose disk paused mid-commit re-drove the same dozen transactions for eight minutes after it
+healed, CamusDB run sd3) — it drives the presumed abort through the record CAS itself, right where the
+gate refused it, and reports what the record answers: `Aborted` with class `PresumedAbort`
+(`kahuna.durable_tx.late_commit_conclusions{outcome=aborted}`), or `Committed` when a stalled bundle's
+commit had already applied under the ordered log (`…{outcome=committed}`). A retry of a frozen finalize
+that arrives with its deadline already behind the attempt clock is concluded the same way before any
+prepare is re-driven (`kahuna.durable_tx.retries_past_deadline`).
+
+### 6.6 Session ownership and routing
+
+An interactive session lives on the node that began it — the leader of its coordinator key's partition at
+`BEGIN` — and stays there when that partition's leadership moves: the session's finalizer forwards its durable
+work (the anchor bundle, the decision, materialization) to whichever node leads the partition now. The routed
+entry points (`LocateAndCommitTransaction`, `LocateAndRollbackTransaction`, operation registration and
+completion, the working-set query) therefore serve a session **this node owns** locally whatever the current
+leader is. Before this rule, a leader that stepped down routed every commit for its own sessions to its
+successor, which had no such session, and each spun as `MustRetry` until the client's deadline (the ~100
+indeterminate commits per leader pause in the CamusDB slow-disk runs sd2–sd6).
+
+A leader that receives a commit or rollback for a session it does not hold (the client learned the new
+leader) offers it to its peers once, in turn; the owner serves it and every other peer answers unknown. The
+probe runs only for a request that arrived directly from a caller and only on that rare path — the membership
+roster does not carry peers' node ids, so the transaction id cannot name the owner directly.
+
+### 6.7 Record-less intents past the retention horizon
+
+Past `TransactionOutcomeRetentionTtl` an absent canonical record no longer means "never initialized": a
+terminal record may have been reclaimed. The recovery sweep never presumes abort for such an intent (that would
+discard a reclaimed commit's leg). It decides from the leg's **completion receipt** — written only when a leg's
+value materialized, which only a committed transaction does — and settles the intent as a commit when one
+exists (`kahuna.transactions.recordless_intent_receipt_commits`). Without a receipt the intent is held: its key
+stays read-only until the outcome can be proven. Holds are counted in
+`kahuna.transactions.recordless_intents_held` (the last pass's count on this node) and summarized in one warning
+per recovery pass naming a few of the keys; a non-zero gauge is an operator signal, not a counter. The record
+GC on the anchor leader never reclaims a terminal record while a prepared intent of that transaction is still
+resident on the same node, so the hold can only arise for a leg resident elsewhere.
+
+### 6.5 The pre-decision replica fence and its lag breaker
+
+Before proposing the commit of a read-modify-write, the finalizer asks every replica of each participant
+partition for its staged-base verdict and refuses the commit if any replica proves the validated base
+moved (`kahuna.durable_tx.replica_fence_refusals`). A replica that cannot answer never blocks the commit —
+a down replica cannot veto either — but before the lag breaker (Kahuna.Core 1.8.2 and earlier) the
+finalizer still *waited* for it: a replica whose
+apply had stalled (its disk paused, its WAL saturated) answered `NotApplied` only after the full 400 ms
+apply wait, and every commit on the leader paid that wait for a verdict that carried nothing. In the
+CamusDB slow-disk runs one follower's 30 s device pause cost a leader with an intact Raft quorum 70% of
+its throughput, and the follower's catch-up kept the cluster below half speed for minutes afterwards.
+
+The fence now carries a per-replica breaker (`ReplicaFenceLagTracker`). After three consecutive
+full-wait asks without an attestation (a timeout, a transport fault, or a serviced reply that is all
+`NotApplied`) the replica is *lagging*: it is still asked on every commit, but with a zero apply wait and
+a 100 ms call budget, so a `StaleBase` it can prove from memory still counts while the commit no longer
+waits on an apply it is not going to see. Once a second one ask is sent with the full budget as a probe;
+the first attesting answer restores the replica. `kahuna.durable_tx.replica_fence_lagging_replicas` is
+the number of replicas currently held as lagging, `…replica_fence_lag_transitions{state}` counts the
+episodes, and `…replica_fence_lagging_asks{kind}` counts the zero-wait asks and the probes. One warning
+line marks each transition.
 
 ---
 
@@ -388,9 +450,12 @@ Every path maps onto three outcomes, and the distinction is load-bearing:
 | **`MustRetry`** | Retryable: nothing durable was decided by this attempt | Safe to retry |
 | `Errored` / `InvalidInput` | Malformed input or an internal error | Fix the request |
 
-Only a conflict abort is `Aborted`. A prepare that did not replicate, a deadline expiry, a presumed abort,
-an admission rejection and every infrastructural failure are `MustRetry`, so a caller never sees a false
-conflict for a transient failure.
+A prepare that did not replicate, an admission rejection and every infrastructural failure are
+`MustRetry`, so a caller never sees a false conflict for a transient failure. An `Aborted` carries the
+abort class in its reason: `Transaction conflict` for a genuine conflict, and `Transaction aborted:
+PresumedAbort` when the frozen decision deadline passed before the commit could be decided (§6.4) — the
+record is then durably aborted, so retrying the commit cannot succeed and the caller restarts the
+transaction.
 
 ---
 
@@ -405,7 +470,9 @@ conflict for a transient failure.
 | `MaxTransactionTimeout` / `DefaultTransactionTimeout` | Session lifetime (and the orphaned-snapshot reclamation horizon) |
 
 Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepared_intent_bytes`,
-`…outstanding`, `…resident_records`, `…admission_rejections`, `…late_commit_rejections`.
+`…outstanding`, `…resident_records`, `…admission_rejections`, `…late_commit_rejections`,
+`…late_commit_conclusions{outcome}`, `…retries_past_deadline{outcome}`,
+`…replica_fence_lagging_replicas`, `…replica_fence_lag_transitions{state}`.
 
 ---
 

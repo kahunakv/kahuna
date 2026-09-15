@@ -533,8 +533,8 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-snapshot-export-retry-cache-max-bytes", Required = false, HelpText = "Upper bound in bytes on the leader-side retry cache for one produced snapshot export; an export at or under this size is cached and re-sent on retry instead of re-exported from scratch. Values <= 0 disable the cache.", Default = 64L * 1024 * 1024)]
     public long RaftSnapshotExportRetryCacheMaxBytes { get; set; } = 64L * 1024 * 1024;
 
-    [Option("raft-compaction-live-replica-lag-budget", Required = false, HelpText = "Entry-count budget within which a follower still converging after a snapshot rescue is held off the WAL compaction floor, so ordinary compaction cannot re-create the below-floor condition the rescue just repaired. Values <= 0 disable the hold.", Default = 100_000L)]
-    public long RaftCompactionLiveReplicaLagBudget { get; set; } = 100_000L;
+    [Option("raft-compaction-live-replica-lag-budget", Required = false, HelpText = "Entry-count budget within which a follower still converging after a snapshot rescue is held off the WAL compaction floor, so ordinary compaction cannot re-create the below-floor condition the rescue just repaired. Values <= 0 disable the hold.", Default = 1_000_000L)]
+    public long RaftCompactionLiveReplicaLagBudget { get; set; } = 1_000_000L;
 
     [Option("raft-compaction-durability-clamp-report-interval", Required = false, HelpText = "How often a partition whose compaction is clamped by the application-durability floor repeats its warning, and how long the floor must sit unchanged before the warning calls the flusher stalled, in milliseconds. Values <= 0 keep only the streak-start and streak-end log lines.", Default = 60000)]
     public int RaftCompactionDurabilityClampReportInterval { get; set; } = 60000;
@@ -627,7 +627,10 @@ public sealed class KahunaCommandLineOptions
     [Option("persistence-max-unflushed-bytes", Required = false, HelpText = "Maximum value bytes queued for the background flush before ordinary writes are rejected with a retryable status (0 = unbounded). Default 536870912 (512 MB).", Default = 536_870_912L)]
     public long PersistenceMaxUnflushedBytes { get; set; } = 536_870_912;
 
-    [Option("pitr-window", Required = false, HelpText = "Point-in-time recovery window in seconds; WAL entries older than now-window may be compacted. Valid range: (0, 21600]. Default 3600 (1 hour).", Default = 3600)]
+    [Option("persistence-write-stall-warn-ms", Required = false, HelpText = "Milliseconds a store write may stay unacknowledged by the persistence backend before the node logs it as a stall (0 = no log lines; the kahuna.persistence.oldest_inflight_write_age_ms gauge and store_write_duration histogram are always published). Default 500.", Default = 500)]
+    public int PersistenceWriteStallWarnMs { get; set; } = 500;
+
+    [Option("pitr-window",Required = false, HelpText = "Point-in-time recovery window in seconds; WAL entries older than now-window may be compacted. Valid range: (0, 21600]. Default 3600 (1 hour).", Default = 3600)]
     public int PitrWindowSeconds { get; set; } = 3600;
 
     [Option("base-snapshot-interval", Required = false, HelpText = "Interval between base checkpoints per shard in seconds. Must be positive and no greater than pitr-window. Default 1800 (30 minutes).", Default = 1800)]

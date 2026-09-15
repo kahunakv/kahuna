@@ -995,7 +995,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             if (reply.PrepareAcknowledged)
             {
                 DurableTransactionMetrics.LateCommitRejections.Add(1);
-                return (LateCommitRejectedRetry(), OnePhaseFallbackReason.None);
+                return (await ConcludeLateCommitAsync(input, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
             }
 
             return (Retry(), OnePhaseFallbackReason.None);
@@ -1129,7 +1129,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (commit && decisionRead == TransactionDecision.Undecided)
         {
             DurableTransactionMetrics.LateCommitRejections.Add(1);
-            return LateCommitRejectedRetry();
+            return await ConcludeLateCommitAsync(input, opId, cancellationToken).ConfigureAwait(false);
         }
 
         // A durable abort is terminal whatever drove it: the record decides once and a later commit against it is
@@ -1481,8 +1481,25 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
 
-    // A retry whose cause is the record's deadline gate withholding the requested commit; the coordinator counts
-    // the cause once per transaction from the flag.
-    private static DurableFinalizeOutcome LateCommitRejectedRetry() =>
-        new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure, LateCommitRejected: true);
+    /// <summary>
+    /// Concludes a commit the record's deadline gate withheld. The gate compares the attempt HLC with the frozen
+    /// decision deadline, and HLCs only advance, so every later attempt of this transaction is rejected the same
+    /// way: answering MustRetry here sent the client into a retry loop that could never terminate (CamusDB run
+    /// sd3, Vorpal 3c7f6b99: the same twelve transactions re-driven for eight minutes after their coordinator's
+    /// disk healed, each retry re-initialising the record on the new anchor leader and losing to the deadline
+    /// again). The transaction yields to presumed abort by design; instead of leaving that to the recovery sweep's
+    /// schedule, drive the presumed abort through the record CAS now and report what the record answers: an abort
+    /// (the common case) is terminal and the client restarts, while a commit that applied under the ordered log
+    /// first — a stalled bundle whose propose-time attempt passed the gate — wins the CAS and is reported as
+    /// Committed. Only a fence that cannot be replicated stays MustRetry, and the flag keeps the coordinator's
+    /// per-transaction accounting of the gate.
+    /// </summary>
+    private async Task<DurableFinalizeOutcome> ConcludeLateCommitAsync(DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        DurableFinalizeOutcome concluded = await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken).ConfigureAwait(false);
+
+        DurableTransactionMetrics.LateCommitConcluded(concluded.Result);
+
+        return concluded with { LateCommitRejected = true };
+    }
 }

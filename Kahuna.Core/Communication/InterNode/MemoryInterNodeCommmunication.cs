@@ -1234,8 +1234,34 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw new KahunaServerException($"The node {node} does not exist.");
     }
 
+    /// <summary>
+    /// Optional test hook consulted before every <c>GetStagedBaseVerdicts</c> RPC with the target node and the
+    /// requested apply wait. Returning true models a replica whose apply has stalled (its disk paused, its WAL
+    /// saturated): the call holds for the requested wait and answers <c>NotApplied</c> for every key, exactly
+    /// what such a replica's handler produces when its wait budget runs out.
+    /// </summary>
+    public Func<string, int, bool>? StagedBaseVerdictsStalledHook { get; set; }
+
+    /// <summary>Every <c>GetStagedBaseVerdicts</c> ask sent through this transport (node, requested wait), so a
+    /// test can assert how the fence asked a replica. Null until a test assigns it.</summary>
+    public ConcurrentQueue<(string Node, int WaitMs)>? StagedBaseVerdictAsks { get; set; }
+
     public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
     {
+        StagedBaseVerdictAsks?.Enqueue((node, waitMs));
+
+        if (StagedBaseVerdictsStalledHook is { } stalled && stalled(node, waitMs))
+        {
+            if (waitMs > 0)
+                await Task.Delay(waitMs, cancellationToken);
+
+            KeyValueStagedBaseVerdictEntry[] notApplied = new KeyValueStagedBaseVerdictEntry[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+                notApplied[i] = new KeyValueStagedBaseVerdictEntry(KeyValueStagedBaseVerdict.NotApplied, -1);
+
+            return (true, notApplied);
+        }
+
         if (nodes is not null && nodes.TryGetValue(node, out IKahuna? kahunaNode))
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();

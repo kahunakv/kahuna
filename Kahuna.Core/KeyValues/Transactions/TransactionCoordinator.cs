@@ -68,6 +68,11 @@ internal sealed class TransactionCoordinator : IDisposable
 
     internal readonly ConcurrentDictionary<HLCTimestamp, TransactionContext> sessions = new();
 
+    /// <summary>True while this node holds the interactive session for <paramref name="transactionId"/>. A session
+    /// lives on the node that began it and does not move with the coordinator partition's leadership, so the
+    /// routed entry points serve a session they own locally whatever the current leader is.</summary>
+    internal bool HasSession(HLCTimestamp transactionId) => sessions.ContainsKey(transactionId);
+
     /// <summary>
     /// Count of durable transactions currently being driven through finalize on this node — reserved before a
     /// transaction prepares and released when its attempt ends (decision installed, or the attempt gave up). It
@@ -1667,6 +1672,25 @@ internal sealed class TransactionCoordinator : IDisposable
     // transaction's caller can commit or roll back the ephemeral subset accordingly. Sets context.Result too.
     private async Task<DurableFinalizeResult> DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
     {
+        // A retry of a frozen finalize whose decision deadline is already behind this attempt's clock cannot
+        // commit: the record's deadline gate rejects every commit whose attempt HLC passed the deadline, and HLCs
+        // only advance. Re-driving the prepares would only re-initialise the record on the (possibly new) anchor
+        // leader and lose to the gate again — the loop CamusDB run sd3 spun in for eight minutes after a
+        // coordinator's disk pause (Vorpal 3c7f6b99). Conclude it now through the same record-CAS fence the reaper
+        // and rollback use: a presumed abort that yields to a commit the ordered log applied first.
+        if (context.UnresolvedDurableFinalize is not null && opId > input.DecisionDeadline)
+        {
+            DurableFinalizeOutcome fenced = await DurableFinalizer.FenceAbandonedAsync(input, opId, cancellationToken).ConfigureAwait(false);
+
+            DurableTransactionMetrics.RetryPastDeadlineConcluded(fenced.Result);
+
+            logger.LogWarning(
+                "Durable commit retry of transaction {TransactionId} arrived past its frozen decision deadline {Deadline} (attempt {Attempt}); concluded through the record fence as {Outcome}",
+                input.TransactionId, input.DecisionDeadline, opId, fenced.Result);
+
+            return ApplyDurableOutcome(context, fenced with { LateCommitRejected = true });
+        }
+
         // Admission gate 1 — resident prepared-intent count/bytes: refuse before preparing if this transaction's
         // intents would push resident prepared-intent state past its node bound, so slow settlement cannot let it
         // grow without limit. A read-only check (no reservation to unwind), so it runs before the slot reserve.
@@ -1752,6 +1776,15 @@ internal sealed class TransactionCoordinator : IDisposable
             ReleaseDurableSlot();
         }
 
+        return ApplyDurableOutcome(context, outcome);
+    }
+
+    /// <summary>
+    /// Records a durable finalize attempt's outcome on the session — the unresolved-finalize fence obligation,
+    /// the per-transaction deadline-gate accounting, and the client-facing result — and returns its result.
+    /// </summary>
+    private DurableFinalizeResult ApplyDurableOutcome(TransactionContext context, DurableFinalizeOutcome outcome)
+    {
         // A terminal outcome is record-backed (classified from the canonical record), so no stalled proposal can
         // contradict it; only a MustRetry leaves the attempt unresolved and keeps the fence obligation in place.
         if (outcome.Result is DurableFinalizeResult.Committed or DurableFinalizeResult.Aborted)

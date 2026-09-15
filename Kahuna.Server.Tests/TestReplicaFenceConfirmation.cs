@@ -1,4 +1,5 @@
 using System.Text;
+using Kahuna.Server.Communication.Internode;
 
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
@@ -457,6 +458,147 @@ public sealed class TestReplicaFenceConfirmation : BaseCluster
                 Assert.Equal(KeyValueResponseType.Get, finalType);
                 Assert.Equal(baseRevision + 1, finalEntry!.Revision);
                 Assert.Equal("150", Encoding.UTF8.GetString(finalEntry.Value!));
+            });
+        }
+        finally
+        {
+            await LeaveCluster(raft1, raft2, raft3);
+        }
+    }
+
+    // ── cluster: the per-replica lag breaker ────────────────────────────────────
+
+    private static string EndpointOfManager(int index) => $"localhost:{8001 + index}";
+
+    /// <summary>One optimistic read-modify-write on <paramref name="key"/>, coordinated on the key's own
+    /// partition so the fence runs on that partition's leader; retried while the commit answers the documented
+    /// retryable outcome (a predecessor's committed-but-unsettled intent still on the key).</summary>
+    private static async Task ReadModifyWrite(IKahuna kahuna, string key, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            (KeyValueResponseType startType, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = key,
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    AsyncRelease = true,
+                    Timeout = 60_000
+                }, ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            (KeyValueResponseType readType, ReadOnlyKeyValueEntry? readEntry) = await kahuna.LocateAndTryGetValue(
+                handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Get, readType);
+
+            long next = long.Parse(Encoding.UTF8.GetString(readEntry!.Value!)) + 1;
+
+            (KeyValueResponseType writeType, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                handle.TransactionId, key, Encoding.UTF8.GetBytes(next.ToString()), null, -1, KeyValueFlags.None, 0,
+                KeyValueDurability.Persistent, ct,
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            (KeyValueResponseType commitType, _) = await kahuna.LocateAndCommitTransaction(handle, ct);
+            if (commitType == KeyValueResponseType.MustRetry)
+            {
+                await Task.Delay(50, ct);
+                continue;
+            }
+
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+            return;
+        }
+
+        Assert.Fail("the read-modify-write kept answering MustRetry");
+    }
+
+    /// <summary>
+    /// The follower-pause shape of Vorpal 3c7f6b99 (finding 3): one replica's apply stalls while the leader and
+    /// the other replica stay healthy. The fence keeps asking the stalled replica and it keeps answering
+    /// NotApplied after the full apply wait, so every commit paid that wait for a verdict that carried nothing.
+    /// After a few such rounds the breaker must stop waiting on it — asking it with no wait, so its instant
+    /// memory-based verdict still counts — while the healthy replica keeps the full wait, and once the replica
+    /// attests again a probe must restore it. Commits never fail on the stalled replica's account.
+    /// </summary>
+    [Fact]
+    public async Task StalledReplica_StopsPacingCommits_AndRejoinsTheFenceWhenItAttestsAgain()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        MemoryInterNodeCommmunication interNode = new();
+
+        (IRaft raft1, IRaft raft2, IRaft raft3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger, interNode: interNode);
+
+        IRaft[] rafts = [raft1, raft2, raft3];
+        KahunaManager[] managers = [(KahunaManager)kahuna1, (KahunaManager)kahuna2, (KahunaManager)kahuna3];
+
+        try
+        {
+            await RunUnderStableLeadership(raft1, 4, async () =>
+            {
+                string key = "rfc-lag/" + Guid.NewGuid().ToString("N")[..8];
+
+                KeyValueTransactionResult seeded = await RetryOnMustRetry(
+                    kahuna1, Encoding.UTF8.GetBytes($"BEGIN SET `{key}` '100' COMMIT END"), null, null);
+                Assert.Equal(KeyValueResponseType.Set, seeded.Type);
+
+                foreach (KahunaManager manager in managers)
+                    await WaitUntilAsync(() => manager.DurablePreparedIntentStore.TryGetCommittedHead(key, out _, out _));
+
+                // The fence runs where the session's coordinator key routes: the leader of the key's durable
+                // partition. The stalled replica is one of the other two nodes; the breaker to watch is that
+                // leader's.
+                int fencePartition = managers[0].KeyValues.LocateDurablePartition(key).PartitionId;
+                int leaderIndex = await LeaderIndexOf(fencePartition, rafts, ct);
+                string stalled = EndpointOfManager((leaderIndex + 1) % managers.Length);
+                ReplicaFenceLagTracker tracker = managers[leaderIndex].KeyValues.DurableMaintenance.FenceLagTracker;
+
+                interNode.StagedBaseVerdictAsks = new();
+                interNode.StagedBaseVerdictsStalledHook = (node, _) => node == stalled;
+
+                try
+                {
+                    // Each commit pays the stalled replica's full apply wait until the breaker trips; none fails.
+                    for (int i = 0; i < ReplicaFenceLagTracker.LaggingThreshold + 3 && !tracker.IsLagging(stalled); i++)
+                        await ReadModifyWrite(kahuna1, key, ct);
+
+                    Assert.True(tracker.IsLagging(stalled),
+                        $"the breaker must trip after consecutive non-attesting rounds; fence leader={EndpointOfManager(leaderIndex)} stalled={stalled} "
+                        + $"asks=[{string.Join(",", interNode.StagedBaseVerdictAsks.Select(a => $"{a.Node}:{a.WaitMs}"))}]");
+                    Assert.True(DurableTransactionMetrics.ReplicaFenceLaggingReplicasCount >= 1);
+
+                    // Lagging: the stalled replica is asked without the wait (at most one full-wait probe per
+                    // interval), the healthy replica with the full wait, and commits still succeed.
+                    interNode.StagedBaseVerdictAsks.Clear();
+                    for (int i = 0; i < 3; i++)
+                        await ReadModifyWrite(kahuna1, key, ct);
+
+                    (string Node, int WaitMs)[] asks = [.. interNode.StagedBaseVerdictAsks];
+                    Assert.Contains(asks, a => a.Node == stalled && a.WaitMs == 0);
+                    Assert.True(asks.Count(a => a.Node == stalled && a.WaitMs > 0) <= 1, "at most one probe per interval");
+                    Assert.Contains(asks, a => a.Node != stalled && a.WaitMs > 0);
+
+                    // The replica heals: the next full-wait probe reaches it, it attests, and it rejoins the fence.
+                    interNode.StagedBaseVerdictsStalledHook = null;
+
+                    await WaitUntilAsync(async () =>
+                    {
+                        await ReadModifyWrite(kahuna1, key, ct);
+                        return !tracker.IsLagging(stalled);
+                    }, timeoutMs: 30_000);
+
+                    interNode.StagedBaseVerdictAsks.Clear();
+                    await ReadModifyWrite(kahuna1, key, ct);
+                    Assert.Contains(interNode.StagedBaseVerdictAsks, a => a.Node == stalled && a.WaitMs > 0);
+                }
+                finally
+                {
+                    interNode.StagedBaseVerdictsStalledHook = null;
+                    interNode.StagedBaseVerdictAsks = null;
+                }
             });
         }
         finally

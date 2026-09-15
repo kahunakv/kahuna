@@ -624,6 +624,13 @@ public sealed class EmbeddedKahunaOptions
     public long PersistenceMaxUnflushedBytes { get; set; } = 512L * 1024 * 1024;
 
     /// <summary>
+    /// Milliseconds an in-flight store write may stay unacknowledged by the persistence backend before
+    /// the node logs it as a stall (and logs its duration when it completes). 0 disables the log lines;
+    /// the stall gauge and the store-write histogram are always published.
+    /// </summary>
+    public int PersistenceWriteStallWarnMs { get; set; } = 500;
+
+    /// <summary>
     /// Length of the point-in-time recovery window. Valid range: (0, 6h].
     /// </summary>
     public TimeSpan PitrWindow { get; set; } = TimeSpan.FromHours(1);

@@ -138,6 +138,115 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <summary>Recent average value size of the writes this writer receives, in bytes.</summary>
     internal long AverageValueBytes => Volatile.Read(ref averageValueBytesX256) >> 8;
 
+    /// <summary>What a store write carries, for the store-write histogram and the stall log line.</summary>
+    internal enum StoreWriteKind
+    {
+        KeyValues,
+        Locks,
+        Floors
+    }
+
+    /// <summary>Stopwatch timestamp at which the store write currently handed to the backend started; 0 while
+    /// none is in flight. The writer awaits every store, so at most one is in flight at a time.</summary>
+    private long inflightStoreStartedTicks;
+
+    /// <summary>Kind of the store write in flight; meaningful only while <see cref="inflightStoreStartedTicks"/> is set.</summary>
+    private StoreWriteKind inflightStoreKind;
+
+    // Rate limit for the stall completion line: a device that answers every write slowly would otherwise emit a
+    // line per write. One line per second carrying the count suppressed since the last.
+    private long lastStallCompletionLogTicks;
+
+    private int suppressedStallCompletionLogs;
+
+    /// <summary>
+    /// Age, in milliseconds, of the store write the writer has handed to the persistence backend and not yet had
+    /// answered; 0 while nothing is in flight. This is the durable-write stall signal: the backlog gauges rise
+    /// whenever the writer is behind, this rises only while the backend (the device under it) is not answering.
+    /// </summary>
+    internal double InflightStoreAgeMs
+    {
+        get
+        {
+            long started = Volatile.Read(ref inflightStoreStartedTicks);
+            return started == 0 ? 0 : Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        }
+    }
+
+    /// <summary>Kind of the store write in flight, or null while none is.</summary>
+    internal StoreWriteKind? InflightStoreKind =>
+        Volatile.Read(ref inflightStoreStartedTicks) == 0 ? null : inflightStoreKind;
+
+    /// <summary>
+    /// Hands one store write to the backend through the writer queue and measures it from hand-off to answer,
+    /// whatever the answer: the duration lands in the store-write histogram tagged by kind and result, the write
+    /// is visible as the in-flight write while it runs, and a write past the stall threshold is logged when it
+    /// completes. Exceptions propagate to the caller's retry loop unchanged; a queue-depth refusal
+    /// (<see cref="ReadBackpressureExceededException"/>) never reached the backend and is not recorded.
+    /// </summary>
+    private async Task<bool> RunStoreAsync(StoreWriteKind kind, int count, Func<bool> store)
+    {
+        long started = Stopwatch.GetTimestamp();
+        inflightStoreKind = kind;
+        Volatile.Write(ref inflightStoreStartedTicks, started);
+
+        KeyValuePair<string, object?> result = PersistenceMetrics.ResultThrew;
+        bool refusedByQueue = false;
+
+        try
+        {
+            bool ok = await backendWriteScheduler.EnqueueTask(WriterQueueKey, store);
+            result = ok ? PersistenceMetrics.ResultOk : PersistenceMetrics.ResultFailed;
+            return ok;
+        }
+        catch (ReadBackpressureExceededException)
+        {
+            refusedByQueue = true;
+            throw;
+        }
+        finally
+        {
+            Volatile.Write(ref inflightStoreStartedTicks, 0);
+
+            if (!refusedByQueue)
+            {
+                double elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+                PersistenceMetrics.StoreWriteMs.Record(elapsedMs, KindTag(kind), result);
+
+                int warnMs = configuration.PersistenceWriteStallWarnMs;
+                if (warnMs > 0 && elapsedMs >= warnMs)
+                    LogStalledStoreCompletion(kind, count, elapsedMs, result.Value as string ?? "unknown", warnMs);
+            }
+        }
+    }
+
+    private static KeyValuePair<string, object?> KindTag(StoreWriteKind kind) => kind switch
+    {
+        StoreWriteKind.KeyValues => PersistenceMetrics.KindKeyValues,
+        StoreWriteKind.Locks => PersistenceMetrics.KindLocks,
+        _ => PersistenceMetrics.KindFloors
+    };
+
+    private void LogStalledStoreCompletion(StoreWriteKind kind, int count, double elapsedMs, string result, int warnMs)
+    {
+        long now = Stopwatch.GetTimestamp();
+
+        if (lastStallCompletionLogTicks != 0 && now - lastStallCompletionLogTicks < Stopwatch.Frequency)
+        {
+            suppressedStallCompletionLogs++;
+            return;
+        }
+
+        int suppressed = suppressedStallCompletionLogs;
+        suppressedStallCompletionLogs = 0;
+        lastStallCompletionLogTicks = now;
+
+        logger.LogWarning(
+            "Durable-write stall: storing {Count} {Kind} took {ElapsedMs:F0} ms (result {Result}), past the {WarnMs} ms stall threshold — the persistence backend, and the device under it, did not answer for that long; the backlog gauges say the writer is behind, this says why. Similar lines suppressed since the last: {Suppressed}",
+            count, kind, elapsedMs, result, warnMs, suppressed);
+    }
+
     /// <summary>
     /// Wall-clock the targeted prune consumed in the current flush cycle, so the sweep that follows
     /// it shares the cycle's prune budget instead of adding a second one on top.
@@ -854,7 +963,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         try
         {
-            stored = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreDurabilityFloors(floorsToPersist));
+            stored = await RunStoreAsync(StoreWriteKind.Floors, floorsToPersist.Count, () => persistenceBackend.StoreDurabilityFloors(floorsToPersist));
         }
         catch (ReadBackpressureExceededException)
         {
@@ -1044,7 +1153,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             {
                 try
                 {
-                    success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreLocks(items));
+                    success = await RunStoreAsync(StoreWriteKind.Locks, items.Count, () => persistenceBackend.StoreLocks(items));
 
                     // A contract-honoring false return is a storage fault the backend already logged.
                     if (!success)
@@ -1230,7 +1339,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             {
                 try
                 {
-                    success = await backendWriteScheduler.EnqueueTask(WriterQueueKey, () => persistenceBackend.StoreKeyValues(items));
+                    success = await RunStoreAsync(StoreWriteKind.KeyValues, items.Count, () => persistenceBackend.StoreKeyValues(items));
 
                     // A contract-honoring false return is a storage fault the backend already logged.
                     if (!success)

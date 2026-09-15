@@ -654,6 +654,19 @@ public sealed class KahunaConfiguration
     public long PersistenceMaxUnflushedBytes { get; set; } = 512L * 1024 * 1024;
 
     /// <summary>
+    /// Age, in milliseconds, past which a store write the background writer has handed to the
+    /// persistence backend and not yet had acknowledged is reported as a stall: one warning when the
+    /// in-flight write crosses it (with reminders while it stays in flight) and one when it completes,
+    /// success or failure, carrying the duration. The continuous signal is the
+    /// <c>kahuna.persistence.oldest_inflight_write_age_ms</c> gauge and the
+    /// <c>kahuna.persistence.store_write_duration</c> histogram, which record every write regardless of
+    /// this threshold. Distinguishes a device that stopped answering from a flusher that is merely
+    /// behind: the backlog gauges rise in both cases, this only in the first. A value &lt;= 0 disables
+    /// the log lines only.
+    /// </summary>
+    public int PersistenceWriteStallWarnMs { get; set; } = 500;
+
+    /// <summary>
     /// Grace window after a restart during which snapshot holds loaded from the durable
     /// snapshot-floor registry are exempt from the expired-hold purge. While every node is down
     /// no reclamation runs, so history pinned by a hold whose lease lapsed during full-cluster

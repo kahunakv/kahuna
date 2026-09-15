@@ -259,6 +259,7 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 | `MaxKeyValueWriteAggregatorInboxSize` | `16384` | Ordinary-submission inbox bound per lane; control messages are exempt. |
 | `PersistenceMaxUnflushedItems` | `1000000` | Persistence back-pressure: ordinary writes are refused (`MustRetry`) while this node holds more committed-but-unflushed writes than this (background writer inbox plus dirty queues). Terminal work is exempt. `0` disables. |
 | `PersistenceMaxUnflushedBytes` | `512 MiB` | Byte counterpart, over the value bytes queued for the background flush (dirty queues exactly, inbox estimated from the recent average value size). `0` disables. |
+| `PersistenceWriteStallWarnMs` | `500` | Durable-write stall log threshold: a store write the background writer has handed to the persistence backend and not yet had answered is logged once it is this old (reminders every 10 s while it stays in flight) and again when it completes, success or failure, with its duration. `0` disables the log lines; the stall gauge and the store-write histogram are always published. |
 
 The number of lanes is derived from the key/value worker count; there is no separate knob, because
 lane count does not limit Raft concurrency (detached work is per partition).
@@ -332,6 +333,16 @@ outcome string — never a key, partition id, or transaction id):
   tighter budget (items ÷ `PersistenceMaxUnflushedItems` or bytes ÷ `PersistenceMaxUnflushedBytes`,
   whichever is larger; alert at 0.75) and `kahuna.persistence.backlog_gate_closed` is 1 while the
   gate is refusing ordinary writes.
+- **Durable-write stall signal** — the backlog gauges rise whenever the writer is behind, whatever the
+  cause; two series say whether the *device* is the cause. `kahuna.persistence.oldest_inflight_write_age_ms`
+  is the age of the store write handed to the backend and not yet answered (0 while idle): it rises only
+  while the backend is not answering, so a device pause reads as a gauge climbing to the pause length while
+  the healthy nodes' stay flat. `kahuna.persistence.store_write_duration` is a histogram over every store
+  write, success or failure (tagged `kind` = `key_values` / `locks` / `floors` and `result` = `ok` /
+  `failed` / `threw`), so a hung write shows as its max rather than as a silence in the success-only debug
+  lines. The Raft WAL publishes the same pair per partition from Kommander:
+  `raft.wal.oldest_pending_write_age_ms` and `raft.wal.write_duration_ms`. `PersistenceWriteStallWarnMs`
+  (and Kommander's `WalStallWarnThreshold`) turn the crossing into log lines.
 
 The backlog monitor also samples itself every five seconds and writes to the log — nobody watches a
 gauge: a **warning** when the backlog crosses 75% of a budget, a **warning** when back-pressure

@@ -56,6 +56,17 @@ internal sealed class DurableTransactionRecovery
     // or reclaimed-after-commit — and must not be presumed aborted. Matches the retention GC's TTL.
     private readonly long recordRetentionMs;
 
+    // Durable evidence that a leg's value already materialized (a completion receipt): a record-less intent
+    // past the retention horizon whose leg carries a receipt was a reclaimed commit, and can be settled as one.
+    private readonly Func<PreparedIntent, bool>? legMaterialized;
+
+    /// <summary>Record-less intents past the retention horizon this instance held (neither settled nor presumed
+    /// aborted) across its sweeps, and a few of them by key for the pass summary. One recovery instance serves one
+    /// maintenance pass, so the caller reads these once the pass is over.</summary>
+    internal int HeldRecordlessIntents { get; private set; }
+
+    internal List<(string Key, HLCTimestamp TransactionId)> HeldRecordlessSamples { get; } = [];
+
     private readonly ILogger<IKahuna>? logger;
 
     // Emits the value-free by-reference materialization record instead of copying the committed value into the
@@ -88,8 +99,10 @@ internal sealed class DurableTransactionRecovery
         bool materializeByReference = false,
         int maxMaterializationBatchItems = 512,
         long maxMaterializationBatchBytes = 4 * 1024 * 1024,
-        SemaphoreSlim? localApplyGate = null)
+        SemaphoreSlim? localApplyGate = null,
+        Func<PreparedIntent, bool>? legMaterialized = null)
     {
+        this.legMaterialized = legMaterialized;
         this.materializeByReference = materializeByReference;
         this.maxMaterializationBatchItems = Math.Max(1, maxMaterializationBatchItems);
         this.maxMaterializationBatchBytes = Math.Max(1, maxMaterializationBatchBytes);
@@ -333,9 +346,29 @@ internal sealed class DurableTransactionRecovery
         // deadline, far inside the retention window.
         if (record is null && recordRetentionMs > 0 && now.L - intent.CommitTimestamp.L > recordRetentionMs)
         {
-            DurableTransactionMetrics.RecordlessIntentHolds.Add(1);
+            // The durable artifact that resolves the ambiguity: a completion receipt is written only when a leg's
+            // value materialized, which only a committed transaction does. With one, the reclaimed record was a
+            // commit and the leg is settled as one (the materialization is idempotent under the head guard);
+            // without one the leg is genuinely unknowable and stays held.
+            if (legMaterialized is not null && legMaterialized(intent))
+            {
+                DurableTransactionMetrics.RecordlessIntentReceiptCommits.Add(1);
 
-            logger?.LogError(
+                logger?.LogWarning(
+                    "Prepared intent for key {Key} of transaction {TransactionId} has no canonical record past the retention horizon but carries a completion receipt: settling it as the reclaimed commit it was",
+                    intent.Key, intent.TransactionId);
+
+                return true;
+            }
+
+            DurableTransactionMetrics.RecordlessIntentHolds.Add(1);
+            HeldRecordlessIntents++;
+            if (HeldRecordlessSamples.Count < 3)
+                HeldRecordlessSamples.Add((intent.Key, intent.TransactionId));
+
+            // One summary line per pass names the holds (see the maintenance sweep); the per-intent line stays
+            // at Debug so a few wedged keys do not produce a failure line per key per tick for the run's life.
+            logger?.LogDebug(
                 "Prepared intent for key {Key} of transaction {TransactionId} has no canonical record and is older than the record retention horizon; holding it instead of presuming abort — the record may have been a reclaimed commit",
                 intent.Key, intent.TransactionId);
 

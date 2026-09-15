@@ -113,6 +113,7 @@ public static class EmbeddedOptionsFactory
         PersistentRevisionCleanupTimeBudget = TimeSpan.FromMilliseconds(opts.PersistentRevisionCleanupTimeBudgetMs),
         PersistenceMaxUnflushedItems = opts.PersistenceMaxUnflushedItems,
         PersistenceMaxUnflushedBytes = opts.PersistenceMaxUnflushedBytes,
+        PersistenceWriteStallWarnMs = opts.PersistenceWriteStallWarnMs,
         PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
         BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
         BackupDir = opts.PitrBackupDir,

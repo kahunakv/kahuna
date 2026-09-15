@@ -314,6 +314,7 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     PersistentRevisionCleanupTimeBudget = TimeSpan.FromMilliseconds(opts.PersistentRevisionCleanupTimeBudgetMs),
     PersistenceMaxUnflushedItems = opts.PersistenceMaxUnflushedItems,
     PersistenceMaxUnflushedBytes = opts.PersistenceMaxUnflushedBytes,
+    PersistenceWriteStallWarnMs = opts.PersistenceWriteStallWarnMs,
     PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
     BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
     // The range knobs are carried here as well as on the embedded options: this is the instance the

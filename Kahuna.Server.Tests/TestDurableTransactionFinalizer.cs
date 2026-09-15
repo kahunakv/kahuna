@@ -479,21 +479,25 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     [Fact]
-    public async Task CommitPastDeadline_MustRetry_RecordStaysUndecided_AndCountsLateRejection()
+    public async Task CommitPastDeadline_ConcludesPresumedAbort_AndCountsLateRejection()
     {
         HLCTimestamp txId = Ts(1000);
         Seam seam = new();
         (DurableTransactionFinalizer finalizer, TransactionRecordStore records, _) = Build(seam);
 
-        // opId (== attempt HLC) is past the frozen decision deadline (9000): the commit CAS is rejected, the record
-        // stays Undecided, and the late-commit-rejection metric fires so a too-tight deadline is observable.
+        // opId (== attempt HLC) is past the frozen decision deadline (9000): the commit CAS is rejected and the
+        // late-commit-rejection metric fires so a too-tight deadline is observable. No later attempt can pass a
+        // deadline that never advances, so the finalizer concludes the presumed abort on the spot rather than
+        // answering a retry that could never terminate.
         long lateRejections = await MeasureCounter("kahuna.durable_tx.late_commit_rejections", async () =>
         {
             DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(10000), CancellationToken.None);
-            Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+            Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+            Assert.Equal(TransactionAbortClass.PresumedAbort, outcome.AbortClass);
+            Assert.True(outcome.LateCommitRejected);
         });
 
-        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
         Assert.Equal(1, lateRejections);
     }
 
@@ -727,7 +731,7 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     [Fact]
-    public async Task Commit_FreshAttemptHlcPastDeadline_YieldsToRecovery()
+    public async Task Commit_FreshAttemptHlcPastDeadline_ConcludesThePresumedAbort()
     {
         HLCTimestamp txId = Ts(1000);
         Seam seam = new();
@@ -736,21 +740,64 @@ public sealed class TestDurableTransactionFinalizer
         seam.Records = records;
         seam.Intents = intents;
         // A fresh attempt clock returns a time past the frozen decision deadline (9000), even though the operation
-        // id (2000) is well within it. The commit compare-and-set is rejected and the record stays Undecided,
-        // yielding to presumed-abort recovery — proving the deadline is checked against a fresh attempt HLC, not
-        // the commit timestamp that is always in-window.
+        // id (2000) is well within it. The commit compare-and-set is rejected — proving the deadline is checked
+        // against a fresh attempt HLC, not the commit timestamp that is always in-window — and, since no later
+        // attempt can ever pass a deadline that does not advance, the finalizer drives the presumed abort itself
+        // instead of answering a retry that could never terminate.
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate, attemptClock: () => Ts(10000));
 
-        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
-            Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        long concluded = await MeasureCounter("kahuna.durable_tx.late_commit_conclusions", async () =>
+        {
+            DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+                Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
 
-        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
-        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+            Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+            Assert.Equal(TransactionAbortClass.PresumedAbort, outcome.AbortClass);
 
-        // The retry names its cause, so the coordinator can count the transaction once however many times the
-        // client retries this commit.
-        Assert.True(outcome.LateCommitRejected);
+            // The outcome still names the deadline gate as its cause, so the coordinator counts the transaction
+            // once however many times the client retried this commit.
+            Assert.True(outcome.LateCommitRejected);
+        });
+
+        Assert.True(concluded >= 1);
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Abort, record.Decision);
+        Assert.Equal(TransactionAbortClass.PresumedAbort, record.AbortClass);
+    }
+
+    [Fact]
+    public async Task Commit_FreshAttemptHlcPastDeadline_YieldsToACommitThatAlreadyWon()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        // A stalled bundle whose propose-time attempt passed the gate applies before this attempt's decision:
+        // the record already reads Commit when the late attempt's presumed abort reaches the CAS.
+        records.Replicate(5, new RaftLog
+        {
+            LogType = ReplicationTypes.TransactionRecord,
+            LogData = TransactionRecordStore.SerializeDelta([
+                new InitializeTransactionCommand(txId, 1, input.CoordinatorKey, input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline, input.ManifestHash, input.Manifest, Ts(1000), Ts(1000)),
+                new CommitTransactionCommand(txId, 1, input.ManifestHash, Ts(1500), Ts(1500))
+            ])
+        });
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate, attemptClock: () => Ts(10000));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // The commit is the canonical truth; the late attempt reports it rather than fabricating an abort.
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
     }
 
     [Fact]
@@ -1255,12 +1302,12 @@ public sealed class TestDurableTransactionFinalizer
 
     /// <summary>
     /// A bundle whose attempt HLC passed the frozen decision deadline by the time it applies (a stalled
-    /// proposal): the record's deadline gate keeps it Undecided, the finalize answers the retryable outcome that
-    /// names the late commit, and nothing is applied to the leader's live state. Presumed-abort recovery owns the
-    /// record from here.
+    /// proposal): the record's deadline gate keeps the bundled commit out, nothing is applied to the leader's
+    /// live state, and — because no later attempt can pass a deadline that never advances — the finalize drives
+    /// the presumed abort through the record on the spot and reports it, naming the late commit as the cause.
     /// </summary>
     [Fact]
-    public async Task OnePhase_ExpiredAttempt_StaysUndecided_AndNamesTheLateCommit()
+    public async Task OnePhase_ExpiredAttempt_ConcludesThePresumedAbort_AndNamesTheLateCommit()
     {
         HLCTimestamp txId = Ts(1000);
         (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
@@ -1279,14 +1326,17 @@ public sealed class TestDurableTransactionFinalizer
             DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
                 Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
 
-            Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+            Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+            Assert.Equal(TransactionAbortClass.PresumedAbort, outcome.AbortClass);
             Assert.True(outcome.LateCommitRejected);
         });
 
         Assert.True(late >= 1);
-        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Abort, record.Decision);
+        Assert.Equal(TransactionAbortClass.PresumedAbort, record.AbortClass);
         Assert.Empty(localApplies);
-        Assert.NotNull(intents.Get("acct/1")); // the prepared intent stays for recovery to resolve
     }
 
     /// <summary>A bundle delivered twice (a retry after a lost acknowledgement re-proposes the identical batch)

@@ -2348,15 +2348,90 @@ internal sealed class KeyValueLocator
     /// <returns>
     /// A <see cref="KeyValueResponseType"/> indicating the outcome of the transaction operation.
     /// </returns>
+    /// <summary>
+    /// True when this node holds the interactive session for <paramref name="transactionId"/>. Sessions live on
+    /// the node that began them and do not move with the coordinator partition's leadership: the session's own
+    /// finalizer forwards its durable operations to whichever node leads the partition now. Routing a commit,
+    /// rollback or operation for a session this node owns to the current leader — which has no such session —
+    /// answered every commit in flight on a stepped-down leader with "No transaction session" until the client's
+    /// deadline (CamusDB slow-disk runs sd2–sd6, ~100 indeterminate commits per leader pause).
+    /// </summary>
+    private bool OwnsSession(HLCTimestamp transactionId) => manager?.Coordinator?.HasSession(transactionId) == true;
+
+
+    /// <summary>
+    /// Whether this leader may look for a session it does not hold on its peers: only for a request that
+    /// arrived directly from a caller. A request that was already forwarded here (a non-leader routed it to
+    /// the leader) is answered locally, so a transaction no node holds gets one answer instead of a round of
+    /// probes per hop.
+    /// </summary>
+    private static bool MayProbePeersForOwner => ForwardedRequestScope.ChainedHops == 0;
+
+    /// <summary>
+    /// Offers a commit or rollback for a session this leader does not hold to each peer in turn and returns the
+    /// first definitive answer: the peer that owns the session (it was begun on the previous leader and stayed
+    /// there) serves it and answers Committed/Aborted/RolledBack; every other peer answers unknown (Errored) or
+    /// MustRetry, which is skipped. Null when no peer served it, so the caller falls back to its local answer
+    /// (a retained terminal outcome, the canonical record, or unknown). The membership roster cannot name the
+    /// owner directly — peers' node ids are not carried on it — so the probe is the round trip that replaces
+    /// it, and it runs only on the rare leader-but-not-owner path, never on a steady-state commit.
+    /// </summary>
+    private async Task<T?> ProbePeersForSessionAsync<T>(Func<string, Task<T>> ask, Func<T, KeyValueResponseType> status, CancellationToken cancellationToken) where T : struct
+    {
+        string local = raft.GetLocalEndpoint();
+
+        foreach (RaftNode peer in raft.GetNodes())
+        {
+            if (peer.Endpoint == local)
+                continue;
+
+            try
+            {
+                T answer = await ask(peer.Endpoint);
+                KeyValueResponseType type = status(answer);
+                if (type is not (KeyValueResponseType.Errored or KeyValueResponseType.MustRetry))
+                    return answer;
+            }
+            catch (KahunaServerException)
+            {
+                // The peer does not hold the session either.
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Probing {Peer} for the owner of a transaction session failed; trying the next peer", peer.Endpoint);
+            }
+        }
+
+        return null;
+    }
+
     public async Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (handle.IsEmpty)
             return (KeyValueResponseType.Errored, null);
 
+        // The session's owner serves it, whoever leads the coordinator partition now.
+        if (OwnsSession(handle.TransactionId))
+            return await manager.CommitTransaction(handle);
+
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            // This node leads the coordinator partition but did not begin the session: leadership moved after
+            // the session began. Offer the commit to the peers, one of which owns it; if none does, the local
+            // answer (a retained outcome, the canonical record, or unknown) stands.
+            if (raft.Joined && MayProbePeersForOwner)
+            {
+                (KeyValueResponseType, string?)? served = await ProbePeersForSessionAsync<(KeyValueResponseType, string?)>(
+                    peer => interNodeCommunication.CommitTransaction(peer, handle, cancellationToken), r => r.Item1, cancellationToken);
+
+                if (served is { } answer)
+                    return answer;
+            }
+
             return await manager.CommitTransaction(handle);
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -2378,10 +2453,24 @@ internal sealed class KeyValueLocator
         if (handle.IsEmpty)
             return KeyValueResponseType.Errored;
 
+        if (OwnsSession(handle.TransactionId))
+            return await manager.RollbackTransaction(handle);
+
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
         if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        {
+            if (raft.Joined && MayProbePeersForOwner)
+            {
+                KeyValueResponseType? served = await ProbePeersForSessionAsync<KeyValueResponseType>(
+                    peer => interNodeCommunication.RollbackTransaction(peer, handle, cancellationToken), r => r, cancellationToken);
+
+                if (served is { } answer)
+                    return answer;
+            }
+
             return await manager.RollbackTransaction(handle);
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -2405,7 +2494,8 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        // The session's owner registers it, whoever leads the coordinator partition now (see OwnsSession).
+        if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) local =
                 manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
@@ -2484,7 +2574,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             string? localAnchor = manager.CompleteOperation(transactionId, operationId, payload);
 
@@ -2524,7 +2614,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             TransactionWorkingSet? local = manager.GetTransactionWorkingSet(transactionId);
 

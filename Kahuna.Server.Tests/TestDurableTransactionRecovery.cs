@@ -570,4 +570,84 @@ public sealed class TestDurableTransactionRecovery
         Assert.Equal(0, await recovery.SettleSuppliedIntentsAsync(PartitionId, [intent], now: Ts(10000), CancellationToken.None));
         Assert.Null(store.Get(BlockedKey));
     }
+
+    // ── record-less intents past the retention horizon ──────────────────────────
+    //
+    // Past the record retention horizon an absent record no longer means "never initialized": the terminal record
+    // may have been reclaimed. The sweep must not presume abort (a reclaimed commit's leg would be discarded); it
+    // decides from the leg's completion receipt when one exists and otherwise holds the intent, visibly.
+
+    [Fact]
+    public async Task RecordlessIntentPastHorizon_WithACompletionReceipt_IsSettledAsTheReclaimedCommit()
+    {
+        PreparedIntent intent = PendingIntent("acct/1", recoveryDeadline: Ts(2000));
+        PreparedIntentStore store = StoreWith(intent);
+        Seam seam = new() { Store = store };
+
+        bool abortDriven = false;
+        DurableTransactionRecovery recovery = new(
+            store, seam.Replicate,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(null),
+            (_, _, _) => { abortDriven = true; return Task.FromResult<TransactionRecord?>(null); },
+            recordRetentionTtl: TimeSpan.FromMilliseconds(1),
+            legMaterialized: _ => true);
+
+        // now is far past both the recovery deadline and the 1 ms retention horizon measured from the commit timestamp.
+        int settled = await recovery.SweepAsync(PartitionId, Ts(50_000), CancellationToken.None);
+
+        Assert.Equal(1, settled);
+        Assert.False(abortDriven);
+        Assert.Null(store.Get("acct/1"));
+        Assert.Equal(0, recovery.HeldRecordlessIntents);
+        Assert.Contains(seam.Calls, c => c.Type == ReplicationTypes.KeyValues);
+    }
+
+    [Fact]
+    public async Task RecordlessIntentPastHorizon_WithoutAReceipt_IsHeldAndCounted()
+    {
+        PreparedIntent intent = PendingIntent("acct/1", recoveryDeadline: Ts(2000));
+        PreparedIntentStore store = StoreWith(intent);
+        Seam seam = new() { Store = store };
+
+        bool abortDriven = false;
+        DurableTransactionRecovery recovery = new(
+            store, seam.Replicate,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(null),
+            (_, _, _) => { abortDriven = true; return Task.FromResult<TransactionRecord?>(null); },
+            recordRetentionTtl: TimeSpan.FromMilliseconds(1),
+            legMaterialized: _ => false);
+
+        int settled = await recovery.SweepAsync(PartitionId, Ts(50_000), CancellationToken.None);
+
+        Assert.Equal(0, settled);
+        Assert.False(abortDriven);
+        Assert.NotNull(store.Get("acct/1"));
+        Assert.Equal(1, recovery.HeldRecordlessIntents);
+        (string key, HLCTimestamp transactionId) = Assert.Single(recovery.HeldRecordlessSamples);
+        Assert.Equal("acct/1", key);
+        Assert.Equal(intent.TransactionId, transactionId);
+    }
+
+    [Fact]
+    public async Task RecordlessIntentInsideHorizon_IsStillPresumedAborted()
+    {
+        PreparedIntent intent = PendingIntent("acct/1", recoveryDeadline: Ts(2000));
+        PreparedIntentStore store = StoreWith(intent);
+        Seam seam = new() { Store = store };
+
+        TransactionRecord aborted = Record(TransactionDecision.Abort, Ts(2000), TransactionAbortClass.PresumedAbort);
+        DurableTransactionRecovery recovery = new(
+            store, seam.Replicate,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(null),
+            (_, _, _) => Task.FromResult<TransactionRecord?>(aborted),
+            recordRetentionTtl: TimeSpan.FromMinutes(5),
+            legMaterialized: _ => true);
+
+        // Inside the horizon a receipt is not consulted: absence still means never initialized and the orphan is aborted.
+        int settled = await recovery.SweepAsync(PartitionId, Ts(3000), CancellationToken.None);
+
+        Assert.Equal(1, settled);
+        Assert.Null(store.Get("acct/1"));
+        Assert.Equal(0, recovery.HeldRecordlessIntents);
+    }
 }

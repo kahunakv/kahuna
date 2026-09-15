@@ -324,6 +324,98 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// Replica fence lag-breaker transitions, tagged by <c>state</c>: <c>lagging</c> when a replica failed to
+    /// attest enough consecutive full-wait asks and commits stop waiting on its apply, <c>healthy</c> when a
+    /// probe saw it attest again. One pair per episode; the running count of lagging replicas is
+    /// <c>kahuna.durable_tx.replica_fence_lagging_replicas</c>.
+    /// </summary>
+    internal static readonly Counter<long> ReplicaFenceLagTransitions =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.replica_fence_lag_transitions",
+            description: "Replica fence lag-breaker transitions, tagged by the state entered (lagging, healthy).");
+
+    private static int replicaFenceLaggingReplicas;
+
+    /// <summary>Replicas the fence currently asks without the apply wait because they stopped attesting.</summary>
+    internal static readonly ObservableGauge<int> ReplicaFenceLaggingReplicas =
+        Meter.CreateObservableGauge(
+            "kahuna.durable_tx.replica_fence_lagging_replicas",
+            static () => Volatile.Read(ref replicaFenceLaggingReplicas),
+            description: "Replica endpoints the pre-decision fence currently treats as lagging: asked without the apply wait, probed once a second.");
+
+    /// <summary>Process-wide count behind <see cref="ReplicaFenceLaggingReplicas"/>, readable for tests.</summary>
+    internal static int ReplicaFenceLaggingReplicasCount => Volatile.Read(ref replicaFenceLaggingReplicas);
+
+    private static readonly KeyValuePair<string, object?> StateLagging = new("state", "lagging");
+    private static readonly KeyValuePair<string, object?> StateHealthy = new("state", "healthy");
+
+    internal static void ReplicaFenceLagTransition(bool lagging)
+    {
+        if (lagging)
+            Interlocked.Increment(ref replicaFenceLaggingReplicas);
+        else
+            Interlocked.Decrement(ref replicaFenceLaggingReplicas);
+
+        ReplicaFenceLagTransitions.Add(1, lagging ? StateLagging : StateHealthy);
+    }
+
+    /// <summary>
+    /// Fence asks sent to a replica held as lagging, tagged by <c>kind</c>: <c>no_wait</c> for the zero-wait
+    /// asks that keep its instant verdict in the fence, <c>probe</c> for the periodic full-wait recovery probe.
+    /// </summary>
+    internal static readonly Counter<long> ReplicaFenceLaggingAsks =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.replica_fence_lagging_asks",
+            description: "Replica fence verdict requests sent to a lagging replica, tagged by kind (no_wait, probe).");
+
+    private static readonly KeyValuePair<string, object?> KindNoWait = new("kind", "no_wait");
+    private static readonly KeyValuePair<string, object?> KindProbe = new("kind", "probe");
+
+    internal static void ReplicaFenceAskedLagging(bool probe) =>
+        ReplicaFenceLaggingAsks.Add(1, probe ? KindProbe : KindNoWait);
+
+    /// <summary>
+    /// Commits the deadline gate withheld that the finalizer concluded on the spot by driving the presumed abort
+    /// through the record CAS, tagged by <c>outcome</c>: <c>aborted</c> (the abort won), <c>committed</c> (a stalled
+    /// commit had already applied and the CAS reported it), <c>retry</c> (the fence could not be replicated).
+    /// Each is one client retry loop that terminates instead of spinning against a deadline that cannot advance.
+    /// </summary>
+    internal static readonly Counter<long> LateCommitConclusions =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.late_commit_conclusions",
+            description: "Deadline-gated commits concluded by the finalizer through the record CAS, tagged by outcome (aborted, committed, retry).");
+
+    private static readonly KeyValuePair<string, object?> OutcomeAborted = new("outcome", "aborted");
+    private static readonly KeyValuePair<string, object?> OutcomeCommitted = new("outcome", "committed");
+    private static readonly KeyValuePair<string, object?> OutcomeRetry = new("outcome", "retry");
+
+    internal static void LateCommitConcluded(DurableFinalizeResult result) =>
+        LateCommitConclusions.Add(1, result switch
+        {
+            DurableFinalizeResult.Aborted => OutcomeAborted,
+            DurableFinalizeResult.Committed => OutcomeCommitted,
+            _ => OutcomeRetry
+        });
+
+    /// <summary>
+    /// Durable commit retries that arrived with their frozen decision deadline already behind the attempt clock,
+    /// concluded through the record CAS before re-driving any prepare (the same presumed-abort fence the reaper
+    /// and rollback use), tagged by <c>outcome</c>.
+    /// </summary>
+    internal static readonly Counter<long> RetriesPastDeadline =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.retries_past_deadline",
+            description: "Durable commit retries whose frozen decision deadline had passed, concluded through the record CAS instead of re-driven, tagged by outcome (aborted, committed, retry).");
+
+    internal static void RetryPastDeadlineConcluded(DurableFinalizeResult result) =>
+        RetriesPastDeadline.Add(1, result switch
+        {
+            DurableFinalizeResult.Aborted => OutcomeAborted,
+            DurableFinalizeResult.Committed => OutcomeCommitted,
+            _ => OutcomeRetry
+        });
+
+    /// <summary>
     /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
     /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
     /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals
@@ -434,6 +526,27 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.transactions.recordless_intent_holds",
             description: "Due prepared intents held by recovery because their record is absent past the retention horizon.");
+
+    /// <summary>Record-less intents past the retention horizon that recovery settled as commits because the leg's
+    /// completion receipt proved its value had materialized.</summary>
+    internal static readonly Counter<long> RecordlessIntentReceiptCommits =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.recordless_intent_receipt_commits",
+            description: "Record-less prepared intents past the retention horizon settled as commits on the evidence of their completion receipt.");
+
+    private static int recordlessIntentsHeld;
+
+    /// <summary>Record-less intents the last recovery pass on this node held: each is a key that stays read-only
+    /// until the transaction's outcome can be proven, so a non-zero value is an operator signal, not a counter.</summary>
+    internal static readonly ObservableGauge<int> RecordlessIntentsHeld =
+        Meter.CreateObservableGauge(
+            "kahuna.transactions.recordless_intents_held",
+            static () => Volatile.Read(ref recordlessIntentsHeld),
+            description: "Prepared intents the last recovery pass held because their record is absent past the retention horizon and no receipt proves the leg materialized; each holds its key read-only.");
+
+    internal static int RecordlessIntentsHeldCount => Volatile.Read(ref recordlessIntentsHeld);
+
+    internal static void SetRecordlessIntentsHeld(int count) => Volatile.Write(ref recordlessIntentsHeld, count);
 
     /// <summary>
     /// Same-id resends of an already-completed many-key batch that were refused instead of re-executed.

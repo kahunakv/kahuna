@@ -83,11 +83,85 @@ internal sealed class PersistenceBacklogMonitor : IDisposable
             description: "Unflushed backlog as a fraction of the tighter budget (items over PersistenceMaxUnflushedItems or bytes over PersistenceMaxUnflushedBytes, whichever is larger); alert at 0.75, back-pressure above 1.");
         meter.CreateObservableGauge("kahuna.persistence.backlog_gate_closed", () => IsOverBudget ? 1 : 0,
             description: "1 while the unflushed backlog exceeds a budget and ordinary writes admitted on this node are refused retryably, else 0.");
+        meter.CreateObservableGauge("kahuna.persistence.oldest_inflight_write_age_ms", () => InflightWriteAgeMs, unit: "ms",
+            description: "Age of the store write handed to the persistence backend and not yet answered, 0 while none is in flight: rises only while the backend (the device under it) is not answering, unlike the backlog gauges which rise whenever the writer is behind.");
 
         // The sampler exists only for the log: without a logger there is nobody to tell. Both bounds
         // disabled means no budget to measure against, so no alerts either.
         if (logger is not null && (maxItems > 0 || maxBytes > 0))
             sampler = new Timer(static state => ((PersistenceBacklogMonitor)state!).Sample(), this, SamplePeriod, SamplePeriod);
+
+        // The stall sampler reports a store write that is still in flight past the threshold — the completion
+        // line alone would say nothing until the device answers, which under a device pause is the whole pause.
+        stallWarnMs = configuration.PersistenceWriteStallWarnMs;
+        if (logger is not null && stallWarnMs > 0)
+            stallSampler = new Timer(static state => ((PersistenceBacklogMonitor)state!).SampleStall(), this, StallSamplePeriod, StallSamplePeriod);
+    }
+
+    /// <summary>How often the stall sampler reads the in-flight write's age.</summary>
+    internal static readonly TimeSpan StallSamplePeriod = TimeSpan.FromSeconds(1);
+
+    /// <summary>Spacing of reminder lines while one store write stays in flight past the threshold.</summary>
+    internal static readonly TimeSpan StallReminderInterval = TimeSpan.FromSeconds(10);
+
+    private readonly int stallWarnMs;
+
+    private readonly Timer? stallSampler;
+
+    private int stallSampling;
+
+    private long stallReportedAtTicks;
+
+    private long lastStallReminderTicks;
+
+    /// <summary>Age of the store write currently handed to the backend, 0 while none is in flight.</summary>
+    public double InflightWriteAgeMs => Actor?.InflightStoreAgeMs ?? 0;
+
+    /// <summary>One stall-sampler tick: warn once when the in-flight write crosses the threshold, remind while it
+    /// stays there, and reset when it completes (the writer's own completion line carries the duration).</summary>
+    internal void SampleStall()
+    {
+        if (Interlocked.CompareExchange(ref stallSampling, 1, 0) != 0)
+            return;
+
+        try
+        {
+            BackgroundWriterActor? actor = Actor;
+            double ageMs = actor?.InflightStoreAgeMs ?? 0;
+            long now = Stopwatch.GetTimestamp();
+
+            if (ageMs < stallWarnMs)
+            {
+                stallReportedAtTicks = 0;
+                return;
+            }
+
+            if (stallReportedAtTicks == 0)
+            {
+                stallReportedAtTicks = now;
+                lastStallReminderTicks = now;
+                logger!.LogWarning(
+                    "Durable-write stall: a store write of {Kind} has been in flight for {AgeMs:F0} ms without an answer from the persistence backend (threshold {WarnMs} ms) — the device under this node is not answering; the unflushed backlog will grow until it does. Reminder every {Interval} while it persists; the completion line carries the final duration",
+                    actor?.InflightStoreKind, ageMs, stallWarnMs, StallReminderInterval);
+                return;
+            }
+
+            if (Stopwatch.GetElapsedTime(lastStallReminderTicks) < StallReminderInterval)
+                return;
+
+            lastStallReminderTicks = now;
+            logger!.LogWarning(
+                "Durable-write stall continues: the store write of {Kind} has been in flight for {AgeMs:F0} ms without an answer from the persistence backend (unflushed backlog {Items} items / {Bytes} bytes)",
+                actor?.InflightStoreKind, ageMs, UnflushedItems, UnflushedBytes);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug(ex, "Durable-write stall sampler tick failed");
+        }
+        finally
+        {
+            Volatile.Write(ref stallSampling, 0);
+        }
     }
 
     private BackgroundWriterActor? Actor => writer.Runner.Actor as BackgroundWriterActor;
@@ -208,6 +282,7 @@ internal sealed class PersistenceBacklogMonitor : IDisposable
     public void Dispose()
     {
         sampler?.Dispose();
+        stallSampler?.Dispose();
         meter.Dispose();
     }
 }

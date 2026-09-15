@@ -423,6 +423,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PersistentRevisionCleanupTimeBudget = options.PersistentRevisionCleanupTimeBudget,
             PersistenceMaxUnflushedItems = options.PersistenceMaxUnflushedItems,
             PersistenceMaxUnflushedBytes = options.PersistenceMaxUnflushedBytes,
+            PersistenceWriteStallWarnMs = options.PersistenceWriteStallWarnMs,
             PitrWindow = options.PitrWindow,
             BaseSnapshotInterval = options.BaseSnapshotInterval,
             CheckpointInterval = options.CheckpointInterval,

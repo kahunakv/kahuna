@@ -413,6 +413,9 @@ public static class ConfigurationValidator
         if (configuration.PersistenceMaxUnflushedBytes < 0)
             configuration.PersistenceMaxUnflushedBytes = 0;
 
+        if (configuration.PersistenceWriteStallWarnMs < 0)
+            configuration.PersistenceWriteStallWarnMs = 0;
+
         if (!IsPersistentRevisionRetentionEnabled(configuration))
             return;
 

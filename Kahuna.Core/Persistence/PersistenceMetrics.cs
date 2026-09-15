@@ -12,6 +12,25 @@ internal static class PersistenceMetrics
 {
     internal static readonly Meter Meter = new("Kahuna", "1.0");
 
+    /// <summary>
+    /// Wall-clock time of one store write from the moment the background writer hands it to the persistence
+    /// backend until the backend answers — success, failure or exception alike, tagged by <c>kind</c>
+    /// (<c>key_values</c>, <c>locks</c>, <c>floors</c>) and <c>result</c> (<c>ok</c>, <c>failed</c>,
+    /// <c>threw</c>). Unlike the success-only debug log lines this records every attempt, so a device that
+    /// stops answering shows up as the histogram's max rather than as a silence; the age of the write still in
+    /// flight is <c>kahuna.persistence.oldest_inflight_write_age_ms</c>.
+    /// </summary>
+    internal static readonly Histogram<double> StoreWriteMs =
+        Meter.CreateHistogram<double>("kahuna.persistence.store_write_duration", unit: "ms",
+            description: "Time one store write spent between hand-off to the persistence backend and its answer, success or failure, tagged by kind and result.");
+
+    internal static readonly KeyValuePair<string, object?> KindKeyValues = new("kind", "key_values");
+    internal static readonly KeyValuePair<string, object?> KindLocks = new("kind", "locks");
+    internal static readonly KeyValuePair<string, object?> KindFloors = new("kind", "floors");
+    internal static readonly KeyValuePair<string, object?> ResultOk = new("result", "ok");
+    internal static readonly KeyValuePair<string, object?> ResultFailed = new("result", "failed");
+    internal static readonly KeyValuePair<string, object?> ResultThrew = new("result", "threw");
+
     /// <summary>Keys the prune (targeted and sweep) walked (a revision-block scan). Compare with
     /// <see cref="PruneKeysSkipped"/>: on a hot key-set with nothing prunable yet, skips should
     /// dominate; walks that dominate mean the memo is not covering the workload.</summary>

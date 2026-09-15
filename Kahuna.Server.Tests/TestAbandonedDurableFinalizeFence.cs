@@ -98,10 +98,10 @@ public sealed class TestAbandonedDurableFinalizeFence
         }
     }
 
-    private async Task<(EmbeddedKahunaNode Node, StallingExecutor Executor)> StartNode(string leaderKey, CancellationToken ct)
+    private async Task<(EmbeddedKahunaNode Node, StallingExecutor Executor)> StartNode(string leaderKey, CancellationToken ct, Action<EmbeddedKahunaOptions>? configure = null)
     {
         StallingExecutor? stalling = null;
-        EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
+        EmbeddedKahunaOptions options = new()
         {
             ReadIOThreads = 1,
             WriteIOThreads = 1,
@@ -113,7 +113,10 @@ public sealed class TestAbandonedDurableFinalizeFence
             // deterministic to assert.
             DurableDeferredSettlement = false,
             WriteBatchExecutorDecorator = inner => stalling = new StallingExecutor(inner)
-        }, loggerFactory);
+        };
+        configure?.Invoke(options);
+
+        EmbeddedKahunaNode node = new(options, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync(leaderKey, ct);
         return (node, stalling!);
@@ -250,6 +253,97 @@ public sealed class TestAbandonedDurableFinalizeFence
             return read == KeyValueResponseType.Get && entry?.Value is not null &&
                    entry.Value.AsSpan().SequenceEqual("stalled-value"u8);
         }, ct);
+    }
+
+    /// <summary>
+    /// The coordinator-side liveness half of the fence (Vorpal 3c7f6b99, finding 2): a commit whose anchor
+    /// proposal never committed answers MustRetry, and the client's contract is to retry COMMIT on the same
+    /// session. Once the frozen decision deadline has passed, no retry can ever commit — the record's deadline
+    /// gate compares against an attempt HLC that only advances — so a retry that re-drove the frozen input
+    /// re-initialised the record on the (possibly new) anchor leader and lost to the gate again, forever. The
+    /// coordinator must instead conclude such a retry through the record fence: a presumed-abort tombstone from
+    /// absence, reported as Aborted, that also rejects the stalled bundle when the healed partition finally
+    /// applies it.
+    /// </summary>
+    [Fact]
+    public async Task RetriedCommit_PastItsFrozenDeadline_ConcludesThroughTheFenceInsteadOfSpinning()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const string key = "fence/retry/k1";
+        const long deadlineFloorMs = 1_000;
+
+        (EmbeddedKahunaNode node, StallingExecutor executor) = await StartNode(key, ct,
+            // A short frozen deadline so the retry can arrive past it inside the test.
+            options => options.DurableDecisionDeadlineFloorMs = deadlineFloorMs);
+        await using EmbeddedKahunaNode ownedNode = node;
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        TransactionHandle handle = await StartSessionWithStalledCommit(node, executor, key, ct);
+        int stalledBeforeRetries = executor.StalledBatches;
+
+        // Inside the deadline the retry re-drives the frozen input, as it should: still stalled, still MustRetry.
+        (KeyValueResponseType earlyRetry, _) = await kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.MustRetry, earlyRetry);
+        Assert.True(executor.StalledBatches > stalledBeforeRetries, "an in-window retry must re-drive the proposal");
+
+        // Past the frozen deadline the partition heals (the executor answers again) but the stalled bundle has
+        // NOT applied. The retry must terminate: Aborted through the fence, never another MustRetry.
+        await Task.Delay(TimeSpan.FromMilliseconds(deadlineFloorMs * 3), ct);
+        executor.Armed = false;
+        int stalledBeforeLateRetry = executor.StalledBatches;
+
+        KeyValueResponseType lateRetry = KeyValueResponseType.MustRetry;
+        long concluded = await MeasureCounter("kahuna.durable_tx.retries_past_deadline", async () =>
+            (lateRetry, _) = await kahuna.LocateAndCommitTransaction(handle, ct));
+
+        Assert.Equal(KeyValueResponseType.Aborted, lateRetry);
+        Assert.Equal(stalledBeforeLateRetry, executor.StalledBatches);
+        Assert.True(concluded > 0, "the retry must have been concluded through the record fence, not re-driven");
+
+        TransactionRecord? record = kahuna.DurableTransactionRecordStore.Get(handle.TransactionId, 1);
+        Assert.NotNull(record);
+        Assert.Equal(TransactionDecision.Abort, record!.Decision);
+        Assert.Equal(TransactionAbortClass.PresumedAbort, record.AbortClass);
+
+        // A further retry replays the terminal answer; it does not reopen anything.
+        (KeyValueResponseType replay, _) = await kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.NotEqual(KeyValueResponseType.MustRetry, replay);
+        Assert.NotEqual(KeyValueResponseType.Committed, replay);
+
+        // The healed partition now commits the stalled bundle: the tombstone rejects its late commit and the
+        // write never becomes visible.
+        await executor.ReplayStalledAsync(kahuna, ct);
+
+        record = kahuna.DurableTransactionRecordStore.Get(handle.TransactionId, 1);
+        Assert.NotNull(record);
+        Assert.Equal(TransactionDecision.Abort, record!.Decision);
+
+        await WaitUntil(async () =>
+        {
+            await kahuna.KeyValues.RecoverPreparedIntents(ct);
+            return kahuna.DurablePreparedIntentStore.Count == 0;
+        }, ct);
+
+        (KeyValueResponseType read, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.True(read == KeyValueResponseType.DoesNotExist || entry?.Value is null,
+            $"aborted transaction's write must not be visible (read={read})");
+    }
+
+    /// <summary>Sum of a Kahuna counter instrument's increments observed while <paramref name="action"/> runs.</summary>
+    private static async Task<long> MeasureCounter(string instrumentName, Func<Task> action)
+    {
+        long total = 0;
+        using System.Diagnostics.Metrics.MeterListener listener = new();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == "Kahuna" && instrument.Name == instrumentName)
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref total, value));
+        listener.Start();
+        await action();
+        return Interlocked.Read(ref total);
     }
 
     private static async Task WaitUntil(Func<Task<bool>> predicate, CancellationToken ct, int timeoutMs = 30_000)

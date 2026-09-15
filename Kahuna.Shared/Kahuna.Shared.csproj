@@ -9,13 +9,13 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>Kahuna.Shared</PackageId>
-        <Version>1.8.2</Version>
-        <Description>.NET shared libries for Kahuna: Distributed locks and reliable key-value store </Description>
+        <Version>1.8.3</Version>
+        <Description>Shared libraries for Kahuna: Distributed locks and reliable key-value store </Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Andres Gutierrez</Company>
         <InvariantGlobalization>true</InvariantGlobalization>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <PackageDescription>.NET client for Kahuna: Distributed locks and reliable key-value store</PackageDescription>
+        <PackageDescription>Shared libraries for Kahuna: Distributed locks and reliable key-value store</PackageDescription>
         <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
         <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
         <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -23,7 +23,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-	<PackageReference Include="Kommander" Version="1.6.7" />
+	<PackageReference Include="Kommander" Version="1.6.8" />
         <PackageReference Include="Grpc.Tools" Version="2.68.1">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>
