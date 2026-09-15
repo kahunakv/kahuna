@@ -203,7 +203,7 @@ public sealed class TestTransactionRecordRetentionBudget
     // milliseconds, far inside it) plus two 100 ms maintenance ticks → 1.2 s.
     private static readonly TimeSpan ShortFloor = TimeSpan.FromMilliseconds(1_200);
 
-    private async Task<EmbeddedKahunaNode> StartNodeAsync(CancellationToken ct, Action<EmbeddedKahunaOptions> configure)
+    private async Task<EmbeddedKahunaNode> StartNodeAsync(Action<EmbeddedKahunaOptions> configure, CancellationToken ct)
     {
         EmbeddedKahunaOptions options = new()
         {
@@ -255,7 +255,7 @@ public sealed class TestTransactionRecordRetentionBudget
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o => o.DurableRecordRetentionMax = Budget);
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o => o.DurableRecordRetentionMax = Budget, ct);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
 
         DurableMaintenanceService maintenance = kahuna.KeyValues.DurableMaintenance;
@@ -305,11 +305,11 @@ public sealed class TestTransactionRecordRetentionBudget
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         // A byte budget worth roughly a third of what the transactions will retain.
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.DurableRecordRetentionMaxBytes = 1;      // placeholder, sized below once a record's cost is known
             o.DurableMaintenanceInterval = TimeSpan.FromMinutes(1); // driven by hand here
-        });
+        }, ct);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         DurableMaintenanceService maintenance = kahuna.KeyValues.DurableMaintenance;
 
@@ -337,12 +337,12 @@ public sealed class TestTransactionRecordRetentionBudget
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.DurableRecordRetentionMax = 2;
             o.DurableRecordRetentionFloor = TimeSpan.FromMinutes(10);
             o.DurableMaintenanceInterval = TimeSpan.FromMinutes(1);
-        });
+        }, ct);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         DurableMaintenanceService maintenance = kahuna.KeyValues.DurableMaintenance;
 
@@ -367,7 +367,7 @@ public sealed class TestTransactionRecordRetentionBudget
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o => o.DurableMaintenanceInterval = TimeSpan.FromMinutes(1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o => o.DurableMaintenanceInterval = TimeSpan.FromMinutes(1), ct);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         DurableMaintenanceService maintenance = kahuna.KeyValues.DurableMaintenance;
 
@@ -381,11 +381,11 @@ public sealed class TestTransactionRecordRetentionBudget
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.DurableRecordRetentionHeapPressure = 0.85;
             o.DurableMaintenanceInterval = TimeSpan.FromMinutes(1); // driven by hand: the floor is then 1 s + 2 min
-        });
+        }, ct);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         DurableMaintenanceService maintenance = kahuna.KeyValues.DurableMaintenance;
 
@@ -419,7 +419,7 @@ public sealed class TestTransactionRecordRetentionBudget
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         // Budgets off, valve on, a floor the test can wait out; the periodic tick is the one that acts.
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o => o.DurableRecordRetentionHeapPressure = 0.85);
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o => o.DurableRecordRetentionHeapPressure = 0.85, ct);
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         DurableMaintenanceService maintenance = kahuna.KeyValues.DurableMaintenance;
 

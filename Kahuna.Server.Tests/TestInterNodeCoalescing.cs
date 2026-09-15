@@ -239,8 +239,10 @@ public sealed class TestInterNodeCoalescing
 
             Assert.True(firstPromise.Task.IsCompletedSuccessfully);
             Assert.True(secondPromise.Task.IsCompletedSuccessfully);
-            Assert.NotNull(firstPromise.Task.Result.LookupTransactionRecord);
-            Assert.NotNull(secondPromise.Task.Result.LookupTransactionRecord);
+            GrpcServerBatcherResponse firstResult = await firstPromise.Task;
+            GrpcServerBatcherResponse secondResult = await secondPromise.Task;
+            Assert.NotNull(firstResult.LookupTransactionRecord);
+            Assert.NotNull(secondResult.LookupTransactionRecord);
 
             Assert.False(RequestStreamRefs().ContainsKey(firstId));
             Assert.False(RequestStreamRefs().ContainsKey(secondId));

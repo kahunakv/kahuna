@@ -433,7 +433,7 @@ public sealed class TestUnflushedOverlayScanBound
                 if (random.Next(2) == 0)
                     overlay.RemoveFlushed(key, revision, Ts(revision));
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         for (int i = 0; i < 2_000; i++)
         {

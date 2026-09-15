@@ -19,6 +19,8 @@ namespace Kahuna.Server.Tests;
 /// </summary>
 public sealed class TestLockProposalCoalescing
 {
+    private static readonly string[] FailedResources = ["failed/transient", "failed/permanent"];
+
     private readonly ILoggerFactory loggerFactory;
 
     public TestLockProposalCoalescing(ITestOutputHelper outputHelper)
@@ -225,7 +227,7 @@ public sealed class TestLockProposalCoalescing
 
             // Neither failure left a stale resident entry or intent behind: both resources grant cleanly now.
             recorder.ClearForced();
-            foreach (string resource in new[] { "failed/transient", "failed/permanent" })
+            foreach (string resource in FailedResources)
             {
                 (LockResponseType type, long fencingToken) = await node.Kahuna.LocateAndTryLock(resource, owner, 30_000, LockDurability.Persistent, ct);
                 Assert.Equal(LockResponseType.Locked, type);

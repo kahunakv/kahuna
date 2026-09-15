@@ -22,7 +22,7 @@ public sealed class TestUserFunctionEvaluation
         loggerFactory = TestLogFactory.Create(outputHelper, quietKommander: true);
     }
 
-    private async Task<EmbeddedKahunaNode> StartNodeAsync(CancellationToken ct, Action<EmbeddedKahunaOptions> configure)
+    private async Task<EmbeddedKahunaNode> StartNodeAsync(Action<EmbeddedKahunaOptions> configure, CancellationToken ct)
     {
         EmbeddedKahunaOptions options = new()
         {
@@ -57,8 +57,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_double", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() * 2), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_double", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() * 2), 1, 1), ct);
 
         KeyValueTransactionResult result = await RunAsync(node, """
         LET x = acme_double(21)
@@ -74,8 +74,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From("tag:" + args[0].AsString()), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From("tag:" + args[0].AsString()), 1, 1), ct);
 
         string key = RandomKey();
 
@@ -97,8 +97,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_upper_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsString().ToUpperInvariant()), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_upper_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsString().ToUpperInvariant()), 1, 1), ct);
 
         string key = RandomKey();
 
@@ -115,8 +115,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_is_even", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() % 2 == 0), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_is_even", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() % 2 == 0), 1, 1), ct);
 
         KeyValueTransactionResult even = await RunAsync(node, """
         IF acme_is_even(4) THEN
@@ -144,8 +144,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From("tag:" + args[0].AsString()), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From("tag:" + args[0].AsString()), 1, 1), ct);
 
         Assert.Equal("TAG:ONE", TextOf(await RunAsync(node, "RETURN upper(acme_tag('one'))")));
     }
@@ -155,8 +155,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_thrice", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() * 3), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_thrice", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() * 3), 1, 1), ct);
 
         Assert.Equal("15", TextOf(await RunAsync(node, "RETURN acme_thrice(abs(-5))")));
     }
@@ -168,7 +168,7 @@ public sealed class TestUserFunctionEvaluation
 
         List<KahunaValueKind> seen = [];
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
             o.Functions.Register("acme_kinds", (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) =>
             {
                 lock (seen)
@@ -180,7 +180,7 @@ public sealed class TestUserFunctionEvaluation
                 }
 
                 return KahunaValue.From((long)args.Length);
-            }));
+            }), ct);
 
         KeyValueTransactionResult result = await RunAsync(node, "RETURN acme_kinds(null, true, 7, 1.5, 'text')");
 
@@ -199,14 +199,14 @@ public sealed class TestUserFunctionEvaluation
         KahunaValueKind observed = KahunaValueKind.Null;
         string payload = string.Empty;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
             o.Functions.Register("acme_echo", (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) =>
             {
                 observed = args[0].Kind;
                 payload = args[0].AsString();
 
                 return KahunaValue.From((long)payload.Length);
-            }, 1, 1));
+            }, 1, 1), ct);
 
         string key = RandomKey();
 
@@ -236,7 +236,7 @@ public sealed class TestUserFunctionEvaluation
         KahunaValueKind observed = KahunaValueKind.Null;
         string payload = string.Empty;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.Functions.Register("acme_raw", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(Encoding.UTF8.GetBytes("raw bytes")));
 
@@ -247,7 +247,7 @@ public sealed class TestUserFunctionEvaluation
 
                 return KahunaValue.From((long)args[0].AsBytes().Length);
             }, 1, 1);
-        });
+        }, ct);
 
         KeyValueTransactionResult result = await RunAsync(node, "RETURN acme_take(acme_raw())");
 
@@ -262,8 +262,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From("tag:" + args[0].AsString()), 1, 1));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_tag", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From("tag:" + args[0].AsString()), 1, 1), ct);
 
         List<KeyValueParameter> parameters = [new() { Key = "@name", Value = "boris" }];
 
@@ -280,7 +280,7 @@ public sealed class TestUserFunctionEvaluation
         int line = 0;
         bool sawTransactionId = false;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.NodeName = "function-context-node";
 
@@ -293,7 +293,7 @@ public sealed class TestUserFunctionEvaluation
 
                 return KahunaValue.From(true);
             });
-        });
+        }, ct);
 
         Assert.Equal("true", TextOf(await RunAsync(node, """
         LET ignored = 1
@@ -311,7 +311,7 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
             o.Functions.Register("acme_sum", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) =>
             {
                 long total = 0;
@@ -320,7 +320,7 @@ public sealed class TestUserFunctionEvaluation
                     total += value.AsLong();
 
                 return KahunaValue.From(total);
-            }));
+            }), ct);
 
         Assert.Equal("0", TextOf(await RunAsync(node, "RETURN acme_sum()")));
         Assert.Equal("6", TextOf(await RunAsync(node, "RETURN acme_sum(1, 2, 3)")));
@@ -334,8 +334,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_pair", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() + args[1].AsLong()), 2, 2));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_pair", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() + args[1].AsLong()), 2, 2), ct);
 
         KeyValueTransactionResult few = await RunAsync(node, "RETURN acme_pair(1)");
 
@@ -353,8 +353,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_pair", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() + args[1].AsLong()), 2, 2));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_pair", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) => KahunaValue.From(args[0].AsLong() + args[1].AsLong()), 2, 2), ct);
 
         string key = RandomKey();
 
@@ -385,14 +385,14 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
             o.Functions.Register("acme_strict", static (in KahunaFunctionContext context, ReadOnlySpan<KahunaValue> args) =>
             {
                 if (args[0].AsLong() < 0)
                     context.Fail("the value must not be negative");
 
                 return KahunaValue.From(args[0].AsLong());
-            }, 1, 1));
+            }, 1, 1), ct);
 
         KeyValueTransactionResult result = await RunAsync(node, "RETURN acme_strict(-1)");
 
@@ -406,11 +406,11 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.Functions.Register("acme_boom", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => throw new InvalidOperationException("kaboom"));
             o.Functions.Register("acme_fine", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(1L));
-        });
+        }, ct);
 
         KeyValueTransactionResult result = await RunAsync(node, "RETURN acme_boom()");
 
@@ -433,8 +433,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_cancel", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => throw new OperationCanceledException("not a timeout")));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_cancel", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => throw new OperationCanceledException("not a timeout")), ct);
 
         KeyValueTransactionResult result = await RunAsync(node, "RETURN acme_cancel()");
 
@@ -450,11 +450,11 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.NodeName = "lonely-node";
             o.Functions.Register("acme_known", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.Null);
-        });
+        }, ct);
 
         KeyValueTransactionResult result = await RunAsync(node, "RETURN acme_missing(1)");
 
@@ -471,8 +471,8 @@ public sealed class TestUserFunctionEvaluation
 
         byte[] reused = Encoding.UTF8.GetBytes("first!");
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_buffer", (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(reused)));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_buffer", (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(reused)), ct);
 
         string key = RandomKey();
 
@@ -492,7 +492,7 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.Functions.Register("acme_null", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.Null);
             o.Functions.Register("acme_bool", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(true));
@@ -500,7 +500,7 @@ public sealed class TestUserFunctionEvaluation
             o.Functions.Register("acme_double", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(1.5d));
             o.Functions.Register("acme_string", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From("text"));
             o.Functions.Register("acme_bytes", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(Encoding.UTF8.GetBytes("raw")));
-        });
+        }, ct);
 
         Assert.Equal("true", TextOf(await RunAsync(node, "RETURN acme_bool()")));
 
@@ -518,14 +518,14 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
         {
             o.Functions.Register("acme_wrap", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) =>
                 KahunaValue.FromArray([args[0], KahunaValue.From("end")]), 1, 1);
 
             o.Functions.Register("acme_count", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) =>
                 KahunaValue.From((long)args[0].AsArray().Count), 1, 1);
-        });
+        }, ct);
 
         Assert.Equal("2", TextOf(await RunAsync(node, "RETURN acme_count(acme_wrap('start'))")));
     }
@@ -537,13 +537,13 @@ public sealed class TestUserFunctionEvaluation
 
         int calls = 0;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
             o.Functions.Register("acme_mark", (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) =>
             {
                 Interlocked.Increment(ref calls);
 
                 return KahunaValue.From("marked");
-            }));
+            }), ct);
 
         string key = RandomKey();
 
@@ -570,7 +570,7 @@ public sealed class TestUserFunctionEvaluation
 
         int calls = 0;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
             o.Functions.Register("acme_identity", (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> args) =>
             {
                 Interlocked.Increment(ref calls);
@@ -578,7 +578,7 @@ public sealed class TestUserFunctionEvaluation
                 // A stateless function under real concurrency: every caller must get its own argument
                 // back, never another caller's.
                 return KahunaValue.From(args[0].AsLong());
-            }, 1, 1));
+            }, 1, 1), ct);
 
         Task<KeyValueTransactionResult>[] running = new Task<KeyValueTransactionResult>[Callers];
 
@@ -605,8 +605,8 @@ public sealed class TestUserFunctionEvaluation
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        await using EmbeddedKahunaNode node = await StartNodeAsync(ct, o =>
-            o.Functions.Register("acme_counted", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(1L)));
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+            o.Functions.Register("acme_counted", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(1L)), ct);
 
         for (int i = 0; i < 5; i++)
             Assert.Equal("1", TextOf(await RunAsync(node, "RETURN acme_counted()")));

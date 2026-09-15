@@ -412,8 +412,9 @@ Record every outcome, but admit through the breaker only where the protection is
 
 ## 11. Verification status
 
-The three scripts in section 5 were executed against a three-node embedded cluster with four
-partitions and the memory backend. The following was observed directly:
+The three scripts in section 5 run in `Kahuna.Server.Tests/TestCircuitBreakerScripts.cs`, against a
+three-node embedded cluster with four partitions and the memory backend. The following was observed
+directly:
 
 - Six outcomes recorded across three nodes accumulate in one window, and the breaker opens at the
   configured ratio.

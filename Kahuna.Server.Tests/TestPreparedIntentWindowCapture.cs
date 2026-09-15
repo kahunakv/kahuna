@@ -69,7 +69,7 @@ public sealed class TestPreparedIntentWindowCapture
                 int drop = random.Next(3_000);
                 store.PurgeWhere(k => k.StartsWith("v/", StringComparison.Ordinal) && k.GetHashCode() % 3 == drop % 3);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         List<string> window = stable.Skip(100).Take(100).ToList(); // s/0100 .. s/0199 inclusive
 

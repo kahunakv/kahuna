@@ -898,13 +898,13 @@ public sealed class TestPartitionWriteAggregator
         exec.Release(9); // batch 1 settles → the hold arms; the sub-threshold backlog must NOT re-dispatch
         await WaitUntil(() => router.Completed.ContainsKey(1));
         await Task.Delay(200, TestContext.Current.CancellationToken);
-        Assert.Equal(1, exec.Calls.Count); // held: no second call while the hold is active
+        Assert.Single(exec.Calls); // held: no second call while the hold is active
 
         for (int i = 5; i <= 6; i++)
             Assert.True(agg.TryEnqueue(Item(9, i, sink: router))); // arrivals during the hold join the buffer
 
         await Task.Delay(100, TestContext.Current.CancellationToken);
-        Assert.Equal(1, exec.Calls.Count);
+        Assert.Single(exec.Calls);
 
         // Advancing past the hold fires the wake; one batch carries all five accumulated items.
         await AdvanceUntil(time, () => router.Completed.Count == 6, stepMs: 60);
@@ -938,7 +938,7 @@ public sealed class TestPartitionWriteAggregator
         exec.Release(10); // completes → the hold arms; one sub-threshold item is held
         await WaitUntil(() => router.Completed.ContainsKey(1));
         await Task.Delay(100, TestContext.Current.CancellationToken);
-        Assert.Equal(1, exec.Calls.Count);
+        Assert.Single(exec.Calls);
 
         Assert.True(agg.TryEnqueue(Item(10, 3, sink: router))); // fills the batch → the threshold overrides the hold
         await WaitUntil(() => router.Completed.Count == 3);
@@ -1002,7 +1002,7 @@ public sealed class TestPartitionWriteAggregator
 
         await AdvanceUntil(time, () => router.Released.ContainsKey(2), stepMs: 600);
         Assert.True(router.Released[2]);          // released retryably at its age deadline
-        Assert.Equal(1, exec.Calls.Count);        // it was never dispatched
+        Assert.Single(exec.Calls);        // it was never dispatched
         await WaitUntil(() => agg.ReservedItems(12) == 0);
     }
 
