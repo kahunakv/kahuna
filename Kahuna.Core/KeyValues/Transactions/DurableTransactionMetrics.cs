@@ -337,15 +337,18 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
-    /// Replica fence lag-breaker transitions, tagged by <c>state</c>: <c>lagging</c> when a replica failed to
-    /// attest enough consecutive full-wait asks and commits stop waiting on its apply, <c>healthy</c> when a
-    /// probe saw it attest again. One pair per episode; the running count of lagging replicas is
+    /// Replica fence lag-breaker transitions, tagged by <c>state</c>: <c>lagging</c> when commits stop waiting
+    /// on a replica's apply, <c>healthy</c> when enough consecutive probes saw it attest with its frontier
+    /// caught up. A <c>lagging</c> transition also carries <c>reason</c>: <c>attestation</c> (it failed to attest
+    /// enough consecutive full-wait asks), <c>frontier</c> (the leader's acknowledgement snapshot puts its
+    /// durable frontier past the bound behind the commit index) or <c>stall</c> (it reports a durable-write
+    /// stall). One pair per episode; the running count of lagging replicas is
     /// <c>kahuna.durable_tx.replica_fence_lagging_replicas</c>.
     /// </summary>
     internal static readonly Counter<long> ReplicaFenceLagTransitions =
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.replica_fence_lag_transitions",
-            description: "Replica fence lag-breaker transitions, tagged by the state entered (lagging, healthy).");
+            description: "Replica fence lag-breaker transitions, tagged by the state entered (lagging, healthy) and, when lagging, the reason (attestation, frontier, stall).");
 
     private static int replicaFenceLaggingReplicas;
 
@@ -361,31 +364,46 @@ internal static class DurableTransactionMetrics
 
     private static readonly KeyValuePair<string, object?> StateLagging = new("state", "lagging");
     private static readonly KeyValuePair<string, object?> StateHealthy = new("state", "healthy");
+    private static readonly KeyValuePair<string, object?> ReasonAttestation = new("reason", "attestation");
+    private static readonly KeyValuePair<string, object?> ReasonFrontier = new("reason", "frontier");
+    private static readonly KeyValuePair<string, object?> ReasonStall = new("reason", "stall");
 
-    internal static void ReplicaFenceLagTransition(bool lagging)
+    internal static void ReplicaFenceLagTransition(bool lagging, ReplicaFenceLagReason reason = ReplicaFenceLagReason.Attestation)
     {
         if (lagging)
+        {
             Interlocked.Increment(ref replicaFenceLaggingReplicas);
-        else
-            Interlocked.Decrement(ref replicaFenceLaggingReplicas);
+            ReplicaFenceLagTransitions.Add(1, StateLagging, reason switch
+            {
+                ReplicaFenceLagReason.Frontier => ReasonFrontier,
+                ReplicaFenceLagReason.Stall => ReasonStall,
+                _ => ReasonAttestation,
+            });
+            return;
+        }
 
-        ReplicaFenceLagTransitions.Add(1, lagging ? StateLagging : StateHealthy);
+        Interlocked.Decrement(ref replicaFenceLaggingReplicas);
+        ReplicaFenceLagTransitions.Add(1, StateHealthy);
     }
 
     /// <summary>
     /// Fence asks sent to a replica held as lagging, tagged by <c>kind</c>: <c>no_wait</c> for the zero-wait
-    /// asks that keep its instant verdict in the fence, <c>probe</c> for the periodic full-wait recovery probe.
+    /// asks that keep its instant verdict in the fence, <c>probe</c> for the periodic full-wait recovery probe,
+    /// <c>held</c> for a zero-wait ask made where a probe was due but the leader's frontier evidence (durable
+    /// frontier past the bound, or a reported stall) withheld it. A steady <c>held</c> rate is a replica the
+    /// fence is deliberately not re-admitting while it catches up.
     /// </summary>
     internal static readonly Counter<long> ReplicaFenceLaggingAsks =
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.replica_fence_lagging_asks",
-            description: "Replica fence verdict requests sent to a lagging replica, tagged by kind (no_wait, probe).");
+            description: "Replica fence verdict requests sent to a lagging replica, tagged by kind (no_wait, probe, held).");
 
     private static readonly KeyValuePair<string, object?> KindNoWait = new("kind", "no_wait");
     private static readonly KeyValuePair<string, object?> KindProbe = new("kind", "probe");
+    private static readonly KeyValuePair<string, object?> KindHeld = new("kind", "held");
 
-    internal static void ReplicaFenceAskedLagging(bool probe) =>
-        ReplicaFenceLaggingAsks.Add(1, probe ? KindProbe : KindNoWait);
+    internal static void ReplicaFenceAskedLagging(bool probe, bool heldByFrontier = false) =>
+        ReplicaFenceLaggingAsks.Add(1, probe ? KindProbe : heldByFrontier ? KindHeld : KindNoWait);
 
     /// <summary>
     /// Commits the deadline gate withheld that the finalizer concluded on the spot by driving the presumed abort

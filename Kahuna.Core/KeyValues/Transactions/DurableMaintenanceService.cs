@@ -3,6 +3,7 @@ using System.Diagnostics;
 using Nixie;
 using Nixie.Routers;
 
+using Kommander.Data;
 using Kommander;
 using Kommander.Time;
 
@@ -1232,7 +1233,9 @@ internal sealed class DurableMaintenanceService
     internal const int ReplicaFenceLaggingCallBudgetMs = 100;
 
     // Per-replica breaker for the fence (see ReplicaFenceLagTracker): a replica that keeps failing to attest
-    // within the apply wait is asked without the wait until a periodic probe sees it attest again.
+    // within the apply wait, or that the leader's acknowledgement snapshot shows cannot attest (durable
+    // frontier past the bound behind the commit index, or a durable-write stall), is asked without the wait
+    // until consecutive periodic probes see it attest with its frontier caught up.
     private readonly ReplicaFenceLagTracker fenceLagTracker = new(ReplicaFenceApplyWaitMs, ReplicaFenceCallBudgetMs, ReplicaFenceLaggingCallBudgetMs);
 
     /// <summary>The fence's per-replica lag breaker, exposed for the metrics gauge and for tests.</summary>
@@ -1444,10 +1447,14 @@ internal sealed class DurableMaintenanceService
         string endpoint, int partitionId, DurableFinalizeInput input,
         List<string> fencedKeys, List<PreparedIntent> fencedIntents, CancellationToken cancellationToken)
     {
-        ReplicaFenceLagTracker.AskPlan plan = fenceLagTracker.Plan(endpoint, Stopwatch.GetTimestamp());
+        ReplicaFrontier frontier = ReadReplicaFrontier(partitionId, endpoint);
+        ReplicaFenceLagTracker.AskPlan plan = fenceLagTracker.Plan(endpoint, Stopwatch.GetTimestamp(), frontier);
+
+        if (plan.Tripped is ReplicaFenceLagReason tripped)
+            ReportReplicaFenceTrip(endpoint, tripped, frontier);
 
         if (plan.Lagging)
-            DurableTransactionMetrics.ReplicaFenceAskedLagging(plan.IsProbe);
+            DurableTransactionMetrics.ReplicaFenceAskedLagging(plan.IsProbe, plan.HeldByFrontier);
 
         bool serviced;
         IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts;
@@ -1471,7 +1478,7 @@ internal sealed class DurableMaintenanceService
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             DurableTransactionMetrics.ReplicaFenceRequestThrew();
-            ScoreReplicaFenceAsk(endpoint, plan, attested: false);
+            ScoreReplicaFenceAsk(endpoint, partitionId, plan, attested: false);
             return null;
         }
 
@@ -1480,13 +1487,72 @@ internal sealed class DurableMaintenanceService
 
         if (!answered)
         {
-            ScoreReplicaFenceAsk(endpoint, plan, attested: false);
+            ScoreReplicaFenceAsk(endpoint, partitionId, plan, attested: false);
             return null;
         }
 
-        ScoreReplicaFenceAsk(endpoint, plan, attested: AnyAttestedVerdict(verdicts));
+        ScoreReplicaFenceAsk(endpoint, partitionId, plan, attested: AnyAttestedVerdict(verdicts));
 
         return AnyStaleBaseVerdict(input, endpoint, fencedIntents, verdicts);
+    }
+
+    /// <summary>
+    /// The leader's evidence about <paramref name="endpoint"/>'s position on <paramref name="partitionId"/>,
+    /// from Kommander's per-follower acknowledgement snapshot: how many committed entries its durable
+    /// frontier trails this node's commit index by, and whether it reports a durable-write stall. Unknown
+    /// when this node does not lead the partition (a participant partition led elsewhere, an unplaced
+    /// partition's cluster-wide fallback) or the leadership has not heard from the replica yet; the fence
+    /// then relies on probe evidence alone. A concurrent-map read and a field read — never an executor
+    /// round-trip, so it is safe to consult on every ask.
+    /// </summary>
+    private ReplicaFrontier ReadReplicaFrontier(int partitionId, string endpoint)
+    {
+        try
+        {
+            RaftFollowerProgress? progress = raft.GetFollowerProgress(partitionId, endpoint);
+            if (progress is null)
+                return ReplicaFrontier.Unknown;
+
+            // The leader's published durable commit index now, or the protocol index it had when the ack
+            // was folded if the former is not readable: the larger of the two, so the lag is never
+            // understated by a leader whose own durable frontier trails its protocol frontier.
+            long leaderCommitIndex = Math.Max(raft.GetCommitIndex(partitionId), progress.LeaderCommitIndex);
+
+            return new ReplicaFrontier(Known: true, progress.EntriesBehind(leaderCommitIndex), progress.WalStalled);
+        }
+        catch (Exception ex)
+        {
+            // Evidence is an optimisation of the wait, never a correctness input: without it the probe
+            // rules alone decide, exactly as before the snapshot existed.
+            logger.LogDebug(ex, "Replica fence: could not read node {Endpoint}'s progress on partition {PartitionId}; planning without frontier evidence", endpoint, partitionId);
+            return ReplicaFrontier.Unknown;
+        }
+    }
+
+    private void ReportReplicaFenceTrip(string endpoint, ReplicaFenceLagReason reason, ReplicaFrontier frontier)
+    {
+        DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: true, reason);
+
+        switch (reason)
+        {
+            case ReplicaFenceLagReason.Stall:
+                logger.LogWarning(
+                    "Replica fence: node {Endpoint} reports a durable-write stall ({EntriesBehind} entries behind the commit index) — treating it as lagging: commits ask it without the wait ({BudgetMs} ms budget) and it is probed only once its disk answers again, then must attest {RecoveryProbes} consecutive probes with its frontier within {MaxEntriesBehind} entries",
+                    endpoint, frontier.EntriesBehind, ReplicaFenceLaggingCallBudgetMs, fenceLagTracker.RequiredRecoveryStreak(endpoint), ReplicaFenceLagTracker.MaxEntriesBehind);
+                break;
+
+            case ReplicaFenceLagReason.Frontier:
+                logger.LogWarning(
+                    "Replica fence: node {Endpoint}'s durable frontier is {EntriesBehind} entries behind the commit index (bound {MaxEntriesBehind}) — treating it as lagging: commits ask it without the wait ({BudgetMs} ms budget) and it is probed only once it is within the bound, then must attest {RecoveryProbes} consecutive probes",
+                    endpoint, frontier.EntriesBehind, ReplicaFenceLagTracker.MaxEntriesBehind, ReplicaFenceLaggingCallBudgetMs, fenceLagTracker.RequiredRecoveryStreak(endpoint));
+                break;
+
+            default:
+                logger.LogWarning(
+                    "Replica fence: node {Endpoint} failed to attest {Threshold} consecutive verdict requests within the {WaitMs} ms apply wait — treating it as lagging: commits keep asking it without the wait ({BudgetMs} ms budget) and probe it with the full wait every {ProbeInterval} until it attests {RecoveryProbes} consecutive probes with its durable frontier within {MaxEntriesBehind} entries of the commit index",
+                    endpoint, ReplicaFenceLagTracker.LaggingThreshold, ReplicaFenceApplyWaitMs, ReplicaFenceLaggingCallBudgetMs, ReplicaFenceLagTracker.ProbeInterval, fenceLagTracker.RequiredRecoveryStreak(endpoint), ReplicaFenceLagTracker.MaxEntriesBehind);
+                break;
+        }
     }
 
     /// <summary>A serviced reply attests when at least one key carries a verdict other than <c>NotApplied</c>:
@@ -1502,29 +1568,29 @@ internal sealed class DurableMaintenanceService
         return false;
     }
 
-    private void ScoreReplicaFenceAsk(string endpoint, ReplicaFenceLagTracker.AskPlan plan, bool attested)
+    private void ScoreReplicaFenceAsk(string endpoint, int partitionId, ReplicaFenceLagTracker.AskPlan plan, bool attested)
     {
         if (!plan.Score)
             return;
 
-        bool? transition = fenceLagTracker.Observe(endpoint, attested, Stopwatch.GetTimestamp(), plan.IsProbe, out double laggingMs);
+        // Re-read the evidence as the answer lands: a probe that attested while the replica fell behind (or
+        // began stalling) during the wait is not recovery evidence.
+        ReplicaFrontier frontier = ReadReplicaFrontier(partitionId, endpoint);
+        bool? transition = fenceLagTracker.Observe(endpoint, attested, Stopwatch.GetTimestamp(), plan.IsProbe, frontier, out double laggingMs);
 
         if (transition is null)
             return;
 
         if (transition.Value)
         {
-            DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: true);
-            logger.LogWarning(
-                "Replica fence: node {Endpoint} failed to attest {Threshold} consecutive verdict requests within the {WaitMs} ms apply wait — treating it as lagging: commits keep asking it without the wait ({BudgetMs} ms budget) and probe it with the full wait every {ProbeInterval} until it attests {RecoveryProbes} consecutive probes",
-                endpoint, ReplicaFenceLagTracker.LaggingThreshold, ReplicaFenceApplyWaitMs, ReplicaFenceLaggingCallBudgetMs, ReplicaFenceLagTracker.ProbeInterval, fenceLagTracker.RequiredRecoveryStreak(endpoint));
+            ReportReplicaFenceTrip(endpoint, fenceLagTracker.LaggingReason(endpoint), frontier);
         }
         else
         {
             DurableTransactionMetrics.ReplicaFenceLagTransition(lagging: false);
             logger.LogWarning(
-                "Replica fence: node {Endpoint} attested {RecoveryProbes} consecutive probes after lagging for {LaggingMs:F0} ms — commits wait for its verdict again",
-                endpoint, fenceLagTracker.RequiredRecoveryStreak(endpoint), laggingMs);
+                "Replica fence: node {Endpoint} attested {RecoveryProbes} consecutive probes after lagging for {LaggingMs:F0} ms, with its durable frontier {EntriesBehind} entries behind the commit index{Evidence} — commits wait for its verdict again",
+                endpoint, fenceLagTracker.RequiredRecoveryStreak(endpoint), laggingMs, frontier.EntriesBehind, frontier.Known ? string.Empty : " (frontier not tracked here: this node does not lead the partition)");
         }
     }
 

@@ -295,10 +295,28 @@ full-wait asks without an attestation (a timeout, a transport fault, or a servic
 `NotApplied`) the replica is *lagging*: it is still asked on every commit, but with a zero apply wait and
 a 100 ms call budget, so a `StaleBase` it can prove from memory still counts while the commit no longer
 waits on an apply it is not going to see. Once a second one ask is sent with the full budget as a probe;
-the first attesting answer restores the replica. `kahuna.durable_tx.replica_fence_lagging_replicas` is
-the number of replicas currently held as lagging, `…replica_fence_lag_transitions{state}` counts the
-episodes, and `…replica_fence_lagging_asks{kind}` counts the zero-wait asks and the probes. One warning
-line marks each transition.
+three consecutive attesting probes restore the replica (a relapse within 30 s doubles that requirement,
+up to 24).
+
+Probe latency alone is the wrong evidence for whether a replica can attest. A replica tens of thousands
+of entries behind the leader answers a probe instantly from state that old, and a replica whose disk is
+paused answers from memory until the entry it is asked about is the one it cannot write. In the CamusDB
+leader-kill run lk8 a restarted replica attested three fast probes while 75,000 entries behind and
+stalling on a shared NVMe; the fence restored it and every commit then waited the full apply wait for a
+verdict it could not give. The leader already knows both facts from every Raft acknowledgement, so the
+fence reads Kommander's per-follower snapshot (`IRaft.GetFollowerProgress`, Kommander 1.6.10) on every
+ask it plans: a replica whose *durable* frontier is more than `ReplicaFenceLagTracker.MaxEntriesBehind`
+(1,000) committed entries behind the leader's commit index, or that reports a durable-write stall, is
+tripped at once without strikes, is not probed while that holds, and its recovery streak restarts — it is
+restored only by consecutive attesting probes made and answered with its frontier within the bound. The
+evidence exists only where this node leads the partition asked about; for a participant partition led
+elsewhere the probe rules alone apply.
+
+`kahuna.durable_tx.replica_fence_lagging_replicas` is the number of replicas currently held as lagging,
+`…replica_fence_lag_transitions{state,reason}` counts the episodes (`reason` on a `lagging` transition
+is `attestation`, `frontier` or `stall`), and `…replica_fence_lagging_asks{kind}` counts the zero-wait
+asks, the probes, and the asks where a due probe was `held` by the frontier evidence. One warning line
+marks each transition and says why.
 
 ---
 
@@ -472,7 +490,7 @@ transaction.
 Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepared_intent_bytes`,
 `…outstanding`, `…resident_records`, `…admission_rejections`, `…late_commit_rejections`,
 `…late_commit_conclusions{outcome}`, `…retries_past_deadline{outcome}`,
-`…replica_fence_lagging_replicas`, `…replica_fence_lag_transitions{state}`.
+`…replica_fence_lagging_replicas`, `…replica_fence_lag_transitions{state,reason}`, `…replica_fence_lagging_asks{kind}`.
 
 ---
 

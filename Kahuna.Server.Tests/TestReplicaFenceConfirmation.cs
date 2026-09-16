@@ -556,6 +556,15 @@ public sealed class TestReplicaFenceConfirmation : BaseCluster
                 string stalled = EndpointOfManager((leaderIndex + 1) % managers.Length);
                 ReplicaFenceLagTracker tracker = managers[leaderIndex].KeyValues.DurableMaintenance.FenceLagTracker;
 
+                // The leader's acknowledgement snapshot of the replica — what the frontier gate reads on every
+                // ask — is populated on this assembled cluster: a healthy replica, its disk keeping up, within
+                // the bound. Without this the gate would be inert here and the test below would prove nothing
+                // about the wired path.
+                await WaitUntilAsync(() =>
+                    rafts[leaderIndex].GetFollowerProgress(fencePartition, stalled) is { WalStalled: false } progress
+                    && progress.EntriesBehind(rafts[leaderIndex].GetCommitIndex(fencePartition)) <= ReplicaFenceLagTracker.MaxEntriesBehind);
+                Assert.False(tracker.IsLagging(stalled));
+
                 interNode.StagedBaseVerdictAsks = new();
                 interNode.StagedBaseVerdictsStalledHook = (node, _) => node == stalled;
 

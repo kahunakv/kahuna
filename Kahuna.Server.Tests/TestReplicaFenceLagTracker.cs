@@ -5,8 +5,10 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// The replica fence's per-replica lag breaker (<see cref="ReplicaFenceLagTracker"/>): a replica that keeps
-/// failing to attest within the apply wait is asked without the wait until enough consecutive full-budget
-/// probes see it attest again. The clock is driven explicitly in stopwatch ticks.
+/// failing to attest within the apply wait, or that the leader's acknowledgement snapshot shows cannot attest
+/// (durable frontier past the bound, or a durable-write stall), is asked without the wait until enough
+/// consecutive full-budget probes — made while its frontier is within the bound — see it attest again. The
+/// clock is driven explicitly in stopwatch ticks.
 /// </summary>
 public sealed class TestReplicaFenceLagTracker
 {
@@ -229,6 +231,169 @@ public sealed class TestReplicaFenceLagTracker
         now += Relapse.TotalSeconds + 1;
         Trip(tracker, "n2", now);
         Assert.Equal(ReplicaFenceLagTracker.RecoveryThreshold, tracker.RequiredRecoveryStreak("n2"));
+    }
+
+    private static ReplicaFrontier Behind(long entries) => new(Known: true, entries, WalStalled: false);
+
+    private static ReplicaFrontier CaughtUp => new(Known: true, EntriesBehind: 12, WalStalled: false);
+
+    private static ReplicaFrontier Stalled => new(Known: true, EntriesBehind: 40, WalStalled: true);
+
+    /// <summary>
+    /// Ask 2 of Vorpal 029dad72. A healthy replica whose durable frontier is more than the bound behind the
+    /// leader's commit index cannot have applied a prepare the leader just committed, so the fence must stop
+    /// waiting on it at once — no three strikes — and say why. Within the bound, nothing changes.
+    /// </summary>
+    [Fact]
+    public void AHealthyReplica_FarBehindOnItsDurableFrontier_IsTrippedOnThePlan_NotAfterStrikes()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+
+        // At the bound: still a healthy full-wait ask.
+        ReplicaFenceLagTracker.AskPlan atBound = tracker.Plan("n2", Ticks(0), Behind(ReplicaFenceLagTracker.MaxEntriesBehind));
+        Assert.False(atBound.Lagging);
+        Assert.Equal(FullWaitMs, atBound.WaitMs);
+        Assert.Null(atBound.Tripped);
+
+        // One past it: tripped by the plan itself, asked without the wait, with the reason for the log line.
+        ReplicaFenceLagTracker.AskPlan tripped = tracker.Plan("n2", Ticks(0.1), Behind(ReplicaFenceLagTracker.MaxEntriesBehind + 1));
+        Assert.True(tripped.Lagging);
+        Assert.Equal(0, tripped.WaitMs);
+        Assert.Equal(LaggingBudgetMs, tripped.CallBudgetMs);
+        Assert.False(tripped.Score);
+        Assert.Equal(ReplicaFenceLagReason.Frontier, tripped.Tripped);
+        Assert.True(tracker.IsLagging("n2"));
+        Assert.Equal(ReplicaFenceLagReason.Frontier, tracker.LaggingReason("n2"));
+        Assert.Equal(1, tracker.LaggingCount);
+
+        // Tripping is reported once: the next plan is an ordinary lagging ask.
+        Assert.Null(tracker.Plan("n2", Ticks(0.2), Behind(75_000)).Tripped);
+        Assert.Equal(1, tracker.LaggingCount);
+    }
+
+    [Fact]
+    public void AHealthyReplica_ReportingADurableWriteStall_IsTrippedWithTheStallReason()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+
+        ReplicaFenceLagTracker.AskPlan tripped = tracker.Plan("n2", Ticks(0), Stalled);
+
+        Assert.True(tripped.Lagging);
+        Assert.Equal(ReplicaFenceLagReason.Stall, tripped.Tripped);
+        Assert.Equal(ReplicaFenceLagReason.Stall, tracker.LaggingReason("n2"));
+    }
+
+    [Fact]
+    public void UnknownFrontierEvidence_LeavesTheProbeRulesInCharge()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+
+        Assert.False(tracker.IsBehind(ReplicaFrontier.Unknown));
+        Assert.False(tracker.Plan("n2", Ticks(0), ReplicaFrontier.Unknown).Lagging);
+
+        // An unknown frontier with a huge lag figure is still unknown: only Known evidence counts.
+        Assert.False(tracker.IsBehind(new ReplicaFrontier(Known: false, EntriesBehind: 1_000_000, WalStalled: true)));
+    }
+
+    /// <summary>
+    /// The lk8 shape: a lagging replica attests fast probes while tens of thousands of entries behind. Such a
+    /// probe must not count, and while the evidence says it is behind no probe is even sent — the due probe
+    /// is withheld and the streak restarts — so it is restored only by consecutive probes made and answered
+    /// with its frontier within the bound.
+    /// </summary>
+    [Fact]
+    public void WhileLagging_ProbesAreWithheldAndTheStreakRestarts_WhileTheFrontierIsBehind()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+        Trip(tracker, "n2", 0);
+
+        // Two attesting probes with the frontier caught up: one short of recovery.
+        Assert.Null(AttestProbes(tracker, "n2", 1.5, ReplicaFenceLagTracker.RecoveryThreshold - 1, out _));
+
+        // The replica falls behind (a snapshot install, a stall): the due probe is withheld, not sent.
+        double heldAt = 1.5 + (ReplicaFenceLagTracker.RecoveryThreshold - 1) * Probe.TotalSeconds;
+        ReplicaFenceLagTracker.AskPlan held = tracker.Plan("n2", Ticks(heldAt), Behind(75_000));
+        Assert.False(held.IsProbe);
+        Assert.True(held.HeldByFrontier);
+        Assert.True(held.Lagging);
+        Assert.Equal(0, held.WaitMs);
+        Assert.False(held.Score);
+        Assert.Equal(ReplicaFenceLagReason.Frontier, tracker.LaggingReason("n2"));
+
+        // Caught up again: the probe goes out at once (no interval wait), but the streak starts over — the
+        // two earlier attestations were made against a replica that has since been behind.
+        ReplicaFenceLagTracker.AskPlan probe = tracker.Plan("n2", Ticks(heldAt + 0.1), CaughtUp);
+        Assert.True(probe.IsProbe);
+        Assert.Null(tracker.Observe("n2", attested: true, Ticks(heldAt + 0.1), isProbe: true, CaughtUp, out _));
+        Assert.True(tracker.IsLagging("n2"));
+
+        Assert.Null(AttestProbes(tracker, "n2", heldAt + 1.1, ReplicaFenceLagTracker.RecoveryThreshold - 2, out _));
+        Assert.True(tracker.IsLagging("n2"));
+
+        double restoredAt = heldAt + 1.1 + (ReplicaFenceLagTracker.RecoveryThreshold - 2) * Probe.TotalSeconds;
+        Assert.True(tracker.Plan("n2", Ticks(restoredAt), CaughtUp).IsProbe);
+        Assert.False(tracker.Observe("n2", attested: true, Ticks(restoredAt), isProbe: true, CaughtUp, out _));
+        Assert.False(tracker.IsLagging("n2"));
+    }
+
+    [Fact]
+    public void AnAttestingProbe_AnsweredWhileTheFrontierIsBehind_IsNotRecoveryEvidence()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+        Trip(tracker, "n2", 0);
+
+        Assert.Null(AttestProbes(tracker, "n2", 1.5, ReplicaFenceLagTracker.RecoveryThreshold - 1, out _));
+
+        // The probe was planned with the frontier caught up; by the time it answers the leader has learned the
+        // replica is stalling. Its attestation came from state it has not caught up to: streak restarts.
+        double at = 1.5 + (ReplicaFenceLagTracker.RecoveryThreshold - 1) * Probe.TotalSeconds;
+        Assert.True(tracker.Plan("n2", Ticks(at), CaughtUp).IsProbe);
+        Assert.Null(tracker.Observe("n2", attested: true, Ticks(at), isProbe: true, Stalled, out _));
+        Assert.True(tracker.IsLagging("n2"));
+        Assert.Equal(ReplicaFenceLagReason.Stall, tracker.LaggingReason("n2"));
+
+        // The full threshold is needed again.
+        Assert.Null(AttestProbes(tracker, "n2", at + 1, ReplicaFenceLagTracker.RecoveryThreshold - 1, out _));
+        Assert.True(tracker.IsLagging("n2"));
+    }
+
+    [Fact]
+    public void AHealthyReplicasAnswer_ScoredAfterTheLeaderLearnedItIsBehind_TripsRegardlessOfAttestation()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+
+        Assert.False(tracker.Plan("n2", Ticks(0), CaughtUp).Lagging);
+
+        // The ask attested, but the acknowledgement folded during the wait shows a stall: waiting again is
+        // known to be wasted, so the breaker trips here rather than after three more strikes.
+        Assert.True(tracker.Observe("n2", attested: true, Ticks(0.3), isProbe: false, Stalled, out _));
+        Assert.True(tracker.IsLagging("n2"));
+        Assert.Equal(ReplicaFenceLagReason.Stall, tracker.LaggingReason("n2"));
+        Assert.Equal(1, tracker.LaggingCount);
+    }
+
+    [Fact]
+    public void AFrontierTrip_EscalatesLikeAnyRelapse()
+    {
+        ReplicaFenceLagTracker tracker = Build();
+
+        Trip(tracker, "n2", 0);
+        double restoredAt = 1.5 + (ReplicaFenceLagTracker.RecoveryThreshold - 1) * Probe.TotalSeconds;
+        Assert.False(AttestProbes(tracker, "n2", 1.5, ReplicaFenceLagTracker.RecoveryThreshold, out _));
+
+        // Relapse on frontier evidence inside the window: the next recovery needs twice the probes.
+        Assert.Equal(ReplicaFenceLagReason.Frontier, tracker.Plan("n2", Ticks(restoredAt + 1), Behind(5_000)).Tripped);
+        Assert.Equal(ReplicaFenceLagTracker.RecoveryThreshold * 2, tracker.RequiredRecoveryStreak("n2"));
+    }
+
+    [Fact]
+    public void TheBoundIsConfigurable()
+    {
+        ReplicaFenceLagTracker tracker = new(FullWaitMs, FullBudgetMs, LaggingBudgetMs, Probe, Relapse, maxEntriesBehind: 10);
+
+        Assert.False(tracker.IsBehind(Behind(10)));
+        Assert.True(tracker.IsBehind(Behind(11)));
+        Assert.True(tracker.IsBehind(new ReplicaFrontier(Known: true, EntriesBehind: 0, WalStalled: true)));
     }
 
     [Fact]
