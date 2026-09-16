@@ -283,13 +283,13 @@ internal sealed class RoutedScanOperations
         CancellationToken cancellationToken) =>
         locator.LocateAndGetByBucket(transactionId, prefixedKey, HLCTimestamp.Zero, durability, beforeQuery, afterDescriptor, cancellationToken);
 
-    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
-            return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+            return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
 
         // A single-shot registered scan folds observations exactly when it is a latest read.
-        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, readTimestamp.IsNull(), cancellationToken);
+        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, readTimestamp.IsNull(), cancellationToken, snapshotAtLeader);
     }
 
     /// <summary>
@@ -307,7 +307,8 @@ internal sealed class RoutedScanOperations
     private async Task<KeyValueGetByRangeResult> RegisterAndGetByRange(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit,
-        HLCTimestamp readTimestamp, KeyValueDurability durability, bool recordObservations, CancellationToken cancellationToken)
+        HLCTimestamp readTimestamp, KeyValueDurability durability, bool recordObservations, CancellationToken cancellationToken,
+        bool snapshotAtLeader = false)
     {
         (OperationRegistrationOutcome outcome, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
@@ -322,7 +323,7 @@ internal sealed class RoutedScanOperations
                 // the first-recorded observations are authoritative for commit validation even if this
                 // re-execution returns a newer value.
                 if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
-                    return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+                    return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
                 return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
@@ -333,7 +334,7 @@ internal sealed class RoutedScanOperations
         }
 
         KeyValueGetByRangeResult result =
-            await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+            await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
 
         List<KeyValueTransactionReadKey>? observations = null;
         if (recordObservations && result.Type == KeyValueResponseType.Get && result.Items.Count > 0)

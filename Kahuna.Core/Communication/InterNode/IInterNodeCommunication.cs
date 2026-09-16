@@ -135,7 +135,12 @@ public interface IInterNodeCommunication
     
     public Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    public Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
+    /// <summary>
+    /// Forwards one range-scan page to <paramref name="node"/>. With <paramref name="snapshotAtLeader"/> set the
+    /// serving node mints the page's snapshot on its own clock and ignores <paramref name="readTimestamp"/>;
+    /// see <see cref="IKahuna.LocateAndGetByRange"/>.
+    /// </summary>
+    public Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, bool snapshotAtLeader = false);
     
     public Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones, CancellationToken cancellationToken);
     

@@ -504,12 +504,20 @@ internal sealed class RangeMerger
     /// page retryable) would otherwise count as under-min and be merged. Merging moves data, so an
     /// incomplete count must never decide it.</para>
     ///
-    /// <para>The pages are read at an explicit snapshot minted when the count starts. That is what buys
-    /// the refusal: only a scan with a caller-supplied read timestamp waits on a live write intent that
-    /// could commit inside its snapshot (the safe-time rule) — a timestamp-less read-committed scan serves
-    /// committed heads and never refuses for an intent, exactly like a point read, so it would count a busy
-    /// range as if it were quiet. One snapshot for every page also gives the walk a single consistent
-    /// cut instead of a moving one.</para>
+    /// <para>Every page is a snapshot read, and its snapshot is minted on the range's leader, not here.
+    /// That is what buys the refusal: only a snapshot scan waits on a live write intent that could commit
+    /// inside its snapshot (the safe-time rule) — a timestamp-less read-committed scan serves committed
+    /// heads and never refuses for an intent, exactly like a point read, so it would count a busy range as
+    /// if it were quiet. And the rule only waits on an intent whose transaction id is below the snapshot:
+    /// a writer that began after the snapshot can never commit inside it. A transaction id is minted on
+    /// the writer's coordinator node, and nothing folds that clock into this node before a local mint, so
+    /// a snapshot minted here can sort below an intent that was planted before the count began — under
+    /// clock skew, or on one machine when the plant and the mint tie on the same millisecond and the
+    /// logical counter decides. The scan then skips the intent and the busy range counts as empty. The
+    /// leader's clock has no such gap: every plant folds the writer's transaction id into it, so a
+    /// snapshot minted there orders after every intent it holds. Each page mints anew, so the walk is a
+    /// moving cut rather than one consistent snapshot; for a size estimate that is the right trade — a
+    /// write that lands mid-walk refuses the count instead of slipping past a stale cut.</para>
     /// </summary>
     internal async Task<(int Count, bool Complete)> CountRangeKeysAsync(
         RangeDescriptor descriptor,
@@ -519,8 +527,6 @@ internal sealed class RangeMerger
         int count      = 0;
         string? cursor = null;
         bool hasMore   = true;
-
-        HLCTimestamp countSnapshot = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         while (hasMore && count < maxCount)
         {
@@ -548,9 +554,10 @@ internal sealed class RangeMerger
                 descriptor.EndKey,
                 false,
                 Math.Min(CountPageSize, maxCount - count),
-                countSnapshot,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
-                ct);
+                ct,
+                snapshotAtLeader: true);
 
             // A refused page (anything but Get) leaves the count unfinished; an empty Get page is the
             // genuine end of the range.

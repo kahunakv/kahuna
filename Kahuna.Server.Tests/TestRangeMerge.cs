@@ -568,6 +568,79 @@ public sealed class TestRangeMerge : BaseCluster
         }
     }
 
+    // ── FindMergeCandidates_WriterClockAheadOfCounter ────────────────────────
+
+    /// <summary>
+    /// The in-flight-write refusal must not depend on whose clock minted the count's snapshot. A snapshot
+    /// read waits on a live intent only when the intent's transaction id is below the snapshot; a
+    /// transaction id is minted on the coordinator's node, and nothing folds that clock into the node that
+    /// runs the merge check. Under clock skew — or, on one machine, a same-millisecond tie on the logical
+    /// counter — the writer's transaction id lands above a locally minted snapshot, the scan skips the
+    /// intent as "cannot commit inside this snapshot", and a busy range counts as empty and quiet.
+    ///
+    /// <para>The writer here stages its intent under a transaction id sixty seconds ahead of the counting
+    /// node's clock, and the count runs on a node that does not lead the range's partition, so nothing on
+    /// the count's own path advances that node's clock past the intent. The count must still be refused:
+    /// the snapshot is minted on the range's leader, whose clock every intent planted there has already
+    /// advanced.</para>
+    /// </summary>
+    [Fact]
+    public async Task FindMergeCandidates_WriterClockAheadOfCounter_IsNotACandidate()
+    {
+        const string spaceSkew = "t:mskw";
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
+            await AssembleThreNodeCluster("memory", 5, raftLogger, kahunaLogger);
+
+        (IRaft, KahunaManager)[] nodes =
+            [(r1, (KahunaManager)k1), (r2, (KahunaManager)k2), (r3, (KahunaManager)k3)];
+
+        try
+        {
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                kahuna.RegisterKeyRange(spaceSkew);
+
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            const string boundary = spaceSkew + "/k010";
+            RangeDescriptor dA = new() { KeySpace = spaceSkew, StartKey = null, EndKey = boundary, PartitionId = 2, Generation = 1 };
+            RangeDescriptor dB = new() { KeySpace = spaceSkew, StartKey = boundary, EndKey = null, PartitionId = 3, Generation = 1 };
+
+            Assert.True(await metaLeader.RangeMapStore.MutateAsync(_ => [dA, dB], ct));
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.FindAll(spaceSkew).Count == 2);
+
+            // The count runs on a node that does not lead the lower range's partition, so planting the
+            // intent on that partition's leader cannot advance the counting node's clock.
+            (IRaft lowerLeaderRaft, KahunaManager _) = await LeaderOf(dA.PartitionId, nodes);
+            (IRaft counterRaft, KahunaManager counter) = Array.Find(nodes, n => !ReferenceEquals(n.Item1, lowerLeaderRaft));
+
+            List<(RangeDescriptor Left, RangeDescriptor Right)> before =
+                await counter.RangeMerger.FindMergeCandidatesAsync(spaceSkew, minMergeSize: 10, ct);
+            Assert.Single(before);
+
+            // A writer whose coordinator clock runs sixty seconds ahead of the counting node.
+            HLCTimestamp aheadWriter =
+                counterRaft.HybridLogicalClock.TrySendOrLocalEvent(counterRaft.GetLocalNodeId()) + 60_000;
+
+            (KeyValueResponseType writeType, _, _) = await counter.LocateAndTrySetKeyValue(
+                aheadWriter, spaceSkew + "/k005", Encoding.UTF8.GetBytes("staged"), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            List<(RangeDescriptor Left, RangeDescriptor Right)> after =
+                await counter.RangeMerger.FindMergeCandidatesAsync(spaceSkew, minMergeSize: 10, ct);
+
+            Assert.Empty(after);
+        }
+        finally
+        {
+            await LeaveCluster(r1, r2, r3);
+        }
+    }
+
     // ── FindMergeCandidates_ThreeUnderMin_ReturnsNonOverlappingPairs ──────────
 
     /// <summary>

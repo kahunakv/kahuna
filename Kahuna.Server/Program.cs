@@ -471,6 +471,8 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         LeadershipBarrierTimeout = TimeSpan.FromMilliseconds(opts.RaftLeadershipBarrierTimeout),
         LeadershipConfirmationTimeout = TimeSpan.FromMilliseconds(opts.RaftLeadershipConfirmationTimeout),
         ProposalTimeout = TimeSpan.FromMilliseconds(opts.RaftProposalTimeout),
+        WalStallStepDownTimeout = TimeSpan.FromMilliseconds(opts.RaftWalStallStepDownTimeout),
+        WalStallWarnThreshold = TimeSpan.FromMilliseconds(opts.RaftWalStallWarnThreshold),
         EnableCheckQuorum = opts.RaftEnableCheckQuorum,
         CheckQuorumIntervalMultiplier = opts.RaftCheckQuorumIntervalMultiplier,
         TimerInitialDelay = TimeSpan.FromMilliseconds(opts.RaftTimerInitialDelay),
@@ -587,6 +589,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         SnapshotRescueProbeInterval = TimeSpan.FromMilliseconds(opts.RaftSnapshotRescueProbeInterval),
         SnapshotExportRetryCacheMaxBytes = opts.RaftSnapshotExportRetryCacheMaxBytes,
         CompactionLiveReplicaLagBudget = opts.RaftCompactionLiveReplicaLagBudget,
+        CompactionSilentPeerRetentionWindow = TimeSpan.FromMilliseconds(opts.RaftCompactionSilentPeerRetentionWindow),
         CompactionDurabilityClampReportInterval = TimeSpan.FromMilliseconds(opts.RaftCompactionDurabilityClampReportInterval)
     };
 }

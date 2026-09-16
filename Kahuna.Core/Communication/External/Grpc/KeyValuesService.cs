@@ -1833,7 +1833,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 request.Limit,
                 readTimestamp,
                 (KeyValueDurability)request.Durability,
-                context.CancellationToken);
+                context.CancellationToken,
+                snapshotAtLeader: request.SnapshotAtLeader);
 
             GrpcGetByRangePageResponse pageResponse = new()
             {
@@ -1887,7 +1888,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
             request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow));
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
+            request.SnapshotAtLeader);
 
         GrpcGetByRangeResponse response = new()
         {

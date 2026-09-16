@@ -368,9 +368,10 @@ internal sealed class DurableTransactionRecovery
 
             // One summary line per pass names the holds (see the maintenance sweep); the per-intent line stays
             // at Debug so a few wedged keys do not produce a failure line per key per tick for the run's life.
-            logger?.LogDebug(
-                "Prepared intent for key {Key} of transaction {TransactionId} has no canonical record and is older than the record retention horizon; holding it instead of presuming abort — the record may have been a reclaimed commit",
-                intent.Key, intent.TransactionId);
+            if (logger is not null && logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(
+                    "Prepared intent for key {Key} of transaction {TransactionId} has no canonical record and is older than the record retention horizon; holding it instead of presuming abort — the record may have been a reclaimed commit",
+                    intent.Key, intent.TransactionId);
 
             return null;
         }

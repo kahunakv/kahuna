@@ -2133,6 +2133,9 @@ internal sealed class KeyValueLocator
     /// For unsplit spaces routes to the single partition leader directly. For split key-range spaces
     /// fans out across all intersecting descriptors in StartKey order, clips each sub-range, and
     /// merges results maintaining key order (multi-range stitch).
+    ///
+    /// <para><paramref name="snapshotAtLeader"/> replaces <paramref name="readTimestamp"/> with a snapshot
+    /// minted on each serving leader, after its leadership check; see <see cref="IKahuna.LocateAndGetByRange"/>.</para>
     /// </summary>
     public async Task<KeyValueGetByRangeResult> LocateAndGetByRange(
         HLCTimestamp transactionId,
@@ -2144,7 +2147,8 @@ internal sealed class KeyValueLocator
         int limit,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool snapshotAtLeader = false)
     {
         if (string.IsNullOrEmpty(prefix))
             return new(KeyValueResponseType.Errored, [], null, false);
@@ -2155,7 +2159,7 @@ internal sealed class KeyValueLocator
             int singlePartitionId = RoutePrefixKey(prefix);
 
             if (!raft.Joined || await ConfirmLeadershipForRead(singlePartitionId, cancellationToken))
-                return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
+                return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, ServedPageSnapshot(readTimestamp, snapshotAtLeader), durability);
 
             string? singleLeader = await TryWaitForLeader(singlePartitionId, cancellationToken);
             if (singleLeader is null || singleLeader == raft.GetLocalEndpoint())
@@ -2163,7 +2167,7 @@ internal sealed class KeyValueLocator
 
             logger.LogGetRangeKeyValueRedirected(prefix, singlePartitionId, singleLeader);
 
-            return await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+            return await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
         }
 
         // Multi-range path: key-range space has been split; fan out across intersecting descriptors.
@@ -2196,7 +2200,7 @@ internal sealed class KeyValueLocator
             KeyValueGetByRangeResult part = await QueryDescriptorRange(
                 descriptor.PartitionId, transactionId, prefix,
                 clStart, clStartInc, clEnd, clEndInc,
-                pageLimit, readTimestamp, durability, cancellationToken);
+                pageLimit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
 
             if (part.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 return part;
@@ -2239,17 +2243,29 @@ internal sealed class KeyValueLocator
         int limit,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool snapshotAtLeader = false)
     {
         if (!raft.Joined || await ConfirmLeadershipForRead(partitionId, cancellationToken))
-            return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
+            return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, ServedPageSnapshot(readTimestamp, snapshotAtLeader), durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
             return new(KeyValueResponseType.MustRetry, [], null, false);
 
-        return await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+        return await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
     }
+
+    /// <summary>
+    /// The snapshot a range page served by this node reads at. A leader-minted snapshot is taken here —
+    /// on the serving node, after its leadership was confirmed — so it orders after every write intent
+    /// already planted on this node's actors: each plant folds the writer's transaction id into this
+    /// node's clock, and a later local event is strictly above it. That is what makes the safe-time
+    /// rule wait on all of those intents. Minted anywhere else, the snapshot only orders after the
+    /// intents whose transaction ids happen to sort below the minting node's clock.
+    /// </summary>
+    private HLCTimestamp ServedPageSnapshot(HLCTimestamp readTimestamp, bool snapshotAtLeader) =>
+        snapshotAtLeader ? raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) : readTimestamp;
 
     /// <summary>
     /// Clips the caller's query range <c>[queryStart, queryEnd)</c> to the descriptor's half-open

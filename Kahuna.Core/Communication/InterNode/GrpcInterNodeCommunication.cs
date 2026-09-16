@@ -1381,7 +1381,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         int limit,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool snapshotAtLeader = false)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1398,6 +1399,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampPhysical = readTimestamp.L,
             ReadTimestampCounter  = readTimestamp.C,
             Durability            = (GrpcKeyValueDurability)durability,
+            SnapshotAtLeader      = snapshotAtLeader,
         };
 
         if (startKey is not null) request.StartKey = startKey;

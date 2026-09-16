@@ -321,9 +321,10 @@ public sealed partial class KahunaManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default)
+        TransactionOperationId operationId = default,
+        bool snapshotAtLeader = false)
     {
-        return keyValues.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+        return keyValues.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader);
     }
 
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(

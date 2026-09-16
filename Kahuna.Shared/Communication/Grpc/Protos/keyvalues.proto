@@ -787,6 +787,9 @@ message GrpcGetByRangeRequest {
   string CoordinatorKey = 14;
   uint64 OperationIdHigh = 15;
   uint64 OperationIdLow = 16;
+  // Mint the page's read snapshot on the serving leader instead of using ReadTimestamp.
+  // Internal to inter-node forwarding; clients leave it unset.
+  bool SnapshotAtLeader = 17;
 }
 
 message GrpcGetByRangePageResponse {

@@ -23,6 +23,8 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.LeadershipBarrierTimeout)] = nameof(KahunaCommandLineOptions.RaftLeadershipBarrierTimeout),
         [nameof(RaftConfiguration.LeadershipConfirmationTimeout)] = nameof(KahunaCommandLineOptions.RaftLeadershipConfirmationTimeout),
         [nameof(RaftConfiguration.ProposalTimeout)] = nameof(KahunaCommandLineOptions.RaftProposalTimeout),
+        [nameof(RaftConfiguration.WalStallStepDownTimeout)] = nameof(KahunaCommandLineOptions.RaftWalStallStepDownTimeout),
+        [nameof(RaftConfiguration.WalStallWarnThreshold)] = nameof(KahunaCommandLineOptions.RaftWalStallWarnThreshold),
         [nameof(RaftConfiguration.EnableCheckQuorum)] = nameof(KahunaCommandLineOptions.RaftEnableCheckQuorum),
         [nameof(RaftConfiguration.CheckQuorumIntervalMultiplier)] = nameof(KahunaCommandLineOptions.RaftCheckQuorumIntervalMultiplier),
         [nameof(RaftConfiguration.TimerInitialDelay)] = nameof(KahunaCommandLineOptions.RaftTimerInitialDelay),
@@ -124,6 +126,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.SnapshotRescueProbeInterval)] = nameof(KahunaCommandLineOptions.RaftSnapshotRescueProbeInterval),
         [nameof(RaftConfiguration.SnapshotExportRetryCacheMaxBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotExportRetryCacheMaxBytes),
         [nameof(RaftConfiguration.CompactionLiveReplicaLagBudget)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagBudget),
+        [nameof(RaftConfiguration.CompactionSilentPeerRetentionWindow)] = nameof(KahunaCommandLineOptions.RaftCompactionSilentPeerRetentionWindow),
         [nameof(RaftConfiguration.CompactionDurabilityClampReportInterval)] = nameof(KahunaCommandLineOptions.RaftCompactionDurabilityClampReportInterval)
     };
 

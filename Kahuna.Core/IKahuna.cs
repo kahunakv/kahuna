@@ -59,7 +59,21 @@ public interface IKahuna
 
     public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
-    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
+    /// <summary>
+    /// Reads one page of a range scan from the partition leaders that serve it.
+    ///
+    /// <para><paramref name="snapshotAtLeader"/> asks each serving leader to mint the page's snapshot on its own
+    /// clock, after its leadership is confirmed, instead of reading at <paramref name="readTimestamp"/> (which
+    /// is then ignored). Such a page is a snapshot read that orders after every write intent already planted
+    /// on that leader: each plant folds the writer's transaction id into the leader's clock, so the safe-time
+    /// rule waits on all of them. A snapshot minted on the calling node carries no such guarantee — nothing
+    /// folds a foreign coordinator's clock into the caller — so under clock skew, or a same-millisecond tie
+    /// on one machine, a caller-minted snapshot can sort below a live intent's transaction id and the scan
+    /// skips that intent as one that cannot commit inside the snapshot. Each page mints anew, so a paged
+    /// walk is not one consistent cut; use it where a live intent must refuse the page, not for a
+    /// point-in-time read.</para>
+    /// </summary>
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false);
 
     /// <summary>
     /// Streams all key-value entries whose keys start with <paramref name="prefix"/> as an

@@ -216,6 +216,12 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-proposal-timeout", Required = false, HelpText = "How long a write caller waits for a proposal to reach quorum before the call returns ProposalTimeout, in milliseconds", Default = 10000)]
     public int RaftProposalTimeout { get; set; } = 10000;
 
+    [Option("raft-wal-stall-step-down-timeout", Required = false, HelpText = "How long a leader's own WAL write may stay unanswered by the storage engine before it steps down in the same term, in milliseconds. Values <= 0 disable the watchdog and the candidacy gate.", Default = 3000)]
+    public int RaftWalStallStepDownTimeout { get; set; } = 3000;
+
+    [Option("raft-wal-stall-warn-threshold", Required = false, HelpText = "Age past which a pending WAL write on this node is logged as a stall and, when reported by a peer, excluded from entry-carrying backfill and snapshot transfers, in milliseconds. Values <= 0 disable the log lines only; the peer rules still use 500 ms.", Default = 500)]
+    public int RaftWalStallWarnThreshold { get; set; } = 500;
+
     [Option("raft-enable-check-quorum", Required = false, HelpText = "When set, a leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower", Default = false)]
     public bool RaftEnableCheckQuorum { get; set; }
 
@@ -535,6 +541,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-compaction-live-replica-lag-budget", Required = false, HelpText = "Entry-count budget within which a follower still converging after a snapshot rescue is held off the WAL compaction floor, so ordinary compaction cannot re-create the below-floor condition the rescue just repaired. Values <= 0 disable the hold.", Default = 1_000_000L)]
     public long RaftCompactionLiveReplicaLagBudget { get; set; } = 1_000_000L;
+
+    [Option("raft-compaction-silent-peer-retention-window", Required = false, HelpText = "How long the leader keeps holding WAL compaction for a peer that has stopped answering, measured from the heartbeat round it was first seen non-Alive, in milliseconds. Past the window the peer holds nothing and a restart is seeded by snapshot. 0 disables the hold.", Default = 120000)]
+    public int RaftCompactionSilentPeerRetentionWindow { get; set; } = 120000;
 
     [Option("raft-compaction-durability-clamp-report-interval", Required = false, HelpText = "How often a partition whose compaction is clamped by the application-durability floor repeats its warning, and how long the floor must sit unchanged before the warning calls the flusher stalled, in milliseconds. Values <= 0 keep only the streak-start and streak-end log lines.", Default = 60000)]
     public int RaftCompactionDurabilityClampReportInterval { get; set; } = 60000;
