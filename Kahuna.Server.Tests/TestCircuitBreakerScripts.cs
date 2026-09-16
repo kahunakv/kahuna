@@ -453,8 +453,6 @@ public class TestCircuitBreakerScripts : BaseCluster
             result = await RunRetrying(kahuna3, AdmitScript, Keys(scope, probeKey: Guid.NewGuid().ToString("N")));
             Assert.Equal("rejected", Text(result));
 
-            // The claim set is asserted where a claim was just taken. A released claim is observed
-            // through the admission that the freed slot lets through, not by counting the set.
             await AssertProbeClaims(kahuna1, scope, 2);
 
             // A result carrying a claim the budget no longer holds makes no progress toward closing.
@@ -469,6 +467,9 @@ public class TestCircuitBreakerScripts : BaseCluster
             result = await RunRetrying(kahuna2, SettleScript, Keys(scope, probeKey: secondProbe, outcome: "s"));
             Assert.Equal("recovered", Text(result));
 
+            // Both settled probes released their slots the moment their transactions committed.
+            await AssertProbeClaims(kahuna1, scope, 0);
+
             // A closed breaker admits without taking a slot, and records again into a window that
             // the epoch bump left empty.
             result = await RunRetrying(kahuna3, AdmitScript, Keys(scope, probeKey: Guid.NewGuid().ToString("N")));
@@ -478,22 +479,22 @@ public class TestCircuitBreakerScripts : BaseCluster
             Assert.Equal("recorded:0/1", Text(result));
 
             // A single probe failure sends a recovering breaker straight back to open, and the
-            // reopened breaker turns the next caller away. A separate scope carries this, so the
-            // budget it works against is the empty one a first recovery attempt always sees.
-            string reopenScope = "svc" + Guid.NewGuid().ToString("N")[..8];
-
-            await SeedOpenAndElapsed(kahuna1, reopenScope);
+            // reopened breaker turns the next caller away. The same scope carries this, so the
+            // budget it works against is the one the two released slots left empty.
+            await SeedOpenAndElapsed(kahuna1, scope);
 
             string failingProbe = Guid.NewGuid().ToString("N");
 
-            result = await RunRetrying(kahuna1, AdmitScript, Keys(reopenScope, probeKey: failingProbe));
+            result = await RunRetrying(kahuna1, AdmitScript, Keys(scope, probeKey: failingProbe));
             Assert.Equal("probe", Text(result));
 
-            result = await RunRetrying(kahuna1, SettleScript, Keys(reopenScope, probeKey: failingProbe, outcome: "f"));
+            result = await RunRetrying(kahuna1, SettleScript, Keys(scope, probeKey: failingProbe, outcome: "f"));
             Assert.Equal("reopened", Text(result));
 
-            result = await RunRetrying(kahuna2, AdmitScript, Keys(reopenScope, probeKey: Guid.NewGuid().ToString("N")));
+            result = await RunRetrying(kahuna2, AdmitScript, Keys(scope, probeKey: Guid.NewGuid().ToString("N")));
             Assert.Equal("rejected", Text(result));
+
+            await AssertProbeClaims(kahuna1, scope, 0);
         }
         finally
         {

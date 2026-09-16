@@ -918,7 +918,9 @@ internal sealed class KeyValueReplicator
     /// partition, and a replica applies that partition's log in order, so the prepare always applied first. The
     /// settle that removes the intent is proposed only after this record replicated, so the removal always
     /// applies later. A replica seeded by snapshot or state transfer receives the pending intents with the
-    /// seed. Deferred settlement only widens the window.</para>
+    /// seed. Deferred settlement only widens the window. A restart replay is the one consumer that can reach
+    /// this record after the settle removed the intent — the restorer resolves that case from the settled
+    /// intents the store retains until the record's row is flushed.</para>
     ///
     /// <para><b>The two kinds of miss.</b> Several producers may materialize the same intent (a deferred
     /// settlement racing the recovery sweep), so a second record can legitimately arrive after the settle

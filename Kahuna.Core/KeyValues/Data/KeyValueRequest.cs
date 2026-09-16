@@ -283,7 +283,17 @@ public sealed class KeyValueRequest : IConsistentHashable
             or KeyValueRequestType.TryReleaseExclusiveRangeLock
             or KeyValueRequestType.GetRangeLocks
             or KeyValueRequestType.ImportRangeLocks)
-            return (int)HashUtils.SimpleHash(Key);
+        {
+            // A prefix names a key space bare ("doctors") or with a trailing slash ("doctors/"). Both spellings
+            // must route to the actor that owns that key space — the one every point request on "doctors/x"
+            // hashes to below — so the trailing-slash spelling hashes the text before that slash, exactly as a
+            // key hashes its own key space. A prefix routed anywhere else lands its scan on an actor whose
+            // copies of the keys never receive the owner's commit notifications, and its prefix lock in a table
+            // the write path never consults.
+            return Key.Length > 0 && Key[^1] == '/'
+                ? (int)HashUtils.InversePrefixedStaticHash(Key, '/')
+                : (int)HashUtils.SimpleHash(Key);
+        }
 
         return (int)HashUtils.InversePrefixedStaticHash(Key, '/');
     }

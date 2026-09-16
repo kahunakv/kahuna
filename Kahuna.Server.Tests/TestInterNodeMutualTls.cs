@@ -131,9 +131,11 @@ public sealed class TestInterNodeMutualTls : IDisposable
         Assert.Equal(StatusCode.Unauthenticated, refused.StatusCode);
         Assert.Equal(nameof(RaftTransportAuthenticationStatus.CertificateUntrusted), refused.Status.Detail);
 
-        await Assert.ThrowsAnyAsync<Exception>(() =>
-            intruder.TryLock(node.ClusterEndpoint, "resource", [1], 1000, LockDurability.Ephemeral, ct));
+        // The batched lock stream is torn down before any request is served; the transport answers that
+        // as the operation's own MustRetry rather than leaking the stream failure to the caller.
+        (LockResponseType lockType, _) = await intruder.TryLock(node.ClusterEndpoint, "resource", [1], 1000, LockDurability.Ephemeral, ct);
 
+        Assert.Equal(LockResponseType.MustRetry, lockType);
         Assert.Empty(node.Kahuna.Calls);
     }
 
@@ -154,12 +156,14 @@ public sealed class TestInterNodeMutualTls : IDisposable
             TrustedServerCertificateThumbprints = [Thumbprint(nodeCertificate)]
         });
 
-        RpcException ex = await Assert.ThrowsAsync<RpcException>(() =>
-            anonymous.GetSequence(node.ClusterEndpoint, "seq", SequenceDurability.Persistent, ct));
+        // Refused by the transport, not by the gate: the request never reached a service. A transport-class
+        // refusal is answered as the operation's typed MustRetry; the gate's Unauthenticated refusal is not
+        // a transport failure and would still surface as an exception here.
+        (SequenceResponseType type, ReadOnlySequenceEntry? entry) =
+            await anonymous.GetSequence(node.ClusterEndpoint, "seq", SequenceDurability.Persistent, ct);
 
-        // Refused by the transport, not by the gate: the request never reached a service.
-        Assert.NotEqual(StatusCode.OK, ex.StatusCode);
-        Assert.NotEqual(StatusCode.Unauthenticated, ex.StatusCode);
+        Assert.Equal(SequenceResponseType.MustRetry, type);
+        Assert.Null(entry);
         Assert.Empty(node.Kahuna.Calls);
     }
 

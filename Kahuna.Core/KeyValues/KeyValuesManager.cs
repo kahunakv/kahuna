@@ -524,6 +524,26 @@ internal sealed partial class KeyValuesManager : IDisposable
         this.backgroundWriter = built.backgroundWriter;
         this.logger = built.logger;
         this.durabilityTracker = built.durabilityTracker;
+
+        // Once a partition's restart replay completes, settled intents reloaded from its snapshot whose
+        // materialized row the replay did not re-queue are released: their row was durable before the crash.
+        raft.OnRestoreFinished += OnPartitionRestoreFinished;
+    }
+
+    private void OnPartitionRestoreFinished(int partitionId)
+    {
+        try
+        {
+            int released = preparedIntentStore.ReleaseSettledIntentsWithDurableRows(partitionId);
+
+            if (released > 0 && logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Released {Count} settled prepared intents of partition #{PartitionId} whose materialized rows were durable before the restart", released, partitionId);
+        }
+        catch (Exception ex)
+        {
+            // Over-retention is safe; the release is a memory/snapshot-size concern, never a correctness one.
+            logger.LogError(ex, "Failed to release settled prepared intents of partition #{PartitionId} after its restore", partitionId);
+        }
     }
 
     /// <summary>
@@ -554,6 +574,8 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     public void Dispose()
     {
+        raft.OnRestoreFinished -= OnPartitionRestoreFinished;
+
         // Reject new writes and release any queued-but-not-dispatched ones retryably before tearing down.
         writeAggregator.Stop();
         txCoordinator.Dispose();

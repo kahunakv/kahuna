@@ -82,7 +82,7 @@ public sealed class TestPreparedIntentWindowCapture
             IReadOnlyList<PreparedIntent> all = store.SnapshotScanWindow("s/", startInclusive: true, "s/\uffff", endInclusive: false);
             AssertExactly(stable, all);
 
-            IReadOnlyList<PreparedIntent> bucket = store.SnapshotBucket("s");
+            IReadOnlyList<PreparedIntent> bucket = store.SnapshotPrefix("s/");
             AssertExactly(stable, bucket);
 
             // The open window sees the churn too: every stable key exactly once, and nothing that is not a live or
@@ -103,6 +103,6 @@ public sealed class TestPreparedIntentWindowCapture
     {
         PreparedIntentStore store = new();
         Assert.Empty(store.SnapshotScanWindow("a", true, "z", true));
-        Assert.Empty(store.SnapshotBucket("a"));
+        Assert.Empty(store.SnapshotPrefix("a"));
     }
 }

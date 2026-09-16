@@ -384,19 +384,18 @@ practice, and the clock source changes on a leader change.
 bucket, and the scan does not return the key you just wrote. Count first, then add the new
 observation in arithmetic, as section 5.1 does.
 
-## 9. A known defect to design around
+## 9. Bucket names
 
-A bucket scan can return a key that a point read reports as deleted, inside the same transaction.
-Shortly after a transaction deletes a probe claim, the next transaction's `GET BY BUCKET` can still
-count it. The window for this is short; extra traffic between the delete and the scan makes it
-disappear.
+A bucket is a key space: the text of a key before its last `/`. `GET BY BUCKET` accepts the key
+space bare (`svc|cb.probe`) or with a trailing slash (`svc|cb.probe/`). Both spellings are served by
+the actor that owns the key space, the same one every point read and write of `svc|cb.probe/<id>`
+goes to, and both take the same prefix lock under pessimistic locking. A scan and a point read of
+one member inside one transaction therefore agree, and a released claim is gone from the next scan
+the moment the release commits.
 
-The practical effect on a breaker is that a re-opened breaker may see stale claims against its probe
-budget. Rule 3 of section 7 already covers it: keep the probe lease at or below the open period, so
-an abandoned claim expires before the breaker next reaches half-open.
-
-This defect is filed in Vorpal in the `kahuna` project, under the title *"GET BY BUCKET returns a
-key that a point read in the same transaction reports as deleted"*.
+A partial prefix that names no key space (`svc|cb.pro`) is also accepted. It reads through the
+persisted rows and is correct, but it cannot be served from the owning actor's memory, so prefer the
+key space when you have it.
 
 ## 10. Cost
 
@@ -424,6 +423,9 @@ directly:
   prevent. It held over three runs.
 - A stale claim settles as `stale` and makes no progress.
 - Two probe successes close the breaker, and a single probe failure re-opens it.
+- Two settled probes release their slots the moment their transactions commit: the next scan of the
+  probe bucket counts zero claims, and a breaker re-opened on the same scope admits a fresh probe
+  against that empty budget.
 
 The following is **not** verified:
 

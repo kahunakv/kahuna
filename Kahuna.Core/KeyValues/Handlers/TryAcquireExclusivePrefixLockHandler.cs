@@ -34,9 +34,13 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        
+
+        // The lock is recorded under the key space the prefix names, which is the bucket the write path looks
+        // up for a key ("doctors" for "doctors/1"), so "doctors" and "doctors/" take and block the same lock.
+        string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
+
         // Check if the prefix is already locked by the current transaction
-        if (context.LocksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
+        if (context.LocksByPrefix.TryGetValue(keySpace, out KeyValueWriteIntent? writeIntent))
         {
             if (writeIntent.TransactionId == message.TransactionId)
             {
@@ -55,10 +59,10 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
                 return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, writeIntent.TransactionId);
             
             // The lock is expired, remove it
-            context.LocksByPrefix.Remove(message.Key);
+            context.LocksByPrefix.Remove(keySpace);
         }
                 
-        return LockExistingKeysByPrefix(currentTime, message);               
+        return LockExistingKeysByPrefix(currentTime, message, keySpace);               
     }
     
     /// <summary>
@@ -69,7 +73,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
     /// <param name="currentTime"></param> 
     /// <param name="message"></param>
     /// <returns></returns>
-    private KeyValueResponse LockExistingKeysByPrefix(HLCTimestamp currentTime, KeyValueRequest message)
+    private KeyValueResponse LockExistingKeysByPrefix(HLCTimestamp currentTime, KeyValueRequest message, string keySpace)
     {
         // Stamp per-key write intents atomically: if any key in the bucket is mid-replication we abort
         // and roll back every intent already written this call, so a mid-loop failure never strands a
@@ -120,7 +124,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             context.Logger.LogAssignedWriteIntent(key, message.TransactionId);
         }
 
-        context.LocksByPrefix.Add(message.Key, new()
+        context.LocksByPrefix.Add(keySpace, new()
         {
             TransactionId = message.TransactionId,
             Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
