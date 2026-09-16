@@ -16,7 +16,7 @@ namespace Kahuna.Server.KeyValues.Transactions;
 internal readonly record struct ReplicaFrontier(bool Known, long EntriesBehind, bool WalStalled)
 {
     /// <summary>No leader-side evidence: probe behavior only.</summary>
-    internal static readonly ReplicaFrontier Unknown = default;
+    internal static readonly ReplicaFrontier Unknown;
 }
 
 /// <summary>Why a replica is (or just became) lagging in the fence's eyes.</summary>

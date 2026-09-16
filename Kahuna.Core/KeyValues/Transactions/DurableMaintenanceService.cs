@@ -1524,7 +1524,8 @@ internal sealed class DurableMaintenanceService
         {
             // Evidence is an optimisation of the wait, never a correctness input: without it the probe
             // rules alone decide, exactly as before the snapshot existed.
-            logger.LogDebug(ex, "Replica fence: could not read node {Endpoint}'s progress on partition {PartitionId}; planning without frontier evidence", endpoint, partitionId);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(ex, "Replica fence: could not read node {Endpoint}'s progress on partition {PartitionId}; planning without frontier evidence", endpoint, partitionId);
             return ReplicaFrontier.Unknown;
         }
     }
