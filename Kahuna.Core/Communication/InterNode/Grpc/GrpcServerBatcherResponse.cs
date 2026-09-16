@@ -11,6 +11,13 @@ internal readonly struct GrpcServerBatcherResponse
 {
     private readonly object? payload;
 
+    /// <summary>
+    /// True when the peer answered with a payload. The default value carries none: it is what a forward
+    /// receives when the transport to the peer failed before an answer arrived, so the forward can return
+    /// its operation's typed MustRetry instead of dereferencing a payload that never existed.
+    /// </summary>
+    public bool IsAnswered => payload is not null;
+
     public GrpcServerBatcherResponse(GrpcTryLockResponse tryLock) => payload = tryLock;
 
     public GrpcServerBatcherResponse(GrpcUnlockResponse unlock) => payload = unlock;

@@ -101,7 +101,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         KahunaConfiguration kahunaConfiguration = CreateKahunaConfiguration(options, singleProcessRaftGroup: true);
 
         this.standaloneComm = new();
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, sharedResources, kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, CreateBackend(options, kahunaConfiguration, kahunaLogger, sharedResources), kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
 
         // Restart replay and WAL compaction consult Kahuna's application-durability floor; wired
         // before StartAsync joins the cluster, so the first partition restore already sees it.
@@ -157,7 +157,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         KahunaConfiguration kahunaConfiguration = CreateKahunaConfiguration(options, singleProcessRaftGroup: false);
 
         this.standaloneComm = null;
-        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, sharedResources, kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, CreateBackend(options, kahunaConfiguration, kahunaLogger, sharedResources), kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
 
         // Restart replay and WAL compaction consult Kahuna's application-durability floor; wired
         // before StartAsync joins the cluster, so the first partition restore already sees it.
@@ -283,6 +283,18 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // Dispose the shared bundle LAST — only after both the Raft/WAL and the Kahuna backend above are
         // closed. This node owns it; the WAL and backend only borrow it.
         sharedResources?.Dispose();
+    }
+
+    /// <summary>
+    /// The raw persistence backend the configuration selects, wrapped by the test-only decorator when the
+    /// options carry one. The manager's composer puts the unflushed-write overlay over whatever is returned.
+    /// </summary>
+    private static Server.Persistence.Backend.IPersistenceBackend CreateBackend(
+        EmbeddedKahunaOptions options, KahunaConfiguration configuration, ILogger<IKahuna> logger, RocksDbSharedResources? sharedResources)
+    {
+        Server.Persistence.Backend.IPersistenceBackend backend = Server.Composition.KahunaNodeComposer.CreateBackend(configuration, logger, sharedResources);
+
+        return options.PersistenceBackendDecorator?.Invoke(backend) ?? backend;
     }
 
     private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger, RocksDbSharedResources? sharedResources)

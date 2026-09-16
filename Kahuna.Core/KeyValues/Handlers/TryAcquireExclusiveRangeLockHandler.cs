@@ -24,12 +24,16 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0)
             return KeyValueStaticResponses.ErroredResponse;
 
+        // The lock is recorded under the key space the prefix names, which is the bucket the write path
+        // looks up for a key, so a prefix spelled with or without a trailing slash guards the same keys.
+        string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
+
         // Prune abandoned expired range locks on the way in so they neither block a fresh acquire
         // nor accumulate on a hot key space; drop the bucket entirely once it holds no live locks.
-        if (context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? existingLocks)
-            && RangeLockChecks.PruneExpired(context, message.Key, existingLocks, currentTime, int.MaxValue))
+        if (context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? existingLocks)
+            && RangeLockChecks.PruneExpired(context, keySpace, existingLocks, currentTime, int.MaxValue))
         {
-            context.LocksByRange.Remove(message.Key);
+            context.LocksByRange.Remove(keySpace);
             existingLocks = null;
         }
 
@@ -103,10 +107,10 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             }
         }
 
-        return LockExistingKeysByRange(currentTime, message);
+        return LockExistingKeysByRange(currentTime, message, keySpace);
     }
 
-    private KeyValueResponse LockExistingKeysByRange(HLCTimestamp currentTime, KeyValueRequest message)
+    private KeyValueResponse LockExistingKeysByRange(HLCTimestamp currentTime, KeyValueRequest message, string keySpace)
     {
         // Exclusive acquires place per-key write intents so existing keys are immediately locked.
         // Shared acquires skip intents — write-path conflict is enforced by TrySetHandler.
@@ -131,10 +135,10 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             Mode           = message.RangeLockMode,
         };
 
-        if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks))
+        if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
         {
             locks = [];
-            context.LocksByRange[message.Key] = locks;
+            context.LocksByRange[keySpace] = locks;
         }
 
         locks.Add(rangeLock);

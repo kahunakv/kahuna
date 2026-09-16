@@ -1,6 +1,9 @@
 
 using System.Text.Json;
 
+using System.Collections.Concurrent;
+using System.Diagnostics;
+
 using Grpc.Core;
 
 using Kahuna.Client.Communication;
@@ -8,7 +11,9 @@ using Kahuna.Communication.External.Rest;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -17,15 +22,16 @@ using Kommander;
 using Kommander.Time;
 
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Coverage for the two guards that keep a mid-forward transport failure from reaching REST clients
-/// as an unhandled HTTP 500: the typed MustRetry mapping on the transaction-session forwarding
-/// methods of <see cref="GrpcInterNodeCommunication"/> (the leader was resolved but died before
-/// answering), and the last-resort REST exception mapping that classifies any remaining escape.
+/// Coverage for the two guards that keep a mid-forward transport failure from reaching the caller
+/// as a raw exception: the typed MustRetry mapping on every forwarding method of
+/// <see cref="GrpcInterNodeCommunication"/> (the leader was resolved but died before answering),
+/// and the last-resort REST exception mapping that classifies any remaining escape.
 /// </summary>
 public sealed class TestInterNodeTransportMustRetry
 {
@@ -33,8 +39,415 @@ public sealed class TestInterNodeTransportMustRetry
     /// status the moment the batcher tries to reach the "leader".</summary>
     private const string UnreachableNode = "https://localhost:1";
 
-    private static GrpcInterNodeCommunication BuildTransport() =>
-        new(new KahunaConfiguration(), new RaftTransportSecurityOptions(), NullLogger<GrpcInterNodeCommunication>.Instance);
+    private static GrpcInterNodeCommunication BuildTransport(ILogger<GrpcInterNodeCommunication>? logger = null) =>
+        new(new KahunaConfiguration(), new RaftTransportSecurityOptions(), logger ?? NullLogger<GrpcInterNodeCommunication>.Instance);
+
+    private static readonly HLCTimestamp TransactionId = new(1, 100, 0);
+
+    // ── key-value and lock forwards ──────────────────────────────────────────
+
+    /// <summary>
+    /// A refused connection sends nothing, so the read demonstrably did not run: the answer is the
+    /// operation's own MustRetry, which every embedding caller already handles, never the transport's
+    /// exception, which the caller would have to know Kahuna's transport to classify.
+    /// </summary>
+    [Fact]
+    public async Task TryGetValue_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await BuildTransport().TryGetValue(
+            UnreachableNode, TransactionId, "key", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Null(entry);
+    }
+
+    [Fact]
+    public async Task TryExistsValue_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await BuildTransport().TryExistsValue(
+            UnreachableNode, TransactionId, "key", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Null(entry);
+    }
+
+    [Fact]
+    public async Task TrySetKeyValue_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await BuildTransport().TrySetKeyValue(
+            UnreachableNode, TransactionId, "key", [1, 2, 3], null, -1, KeyValueFlags.Set, 0,
+            KeyValueDurability.Persistent, 0, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(0, revision);
+        Assert.Equal(HLCTimestamp.Zero, lastModified);
+    }
+
+    [Fact]
+    public async Task TryDeleteKeyValue_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, _, _) = await BuildTransport().TryDeleteKeyValue(
+            UnreachableNode, TransactionId, "key", KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+    }
+
+    [Fact]
+    public async Task TryExtendKeyValue_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, _, _) = await BuildTransport().TryExtendKeyValue(
+            UnreachableNode, TransactionId, "key", 1000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+    }
+
+    /// <summary>
+    /// Callers of a batch forward correlate results by key, so a refusal has to name every key it
+    /// covers: one MustRetry per requested key, in the shared response list, under the shared lock.
+    /// </summary>
+    [Fact]
+    public async Task TryGetManyNodeValues_LeaderUnreachable_AnswersMustRetryPerKey()
+    {
+        List<(string key, long revision, KeyValueDurability durability)> keys =
+        [
+            ("a", -1, KeyValueDurability.Persistent),
+            ("b", -1, KeyValueDurability.Ephemeral),
+            ("c", -1, KeyValueDurability.Persistent)
+        ];
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses = [];
+
+        await BuildTransport().TryGetManyNodeValues(
+            UnreachableNode, TransactionId, HLCTimestamp.Zero, keys, new Lock(), responses, TestContext.Current.CancellationToken);
+
+        Assert.Equal(keys.Count, responses.Count);
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            Assert.Equal(KeyValueResponseType.MustRetry, responses[i].type);
+            Assert.Equal(keys[i].key, responses[i].key);
+            Assert.Equal(keys[i].durability, responses[i].durability);
+            Assert.Null(responses[i].entry);
+        }
+    }
+
+    [Fact]
+    public async Task TrySetManyNodeKeyValue_LeaderUnreachable_AnswersMustRetryPerKey()
+    {
+        List<KahunaSetKeyValueRequestItem> items =
+        [
+            new() { Key = "a", Value = [1], Durability = KeyValueDurability.Persistent },
+            new() { Key = "b", Value = [2], Durability = KeyValueDurability.Ephemeral }
+        ];
+
+        List<KahunaSetKeyValueResponseItem> responses = [];
+
+        await BuildTransport().TrySetManyNodeKeyValue(
+            UnreachableNode, items, new Lock(), responses, TestContext.Current.CancellationToken);
+
+        Assert.Equal(items.Count, responses.Count);
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            Assert.Equal(KeyValueResponseType.MustRetry, responses[i].Type);
+            Assert.Equal(items[i].Key, responses[i].Key);
+            Assert.Equal(items[i].Durability, responses[i].Durability);
+        }
+    }
+
+    [Fact]
+    public async Task TryDeleteManyNodeKeyValue_LeaderUnreachable_AnswersMustRetryPerKey()
+    {
+        List<KahunaDeleteKeyValueRequestItem> items =
+        [
+            new() { Key = "a", Durability = KeyValueDurability.Persistent },
+            new() { Key = "b", Durability = KeyValueDurability.Ephemeral }
+        ];
+
+        List<KahunaDeleteKeyValueResponseItem> responses = [];
+
+        await BuildTransport().TryDeleteManyNodeKeyValue(
+            UnreachableNode, items, new Lock(), responses, TestContext.Current.CancellationToken);
+
+        Assert.Equal(items.Count, responses.Count);
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            Assert.Equal(KeyValueResponseType.MustRetry, responses[i].Type);
+            Assert.Equal(items[i].Key, responses[i].Key);
+            Assert.Equal(items[i].Durability, responses[i].Durability);
+        }
+    }
+
+    [Fact]
+    public async Task TryCheckManyWriteIntents_LeaderUnreachable_AnswersMustRetryPerKey()
+    {
+        List<KeyValueConflictProbe> probes =
+        [
+            new("a", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+            new("b", KeyValueDurability.Ephemeral, KeyValueConflictChecks.WriteIntent)
+        ];
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
+            await BuildTransport().TryCheckManyWriteIntents(UnreachableNode, TransactionId, probes, TestContext.Current.CancellationToken);
+
+        Assert.Equal(probes.Count, responses.Count);
+
+        for (int i = 0; i < probes.Count; i++)
+        {
+            Assert.Equal(KeyValueResponseType.MustRetry, responses[i].type);
+            Assert.Equal(probes[i].Key, responses[i].key);
+            Assert.Equal(probes[i].Durability, responses[i].durability);
+        }
+    }
+
+    [Fact]
+    public async Task TryAcquireExclusiveLock_LeaderUnreachable_ReturnsMustRetryWithTheKey()
+    {
+        (KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder) =
+            await BuildTransport().TryAcquireExclusiveLock(
+                UnreachableNode, TransactionId, "key", 1000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal("key", key);
+        Assert.Equal(KeyValueDurability.Persistent, durability);
+        Assert.Equal(HLCTimestamp.Zero, holder);
+    }
+
+    [Fact]
+    public async Task TryAcquireNodeExclusiveLocks_LeaderUnreachable_AnswersMustRetryPerKey()
+    {
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys =
+        [
+            ("a", 1000, KeyValueDurability.Persistent),
+            ("b", 1000, KeyValueDurability.Ephemeral)
+        ];
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses = [];
+
+        await BuildTransport().TryAcquireNodeExclusiveLocks(
+            UnreachableNode, TransactionId, keys, new Lock(), responses, TestContext.Current.CancellationToken);
+
+        Assert.Equal(keys.Count, responses.Count);
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            Assert.Equal(KeyValueResponseType.MustRetry, responses[i].type);
+            Assert.Equal(keys[i].key, responses[i].key);
+            Assert.Equal(keys[i].durability, responses[i].durability);
+        }
+    }
+
+    [Fact]
+    public async Task TryAcquireExclusiveRangeLock_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, HLCTimestamp holder) = await BuildTransport().TryAcquireExclusiveRangeLock(
+            UnreachableNode, TransactionId, "prefix", "a", true, "z", false, 1000, KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(HLCTimestamp.Zero, holder);
+    }
+
+    [Fact]
+    public async Task TryReleaseExclusiveLock_LeaderUnreachable_ReturnsMustRetryWithTheKey()
+    {
+        (KeyValueResponseType type, string key) = await BuildTransport().TryReleaseExclusiveLock(
+            UnreachableNode, TransactionId, "key", KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal("key", key);
+    }
+
+    /// <summary>
+    /// The 2PC participant forwards answer the same way the participant itself does on leadership loss,
+    /// so the coordinator's existing retry handles a dead participant node and a re-elected one alike.
+    /// </summary>
+    [Fact]
+    public async Task TryPrepareMutations_LeaderUnreachable_ReturnsMustRetryWithTheKey()
+    {
+        (KeyValueResponseType type, HLCTimestamp ticket, string key, KeyValueDurability durability) =
+            await BuildTransport().TryPrepareMutations(
+                UnreachableNode, TransactionId, new HLCTimestamp(1, 200, 0), "key", KeyValueDurability.Persistent, 0,
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(HLCTimestamp.Zero, ticket);
+        Assert.Equal("key", key);
+        Assert.Equal(KeyValueDurability.Persistent, durability);
+    }
+
+    [Fact]
+    public async Task TryCommitNodeMutations_LeaderUnreachable_AnswersMustRetryPerKey()
+    {
+        List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys =
+        [
+            ("a", new HLCTimestamp(1, 300, 0), KeyValueDurability.Persistent),
+            ("b", new HLCTimestamp(1, 300, 1), KeyValueDurability.Persistent)
+        ];
+
+        List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses = [];
+
+        await BuildTransport().TryCommitNodeMutations(
+            UnreachableNode, TransactionId, keys, new Lock(), responses, TestContext.Current.CancellationToken);
+
+        Assert.Equal(keys.Count, responses.Count);
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            Assert.Equal(KeyValueResponseType.MustRetry, responses[i].type);
+            Assert.Equal(keys[i].key, responses[i].key);
+        }
+    }
+
+    [Fact]
+    public async Task GetByRange_LeaderUnreachable_ReturnsMustRetryWithNoPage()
+    {
+        KeyValueGetByRangeResult result = await BuildTransport().GetByRange(
+            UnreachableNode, TransactionId, "prefix", null, true, null, true, 100, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, result.Type);
+        Assert.Empty(result.Items);
+        Assert.False(result.HasMore);
+        Assert.Null(result.NextCursor);
+    }
+
+    [Fact]
+    public async Task GetByBucket_LeaderUnreachable_ReturnsMustRetryWithNoItems()
+    {
+        KeyValueGetByBucketResult result = await BuildTransport().GetByBucket(
+            UnreachableNode, TransactionId, "prefix", HLCTimestamp.Zero, KeyValueDurability.Persistent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, result.Type);
+        Assert.Empty(result.Items);
+    }
+
+    /// <summary>The coordinator-session hops answer the same shape the locator gives an unrouted call.</summary>
+    [Fact]
+    public async Task BeginOperation_LeaderUnreachable_ReturnsPendingMustRetry()
+    {
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, string? anchor) =
+            await BuildTransport().BeginOperation(
+                UnreachableNode, "coordinator-key", TransactionId, new TransactionOperationId(1, 2), OperationKind.Set, null,
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(OperationRegistrationOutcome.AlreadyPending, outcome);
+        Assert.Equal(KeyValueResponseType.MustRetry, cachedType);
+        Assert.Null(anchor);
+    }
+
+    [Fact]
+    public async Task TryLock_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (LockResponseType type, long fencingToken) = await BuildTransport().TryLock(
+            UnreachableNode, "resource", [1, 2, 3], 1000, LockDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(LockResponseType.MustRetry, type);
+        Assert.Equal(0, fencingToken);
+    }
+
+    [Fact]
+    public async Task GetLock_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (LockResponseType type, ReadOnlyLockEntry? entry) = await BuildTransport().GetLock(
+            UnreachableNode, "resource", LockDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(LockResponseType.MustRetry, type);
+        Assert.Null(entry);
+    }
+
+    /// <summary>Sequence forwards are plain unary calls rather than batched streams; they follow the same rule.</summary>
+    [Fact]
+    public async Task NextSequenceValue_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (SequenceResponseType type, SequenceAllocation allocation) = await BuildTransport().NextSequenceValue(
+            UnreachableNode, "sequence", null, SequenceDurability.Persistent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SequenceResponseType.MustRetry, type);
+        Assert.Equal(default, allocation);
+    }
+
+    [Fact]
+    public async Task AcquireSnapshotHold_LeaderUnreachable_ReturnsMustRetry()
+    {
+        (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) = await BuildTransport().AcquireSnapshotHold(
+            UnreachableNode, "holder", new HLCTimestamp(1, 100, 0), 1000, TestContext.Current.CancellationToken);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(string.Empty, holdId);
+        Assert.Equal(HLCTimestamp.Zero, leaseExpiry);
+    }
+
+    /// <summary>
+    /// A dead leader fails thousands of forwards per second until the placement moves; a warning per
+    /// forward was itself an operational problem. The transport logs one line per peer per quiet
+    /// window and folds the rest into that line's count, while still answering every forward.
+    /// </summary>
+    [Fact]
+    public async Task TransportFailureLog_IsGatedPerPeer()
+    {
+        const int forwards = 64;
+
+        CapturingLogger logger = new();
+        GrpcInterNodeCommunication transport = BuildTransport(logger);
+
+        Stopwatch elapsed = Stopwatch.StartNew();
+
+        Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>[] calls = new Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>[forwards];
+
+        for (int i = 0; i < forwards; i++)
+            calls[i] = transport.TryGetValue(
+                UnreachableNode, TransactionId, "key-" + i, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent,
+                TestContext.Current.CancellationToken);
+
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?)[] answers = await Task.WhenAll(calls);
+
+        elapsed.Stop();
+
+        Assert.All(answers, answer => Assert.Equal(KeyValueResponseType.MustRetry, answer.Item1));
+
+        // The batcher shares the transport's logger and reports each stream eviction on its own;
+        // only the forwarding refusal line is under test here.
+        string[] lines = logger.Lines.Where(static line => line.Contains("returning MustRetry", StringComparison.Ordinal)).ToArray();
+
+        // The first failure always logs; later ones log at most once per quiet window.
+        long windows = 1 + elapsed.ElapsedMilliseconds / GrpcInterNodeCommunication.TransportFailureLogQuietMs;
+        Assert.InRange(lines.Length, 1, windows);
+
+        // Every failure is either its own line or counted on a later line, never dropped silently. The last
+        // window's suppressed failures are still pending on the gate, so the sum is a floor, not an equality.
+        long counted = 0;
+
+        foreach (string line in lines)
+        {
+            int open = line.IndexOf('(');
+            int space = line.IndexOf(' ', open);
+            counted += long.Parse(line.AsSpan(open + 1, space - open - 1));
+        }
+
+        Assert.InRange(lines.Length + counted, lines.Length, forwards);
+    }
+
+    private sealed class CapturingLogger : ILogger<GrpcInterNodeCommunication>
+    {
+        public readonly ConcurrentQueue<string> Lines = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel))
+                Lines.Enqueue(formatter(state, exception));
+        }
+    }
+
+    // ── transaction-session forwards ─────────────────────────────────────────
 
     [Fact]
     public async Task StartTransaction_LeaderUnreachable_ReturnsMustRetry()

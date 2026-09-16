@@ -16,15 +16,17 @@ internal sealed class GetRangeLocksHandler : BaseHandler
 
     public KeyValueResponse Execute(KeyValueRequest message)
     {
-        if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks) || locks.Count == 0)
+        string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
+
+        if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks) || locks.Count == 0)
             return KeyValueResponse.ForRangeLocks([]);
 
         // Prune expired locks before the snapshot so an abandoned lock is never carried into the
         // split/merge transfer stream as if it were live; drop the bucket if nothing survives.
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        if (RangeLockChecks.PruneExpired(context, message.Key, locks, currentTime, int.MaxValue))
+        if (RangeLockChecks.PruneExpired(context, keySpace, locks, currentTime, int.MaxValue))
         {
-            context.LocksByRange.Remove(message.Key);
+            context.LocksByRange.Remove(keySpace);
             return KeyValueResponse.ForRangeLocks([]);
         }
 

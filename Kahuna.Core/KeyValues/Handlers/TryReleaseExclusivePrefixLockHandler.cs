@@ -29,14 +29,17 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
         
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         
+        // The lock was recorded under the key space the prefix names (see the acquire handler).
+        string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
+
         // Check if the prefix is already locked by the current transaction
-        if (context.LocksByPrefix.TryGetValue(message.Key, out KeyValueWriteIntent? writeIntent))
+        if (context.LocksByPrefix.TryGetValue(keySpace, out KeyValueWriteIntent? writeIntent))
         {
             if (writeIntent.TransactionId == message.TransactionId)
             {
                 ReleaseExistingLocksByPrefix(currentTime, message);
                 
-                context.LocksByPrefix.Remove(message.Key);
+                context.LocksByPrefix.Remove(keySpace);
             }
         }
 

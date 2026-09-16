@@ -27,15 +27,17 @@ internal sealed class ImportRangeLocksHandler : BaseHandler
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks))
+        string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
+
+        if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
         {
             locks = [];
-            context.LocksByRange[message.Key] = locks;
+            context.LocksByRange[keySpace] = locks;
         }
         else
         {
             // Prune expired destination locks first so re-import dedups against live locks only.
-            RangeLockChecks.PruneExpired(context, message.Key, locks, currentTime, int.MaxValue);
+            RangeLockChecks.PruneExpired(context, keySpace, locks, currentTime, int.MaxValue);
         }
 
         foreach (KeyValueRangeLock entry in message.RangeLockImportList)

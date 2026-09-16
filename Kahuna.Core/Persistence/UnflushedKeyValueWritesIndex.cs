@@ -40,8 +40,17 @@ internal sealed class UnflushedKeyValueWritesIndex
 {
     private readonly ConcurrentDictionary<string, UnflushedKeyValueWrite> entries = new(StringComparer.Ordinal);
 
+    // Invoked with the key after a confirmed flush removed its overlay entry — i.e. once every queued head of
+    // the key is durable. The prepared-intent store releases the settled intents it retains for that key's
+    // unflushed materialization on this signal. Runs on the flush path; must be cheap and must not throw.
+    private Action<string>? onKeyReleased;
+
     /// <summary>True when the overlay currently holds no unflushed writes (fast path for reads).</summary>
     public bool IsEmpty => entries.IsEmpty;
+
+    /// <summary>Wires the observer notified whenever a confirmed flush removes a key's overlay entry (manager
+    /// construction). One observer; a later attach replaces the earlier one.</summary>
+    public void AttachReleaseObserver(Action<string> observer) => onKeyReleased = observer;
 
     /// <summary>
     /// Records a committed write queued for persistence. Keeps the newest head per key: same-revision
@@ -74,7 +83,10 @@ internal sealed class UnflushedKeyValueWritesIndex
             // Atomic conditional removal: only removes when the stored value is still `current`,
             // so a concurrent Record of a newer head is never lost.
             if (entries.TryRemove(new KeyValuePair<string, UnflushedKeyValueWrite>(key, current)))
+            {
+                onKeyReleased?.Invoke(key);
                 return;
+            }
         }
     }
 

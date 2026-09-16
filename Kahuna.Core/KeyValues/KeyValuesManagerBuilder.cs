@@ -372,6 +372,19 @@ internal sealed class KeyValuesManagerBuilder
         // becomes a no-op, restoring pre-overlay behavior.
         UnflushedKeyValueWritesIndex? unflushedWrites = (persistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
 
+        // A settled committed intent whose by-reference materialization is queued but not yet flushed stays
+        // reachable for a restart replay until the flush lands (see the store's settled-intent retention). The
+        // overlay is both the witness that decides retention — a head at or above the intent's revision means
+        // the row is queued here but not durable — and the signal that releases it, when a confirmed flush
+        // drops the key. Without an overlay nothing can be proven either way, and nothing is retained.
+        if (unflushedWrites is not null)
+        {
+            UnflushedKeyValueWritesIndex retentionWitness = unflushedWrites;
+            preparedIntentStore.AttachUnflushedRowProbe((key, revision) =>
+                retentionWitness.TryGet(key, out UnflushedKeyValueWrite queued) && queued.Revision >= revision);
+            retentionWitness.AttachReleaseObserver(preparedIntentStore.ReleaseSettledIntentsAwaitingFlush);
+        }
+
         // The restorer resolves a by-reference materialization record against the same prepared-intent store the
         // replay rebuilds from its snapshot and the replayed prepare deltas.
         restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker, preparedIntentStore);

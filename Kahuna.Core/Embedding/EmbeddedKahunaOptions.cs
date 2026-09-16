@@ -14,6 +14,14 @@ public sealed class EmbeddedKahunaOptions
     /// calls; scoped to this node, never a process-wide static. Null in production.</summary>
     internal Func<Writes.IPartitionBatchExecutor, Writes.IPartitionBatchExecutor>? WriteBatchExecutorDecorator { get; set; }
 
+    /// <summary>
+    /// Test-only decorator over the raw persistence backend, applied before the node's unflushed-write overlay
+    /// wraps it: a test can fail or delay individual flush batches to hold committed rows out of the backend
+    /// while the node's replication, snapshots and durability floors keep advancing. Null (the default) leaves
+    /// the backend exactly as the configuration builds it.
+    /// </summary>
+    internal Func<Server.Persistence.Backend.IPersistenceBackend, Server.Persistence.Backend.IPersistenceBackend>? PersistenceBackendDecorator { get; set; }
+
     public string NodeName { get; set; } = "embedded-1";
 
     public int NodeId { get; set; } = 1;

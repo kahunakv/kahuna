@@ -176,6 +176,10 @@ internal static class RangeRouting
     /// </summary>
     public static bool IsPrefixOpSafe(KeySpaceRegistry registry, RangeMap rangeMap, string keySpace)
     {
+        // Callers hand in the operation's prefix as given, which may spell the key space with a
+        // trailing slash; the registry and the map know the key space by its bare name.
+        keySpace = KeyValueKeySpace.OfPrefix(keySpace);
+
         if (registry.GetMode(keySpace) != RoutingMode.KeyRange)
             return true;
 

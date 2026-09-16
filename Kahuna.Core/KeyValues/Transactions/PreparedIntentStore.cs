@@ -259,6 +259,247 @@ internal sealed class PreparedIntentStore
     /// store.</summary>
     public void AttachCommittedSettleObserver(Action<PreparedIntent> observer) => onCommittedSettleApplied = observer;
 
+    // ── settled intents awaiting the flush of their materialized row ──────────────────────────────
+    //
+    // A by-reference materialization record carries no value: a replica applies it from the intent the record
+    // names. The settle that follows removes that intent from the live set, and the next snapshot rewrite drops
+    // it from disk — while the committed row the record materialized may still be queued for the background
+    // flush. The durability floor certifies the prepare delta through the snapshot channel, collectively, so a
+    // restart's replay can start above the prepare and at or below the record. Such a replay would then find the
+    // mutation nowhere on this node: not in the live set, not in the snapshot, not in the backend. Once the intent
+    // is settled, the flushed row is the prepare's only durable artifact — so a settled committed intent whose row
+    // is not yet durable is retained here and persisted with the partition's snapshot until the flush that carries
+    // its row is confirmed.
+    //
+    // Retention is decided at the settle apply from the unflushed overlay, the same witness the settle-time
+    // convergence check uses: an overlay head at or above the intent's revision means the row is queued but not
+    // durable. Release is driven by the overlay dropping the key after a confirmed flush. Both the probe-and-retain
+    // and the release run under settledGate, so a flush confirmed between the probe and the retention still finds
+    // the entry when its release runs. Entries loaded from a snapshot are re-checked once the partition's restart
+    // replay completes: those whose row the replay did not re-queue were durable before the crash, because the
+    // replay window started above their record.
+    //
+    // Never part of the live set: invisible to Get/GetByIdentity, the recovery sweep, admission accounting and
+    // every fence. The only reader is the restart restorer, by exact identity, which also checks the revision.
+
+    private readonly Dictionary<string, List<PreparedIntent>> settledAwaitingFlush = new(StringComparer.Ordinal);
+
+    private readonly object settledGate = new();
+
+    // Whether this node holds a queued-but-unflushed row for (key, revision) — an overlay head at or above the
+    // revision. Null in the pure/in-memory configuration, which then retains nothing.
+    private Func<string, long, bool>? rowUnflushed;
+
+    /// <summary>Wires the unflushed-row probe (manager construction). Without it no settled intent is retained.</summary>
+    public void AttachUnflushedRowProbe(Func<string, long, bool> probe) => rowUnflushed = probe;
+
+    /// <summary>Retained settled intents across every key (observability / tests).</summary>
+    internal int SettledIntentsAwaitingFlushCount
+    {
+        get
+        {
+            lock (settledGate)
+            {
+                int count = 0;
+                foreach (List<PreparedIntent> retained in settledAwaitingFlush.Values)
+                    count += retained.Count;
+                return count;
+            }
+        }
+    }
+
+    // Caller holds applyGate: this is the removal of a committed intent. The probe and the insertion share
+    // settledGate with the release so the two cannot interleave into a leaked entry.
+    private void RetainSettledIntentIfRowUnflushed(PreparedIntent intent)
+    {
+        Func<string, long, bool>? probe = rowUnflushed;
+        if (probe is null)
+            return;
+
+        lock (settledGate)
+        {
+            if (!probe(intent.Key, intent.Revision))
+                return;
+
+            AddSettledAwaitingFlushLocked(intent);
+        }
+    }
+
+    // Caller holds settledGate. One entry per (transaction, epoch) identity per key; a re-retention of the same
+    // identity replaces its entry.
+    private void AddSettledAwaitingFlushLocked(PreparedIntent intent)
+    {
+        if (!settledAwaitingFlush.TryGetValue(intent.Key, out List<PreparedIntent>? retained))
+        {
+            settledAwaitingFlush[intent.Key] = [intent];
+            return;
+        }
+
+        for (int i = 0; i < retained.Count; i++)
+        {
+            PreparedIntent existing = retained[i];
+            if (existing.TransactionId == intent.TransactionId && existing.Epoch == intent.Epoch)
+            {
+                retained[i] = intent;
+                return;
+            }
+        }
+
+        retained.Add(intent);
+    }
+
+    /// <summary>The retained settled intent of the given transaction attempt at <paramref name="key"/>, if this
+    /// node still awaits the flush of its materialized row. The restart restorer's fallback for a by-reference
+    /// record whose intent is no longer live; the caller checks the revision.</summary>
+    public bool TryGetSettledIntentAwaitingFlush(HLCTimestamp transactionId, long epoch, string key, out PreparedIntent? intent)
+    {
+        intent = null;
+
+        lock (settledGate)
+        {
+            if (settledAwaitingFlush.Count == 0 || !settledAwaitingFlush.TryGetValue(key, out List<PreparedIntent>? retained))
+                return false;
+
+            foreach (PreparedIntent candidate in retained)
+            {
+                if (candidate.TransactionId == transactionId && candidate.Epoch == epoch)
+                {
+                    intent = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Drops every retained settled intent of <paramref name="key"/>: a confirmed flush removed the key
+    /// from the unflushed overlay, so each queued head of the key — the materialized rows included — is durable.
+    /// Invoked by the overlay on the flush path.</summary>
+    public void ReleaseSettledIntentsAwaitingFlush(string key)
+    {
+        lock (settledGate)
+        {
+            if (settledAwaitingFlush.Count == 0 || !settledAwaitingFlush.Remove(key))
+                return;
+        }
+
+        // The partition's snapshot must drop the entry on its next rewrite.
+        StampDirty(key);
+    }
+
+    /// <summary>
+    /// Drops the retained settled intents of <paramref name="partitionId"/> whose row this node holds no unflushed
+    /// head for. Runs when the partition's restart replay completes: an entry loaded from the snapshot whose
+    /// by-reference record the replay redelivered has its row queued again (the restorer records it in the overlay
+    /// before anything else) and stays; one the replay did not reach was durable before the crash — the replay
+    /// window started above its record — and would otherwise linger in memory and in every later snapshot. Keys
+    /// the resolver cannot attribute (a range-map gap) are kept: over-retention is safe, release is not.
+    /// </summary>
+    public int ReleaseSettledIntentsWithDurableRows(int partitionId)
+    {
+        Func<string, long, bool>? probe = rowUnflushed;
+        Func<string, int>? resolver = resolvePartition;
+        if (probe is null || resolver is null)
+            return 0;
+
+        int released = 0;
+        List<string>? emptied = null;
+
+        lock (settledGate)
+        {
+            if (settledAwaitingFlush.Count == 0)
+                return 0;
+
+            foreach (KeyValuePair<string, List<PreparedIntent>> kv in settledAwaitingFlush)
+            {
+                int owner;
+                try
+                {
+                    owner = resolver(kv.Key);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (owner != partitionId)
+                    continue;
+
+                List<PreparedIntent> retained = kv.Value;
+                for (int i = retained.Count - 1; i >= 0; i--)
+                {
+                    if (probe(retained[i].Key, retained[i].Revision))
+                        continue;
+
+                    retained.RemoveAt(i);
+                    released++;
+                }
+
+                if (retained.Count == 0)
+                    (emptied ??= []).Add(kv.Key);
+            }
+
+            if (emptied is not null)
+                foreach (string key in emptied)
+                    settledAwaitingFlush.Remove(key);
+        }
+
+        if (released > 0)
+            StampPartitionDirty(partitionId);
+
+        return released;
+    }
+
+    // Drops the retained settled intents whose key matches — the un-host purge and the whole-partition install
+    // both replace what this node holds for those keys. Caller holds applyGate (the gate order is applyGate,
+    // then settledGate, as in the settle apply).
+    private bool PurgeSettledAwaitingFlushLocked(Func<string, bool> shouldRemove)
+    {
+        lock (settledGate)
+        {
+            if (settledAwaitingFlush.Count == 0)
+                return false;
+
+            List<string>? toRemove = null;
+            foreach (string key in settledAwaitingFlush.Keys)
+            {
+                if (shouldRemove(key))
+                    (toRemove ??= []).Add(key);
+            }
+
+            if (toRemove is null)
+                return false;
+
+            foreach (string key in toRemove)
+                settledAwaitingFlush.Remove(key);
+
+            return true;
+        }
+    }
+
+    // The partition's retained settled intents, copied out under settledGate so the snapshot's file write never
+    // runs under it. Uses the same resolver as the live-intent scan, which the caller has checked is attached.
+    private List<PreparedIntent>? CollectSettledAwaitingFlush(int partitionId, Func<string, int> resolver)
+    {
+        lock (settledGate)
+        {
+            if (settledAwaitingFlush.Count == 0)
+                return null;
+
+            List<PreparedIntent>? collected = null;
+            foreach (KeyValuePair<string, List<PreparedIntent>> kv in settledAwaitingFlush)
+            {
+                if (resolver(kv.Key) != partitionId)
+                    continue;
+
+                (collected ??= []).AddRange(kv.Value);
+            }
+
+            return collected;
+        }
+    }
+
     // Invoked (outside the apply gate) with the key and the frozen (validated base, committed head) revision
     // pair when a fence-refusal streak indicates this node's visible entry stopped converging with its
     // committed head — the wiring re-drives convergence from the node's own durable state, and the head
@@ -416,6 +657,12 @@ internal sealed class PreparedIntentStore
                     RecordCommittedHead(existing, partitionId);
                     settledCommit = existing;
                 }
+
+                // The removal takes the intent out of the live set and, at the next rewrite, out of the snapshot;
+                // if its materialized row is still only queued here, keep the intent reachable for a restart replay
+                // until the row is durable.
+                if (removedCommitted)
+                    RetainSettledIntentIfRowUnflushed(existing);
             }
 
             // ── Staged-base fence, evaluated at the prepare's own apply position ──
@@ -2073,6 +2320,10 @@ internal sealed class PreparedIntentStore
 
                 LedgerCapture? ledger = CaptureLedger(partitionId);
 
+                // Settled intents whose materialized row is still queued for the flush ride in the same file, in
+                // their own field: a reader must never install them as live intents.
+                List<PreparedIntent>? settledAwaitingFlushSlice = CollectSettledAwaitingFlush(partitionId, resolvePartition);
+
                 using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
                 using (CodedOutputStream output = new(file))
                 {
@@ -2086,6 +2337,16 @@ internal sealed class PreparedIntentStore
                         FillPrepareProto(entry, intent);
                         output.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
                         output.WriteMessage(entry);
+                    }
+
+                    if (settledAwaitingFlushSlice is not null)
+                    {
+                        foreach (PreparedIntent intent in settledAwaitingFlushSlice)
+                        {
+                            FillPrepareProto(entry, intent);
+                            output.WriteTag(PreparedIntentSnapshotMessage.SettledIntentsAwaitingFlushFieldNumber, WireFormat.WireType.LengthDelimited);
+                            output.WriteMessage(entry);
+                        }
                     }
 
                     // The checkpoint persists the slice's reflected position as installed, so a restart mid
@@ -2141,6 +2402,18 @@ internal sealed class PreparedIntentStore
 
             foreach (PreparedIntentCommandMessage entry in message.Intents)
                 MergeLoad(IntentOf(entry));
+
+            // Retained settled intents reload into their own set — never into the live set, where a settled
+            // intent would hold its key as a phantom. Nothing is queued yet, so no probe applies here; the
+            // partition's restore completion re-checks them (see ReleaseSettledIntentsWithDurableRows).
+            if (message.SettledIntentsAwaitingFlush.Count > 0)
+            {
+                lock (settledGate)
+                {
+                    foreach (PreparedIntentCommandMessage entry in message.SettledIntentsAwaitingFlush)
+                        AddSettledAwaitingFlushLocked(IntentOf(entry));
+                }
+            }
 
             if (message.LedgerPresent)
                 InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex);
@@ -2320,18 +2593,19 @@ internal sealed class PreparedIntentStore
     private long ReflectedPositionForExport(int partitionId, LedgerCapture? ledger) =>
         Math.Max(AppliedLogIndexOf(partitionId), ledger?.ReflectedThroughIndex ?? 0);
 
-    /// <summary>Intents whose key belongs to <paramref name="bucket"/> (its parent prefix) — the set a bucket scan
-    /// (<c>GetByBucket</c>) reconciles against. Uses the intent's own bucket, which the freeze sources from the key
-    /// (its parent prefix), so an intent-only committed key is included/overridden/excluded in a bucket scan exactly
-    /// as it would be in the equivalent range scan.</summary>
-    public IReadOnlyList<PreparedIntent> SnapshotBucket(string? bucket)
+    /// <summary>Intents whose key starts with <paramref name="prefix"/> (ordinal) — the set a bucket scan
+    /// (<c>GetByBucket</c>) reconciles against. Matched on the key with the same prefix predicate the scan applies to
+    /// its resident and persisted rows, so a prefix spelled with a trailing slash, a bare key-space name, or a
+    /// partial key selects exactly the intents the scan's own page can contain; an intent-only committed key is then
+    /// included/overridden/excluded in a bucket scan exactly as it would be in the equivalent range scan.</summary>
+    public IReadOnlyList<PreparedIntent> SnapshotPrefix(string prefix)
     {
         List<PreparedIntent> result = [];
 
         // Lock-free per-key capture; the argument is the one on SnapshotScanWindow.
         foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
-            if (string.Equals(kv.Value.Bucket, bucket, StringComparison.Ordinal))
+            if (kv.Key.StartsWith(prefix, StringComparison.Ordinal))
                 result.Add(kv.Value);
         }
 
@@ -2397,6 +2671,9 @@ internal sealed class PreparedIntentStore
 
         lock (applyGate)
         {
+            // The retained settled intents of the range go with it, whether or not a live intent matches.
+            bool settledPurged = PurgeSettledAwaitingFlushLocked(shouldRemove);
+
             List<string>? toRemove = null;
 
             foreach (KeyValuePair<string, PreparedIntent> kv in intents)
@@ -2406,7 +2683,12 @@ internal sealed class PreparedIntentStore
             }
 
             if (toRemove is null)
+            {
+                if (settledPurged)
+                    StampAllDirty();
+
                 return 0;
+            }
 
             foreach (string key in toRemove)
             {
@@ -2572,6 +2854,10 @@ internal sealed class PreparedIntentStore
                     purged++;
                 }
             }
+
+            // The install replaces this node's rows for the partition too, so a retained settled intent that was
+            // waiting on a locally queued row no longer certifies anything the installed state needs.
+            PurgeSettledAwaitingFlushLocked(isOwned);
 
             if (ledger is null)
                 ledgers.TryRemove(partitionId, out _);

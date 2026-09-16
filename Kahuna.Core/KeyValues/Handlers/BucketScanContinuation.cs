@@ -16,6 +16,12 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// against the current resident store — a write that landed during stage 2 is picked up by
 /// re-checking the store for each disk-sourced key — then sorts and resolves all waiters.
 ///
+/// A disk row warms the resident cache only when this actor owns the row's key space: the scan is
+/// routed by the key space its prefix names, and every commit of a key is applied on the actor that
+/// owns the key's key space, so a copy cached anywhere else never receives the notification that
+/// would advance it. Such a copy would shadow the persisted head on every later scan and resurrect
+/// a deleted key. Rows of other key spaces (a prefix that spans several) are served without caching.
+///
 /// Concurrent requests for the same prefix coalesce onto one disk read: later arrivals attach
 /// their Promise via AddWaiter and receive the same merged result.
 /// </summary>
@@ -28,6 +34,10 @@ internal sealed class BucketScanContinuation : ReadContinuation
     private readonly HashSet<string> seenKeys;
     private readonly HLCTimestamp currentTime;
     private readonly (string, long, bool)? scanKey;
+
+    /// <summary>The key space the scan prefix names — the one this actor owns, because the request was routed by
+    /// it. A disk row whose key belongs to it may be cached here; any other row may not.</summary>
+    private readonly string scanKeySpace;
 
     /// <summary>Canonical decisions routed off-mailbox for the still-pending foreign intents this bucket meets
     /// (keyed by intent identity). Null on the first attempt; populated when the manager re-issues the scan after
@@ -69,6 +79,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         this.currentTime = currentTime;
         this.scanKey = scanKey;
         this.routedDecisions = routedDecisions;
+        scanKeySpace = KeyValueKeySpace.OfPrefix(prefix);
     }
 
     internal override void RemovePendingKey(KeyValueContext context)
@@ -104,20 +115,31 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
                 // Reconcile: prefer the higher-revision entry between current store and disk.
                 // A write may have committed while the disk read was in flight.
-                KeyValueEntry entry;
+                KeyValueResponse? result;
                 if (context.Store.TryGetValue(key, out KeyValueEntry? resident) &&
                     resident.Revision >= diskEntry.Revision)
                 {
-                    entry = resident;
+                    result = EvaluateEntry(
+                        context, currentTime, transactionId, readTimestamp, key, resident, SnapshotProjections);
+                }
+                else if (string.Equals(KeyValueKeySpace.OfKey(key), scanKeySpace, StringComparison.Ordinal))
+                {
+                    // This actor owns the key's key space, so the disk row may warm the resident cache: every
+                    // later commit of the key is applied here and keeps the copy current.
+                    KeyValueEntry entry = BuildEntry(key, diskEntry);
+                    context.InsertStoreEntry(key, entry);
+
+                    result = EvaluateEntry(
+                        context, currentTime, transactionId, readTimestamp, key, entry, SnapshotProjections);
                 }
                 else
                 {
-                    entry = BuildEntry(key, diskEntry);
-                    context.InsertStoreEntry(key, entry);
+                    // A prefix that spans other key spaces meets rows this actor does not own. Their commit
+                    // notifications go to the owning actors, so a copy cached here would never be
+                    // invalidated and would shadow the persisted head on every later scan. Serve the row
+                    // from the page without touching the store; the intent overlay below still reconciles it.
+                    result = EvaluateForeignRow(key, diskEntry);
                 }
-
-                KeyValueResponse? result = EvaluateEntry(
-                    context, currentTime, transactionId, readTimestamp, key, entry, SnapshotProjections);
 
                 if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
                     continue;
@@ -150,15 +172,15 @@ internal sealed class BucketScanContinuation : ReadContinuation
     }
 
     /// <summary>
-    /// Reconciles a bucket scan's assembled page with the durable prepared intents belonging to the bucket: a
-    /// committed intent overrides/injects, a committed delete or expired committed value excludes, an undecided
-    /// in-bucket intent makes the scan retry. A bucket scan has no pagination cursor, so the merge is invoked with
-    /// the scan's result cap as the limit (no "more" signal) and its capped item list is returned. No-op (returns
-    /// the page unchanged) when the intent store is empty or no intent covers the bucket.
+    /// Reconciles a bucket scan's assembled page with the durable prepared intents whose key starts with the scan
+    /// prefix: a committed intent overrides/injects, a committed delete or expired committed value excludes, an
+    /// undecided in-prefix intent makes the scan retry. A bucket scan has no pagination cursor, so the merge is
+    /// invoked with the scan's result cap as the limit (no "more" signal) and its capped item list is returned.
+    /// No-op (returns the page unchanged) when the intent store is empty or no intent falls under the prefix.
     /// </summary>
     internal static (List<(string, ReadOnlyKeyValueEntry)> Items, bool MustRetry) OverlayBucketIntents(
         KeyValueContext context,
-        string? bucket,
+        string prefix,
         List<(string, ReadOnlyKeyValueEntry)> items,
         HLCTimestamp currentTime,
         HLCTimestamp readTimestamp,
@@ -168,7 +190,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         if (context.PreparedIntentStore is not { } intentStore)
             return (items, false);
 
-        IReadOnlyList<PreparedIntent> bucketIntents = intentStore.SnapshotBucket(bucket);
+        IReadOnlyList<PreparedIntent> bucketIntents = intentStore.SnapshotPrefix(prefix);
         if (bucketIntents.Count == 0)
             return (items, false);
 
@@ -183,9 +205,34 @@ internal sealed class BucketScanContinuation : ReadContinuation
         return (merge.Items, merge.MustRetry);
     }
 
+    /// <summary>
+    /// Serves a disk row whose key space this actor does not own: no resident state (MVCC snapshot, write
+    /// intent, revision archive) can exist for it here, so only the row's own state, expiry and — for a snapshot
+    /// scan — the stage-2 projection decide. Returns null when the row is not visible.
+    /// </summary>
+    private KeyValueResponse? EvaluateForeignRow(string key, ReadOnlyKeyValueEntry disk)
+    {
+        ReadOnlyKeyValueEntry row = disk;
+
+        if (!readTimestamp.IsNull() && disk.LastModified > readTimestamp)
+        {
+            // The head was written after the snapshot: only the stage-2 as-of projection can answer.
+            if (SnapshotProjections is null || !SnapshotProjections.TryGetValue(key, out ReadOnlyKeyValueEntry? projected))
+                return null;
+
+            row = projected;
+        }
+
+        if (row.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+            (row.Expires != HLCTimestamp.Zero && row.Expires - currentTime < TimeSpan.Zero))
+            return null;
+
+        return new(KeyValueResponseType.Get, row);
+    }
+
     private static KeyValueEntry BuildEntry(string key, ReadOnlyKeyValueEntry disk) => new()
     {
-        Bucket = GetBucket(key),
+        Bucket = KeyValueKeySpace.OfKey(key),
         Value = disk.Value,
         Revision = disk.Revision,
         FlushedRevision = disk.Revision,
@@ -194,12 +241,6 @@ internal sealed class BucketScanContinuation : ReadContinuation
         LastModified = disk.LastModified,
         State = disk.State
     };
-
-    private static string? GetBucket(string key)
-    {
-        int index = key.LastIndexOf('/');
-        return index == -1 ? null : key[..index];
-    }
 
     /// <summary>
     /// Evaluates a resident KeyValueEntry against the MVCC/snapshot/state rules for a scan

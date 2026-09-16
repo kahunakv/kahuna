@@ -114,4 +114,11 @@ message PreparedIntentSnapshotMessage {
   // advisory staged-base fence does not judge them and the below-head witness does not fire on them.
   // Zero when unknown (a checkpoint snapshot of a slice that was never installed, or an older writer).
   int64  ledgerReflectedThroughIndex = 8;
+  // Committed intents this node settled (resolved and removed from the live set) whose materialized row it had
+  // queued for the background flush but not yet confirmed durable when the snapshot was written. A restart whose
+  // replay starts above the intent's prepare delta and at or below its by-reference materialization record
+  // resolves the record's value from here: the live set no longer holds the intent and the row never reached the
+  // backend. A reader loads these into a separate set — never as live intents — and drops each one once the
+  // flush carrying its row is confirmed.
+  repeated PreparedIntentCommandMessage settledIntentsAwaitingFlush = 9;
 }

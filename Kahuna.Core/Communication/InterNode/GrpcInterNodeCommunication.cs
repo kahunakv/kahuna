@@ -34,6 +34,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 {
     private readonly ConcurrentDictionary<string, Lazy<GrpcServerBatcher>> batchers = new();
 
+    private readonly ConcurrentDictionary<string, TransportFailureLogGate> transportFailureLogGates = new();
+
     private readonly KahunaConfiguration configuration;
 
     private readonly RaftTransportSecurityOptions transportSecurity;
@@ -86,7 +88,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (LockResponseType.MustRetry, 0);
         
         GrpcTryLockResponse remoteResponse = response.TryLock!;
         
@@ -123,7 +127,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExtendLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (LockResponseType.MustRetry, 0);
+
         GrpcExtendLockResponse remoteResponse = response.ExtendLock!;
         
         
@@ -156,7 +163,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryUnlock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return LockResponseType.MustRetry;
+
         GrpcUnlockResponse remoteResponse = response.Unlock!;
         
         
@@ -186,7 +196,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (LockResponseType.MustRetry, null);
+
         GrpcGetLockResponse remoteResponse = response.GetLock!;
         
         if (remoteResponse.Type != GrpcLockResponseType.LockResponseTypeGot)
@@ -254,7 +267,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
                        
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TrySetKeyValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
         GrpcTrySetKeyValueResponse remoteResponse = response.TrySetKeyValue!;
         
         
@@ -287,7 +303,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TrySetManyNodeKeyValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach (KahunaSetKeyValueRequestItem item in items)
+                    responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
+            }
+
+            return;
+        }
+
         GrpcTrySetManyKeyValueResponse remoteResponse = response.TrySetManyKeyValue!;
 
         lock (lockSync)
@@ -318,7 +345,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryDeleteManyNodeKeyValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach (KahunaDeleteKeyValueRequestItem item in items)
+                    responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
+            }
+
+            return;
+        }
+
         GrpcTryDeleteManyKeyValueResponse remoteResponse = response.TryDeleteManyKeyValue!;
 
         lock (lockSync)
@@ -426,7 +464,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryDeleteKeyValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
         GrpcTryDeleteKeyValueResponse remoteResponse = response.TryDeleteKeyValue!;
         
         
@@ -468,7 +509,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExtendKeyValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
         GrpcTryExtendKeyValueResponse remoteResponse = response.TryExtendKeyValue!;
         
         
@@ -514,7 +558,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);               
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryGetValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, null);
+
         GrpcTryGetKeyValueResponse remoteResponse = response.TryGetKeyValue!;
         
         
@@ -567,7 +614,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExistsValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, null);
+
         GrpcTryExistsKeyValueResponse remoteResponse = response.TryExistsKeyValue!;
         
         
@@ -605,7 +655,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         AddTryManyValuesRequestItems(request.Items, keys);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryGetManyNodeValues", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, _, KeyValueDurability durability) in keys)
+                    responses.Add((KeyValueResponseType.MustRetry, key, durability, null));
+            }
+
+            return;
+        }
+
         GrpcTryGetManyValuesResponse remoteResponse = response.TryGetManyValues!;
 
         lock (lockSync)
@@ -639,7 +700,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         AddTryManyValuesRequestItems(request.Items, keys);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExistsManyNodeValues", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, _, KeyValueDurability durability) in keys)
+                    responses.Add((KeyValueResponseType.MustRetry, key, durability, null));
+            }
+
+            return;
+        }
+
         GrpcTryExistsManyValuesResponse remoteResponse = response.TryExistsManyValues!;
 
         lock (lockSync)
@@ -731,7 +803,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryCheckWriteIntentValue", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return KeyValueResponseType.MustRetry;
+
         GrpcTryCheckWriteIntentResponse remoteResponse = response.TryCheckWriteIntent!;
 
         return (KeyValueResponseType)remoteResponse.Type;
@@ -766,7 +841,17 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryCheckManyWriteIntents", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> refused = new(keys.Count);
+
+            foreach (KeyValueConflictProbe probe in keys)
+                refused.Add((KeyValueResponseType.MustRetry, probe.Key, probe.Durability));
+
+            return refused;
+        }
+
         GrpcTryCheckManyWriteIntentsResponse remoteResponse = response.TryCheckManyWriteIntents!;
 
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(remoteResponse.Items.Count);
@@ -808,7 +893,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireExclusiveLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
 
 
@@ -848,7 +936,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireExclusivePrefixLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return KeyValueResponseType.MustRetry;
+
         GrpcTryAcquireExclusivePrefixLockResponse remoteResponse = response.TryAcquireExclusivePrefixLock!;
         
 
@@ -885,7 +976,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         AddAcquireLockRequestItems(request.Items, xkeys);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireNodeExclusiveLocks", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, _, KeyValueDurability durability) in xkeys)
+                    responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero));
+            }
+
+            return;
+        }
+
         GrpcTryAcquireManyExclusiveLocksResponse remoteResponse = response.TryAcquireManyExclusiveLocks!;
 
         lock (lockSync)
@@ -930,7 +1032,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryReleaseExclusiveLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, key);
+
         GrpcTryReleaseExclusiveLockResponse remoteResponse = response.TryReleaseExclusiveLock!;
         
         
@@ -966,7 +1071,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryReleaseExclusivePrefixLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return KeyValueResponseType.MustRetry;
+
         GrpcTryReleaseExclusivePrefixLockResponse remoteResponse = response.TryReleaseExclusivePrefixLock!;
 
 
@@ -1003,7 +1111,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (startKey is not null) request.StartKey = startKey;
         if (endKey   is not null) request.EndKey   = endKey;
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireRangeLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
         GrpcTryAcquireExclusiveRangeLockResponse remoteResponse = response.TryAcquireExclusiveRangeLock!;
         HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
         return ((KeyValueResponseType)remoteResponse.Type, holder);
@@ -1048,7 +1159,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (endKey   is not null) request.EndKey   = endKey;
         if (targetPartitionId is not null) request.TargetPartitionId = targetPartitionId.Value;
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request).WaitAsync(cancellationToken);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryReleaseExclusiveRangeLock", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return KeyValueResponseType.MustRetry;
+
         GrpcTryReleaseExclusiveRangeLockResponse remoteResponse = response.TryReleaseExclusiveRangeLock!;
         return (KeyValueResponseType)remoteResponse.Type;
     }
@@ -1082,7 +1196,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             
         AddReleaseLockRequestItems(request.Items, xkeys);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryReleaseNodeExclusiveLocks", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, KeyValueDurability durability) in xkeys)
+                    responses.Add((KeyValueResponseType.MustRetry, key, durability));
+            }
+
+            return;
+        }
+
         GrpcTryReleaseManyExclusiveLocksResponse remoteResponse = response.TryReleaseManyExclusiveLocks!;
 
         lock (lockSync)
@@ -1132,7 +1257,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (recordAnchorKey is not null)
             request.RecordAnchorKey = recordAnchorKey;
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryPrepareMutations", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
+
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
         
         
@@ -1172,7 +1300,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         AddPrepareRequestItems(request.Items, xkeys);
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryPrepareNodeMutations", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, KeyValueDurability durability) in xkeys)
+                    responses.Add((KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability));
+            }
+
+            return;
+        }
+
         GrpcTryPrepareManyMutationsResponse remoteResponse = response.TryPrepareManyMutations!;
 
         lock (lockSync)
@@ -1215,7 +1354,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryCommitMutations", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, 0);
+
         GrpcTryCommitMutationsResponse remoteResponse = response.TryCommitMutations!;
         
         
@@ -1235,7 +1377,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             
         AddCommitRequestItems(request.Items, xkeys);
             
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryCommitNodeMutations", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, _, KeyValueDurability durability) in xkeys)
+                    responses.Add((KeyValueResponseType.MustRetry, key, 0, durability));
+            }
+
+            return;
+        }
+
         GrpcTryCommitManyMutationsResponse remoteResponse = response.TryCommitManyMutations!;
 
         lock (lockSync)
@@ -1276,7 +1429,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcKeyValueDurability)durability,
         };
         
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryRollbackMutations", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, 0);
+
         GrpcTryRollbackMutationsResponse remoteResponse = response.TryRollbackMutations!;
         
         
@@ -1296,7 +1452,18 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             
         AddRollbackRequestItems(request.Items, xkeys);
             
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryRollbackNodeMutations", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            lock (lockSync)
+            {
+                foreach ((string key, _, KeyValueDurability durability) in xkeys)
+                    responses.Add((KeyValueResponseType.MustRetry, key, 0, durability));
+            }
+
+            return;
+        }
+
         GrpcTryRollbackManyMutationsResponse remoteResponse = response.TryRollbackManyMutations!;
 
         lock (lockSync)
@@ -1346,12 +1513,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampCounter  = readTimestamp.C,
         };
         
-        GrpcServerBatcherResponse batchResponse;
-                              
-        if (cancellationToken == CancellationToken.None)
-           batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-           batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetByBucket", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
+            return new(KeyValueResponseType.MustRetry, []);
        
         GrpcGetByBucketResponse remoteResponse = batchResponse.GetByBucket!;
         
@@ -1403,12 +1567,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (startKey is not null) request.StartKey = startKey;
         if (endKey   is not null) request.EndKey   = endKey;
 
-        GrpcServerBatcherResponse batchResponse;
-
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetByRange", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
+            return new(KeyValueResponseType.MustRetry, [], null, false);
 
         GrpcGetByRangeResponse remoteResponse = batchResponse.GetByRange!;
 
@@ -1433,12 +1594,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             IncludeTombstones = includeTombstones,
         };
         
-        GrpcServerBatcherResponse batchResponse;
-                              
-        if (cancellationToken == CancellationToken.None)
-           batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-           batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "ScanByPrefix", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
+            return new(KeyValueResponseType.MustRetry, []);
        
         GrpcScanByPrefixResponse remoteResponse = batchResponse.ScanByPrefix!;
         
@@ -1475,19 +1633,12 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             AdmissionWaitMs = options.AdmissionWaitMs,
         };
 
-        GrpcServerBatcherResponse response;
-
-        try
-        {
-            response = await batcher.Enqueue(request);
-        }
-        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "StartTransaction", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
         {
             // The leader was resolved but died or became unreachable before answering. No session
             // was opened, so a retry (ideally against another node) is unconditionally safe — tell
             // the caller that instead of leaking the transport failure as a server error.
-            LogTransactionForwardingFailed(logger, "StartTransaction", node, ex.StatusCode);
-
             return (KeyValueResponseType.MustRetry, TransactionHandle.None);
         }
 
@@ -1518,20 +1669,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (handle.RecordAnchorKey is not null)
             request.RecordAnchorKey = handle.RecordAnchorKey;
 
-        GrpcServerBatcherResponse response;
-
-        try
-        {
-            response = await batcher.Enqueue(request);
-        }
-        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "CommitTransaction", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
         {
             // The commit may or may not have been applied before the transport died — MustRetry
             // preserves that indeterminacy: the commit path is idempotent and a retry (carrying the
             // record anchor when one exists) consults the session or the durable decision to
             // resolve the true outcome. Hand the caller's own anchor back so the retry keeps it.
-            LogTransactionForwardingFailed(logger, "CommitTransaction", node, ex.StatusCode);
-
             return (KeyValueResponseType.MustRetry, handle.RecordAnchorKey);
         }
 
@@ -1557,19 +1701,12 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (handle.RecordAnchorKey is not null)
             request.RecordAnchorKey = handle.RecordAnchorKey;
 
-        GrpcServerBatcherResponse response;
-
-        try
-        {
-            response = await batcher.Enqueue(request);
-        }
-        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "RollbackTransaction", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
         {
             // Same indeterminacy contract as commit: rollback is idempotent and a retry consults
             // the session or the durable decision (via the anchor), so MustRetry is safe and a
             // decided commit can never be undone by the retried rollback.
-            LogTransactionForwardingFailed(logger, "RollbackTransaction", node, ex.StatusCode);
-
             return KeyValueResponseType.MustRetry;
         }
 
@@ -1597,7 +1734,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (payloadDigest is not null)
             request.PayloadDigest = ByteString.CopyFrom(payloadDigest);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "BeginOperation", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null);
+
         GrpcBeginOperationResponse remoteResponse = response.BeginOperation!;
 
         HLCTimestamp cachedTimestamp = new(remoteResponse.CachedTimestampNode, remoteResponse.CachedTimestampPhysical, remoteResponse.CachedTimestampCounter);
@@ -1617,7 +1757,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcCompleteOperationRequest request = ToGrpcCompleteOperationRequest(coordinatorKey, transactionId, operationId, payload);
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "CompleteOperation", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, null);
+
         GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
         KeyValueResponseType outcome = remoteResponse.Acknowledged ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry;
         return (outcome, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
@@ -1698,7 +1841,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "GetTransactionWorkingSet", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return null;
+
         GrpcGetTransactionWorkingSetResponse remoteResponse = response.GetTransactionWorkingSet!;
 
         return remoteResponse.Found ? FromGrpcWorkingSet(remoteResponse.WorkingSet) : null;
@@ -1716,7 +1862,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C
         };
 
-        GrpcServerBatcherResponse response = await batcher.Enqueue(request);
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "CloseTransaction", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+            return (KeyValueResponseType.MustRetry, null);
+
         GrpcCloseTransactionResponse remoteResponse = response.CloseTransaction!;
 
         return (
@@ -2248,11 +2397,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse batchResponse;
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "AcquireSnapshotHold", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
+            return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
 
         GrpcAcquireSnapshotHoldResponse r = batchResponse.AcquireSnapshotHold!;
         return (
@@ -2273,11 +2420,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse batchResponse;
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "RenewSnapshotHold", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
         GrpcRenewSnapshotHoldResponse r = batchResponse.RenewSnapshotHold!;
         return (
@@ -2293,11 +2438,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse batchResponse;
-        if (cancellationToken == CancellationToken.None)
-            batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-        else
-            batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "ReleaseSnapshotHold", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
+            return KeyValueResponseType.MustRetry;
 
         return (KeyValueResponseType)batchResponse.ReleaseSnapshotHold!.Type;
     }
@@ -2309,23 +2452,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcServerBatcherResponse batchResponse;
-
-        try
-        {
-            if (cancellationToken == CancellationToken.None)
-                batchResponse = await batcher.Enqueue(request).ConfigureAwait(false);
-            else
-                batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetSnapshotFloor", node).ConfigureAwait(false);
+        if (!batchResponse.IsAnswered)
         {
             // The floor read is side-effect free, so a transport failure mid-forward is unconditionally
             // safe to answer with the endpoint's own typed refusal — the caller re-resolves the meta
             // leader and asks again — instead of escaping as an exception the external surfaces would
             // report as an unclassifiable server error.
-            LogTransactionForwardingFailed(logger, "GetSnapshotFloor", node, ex.StatusCode);
-
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
         }
 
@@ -2375,8 +2508,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (blockSize.HasValue)
             request.BlockSize = blockSize.Value;
 
-        GrpcSequenceResponse response = await GetSequencerClient(node)
-            .CreateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+        GrpcSequenceResponse response;
+
+        try
+        {
+            response = await GetSequencerClient(node)
+                .CreateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("CreateSequence", node, ex.StatusCode);
+
+            return (SequenceResponseType.MustRetry, 0);
+        }
 
         return ((SequenceResponseType)response.Type, response.Revision);
     }
@@ -2417,8 +2561,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (update.BlockSize.HasValue)
             request.BlockSize = update.BlockSize.Value;
 
-        GrpcSequenceResponse response = await GetSequencerClient(node)
-            .UpdateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+        GrpcSequenceResponse response;
+
+        try
+        {
+            response = await GetSequencerClient(node)
+                .UpdateSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("UpdateSequence", node, ex.StatusCode);
+
+            return (SequenceResponseType.MustRetry, 0);
+        }
 
         return ((SequenceResponseType)response.Type, response.Revision);
     }
@@ -2437,8 +2592,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcSequenceDurability)durability
         };
 
-        GrpcSequenceResponse response = await GetSequencerClient(node)
-            .GetSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+        GrpcSequenceResponse response;
+
+        try
+        {
+            response = await GetSequencerClient(node)
+                .GetSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("GetSequence", node, ex.StatusCode);
+
+            return (SequenceResponseType.MustRetry, null);
+        }
 
         SequenceResponseType type = (SequenceResponseType)response.Type;
 
@@ -2480,8 +2646,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (idempotencyKey is not null)
             request.IdempotencyKey = idempotencyKey;
 
-        GrpcSequenceAllocationResponse response = await GetSequencerClient(node)
-            .NextSequenceValueAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+        GrpcSequenceAllocationResponse response;
+
+        try
+        {
+            response = await GetSequencerClient(node)
+                .NextSequenceValueAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("NextSequenceValue", node, ex.StatusCode);
+
+            return (SequenceResponseType.MustRetry, default);
+        }
 
         return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
     }
@@ -2506,8 +2683,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (idempotencyKey is not null)
             request.IdempotencyKey = idempotencyKey;
 
-        GrpcSequenceAllocationResponse response = await GetSequencerClient(node)
-            .ReserveSequenceRangeAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+        GrpcSequenceAllocationResponse response;
+
+        try
+        {
+            response = await GetSequencerClient(node)
+                .ReserveSequenceRangeAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("ReserveSequenceRange", node, ex.StatusCode);
+
+            return (SequenceResponseType.MustRetry, default);
+        }
 
         return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
     }
@@ -2526,8 +2714,19 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Durability = (GrpcSequenceDurability)durability
         };
 
-        GrpcSequenceResponse response = await GetSequencerClient(node)
-            .DeleteSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+        GrpcSequenceResponse response;
+
+        try
+        {
+            response = await GetSequencerClient(node)
+                .DeleteSequenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("DeleteSequence", node, ex.StatusCode);
+
+            return SequenceResponseType.MustRetry;
+        }
 
         return (SequenceResponseType)response.Type;
     }
@@ -2578,6 +2777,65 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     private static bool IsRetryableTransportFailure(RpcException ex) =>
         InterNodeTransportFailure.IsRetryable(ex);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "{Operation} forwarding to {Node} failed with transport status {StatusCode}, returning MustRetry")]
-    private static partial void LogTransactionForwardingFailed(ILogger<GrpcInterNodeCommunication> logger, string operation, string node, StatusCode statusCode);
+    /// <summary>
+    /// The single exit every batched forward awaits through. The batcher settles a pending request with the
+    /// raw transport exception when its stream to the peer cannot be opened, is torn down mid-flight, or
+    /// stays quiet past the request deadline; here that exception becomes an empty answer so the calling
+    /// forward can return the operation's own typed <c>MustRetry</c> instead of leaking the transport into
+    /// the embedding application. A refused connection sends nothing, so the operation demonstrably did not
+    /// run; a stream that died after the write is indeterminate, which is exactly what <c>MustRetry</c>
+    /// means to every caller (the retried operation re-resolves the leader and is idempotent or consults
+    /// the durable decision). Any other failure keeps propagating unchanged.
+    /// </summary>
+    private async Task<GrpcServerBatcherResponse> ForwardAsync(Task<GrpcServerBatcherResponse> pending, string operation, string node)
+    {
+        try
+        {
+            return await pending.ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure(operation, node, ex.StatusCode);
+
+            return default;
+        }
+    }
+
+    /// <summary>
+    /// Logs a transport failure at most once per <see cref="TransportFailureLogQuietMs"/> per peer, carrying
+    /// the number of forwards to that peer that failed silently since the previous line. Under load a dead
+    /// leader fails thousands of forwards per second for the seconds the placement takes to move; a line
+    /// per forward was itself an operational problem, and the batcher already logs each stream eviction.
+    /// </summary>
+    private void LogForwardingTransportFailure(string operation, string node, StatusCode statusCode)
+    {
+        TransportFailureLogGate gate = transportFailureLogGates.GetOrAdd(node, static _ => new());
+
+        long now = Environment.TickCount64;
+        long last = Volatile.Read(ref gate.LastLogTicks);
+
+        if (now - last < TransportFailureLogQuietMs || Interlocked.CompareExchange(ref gate.LastLogTicks, now, last) != last)
+        {
+            Interlocked.Increment(ref gate.Suppressed);
+            return;
+        }
+
+        long suppressed = Interlocked.Exchange(ref gate.Suppressed, 0);
+
+        LogForwardingTransportFailure(logger, operation, node, statusCode, suppressed);
+    }
+
+    /// <summary>Minimum spacing between two transport-failure log lines for the same peer.</summary>
+    internal const int TransportFailureLogQuietMs = 1000;
+
+    private sealed class TransportFailureLogGate
+    {
+        // Far enough in the past that the first failure always logs, without overflowing the subtraction.
+        public long LastLogTicks = long.MinValue / 2;
+
+        public long Suppressed;
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Operation} forwarding to {Node} failed with transport status {StatusCode}, returning MustRetry ({Suppressed} more forwards to this node failed the same way since the previous line)")]
+    private static partial void LogForwardingTransportFailure(ILogger<GrpcInterNodeCommunication> logger, string operation, string node, StatusCode statusCode, long suppressed);
 }

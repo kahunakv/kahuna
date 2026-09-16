@@ -175,18 +175,24 @@ public sealed class TestPreparedIntentStore
     }
 
     [Fact]
-    public void SnapshotBucket_FiltersByIntentBucket()
+    public void SnapshotPrefix_FiltersByKeyPrefix()
     {
         PreparedIntentStore store = new();
         store.Apply(new PrepareIntentCommand(Intent(1000, 1, "accounts/alice", bucket: "accounts")));
         store.Apply(new PrepareIntentCommand(Intent(1000, 1, "accounts/bob", bucket: "accounts")));
         store.Apply(new PrepareIntentCommand(Intent(1000, 1, "orders/1", bucket: "orders")));
 
-        List<string> accounts = store.SnapshotBucket("accounts").Select(i => i.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
-        Assert.Equal(["accounts/alice", "accounts/bob"], accounts);
+        // A bare key-space name, the same name with a trailing slash, and a partial key all select by the
+        // ordinal prefix of the key — the predicate the bucket scan applies to its own rows.
+        foreach (string prefix in new[] { "accounts", "accounts/", "acc", "accounts/a" })
+        {
+            List<string> accounts = store.SnapshotPrefix(prefix).Select(i => i.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
+            List<string> expected = prefix == "accounts/a" ? ["accounts/alice"] : ["accounts/alice", "accounts/bob"];
+            Assert.Equal(expected, accounts);
+        }
 
-        Assert.Single(store.SnapshotBucket("orders"));
-        Assert.Empty(store.SnapshotBucket("missing"));
+        Assert.Single(store.SnapshotPrefix("orders"));
+        Assert.Empty(store.SnapshotPrefix("missing"));
     }
 
     // ── remove ─────────────────────────────────────────────────────────────────────

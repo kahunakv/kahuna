@@ -253,7 +253,7 @@ internal sealed class LocalScanOperations
 
                         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routed =
                             await TryRouteForeignScanDecisions(
-                                preparedIntentStore.SnapshotBucket(prefixKeyName), transactionId, CancellationToken.None);
+                                preparedIntentStore.SnapshotPrefix(prefixKeyName), transactionId, CancellationToken.None);
 
                         if (routed is not null)
                         {

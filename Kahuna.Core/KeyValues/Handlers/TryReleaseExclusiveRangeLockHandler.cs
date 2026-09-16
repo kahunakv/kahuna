@@ -21,7 +21,10 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
 
-        if (!context.LocksByRange.TryGetValue(message.Key, out List<KeyValueRangeLock>? locks))
+        // The lock was recorded under the key space the prefix names (see the acquire handler).
+        string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
+
+        if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
             return KeyValueStaticResponses.UnlockedResponse;
 
         // Pass 1: exact-bounds match — preserves precision for same-tx multi-lock.
@@ -63,7 +66,7 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
         locks.Remove(found);
 
         if (locks.Count == 0)
-            context.LocksByRange.Remove(message.Key);
+            context.LocksByRange.Remove(keySpace);
 
         ReleaseExistingLocksInRange(message);
 

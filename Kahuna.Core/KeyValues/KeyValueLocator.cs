@@ -118,12 +118,15 @@ internal sealed class KeyValueLocator
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key).PartitionId;
 
     /// <summary>
-    /// Routes a prefix/bucket operation. A bare prefix (no trailing <c>/</c>) is the key space
-    /// itself; appending <c>/</c> lets <see cref="KeySpaceRegistry.ExtractKeySpace"/> strip it
-    /// back to the prefix, consistent with how real keys look (<c>"t:r/0001"</c> → space <c>"t:r"</c>).
+    /// Routes a prefix/bucket operation to the partition of the key space the prefix names. The prefix
+    /// is reduced to that key space first (<c>"t:r"</c> and <c>"t:r/"</c> both name <c>"t:r"</c>), then
+    /// a <c>/</c> is appended so <see cref="KeySpaceRegistry.ExtractKeySpace"/> strips it back to the
+    /// key space exactly as it does for a real key (<c>"t:r/0001"</c> → space <c>"t:r"</c>). Without
+    /// the reduction the slashed spelling would route as key space <c>"t:r/"</c>: a different
+    /// placement group, and so a partition whose leader does not serve the keys the scan is about.
     /// </summary>
     private int RoutePrefixKey(string prefix) =>
-        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, prefix + "/").PartitionId;
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, KeyValueKeySpace.OfPrefix(prefix) + "/").PartitionId;
 
     /// <summary>
     /// Resolves the partition leader, mapping the retryable Raft resolution failures — a node that
@@ -1334,7 +1337,7 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
 
         ArraySegment<RangeDescriptor> descriptors =
-            manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
+            manager.RangeMapStore.Current.FindIntersecting(KeyValueKeySpace.OfPrefix(prefix), startKey, endKey);
 
         if (afterSnapshot != null)
             await afterSnapshot();
@@ -1360,7 +1363,7 @@ internal sealed class KeyValueLocator
             // Generation fence: a split that committed after FindIntersecting but before the
             // sub-lock RPC would leave P' un-locked. Re-check the map; if the descriptor set
             // changed, roll back and signal the caller to re-resolve.
-            if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey)))
+            if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(KeyValueKeySpace.OfPrefix(prefix), startKey, endKey)))
             {
                 KeyValueResponseType rel = await ReleaseRangeLockOnPartition(transactionId, descriptors[0].PartitionId, prefix,
                     startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
@@ -1407,7 +1410,7 @@ internal sealed class KeyValueLocator
 
         // Generation fence: re-check after all sub-locks are held. If the map changed
         // (split committed in the acquire window), roll everything back and MustRetry.
-        if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey)))
+        if (!DescriptorSetStable(descriptors, manager.RangeMapStore.Current.FindIntersecting(KeyValueKeySpace.OfPrefix(prefix), startKey, endKey)))
         {
             logger.LogAcquireRangeLockDescriptorChanged(prefix);
 
@@ -1465,7 +1468,7 @@ internal sealed class KeyValueLocator
             return KeyValueResponseType.InvalidInput;
 
         ArraySegment<RangeDescriptor> descriptors =
-            manager.RangeMapStore.Current.FindIntersecting(prefix, startKey, endKey);
+            manager.RangeMapStore.Current.FindIntersecting(KeyValueKeySpace.OfPrefix(prefix), startKey, endKey);
 
         if (descriptors.Count == 0)
         {
@@ -2028,9 +2031,8 @@ internal sealed class KeyValueLocator
         // Multi-range path (parallel): key-range space is split; fan out to all descriptors
         // concurrently. Snapshot the map once — safe because orphan retention + MVCC means the source
         // partition still answers snapshot reads for stale entries after a cutover.
-        // The scan prefix is already the key space, so extracting the portion before a trailing
-        // separator would just return it unchanged.
-        string keySpace = prefixedKey;
+        // The map knows the key space by its bare name; the scan prefix may spell it with a trailing slash.
+        string keySpace = KeyValueKeySpace.OfPrefix(prefixedKey);
         IReadOnlyList<RangeDescriptor> descriptors = manager.RangeMapStore.Current.FindAll(keySpace);
 
         if (descriptors.Count == 0)
@@ -2171,9 +2173,8 @@ internal sealed class KeyValueLocator
         // may query a now-stale source partition, but that is safe: the split transaction orphan-retains [K,E) on
         // the source, so the fixed readTimestamp (MVCC) still resolves correctly from there. The
         // next page re-resolves RangeMapStore.Current fresh and routes to the new partition.
-        // The scan prefix is already the key space, so extracting the portion before a trailing
-        // separator would just return it unchanged.
-        string keySpace = prefix;
+        // The map knows the key space by its bare name; the scan prefix may spell it with a trailing slash.
+        string keySpace = KeyValueKeySpace.OfPrefix(prefix);
         RangeMap rangeMap = manager.RangeMapStore.Current;
         ArraySegment<RangeDescriptor> descriptors = rangeMap.FindIntersecting(keySpace, startKey, endKey);
 
@@ -2755,7 +2756,7 @@ internal sealed class KeyValueLocator
             partitions.Add(RoutePrefixKey(prefixKeyName));
         else
         {
-            foreach (RangeDescriptor descriptor in manager.RangeMapStore.Current.FindAll(prefixKeyName))
+            foreach (RangeDescriptor descriptor in manager.RangeMapStore.Current.FindAll(KeyValueKeySpace.OfPrefix(prefixKeyName)))
                 partitions.Add(descriptor.PartitionId);
         }
 
