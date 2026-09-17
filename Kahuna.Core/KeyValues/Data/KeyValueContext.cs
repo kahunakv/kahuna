@@ -404,4 +404,61 @@ internal sealed class KeyValueContext
     }
 
     public bool WasRolledBackHere(HLCTimestamp txId) => recentRolledBackTxns.Contains(txId);
+
+    // Point-key write intents a foreground writer took over from a yielding transaction, keyed by the key and
+    // the losing owner and valued by the moment the record may be forgotten. Node-local actor state, like the
+    // intents themselves: a leader change drops both, and the loser's finalize pin then finds no intent and
+    // aborts. Consulted by every operation the loser sends for the key afterwards (it answers Aborted and
+    // does not recreate the intent) and by the finalize pin, which is what makes the loss impossible to commit
+    // over. Release and rollback remove the record; the collector reclaims expired ones.
+    private Dictionary<(string Key, HLCTimestamp Owner), HLCTimestamp>? yieldedIntents;
+
+    /// <summary>Number of takeover records held. Zero on an actor no yielding transaction has ever lost a key on.</summary>
+    internal int YieldedIntentCount => yieldedIntents?.Count ?? 0;
+
+    /// <summary>
+    /// Records that <paramref name="owner"/>'s intent on <paramref name="key"/> was taken over. The record lives
+    /// until <paramref name="expires"/>, which the caller derives from the intent's own lease or, for a
+    /// session-owned intent, from the liveness ceiling: past that point the losing session is provably finalized
+    /// or reaped, so nothing can arrive that still needs to learn of the loss.
+    /// </summary>
+    public void RecordYieldedIntent(string key, HLCTimestamp owner, HLCTimestamp expires)
+    {
+        yieldedIntents ??= new();
+        yieldedIntents[(key, owner)] = expires;
+    }
+
+    /// <summary>Whether <paramref name="owner"/> lost its intent on <paramref name="key"/> to a takeover.</summary>
+    public bool HasYieldedIntent(string key, HLCTimestamp owner) =>
+        yieldedIntents is not null && yieldedIntents.ContainsKey((key, owner));
+
+    /// <summary>Forgets a takeover record once the loser released or rolled back the key.</summary>
+    public void ForgetYieldedIntent(string key, HLCTimestamp owner) =>
+        yieldedIntents?.Remove((key, owner));
+
+    /// <summary>
+    /// Drops every takeover record whose retention passed. Called by the collector; the table is small (one
+    /// entry per lost key of a still-live loser) so a full pass per collect cycle is cheap.
+    /// </summary>
+    public int SweepExpiredYieldedIntents(HLCTimestamp currentTime)
+    {
+        if (yieldedIntents is null || yieldedIntents.Count == 0)
+            return 0;
+
+        List<(string, HLCTimestamp)>? expired = null;
+
+        foreach (((string Key, HLCTimestamp Owner) record, HLCTimestamp expires) in yieldedIntents)
+        {
+            if (expires - currentTime <= TimeSpan.Zero)
+                (expired ??= []).Add(record);
+        }
+
+        if (expired is null)
+            return 0;
+
+        foreach ((string, HLCTimestamp) record in expired)
+            yieldedIntents.Remove(record);
+
+        return expired.Count;
+    }
 }

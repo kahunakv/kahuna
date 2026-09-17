@@ -3,6 +3,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Routing;
 using Kahuna.Shared.Routing;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -701,7 +702,8 @@ public static class KeyValuesHandlers
                 DecisionDurability = request.DecisionDurability,
                 Priority = request.Priority,
                 ReadTimestamp = request.ReadTimestamp,
-                AdmissionWaitMs = request.AdmissionWaitMs
+                AdmissionWaitMs = request.AdmissionWaitMs,
+                ConflictPolicy = TransactionConflictPolicyWire.Normalize(request.ConflictPolicy)
             }, cancellationToken);
 
             return new KahunaStartTransactionResponse { Type = type, TransactionId = handle.TransactionId };

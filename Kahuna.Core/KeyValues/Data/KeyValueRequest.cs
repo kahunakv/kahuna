@@ -116,6 +116,13 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// </summary>
     public string? RecordAnchorKey { get; internal set; }
 
+    /// <summary>
+    /// Conflict policy of the transaction behind an intent-planting request (exclusive lock, transactional
+    /// set, delete or extend). Stamped from the coordinator's record of the session by the routed operation
+    /// that registered the request, so a participant records on the intent it plants whether its owner
+    /// yields. Default (<see cref="TransactionConflictPolicy.Normal"/>) on every other request type.
+    /// </summary>
+    internal TransactionConflictPolicy ConflictPolicy { get; set; }
 
     /// <summary>
     ///
@@ -269,6 +276,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         InvalidateOrApplyData = null;
         RoutedGeneration = 0;
         RecordAnchorKey = null;
+        ConflictPolicy = TransactionConflictPolicy.Normal;
         ReturnToPoolOnReceive = false;
     }
 

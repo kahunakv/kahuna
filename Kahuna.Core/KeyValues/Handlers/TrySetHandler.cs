@@ -196,9 +196,29 @@ internal sealed class TrySetHandler : BaseHandler
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
-                    return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+                {
+                    if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
+                    {
+                        if (entry.WriteIntent.Pinned)
+                        {
+                            Transactions.DurableTransactionMetrics.PinnedYieldingWaits.Add(1);
+                            return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, exists);
+                        }
 
-                entry.WriteIntent = null;
+                        if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
+                            TakeOverYieldingIntent(message, message.Key, entry, currentTime);
+                        else
+                            return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+                    }
+                    else
+                    {
+                        return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+                    }
+                }
+                else
+                {
+                    entry.WriteIntent = null;
+                }
             }
         }
 
@@ -240,6 +260,14 @@ internal sealed class TrySetHandler : BaseHandler
     /// </summary>
     private async ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
     {
+        // A yielding transaction that already lost this key learns of it here instead of at the finalize pin,
+        // and never re-stages a value or recreates the intent for a key it can no longer commit.
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            Transactions.DurableTransactionMetrics.RecordYieldAbortAtFollowUp();
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 
         (KeyValueResponse? terminal, KeyValueEntry entry, bool exists) = await LoadAndValidateEntry(message, currentTime);
@@ -311,7 +339,9 @@ internal sealed class TrySetHandler : BaseHandler
         entry.WriteIntent ??= new()
         {
             TransactionId = message.TransactionId,
-            Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs
+            Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
+            AcquiredAt = currentTime,
+            Yielding = message.ConflictPolicy == TransactionConflictPolicy.Yield
         };
 
         return new(KeyValueResponseType.Set, mvccEntry.Revision, currentTime);

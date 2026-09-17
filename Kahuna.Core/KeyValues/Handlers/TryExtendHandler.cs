@@ -32,6 +32,13 @@ internal sealed class TryExtendHandler : BaseHandler
         else
             currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 
+        // A yielding transaction that already lost this key learns of it here instead of at the finalize pin.
+        if (message.TransactionId != HLCTimestamp.Zero && context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            Transactions.DurableTransactionMetrics.RecordYieldAbortAtFollowUp();
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
@@ -71,9 +78,29 @@ internal sealed class TryExtendHandler : BaseHandler
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
-                    return KeyValueStaticResponses.MustRetryResponse;
-                
-                entry.WriteIntent = null;
+                {
+                    if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
+                    {
+                        if (entry.WriteIntent.Pinned)
+                        {
+                            Transactions.DurableTransactionMetrics.PinnedYieldingWaits.Add(1);
+                            return KeyValueStaticResponses.WaitingForReplicationResponse;
+                        }
+
+                        if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
+                            TakeOverYieldingIntent(message, message.Key, entry, currentTime);
+                        else
+                            return KeyValueStaticResponses.MustRetryResponse;
+                    }
+                    else
+                    {
+                        return KeyValueStaticResponses.MustRetryResponse;
+                    }
+                }
+                else
+                {
+                    entry.WriteIntent = null;
+                }
             }
         }
         
@@ -131,6 +158,17 @@ internal sealed class TryExtendHandler : BaseHandler
             mvccEntry.Expires = currentTime + message.ExpiresMs;
             mvccEntry.LastUsed = currentTime;
             mvccEntry.LastModified = currentTime;
+
+            // A yielding transaction plants a write intent for the staged extend so the finalize pin has an
+            // intent to claim and a foreground writer can take the key over. A normal transaction is unchanged.
+            if (message.ConflictPolicy == TransactionConflictPolicy.Yield)
+                entry.WriteIntent ??= new()
+                {
+                    TransactionId = message.TransactionId,
+                    Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
+                    AcquiredAt = currentTime,
+                    Yielding = true
+                };
             
             return new(KeyValueResponseType.Extended, mvccEntry.Revision, mvccEntry.LastModified);
         }

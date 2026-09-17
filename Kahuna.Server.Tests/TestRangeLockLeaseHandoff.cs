@@ -95,7 +95,7 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
 
         // Register a pending operation but never complete it → the finalize drain blocks on it.
         TransactionOperationId pendingOp = TransactionOperationId.NewRandom();
-        (OperationRegistrationOutcome regOutcome, _, _, _, _) = await node.LocateAndBeginOperation(
+        (OperationRegistrationOutcome regOutcome, _, _, _, _, _) = await node.LocateAndBeginOperation(
             txA.CoordinatorKey, txA.TransactionId, pendingOp, OperationKind.Set, null, ct);
         Assert.Equal(OperationRegistrationOutcome.New, regOutcome);
 

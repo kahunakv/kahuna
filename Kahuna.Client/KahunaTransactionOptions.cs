@@ -62,4 +62,13 @@ public sealed class KahunaTransactionOptions
     /// ceiling every transaction starts immediately regardless of priority.
     /// </summary>
     public TransactionPriority Priority { get; set; } = TransactionPriority.Normal;
+
+    /// <summary>
+    /// Whether this transaction yields its point-key write intents to foreground writers. Defaults to
+    /// <see cref="TransactionConflictPolicy.Normal"/>. Set it to <see cref="TransactionConflictPolicy.Yield"/>
+    /// for maintenance work (bulk rewrites, backfills, compaction-like sweeps) that must never make a
+    /// foreground transaction fail. A yielding transaction may not hold prefix or range locks, and the option
+    /// applies to interactive sessions only.
+    /// </summary>
+    public TransactionConflictPolicy ConflictPolicy { get; set; } = TransactionConflictPolicy.Normal;
 }

@@ -55,7 +55,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             byte[] digestB = [9, 9, 9];
 
             // First registration from an arbitrary entry node → New.
-            (OperationRegistrationOutcome outcome, _, _, _, _) =
+            (OperationRegistrationOutcome outcome, _, _, _, _, _) =
                 await nodes[1].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op1, OperationKind.Set, digestA, ct);
             Assert.Equal(OperationRegistrationOutcome.New, outcome);
 
@@ -79,7 +79,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // Retry with the same id (from yet another node) → cached response, no re-apply, and the same
             // canonical anchor is recovered even though this retry never re-ran the mutation.
-            (OperationRegistrationOutcome replayOutcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? replayAnchor) =
+            (OperationRegistrationOutcome replayOutcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? replayAnchor, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op1, OperationKind.Set, digestA, ct);
             Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, replayOutcome);
             Assert.Equal(KeyValueResponseType.Set, cachedType);
@@ -88,12 +88,12 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Equal("k1", replayAnchor);
 
             // Same id, different declaration → rejected as a conflict.
-            (OperationRegistrationOutcome conflictOutcome, _, _, _, _) =
+            (OperationRegistrationOutcome conflictOutcome, _, _, _, _, _) =
                 await nodes[1].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op1, OperationKind.Set, digestB, ct);
             Assert.Equal(OperationRegistrationOutcome.RejectedDuplicate, conflictOutcome);
 
             // A distinct operation id registers fresh.
-            (OperationRegistrationOutcome op2Outcome, _, _, _, _) =
+            (OperationRegistrationOutcome op2Outcome, _, _, _, _, _) =
                 await nodes[2].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Delete, null, ct);
             Assert.Equal(OperationRegistrationOutcome.New, op2Outcome);
         }
@@ -111,7 +111,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
         try
         {
             // No StartTransaction: the coordinator holds no session for this id.
-            (OperationRegistrationOutcome outcome, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+            (OperationRegistrationOutcome outcome, _, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
                 Guid.NewGuid().ToString("N"), new HLCTimestamp(1, 42, 0), TransactionOperationId.NewRandom(), OperationKind.Set, null, ct);
 
             Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, outcome);
@@ -586,7 +586,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             {
                 int before = interNode.BeginOperationCallCount;
                 TransactionOperationId opId = TransactionOperationId.NewRandom();
-                (OperationRegistrationOutcome outcome, _, _, _, _) =
+                (OperationRegistrationOutcome outcome, _, _, _, _, _) =
                     await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opId, OperationKind.Set, digest, ct);
                 Assert.Equal(OperationRegistrationOutcome.New, outcome);
 
@@ -670,7 +670,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 foreach (Node node in nodes)
                 {
                     int before = interNode.BeginOperationCallCount;
-                    (OperationRegistrationOutcome probeOutcome, _, _, _, _) =
+                    (OperationRegistrationOutcome probeOutcome, _, _, _, _, _) =
                         await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, probe, ct);
 
                     if (probeOutcome == OperationRegistrationOutcome.RejectedSessionClosed)
@@ -759,7 +759,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // Register the operation, then cancel it via a transient (MustRetry) completion — a no-effect
             // result the node-local completion path turns into a cancellation.
-            (OperationRegistrationOutcome first, _, _, _, _) =
+            (OperationRegistrationOutcome first, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, first);
 
@@ -769,7 +769,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // The same id with the identical declaration must re-register as New (pre-fix it returned
             // AlreadyPending forever), then complete with a confirmed effect.
-            (OperationRegistrationOutcome second, _, _, _, _) =
+            (OperationRegistrationOutcome second, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, second);
 
@@ -995,7 +995,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // Register an operation but never complete it, so the close drain cannot finish.
             TransactionOperationId stuck = TransactionOperationId.NewRandom();
-            (OperationRegistrationOutcome stuckOutcome, _, _, _, _) =
+            (OperationRegistrationOutcome stuckOutcome, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(
                     handle.CoordinatorKey, handle.TransactionId, stuck, OperationKind.Set, [1, 2, 3], ct);
             Assert.Equal(OperationRegistrationOutcome.New, stuckOutcome);
@@ -1008,7 +1008,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // The session stayed closed: a brand-new operation is rejected, not admitted by a reopened session.
             TransactionOperationId fresh = TransactionOperationId.NewRandom();
-            (OperationRegistrationOutcome afterClose, _, _, _, _) =
+            (OperationRegistrationOutcome afterClose, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(
                     handle.CoordinatorKey, handle.TransactionId, fresh, OperationKind.Set, [4, 5, 6], ct);
             Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, afterClose);
@@ -2250,7 +2250,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 foreach (Node node in nodes)
                 {
                     int before = interNode.BeginOperationCallCount;
-                    (OperationRegistrationOutcome probeOutcome, _, _, _, _) =
+                    (OperationRegistrationOutcome probeOutcome, _, _, _, _, _) =
                         await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, probe, ct);
 
                     if (probeOutcome == OperationRegistrationOutcome.RejectedSessionClosed)
@@ -2334,7 +2334,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             TransactionOperationId op = TransactionOperationId.NewRandom();
             byte[] digest = [0xAA];
 
-            (OperationRegistrationOutcome regOutcome, _, _, _, _) =
+            (OperationRegistrationOutcome regOutcome, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, regOutcome);
 
@@ -2356,7 +2356,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             Assert.Null(anchor);
 
             // Same operation id is now AlreadyCompleted (cache entry was removed; coordinator saw the fold).
-            (OperationRegistrationOutcome replayOutcome, _, _, _, _) =
+            (OperationRegistrationOutcome replayOutcome, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, replayOutcome);
         }
@@ -2389,7 +2389,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             // — Branch A: WaitingForReplication + no effect — should cancel and allow re-registration.
             TransactionOperationId opNoEffect = TransactionOperationId.NewRandom();
 
-            (OperationRegistrationOutcome regNoEffect, _, _, _, _) =
+            (OperationRegistrationOutcome regNoEffect, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opNoEffect, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, regNoEffect);
 
@@ -2405,7 +2405,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 ct);
 
             // Should have been cancelled — re-registration with the same id must come back as New.
-            (OperationRegistrationOutcome reregOutcome, _, _, _, _) =
+            (OperationRegistrationOutcome reregOutcome, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opNoEffect, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, reregOutcome);
 
@@ -2413,7 +2413,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             TransactionOperationId opWithEffect = TransactionOperationId.NewRandom();
             byte[] digestB = [0x22];
 
-            (OperationRegistrationOutcome regWithEffect, _, _, _, _) =
+            (OperationRegistrationOutcome regWithEffect, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opWithEffect, OperationKind.Set, digestB, ct);
             Assert.Equal(OperationRegistrationOutcome.New, regWithEffect);
 
@@ -2430,7 +2430,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 ct);
 
             // Effect was registered — same id must come back as AlreadyCompleted (cached-response replay).
-            (OperationRegistrationOutcome cachedOutcome, KeyValueResponseType cachedType, long cachedRevision, _, _) =
+            (OperationRegistrationOutcome cachedOutcome, KeyValueResponseType cachedType, long cachedRevision, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, opWithEffect, OperationKind.Set, digestB, ct);
             Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, cachedOutcome);
             Assert.Equal(KeyValueResponseType.WaitingForReplication, cachedType);
@@ -2480,7 +2480,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // Nothing was confirmed, so the registration must have been cancelled: re-registering the same
             // id with the same declaration comes back as New (not a replayed terminal success).
-            (OperationRegistrationOutcome reregNone, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+            (OperationRegistrationOutcome reregNone, _, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
                 handle.CoordinatorKey, handle.TransactionId, opNone, OperationKind.SetMany,
                 OperationDigest.ForSetMany(noneItems), ct);
             Assert.Equal(OperationRegistrationOutcome.New, reregNone);
@@ -2497,7 +2497,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 someItems, ct, handle.CoordinatorKey, opSome);
             Assert.Equal(KeyValueResponseType.Set, someResp.Single().Type);
 
-            (OperationRegistrationOutcome reregSome, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+            (OperationRegistrationOutcome reregSome, _, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
                 handle.CoordinatorKey, handle.TransactionId, opSome, OperationKind.SetMany,
                 OperationDigest.ForSetMany(someItems), ct);
             Assert.Equal(OperationRegistrationOutcome.AlreadyCompleted, reregSome);
@@ -2530,7 +2530,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             byte[] digest = [0x77];
 
             // Register the operation on the coordinator.
-            (OperationRegistrationOutcome regOutcome, _, _, _, _) =
+            (OperationRegistrationOutcome regOutcome, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, regOutcome);
 
@@ -2624,7 +2624,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             byte[] digest = [1, 2, 3];
             for (int i = 0; i < 2; i++)
             {
-                (OperationRegistrationOutcome reg, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
+                (OperationRegistrationOutcome reg, _, _, _, _, _) = await nodes[0].Kahuna.LocateAndBeginOperation(
                     handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(),
                     OperationKind.Set, digest, ct);
                 Assert.Equal(OperationRegistrationOutcome.New, reg);

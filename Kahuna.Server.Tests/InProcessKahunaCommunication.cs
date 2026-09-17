@@ -220,7 +220,8 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
             ReadValidation     = txOptions.ReadValidation,
             DecisionDurability = txOptions.DecisionDurability,
             Priority           = txOptions.Priority,
-            ReadTimestamp      = txOptions.ReadTimestamp
+            ReadTimestamp      = txOptions.ReadTimestamp,
+            ConflictPolicy     = txOptions.ConflictPolicy
         };
         (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(opts, cancellationToken);
         if (type != KeyValueResponseType.Set)

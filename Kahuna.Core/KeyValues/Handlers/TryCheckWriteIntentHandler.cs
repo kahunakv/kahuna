@@ -44,6 +44,13 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
     {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
+        // Finalize pin for a yielding transaction: claim this transaction's own intent so no foreground writer
+        // can take it over between here and the durable prepare. Runs in the key's actor turn, the same
+        // discipline as a takeover, so the two cannot interleave on one key. This is what makes the hard
+        // invariant true — a yielding transaction never commits a write to a key it lost.
+        if ((message.ConflictChecks & KeyValueConflictChecks.PinOwnIntent) != 0)
+            return await PinOwnIntent(message, currentTime);
+
         // Foreign range lock covering the key — the write set's decide-time fence. Answered before (and without)
         // the entry load: the bounds check needs only the key's bucket, which is derived from the key itself. An
         // entry-derived bucket would answer "no lock" for a phantom insert or a key that is not resident, exactly
@@ -103,5 +110,41 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
 
         return KeyValueStaticResponses.DoesNotExistContextResponse;
+    }
+
+    /// <summary>
+    /// Claims this transaction's own write intent on the key so it cannot be taken over before the durable
+    /// prepare, or reports that the key was already lost. In the key's actor turn:
+    /// <list type="bullet">
+    /// <item>the key is recorded as taken over from this transaction: answer <c>Aborted</c> — the loss stands;</item>
+    /// <item>a live intent owned by this transaction: set <c>Pinned</c> and answer no conflict;</item>
+    /// <item>no such intent (missing or foreign): answer <c>Aborted</c>. A pin can only make an intent this
+    /// transaction still holds unstealable; a missing one means it was lost or a leader change dropped it, and
+    /// committing over it is exactly what the pin exists to prevent.</item>
+    /// </list>
+    /// A durably-prepared intent is already safe (never stealable), so a key already backed by this
+    /// transaction's durable prepared intent answers no conflict without needing an in-memory intent.
+    /// </summary>
+    private async ValueTask<KeyValueResponse> PinOwnIntent(KeyValueRequest message, HLCTimestamp currentTime)
+    {
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+            return KeyValueStaticResponses.AbortedResponse;
+
+        // A key already carried by this transaction's durable prepared intent is safe regardless of the
+        // in-memory intent: durable intents are never stolen.
+        if (context.PreparedIntentStore?.Get(message.Key) is { } durable && durable.TransactionId == message.TransactionId)
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
+
+        if (entry?.WriteIntent is not null
+            && entry.WriteIntent.TransactionId == message.TransactionId
+            && KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
+        {
+            entry.WriteIntent.Pinned = true;
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
+        }
+
+        return KeyValueStaticResponses.AbortedResponse;
     }
 }

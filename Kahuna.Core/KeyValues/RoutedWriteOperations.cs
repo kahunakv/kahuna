@@ -51,7 +51,7 @@ internal sealed class RoutedWriteOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
-    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(
+    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
@@ -113,7 +113,7 @@ internal sealed class RoutedWriteOperations
         byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs,
         KeyValueDurability durability, byte[] digest, long routedGeneration, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Set, digest, cancellationToken);
 
         switch (outcome)
@@ -135,8 +135,12 @@ internal sealed class RoutedWriteOperations
                 return (KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
         }
 
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) =
-            await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+        KeyValueResponseType type;
+        long revision;
+        HLCTimestamp lastModified;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            (type, revision, lastModified) =
+                await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
 
         // Only a confirmed set records a modified key + its implicit point lock into the working set.
         bool applied = type == KeyValueResponseType.Set;
@@ -199,7 +203,7 @@ internal sealed class RoutedWriteOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
         List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.SetMany, OperationDigest.ForSetMany(setManyItems), cancellationToken);
 
 
@@ -235,8 +239,15 @@ internal sealed class RoutedWriteOperations
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.Errored);
         }
 
-        List<KahunaSetKeyValueResponseItem> responses =
-            await locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+        // Stamp the session's conflict policy onto every item from the coordinator's record, so the intent
+        // each item plants records whether its owner yields — never a value the caller could forge. The item
+        // field carries it across a gRPC hop; the ambient scope carries it for the in-process transport.
+        foreach (KahunaSetKeyValueRequestItem item in setManyItems)
+            item.ConflictPolicy = sessionPolicy;
+
+        List<KahunaSetKeyValueResponseItem> responses;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            responses = await locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
 
         // Fold the confirmed writes in canonical request order (fan-out returns them unordered), so the first
         // persistent key deterministically anchors the transaction record. Only a genuine Set is a confirmed
@@ -337,7 +348,7 @@ internal sealed class RoutedWriteOperations
         foreach (KahunaDeleteKeyValueRequestItem item in deleteManyItems)
             canonicalItems.Add((item.Key ?? "", item.Durability));
 
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.DeleteMany, OperationDigest.ForDeleteMany(canonicalItems), cancellationToken);
 
         switch (outcome)
@@ -368,8 +379,14 @@ internal sealed class RoutedWriteOperations
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.Errored);
         }
 
-        List<KahunaDeleteKeyValueResponseItem> responses =
-            await locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+        // Stamp the session's conflict policy onto every item from the coordinator's record. The item field
+        // carries it across a gRPC hop; the ambient scope carries it for the in-process transport.
+        foreach (KahunaDeleteKeyValueRequestItem item in deleteManyItems)
+            item.ConflictPolicy = sessionPolicy;
+
+        List<KahunaDeleteKeyValueResponseItem> responses;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            responses = await locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
 
         // Fold the confirmed deletes in canonical request order (fan-out returns them unordered), so the
         // first persistent key deterministically anchors the transaction record. A transient (MustRetry) item
@@ -486,7 +503,7 @@ internal sealed class RoutedWriteOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Delete, digest, cancellationToken);
 
         switch (outcome)
@@ -508,8 +525,12 @@ internal sealed class RoutedWriteOperations
                 return (KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
         }
 
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) =
-            await locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        KeyValueResponseType type;
+        long revision;
+        HLCTimestamp lastModified;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            (type, revision, lastModified) =
+                await locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
 
         bool applied = type == KeyValueResponseType.Deleted;
 
@@ -560,7 +581,7 @@ internal sealed class RoutedWriteOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         int expiresMs, KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Extend, digest, cancellationToken);
 
         switch (outcome)
@@ -582,8 +603,12 @@ internal sealed class RoutedWriteOperations
                 return (KeyValueResponseType.Errored, 0, HLCTimestamp.Zero);
         }
 
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) =
-            await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        KeyValueResponseType type;
+        long revision;
+        HLCTimestamp lastModified;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            (type, revision, lastModified) =
+                await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
 
         bool applied = type == KeyValueResponseType.Extended;
 

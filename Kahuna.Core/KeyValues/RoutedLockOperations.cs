@@ -1,6 +1,7 @@
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -48,7 +49,7 @@ internal sealed class RoutedLockOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
-    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(
+    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
@@ -96,7 +97,7 @@ internal sealed class RoutedLockOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockAcquire(key, expiresMs, durability), cancellationToken);
 
         switch (outcome)
@@ -121,8 +122,13 @@ internal sealed class RoutedLockOperations
                 return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero);
         }
 
-        (KeyValueResponseType type, string resultKey, KeyValueDurability resultDurability, HLCTimestamp holder) =
-            await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+        KeyValueResponseType type;
+        string resultKey;
+        KeyValueDurability resultDurability;
+        HLCTimestamp holder;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            (type, resultKey, resultDurability, holder) =
+                await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
 
         bool acquired = type == KeyValueResponseType.Locked;
 
@@ -176,7 +182,7 @@ internal sealed class RoutedLockOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockAcquire(prefixKey, expiresMs, durability), cancellationToken);
 
         switch (outcome)
@@ -197,6 +203,18 @@ internal sealed class RoutedLockOperations
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:
                 return KeyValueResponseType.Errored;
+        }
+
+        // A yielding transaction may not hold a prefix lock: the takeover rule covers point-key intents only,
+        // so a prefix lock would keep today's non-yielding semantics silently. Refuse it with a clear reason
+        // and resolve the registration terminally so the session can still finalize.
+        if (sessionPolicy == TransactionConflictPolicy.Yield)
+        {
+            OperationCompletionPayload rejectPayload = OperationCompletionPayloadPool.Rent();
+            rejectPayload.CachedType = KeyValueResponseType.Errored;
+            await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, KeyValueResponseType.Errored, rejectPayload);
+            logger.LogYieldingPredicateLockRejected("prefix", prefixKey, transactionId);
+            return KeyValueResponseType.Errored;
         }
 
         KeyValueResponseType type =
@@ -247,7 +265,7 @@ internal sealed class RoutedLockOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ManyPointLock, OperationDigest.ForManyPointLockAcquire(keys), cancellationToken);
 
         switch (outcome)
@@ -266,8 +284,10 @@ internal sealed class RoutedLockOperations
                 return keys.Select(k => (KeyValueResponseType.Errored, k.key, k.durability, HLCTimestamp.Zero)).ToList();
         }
 
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> responses =
-            await locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> responses;
+        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            responses =
+                await locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
 
         // Fold every confirmed Locked key as a held point lock so commit/rollback release it. A transient
         // (MustRetry) key folds nothing; the caller resends only the transient subset as a fresh operation.
@@ -321,7 +341,7 @@ internal sealed class RoutedLockOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockRelease(key, durability), cancellationToken);
 
         switch (outcome)
@@ -398,7 +418,7 @@ internal sealed class RoutedLockOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixKey,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockRelease(prefixKey, durability), cancellationToken);
 
         switch (outcome)
@@ -471,7 +491,7 @@ internal sealed class RoutedLockOperations
         KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken,
         Func<Task>? afterSnapshot = null)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
                 OperationDigest.ForRangeLockAcquire(prefix, startKey, startInclusive, endKey, endInclusive, mode, expiresMs, durability), cancellationToken);
 
@@ -494,6 +514,16 @@ internal sealed class RoutedLockOperations
                 return (KeyValueResponseType.Aborted, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
                 return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
+        }
+
+        // A yielding transaction may not hold a range lock, for the same reason it may not hold a prefix lock.
+        if (sessionPolicy == TransactionConflictPolicy.Yield)
+        {
+            OperationCompletionPayload rejectPayload = OperationCompletionPayloadPool.Rent();
+            rejectPayload.CachedType = KeyValueResponseType.Errored;
+            await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, (KeyValueResponseType.Errored, HLCTimestamp.Zero), rejectPayload);
+            logger.LogYieldingPredicateLockRejected("range", prefix, transactionId);
+            return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
         }
 
         (KeyValueResponseType type, HLCTimestamp holder) =
@@ -576,7 +606,7 @@ internal sealed class RoutedLockOperations
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
         KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
                 OperationDigest.ForRangeLockRelease(prefix, startKey, startInclusive, endKey, endInclusive, durability), cancellationToken);
 

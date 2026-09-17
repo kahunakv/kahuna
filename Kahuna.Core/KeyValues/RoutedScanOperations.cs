@@ -76,7 +76,7 @@ internal sealed class RoutedScanOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
-    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(
+    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
@@ -221,7 +221,7 @@ internal sealed class RoutedScanOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixedKey,
         HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
                 OperationDigest.ForScan(prefixedKey, readTimestamp, durability), cancellationToken);
 
@@ -310,7 +310,7 @@ internal sealed class RoutedScanOperations
         HLCTimestamp readTimestamp, KeyValueDurability durability, bool recordObservations, CancellationToken cancellationToken,
         bool snapshotAtLeader = false)
     {
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
                 OperationDigest.ForRangeScan(prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability), cancellationToken);
 

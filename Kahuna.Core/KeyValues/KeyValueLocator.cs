@@ -2504,17 +2504,17 @@ internal sealed class KeyValueLocator
     /// when this node is that leader and forwarding otherwise.
     /// </summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    public async ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
-            return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero, null);
+            return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero, null, TransactionConflictPolicy.Normal);
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         // The session's owner registers it, whoever leads the coordinator partition now (see OwnsSession).
         if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
-            (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) local =
+            (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) local =
                 manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
 
             sessionRegistration.Local(SessionRegistrationOp.Begin, IsRegistrationAccepted(local.outcome));
@@ -2525,14 +2525,14 @@ internal sealed class KeyValueLocator
         if (leader is null || leader == raft.GetLocalEndpoint())
         {
             sessionRegistration.Unrouted(SessionRegistrationOp.Begin);
-            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null);
+            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null, TransactionConflictPolicy.Normal);
         }
 
         SessionRegistrationForward forward = sessionRegistration.BeginForward(SessionRegistrationOp.Begin);
 
         try
         {
-            (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) forwarded =
+            (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) forwarded =
                 await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
             forward.Answered(IsRegistrationAccepted(forwarded.outcome));

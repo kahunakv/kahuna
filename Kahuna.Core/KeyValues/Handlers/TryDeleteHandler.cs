@@ -136,9 +136,29 @@ internal sealed class TryDeleteHandler : BaseHandler
             if (entry.WriteIntent.TransactionId != message.TransactionId)
             {
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
-                    return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
+                {
+                    if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
+                    {
+                        if (entry.WriteIntent.Pinned)
+                        {
+                            Transactions.DurableTransactionMetrics.PinnedYieldingWaits.Add(1);
+                            return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, currentTime);
+                        }
 
-                entry.WriteIntent = null;
+                        if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
+                            TakeOverYieldingIntent(message, message.Key, entry, currentTime);
+                        else
+                            return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
+                    }
+                    else
+                    {
+                        return (KeyValueStaticResponses.MustRetryResponse, entry, currentTime);
+                    }
+                }
+                else
+                {
+                    entry.WriteIntent = null;
+                }
             }
         }
 
@@ -180,6 +200,13 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// </summary>
     private async ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
     {
+        // A yielding transaction that already lost this key learns of it here instead of at the finalize pin.
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            Transactions.DurableTransactionMetrics.RecordYieldAbortAtFollowUp();
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
         (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime) = await LoadAndValidateEntry(message);
         if (terminal is not null)
             return terminal;
@@ -215,6 +242,18 @@ internal sealed class TryDeleteHandler : BaseHandler
         mvccEntry.Revision++;
         mvccEntry.State = KeyValueState.Deleted;
         mvccEntry.LastModified = currentTime;
+
+        // A yielding transaction plants a write intent for the staged tombstone so the finalize pin has an
+        // intent to claim and a foreground writer can take the key over. A normal transaction is unchanged: the
+        // tombstone's write-skew fence is the coordinator's commit-time probe, exactly as before.
+        if (message.ConflictPolicy == TransactionConflictPolicy.Yield)
+            entry.WriteIntent ??= new()
+            {
+                TransactionId = message.TransactionId,
+                Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
+                AcquiredAt = currentTime,
+                Yielding = true
+            };
 
         return new(KeyValueResponseType.Deleted, mvccEntry.Revision, mvccEntry.LastModified);
     }

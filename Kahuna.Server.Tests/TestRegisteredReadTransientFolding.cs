@@ -301,7 +301,7 @@ public sealed class TestRegisteredReadTransientFolding : RaftTrackingTest
 
             // Register a Get operation then complete it with MustRetry, mirroring what
             // RegisterAndTryReadValue does when the actor returns a transient.
-            (OperationRegistrationOutcome firstPoint, _, _, _, _) =
+            (OperationRegistrationOutcome firstPoint, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, pointOp, OperationKind.Get, [1, 2], ct);
             Assert.Equal(OperationRegistrationOutcome.New, firstPoint);
 
@@ -310,7 +310,7 @@ public sealed class TestRegisteredReadTransientFolding : RaftTrackingTest
                 new OperationCompletionPayload { CachedType = KeyValueResponseType.MustRetry }, ct);
 
             // The cancel freed the id: same-id retry registers as New (not AlreadyPending).
-            (OperationRegistrationOutcome retryPoint, _, _, _, _) =
+            (OperationRegistrationOutcome retryPoint, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, pointOp, OperationKind.Get, [1, 2], ct);
             Assert.Equal(OperationRegistrationOutcome.New, retryPoint);
 
@@ -322,7 +322,7 @@ public sealed class TestRegisteredReadTransientFolding : RaftTrackingTest
             // ── range read transient ─────────────────────────────────────────────────
             TransactionOperationId rangeOp = TransactionOperationId.NewRandom();
 
-            (OperationRegistrationOutcome firstRange, _, _, _, _) =
+            (OperationRegistrationOutcome firstRange, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, rangeOp, OperationKind.Scan, [3, 4], ct);
             Assert.Equal(OperationRegistrationOutcome.New, firstRange);
 
@@ -330,7 +330,7 @@ public sealed class TestRegisteredReadTransientFolding : RaftTrackingTest
                 handle.CoordinatorKey, handle.TransactionId, rangeOp,
                 new OperationCompletionPayload { CachedType = KeyValueResponseType.MustRetry }, ct);
 
-            (OperationRegistrationOutcome retryRange, _, _, _, _) =
+            (OperationRegistrationOutcome retryRange, _, _, _, _, _) =
                 await nodes[0].Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, rangeOp, OperationKind.Scan, [3, 4], ct);
             Assert.Equal(OperationRegistrationOutcome.New, retryRange);
 

@@ -48,7 +48,7 @@ internal sealed class RoutedReadOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
-    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(
+    private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
@@ -100,7 +100,7 @@ internal sealed class RoutedReadOperations
     {
         byte[] digest = OperationDigest.ForRead(kind, key, revision, readTimestamp, durability);
 
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
 
         switch (outcome)
@@ -267,7 +267,7 @@ internal sealed class RoutedReadOperations
             ? OperationDigest.ForExistsMany(keys, readTimestamp)
             : OperationDigest.ForGetMany(keys, readTimestamp);
 
-        (OperationRegistrationOutcome outcome, _, _, _, _) =
+        (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
 
         switch (outcome)

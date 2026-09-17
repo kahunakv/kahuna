@@ -266,6 +266,10 @@ internal sealed class TryCollectHandler : BaseHandler
         // and resumed via lockSweepKeys so the sweep never scans the whole lock table in one turn.
         SweepExpiredPredicateLocks(currentTime, inspectionMax);
 
+        // Reclaim takeover records whose retention passed: the losing session is provably gone, so nothing can
+        // still arrive that needs to learn its key was taken over.
+        context.SweepExpiredYieldedIntents(currentTime);
+
         // Step 4: expire in-flight resumable reads whose deadline has passed. A hung or slow backend
         // read otherwise leaves its coalesced waiters parked indefinitely; resolving them with a
         // retryable result lets the callers retry, and marking the continuation cancelled makes a

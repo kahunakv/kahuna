@@ -100,6 +100,7 @@ internal sealed class LocalKeyValueOperations
         );
 
         request.RoutedGeneration = routedGeneration;
+        request.ConflictPolicy = YieldingIntentPolicyScope.Current;
 
         try
         {
@@ -183,6 +184,7 @@ internal sealed class LocalKeyValueOperations
             );
 
             request.RoutedGeneration = item.RoutedGeneration;
+            request.ConflictPolicy = item.ConflictPolicy;
 
             try
             {
@@ -247,6 +249,8 @@ internal sealed class LocalKeyValueOperations
                 0,
                 default
             );
+
+            request.ConflictPolicy = item.ConflictPolicy;
 
             try
             {
@@ -335,6 +339,8 @@ internal sealed class LocalKeyValueOperations
             default
         );
 
+        request.ConflictPolicy = YieldingIntentPolicyScope.Current;
+
         try
         {
             bool attemptedRoutedResolve = false;
@@ -410,6 +416,8 @@ internal sealed class LocalKeyValueOperations
             0,
             default
         );
+
+        request.ConflictPolicy = YieldingIntentPolicyScope.Current;
 
         try
         {

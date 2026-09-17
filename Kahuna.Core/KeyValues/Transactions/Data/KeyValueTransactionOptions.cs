@@ -67,4 +67,11 @@ public sealed class KeyValueTransactionOptions
     /// exactly as it did before priorities existed.
     /// </summary>
     public TransactionPriority Priority { get; set; } = TransactionPriority.Normal;
+
+    /// <summary>
+    /// Whether this transaction yields its point-key write intents to foreground writers. Defaults to
+    /// <see cref="TransactionConflictPolicy.Normal"/>, so a caller that never sets it behaves exactly as before
+    /// the option existed. See <see cref="TransactionConflictPolicy.Yield"/> for the contract and its limits.
+    /// </summary>
+    public TransactionConflictPolicy ConflictPolicy { get; set; } = TransactionConflictPolicy.Normal;
 }

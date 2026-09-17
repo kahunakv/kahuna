@@ -10,6 +10,7 @@ using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.Replication;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Communication.Grpc;
 using TransactionHandle = Kahuna.Shared.KeyValue.TransactionHandle;
 
 namespace Kahuna.Server.KeyValues.Transactions;
@@ -202,6 +203,7 @@ internal sealed class TransactionCoordinator : IDisposable
                     DecisionDurability = options.DecisionDurability,
                     ReadTimestamp      = options.ReadTimestamp,
                     Priority           = priority,
+                    ConflictPolicy     = TransactionConflictPolicyWire.Normalize(options.ConflictPolicy),
                     Action             = KeyValueTransactionAction.Commit,
                     AsyncRelease       = options.AsyncRelease,
                     Timeout            = timeout,
@@ -1334,6 +1336,12 @@ internal sealed class TransactionCoordinator : IDisposable
                 return;
             }
         }
+
+        // A yielding transaction claims every intent it still holds before any prepare. A key it lost to a
+        // foreground writer answers Aborted, so the transaction can never commit over the winner. Runs before
+        // the durable, 2PC and ephemeral finalize shapes alike; a normal transaction sends no pin.
+        if (context.ConflictPolicy == TransactionConflictPolicy.Yield && !await PinYieldingIntents(context, cancellationToken))
+            return;
 
         // Split the working set: the persistent (crash-atomic) keys are finalized through the durable-intent path
         // (canonical decision record + prepared intents, no manual Raft ticket); the ephemeral keys are committed
@@ -2476,6 +2484,72 @@ internal sealed class TransactionCoordinator : IDisposable
             logger.LogWriteSkewGuardAborted(context.TransactionId, key);
 
             return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The finalize pin for a yielding transaction. Before any prepare, it claims every write intent the
+    /// transaction still holds — one probe per node owning part of the set — so a foreground writer cannot take
+    /// one over in the window between here and the durable prepare. A key already taken over answers
+    /// <c>Aborted</c>, and the transaction aborts rather than committing over the winner. This is the hard
+    /// invariant: a yielding transaction never commits a write to a key it lost.
+    ///
+    /// <para>The keys pinned are the transaction's point locks and its modified keys — every key on which a
+    /// yielding intent may live. A yielding transaction cannot hold a prefix or range lock (those acquires are
+    /// refused), so the set is exactly its point-key intents.</para>
+    /// </summary>
+    private async Task<bool> PinYieldingIntents(TransactionContext context, CancellationToken cancellationToken)
+    {
+        HashSet<(string, KeyValueDurability)> keys = [];
+        if (context.LocksAcquired is not null)
+            foreach ((string, KeyValueDurability) k in context.LocksAcquired)
+                keys.Add(k);
+        if (context.ModifiedKeys is not null)
+            foreach ((string, KeyValueDurability) k in context.ModifiedKeys)
+                keys.Add(k);
+
+        if (keys.Count == 0)
+            return true;
+
+        List<KeyValueConflictProbe> probes = new(keys.Count);
+        foreach ((string key, KeyValueDurability durability) in keys)
+        {
+            if (!string.IsNullOrEmpty(key))
+                probes.Add(new(key, durability, KeyValueConflictChecks.PinOwnIntent));
+        }
+
+        if (probes.Count == 0)
+            return true;
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
+            await manager.LocateAndTryCheckManyWriteIntents(context.TransactionId, probes, cancellationToken);
+
+        Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(results.Count);
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
+        {
+            // Any Aborted answer for a key is the one that matters: a takeover was detected. Never let a second,
+            // cleaner answer overwrite it.
+            if (byKey.TryGetValue((key, durability), out KeyValueResponseType existing) && existing == KeyValueResponseType.Aborted)
+                continue;
+            byKey[(key, durability)] = type;
+        }
+
+        foreach (KeyValueConflictProbe probe in probes)
+        {
+            // An unanswered key means the pin did not actually cover the set — a broken contract, not a clean
+            // answer. Treat it as a loss so the invariant is never silently disabled.
+            if (!byKey.TryGetValue((probe.Key, probe.Durability), out KeyValueResponseType type) || type == KeyValueResponseType.Aborted)
+            {
+                DurableTransactionMetrics.RecordYieldAbortAtPin();
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.Aborted,
+                    Reason = $"Yielding transaction lost key {probe.Key} to a foreground writer"
+                };
+                return false;
+            }
         }
 
         return true;

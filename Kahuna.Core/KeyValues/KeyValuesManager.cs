@@ -151,7 +151,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         operationRegistrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
     /// <summary>Registers a transaction-scoped operation on its coordinator before it is applied.</summary>
-    public ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
+    public ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         operationRegistrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
 
     /// <summary>Records a transaction-scoped operation's confirmed effect on its coordinator.</summary>
@@ -159,7 +159,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         operationRegistrar.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
 
     /// <summary>Coordinator-side registration of an operation.</summary>
-    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest) =>
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest) =>
         operationRegistrar.BeginOperation(transactionId, operationId, kind, payloadDigest);
 
     /// <summary>Coordinator-side recording of an operation's confirmed effect.</summary>

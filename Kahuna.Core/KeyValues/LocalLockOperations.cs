@@ -91,6 +91,8 @@ internal sealed class LocalLockOperations
             default
         );
 
+        request.ConflictPolicy = YieldingIntentPolicyScope.Current;
+
         try
         {
             (KeyValueResponseType type, HLCTimestamp holder) = await AcquireExclusiveLockWithWait(
@@ -256,6 +258,8 @@ internal sealed class LocalLockOperations
                 0,
                 default
             );
+
+            request.ConflictPolicy = YieldingIntentPolicyScope.Current;
 
             try
             {

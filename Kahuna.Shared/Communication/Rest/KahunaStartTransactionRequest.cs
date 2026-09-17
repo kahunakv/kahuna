@@ -42,6 +42,13 @@ public sealed class KahunaStartTransactionRequest
     public TransactionPriority Priority { get; set; }
 
     /// <summary>
+    /// Whether the session yields its point-key write intents to foreground writers. An out-of-range number
+    /// decodes as <see cref="TransactionConflictPolicy.Normal"/>.
+    /// </summary>
+    [JsonPropertyName("conflictPolicy")]
+    public TransactionConflictPolicy ConflictPolicy { get; set; }
+
+    /// <summary>
     /// Transaction-wide snapshot for reads. Zero means latest.
     /// </summary>
     [JsonPropertyName("readTimestamp")]

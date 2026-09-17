@@ -1659,7 +1659,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             DecisionDurability = txOptions.DecisionDurability,
             Priority = txOptions.Priority,
             ReadTimestamp = txOptions.ReadTimestamp,
-            AdmissionWaitMs = txOptions.AdmissionWaitMs
+            AdmissionWaitMs = txOptions.AdmissionWaitMs,
+            ConflictPolicy = txOptions.ConflictPolicy
         };
 
         KahunaStartTransactionResponse response = await PostWithMustRetry<KahunaStartTransactionRequest, KahunaStartTransactionResponse>(

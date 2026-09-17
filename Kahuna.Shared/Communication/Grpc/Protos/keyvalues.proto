@@ -60,6 +60,10 @@ message GrpcTrySetKeyValueRequest {
   string CoordinatorKey = 12;
   uint64 OperationIdHigh = 13;
   uint64 OperationIdLow = 14;
+  // Conflict policy of the owning session, stamped by the node that registered the operation and carried
+  // on the inter-node forward. Ignored on a registered request; honoured on an unregistered one only when
+  // it arrived from a peer. Unspecified decodes as Normal.
+  GrpcTransactionConflictPolicy ConflictPolicy = 15;
 }
 
 message GrpcTrySetKeyValueResponse {
@@ -91,6 +95,7 @@ message GrpcTrySetManyKeyValueRequestItem {
   int32 ExpiresMs = 9;
   GrpcKeyValueDurability Durability = 10;
   int64 RoutedGeneration = 11;
+  GrpcTransactionConflictPolicy ConflictPolicy = 12;
 }
 
 message GrpcTrySetManyKeyValueResponse {
@@ -127,6 +132,7 @@ message GrpcTryDeleteManyKeyValueRequestItem {
   uint32 TransactionIdCounter = 3;
   string Key = 4;
   GrpcKeyValueDurability Durability = 5;
+  GrpcTransactionConflictPolicy ConflictPolicy = 6;
 }
 
 message GrpcTryDeleteManyKeyValueResponse {
@@ -160,6 +166,7 @@ message GrpcTryExtendKeyValueRequest {
   string CoordinatorKey = 7;
   uint64 OperationIdHigh = 8;
   uint64 OperationIdLow = 9;
+  GrpcTransactionConflictPolicy ConflictPolicy = 10;
 }
 
 message GrpcTryExtendKeyValueResponse {
@@ -184,6 +191,7 @@ message GrpcTryDeleteKeyValueRequest {
   string CoordinatorKey = 6;
   uint64 OperationIdHigh = 7;
   uint64 OperationIdLow = 8;
+  GrpcTransactionConflictPolicy ConflictPolicy = 9;
 }
 
 message GrpcTryDeleteKeyValueResponse {
@@ -393,6 +401,7 @@ message GrpcTryAcquireExclusiveLockRequest {
   string CoordinatorKey = 7;
   uint64 OperationIdHigh = 8;
   uint64 OperationIdLow = 9;
+  GrpcTransactionConflictPolicy ConflictPolicy = 10;
 }
 
 message GrpcTryAcquireExclusiveLockResponse {
@@ -475,6 +484,8 @@ message GrpcTryAcquireManyExclusiveLocksRequest {
   int64 TransactionIdPhysical = 2;
   uint32 TransactionIdCounter = 3;
   repeated GrpcTryAcquireManyExclusiveLocksRequestItem Items = 4;
+  // One policy for the whole batch: every item belongs to the same transaction.
+  GrpcTransactionConflictPolicy ConflictPolicy = 5;
 }
 
 message GrpcTryAcquireManyExclusiveLocksResponse {
@@ -836,6 +847,9 @@ message GrpcStartTransactionRequest
   // How long the caller will queue for an admission slot. Distinct from Timeout, which is the session's
   // lifetime. Zero means "use the server default"; the server clamps it to its own maximum.
   int32 AdmissionWaitMs = 12;
+  // Whether the session yields its point-key write intents to foreground writers. Convert with
+  // TransactionConflictPolicyWire; unspecified and unknown values decode as Normal.
+  GrpcTransactionConflictPolicy ConflictPolicy = 13;
 }
 
 message GrpcStartTransactionResponse
@@ -984,6 +998,9 @@ message GrpcBeginOperationResponse
   int64 CachedTimestampPhysical = 6;
   uint32 CachedTimestampCounter = 7;
   optional string RecordAnchorKey = 8;
+  // The session's conflict policy, so the registering node stamps the participant request from the
+  // coordinator's own record of the session and never from a caller-supplied value.
+  GrpcTransactionConflictPolicy ConflictPolicy = 9;
 }
 
 message GrpcCompleteOperationRequest
@@ -1713,6 +1730,15 @@ enum GrpcTransactionPriority {
   TRANSACTION_PRIORITY_NORMAL = 3;
   TRANSACTION_PRIORITY_HIGH = 4;
   TRANSACTION_PRIORITY_CRITICAL = 5;
+}
+
+// Offset by one from Kahuna.Shared.KeyValue.TransactionConflictPolicy so that zero — the value a peer that
+// predates this field necessarily sends — means "not specified" and resolves to Normal. Convert with
+// TransactionConflictPolicyWire, never with a raw cast: an unrecognised value must never decode as Yield.
+enum GrpcTransactionConflictPolicy {
+  TRANSACTION_CONFLICT_POLICY_UNSPECIFIED = 0;
+  TRANSACTION_CONFLICT_POLICY_NORMAL = 1;
+  TRANSACTION_CONFLICT_POLICY_YIELD = 2;
 }
 message GrpcAcquireSnapshotHoldRequest {
   string HolderId          = 1;

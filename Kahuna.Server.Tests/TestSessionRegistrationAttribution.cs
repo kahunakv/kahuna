@@ -244,7 +244,7 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
             // rejection the caller still receives.
             SessionRegistrationCounts beforeRefusal = driver.KeyValues.SessionRegistrationCounts;
 
-            (OperationRegistrationOutcome refusedOutcome, _, _, _, _) = await driver.LocateAndBeginOperation(
+            (OperationRegistrationOutcome refusedOutcome, _, _, _, _, _) = await driver.LocateAndBeginOperation(
                 coordinatorKey, new HLCTimestamp(1, 42, 0), TransactionOperationId.NewRandom(), OperationKind.Set, [1, 2, 3], ct);
 
             Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, refusedOutcome);
@@ -265,7 +265,7 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
 
             try
             {
-                (OperationRegistrationOutcome beginOutcome, _, _, _, _) = await driver.LocateAndBeginOperation(
+                (OperationRegistrationOutcome beginOutcome, _, _, _, _, _) = await driver.LocateAndBeginOperation(
                     handle.CoordinatorKey, handle.TransactionId, faultedOp, OperationKind.Set, [4, 5, 6], ct);
 
                 Assert.Equal(OperationRegistrationOutcome.New, beginOutcome);
@@ -322,11 +322,11 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
 
             SessionRegistrationCounts before = driver.KeyValues.SessionRegistrationCounts;
 
-            (OperationRegistrationOutcome first, _, _, _, _) = await driver.LocateAndBeginOperation(
+            (OperationRegistrationOutcome first, _, _, _, _, _) = await driver.LocateAndBeginOperation(
                 handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.New, first);
 
-            (OperationRegistrationOutcome second, _, _, _, _) = await driver.LocateAndBeginOperation(
+            (OperationRegistrationOutcome second, _, _, _, _, _) = await driver.LocateAndBeginOperation(
                 handle.CoordinatorKey, handle.TransactionId, op, OperationKind.Set, digest, ct);
             Assert.Equal(OperationRegistrationOutcome.AlreadyPending, second);
 
@@ -474,7 +474,7 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
 
             try
             {
-                (OperationRegistrationOutcome beginOutcome, _, _, _, _) = await driver.LocateAndBeginOperation(
+                (OperationRegistrationOutcome beginOutcome, _, _, _, _, _) = await driver.LocateAndBeginOperation(
                     handle.CoordinatorKey, handle.TransactionId, faultedOp, OperationKind.Set, [4, 5, 6], ct);
 
                 Assert.Equal(OperationRegistrationOutcome.New, beginOutcome);

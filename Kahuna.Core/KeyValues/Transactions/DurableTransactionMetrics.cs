@@ -1,5 +1,7 @@
 using System.Diagnostics.Metrics;
 
+using Kahuna.Shared.KeyValue;
+
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>
@@ -629,6 +631,64 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.kv.session_owned_intent_ceiling_expiries",
             description: "Session-owned write intents and range locks dropped after outliving the liveness ceiling.");
+
+    /// <summary>
+    /// Point-key write intents a foreground writer took over from a yielding transaction, tagged by the
+    /// operation that took them (lock, set, delete, extend). A firing marks maintenance work stepping aside for
+    /// foreground work, exactly as the yield contract intends; a sustained rate against one owner marks a
+    /// yielding transaction being starved out, which is accepted by design.
+    /// </summary>
+    internal static readonly Counter<long> YieldedIntents =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.yielded_intents",
+            description: "Yielding write intents taken over by a foreground writer, tagged by operation.");
+
+    /// <summary>
+    /// Yielding transactions aborted because they lost a key, tagged by where the loss was detected: a
+    /// follow-up operation on the lost key, or the finalize pin. A firing is the yield contract holding — the
+    /// loser never commits a key it lost.
+    /// </summary>
+    internal static readonly Counter<long> YieldAborts =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.yield_aborts",
+            description: "Yielding transactions aborted after losing a key, tagged by where the loss was detected.");
+
+    /// <summary>
+    /// Foreground requests answered WaitingForReplication because they met a pinned yielding intent whose owner
+    /// is already finalizing. The requester waits out its existing bounded retry instead of failing, and the
+    /// key frees when the owner's decision lands.
+    /// </summary>
+    internal static readonly Counter<long> PinnedYieldingWaits =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.pinned_waits",
+            description: "Foreground requests told to wait because a yielding intent on the key is pinned for its owner's commit.");
+
+    private static readonly KeyValuePair<string, object?>[] YieldOpLock = [new("operation", "lock")];
+    private static readonly KeyValuePair<string, object?>[] YieldOpSet = [new("operation", "set")];
+    private static readonly KeyValuePair<string, object?>[] YieldOpDelete = [new("operation", "delete")];
+    private static readonly KeyValuePair<string, object?>[] YieldOpExtend = [new("operation", "extend")];
+    private static readonly KeyValuePair<string, object?>[] YieldWhereFollowUp = [new("where", "follow_up")];
+    private static readonly KeyValuePair<string, object?>[] YieldWherePin = [new("where", "pin")];
+
+    /// <summary>Counts a takeover, tagged by the operation type that performed it.</summary>
+    internal static void RecordYieldedIntent(KeyValueRequestType type)
+    {
+        KeyValuePair<string, object?>[] tag = type switch
+        {
+            KeyValueRequestType.TryAcquireExclusiveLock => YieldOpLock,
+            KeyValueRequestType.TrySet => YieldOpSet,
+            KeyValueRequestType.TryDelete => YieldOpDelete,
+            KeyValueRequestType.TryExtend => YieldOpExtend,
+            _ => YieldOpSet
+        };
+        YieldedIntents.Add(1, tag);
+    }
+
+    /// <summary>Counts a yielding-transaction abort at a follow-up operation on a lost key.</summary>
+    internal static void RecordYieldAbortAtFollowUp() => YieldAborts.Add(1, YieldWhereFollowUp);
+
+    /// <summary>Counts a yielding-transaction abort at the finalize pin.</summary>
+    internal static void RecordYieldAbortAtPin() => YieldAborts.Add(1, YieldWherePin);
 
     /// <summary>
     /// Operation completions carrying at least one confirmed working-set effect (a modified key, a staged

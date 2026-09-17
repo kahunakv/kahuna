@@ -1,6 +1,7 @@
 
 using Google.Protobuf;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence;
@@ -547,6 +548,58 @@ internal abstract class BaseHandler
             context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
             revisionsToRemove.Clear();
         }
+    }
+
+    /// <summary>
+    /// Whether the request that carries <paramref name="message"/> may take over a yielding intent: it is not
+    /// itself a yielding transaction. A plain write with no transaction counts as non-yielding, so maintenance
+    /// work never makes plain writes wait either.
+    /// </summary>
+    protected static bool RequesterMayTakeOverYieldingIntent(KeyValueRequest message)
+        => message.ConflictPolicy != TransactionConflictPolicy.Yield;
+
+    /// <summary>
+    /// Whether <paramref name="intent"/> is a yielding intent that a foreground writer may take over: its owner
+    /// yields, it has not been pinned by its owner's finalize, it has not been prepared in memory
+    /// (<see cref="KeyValueWriteIntent.CommitTimestamp"/> is Zero), and no durable prepared intent backs it on
+    /// this key. A prepared or durable intent is never stolen.
+    /// </summary>
+    protected bool IsStealableYieldingIntent(string key, KeyValueWriteIntent intent)
+    {
+        if (!intent.Yielding || intent.Pinned || intent.CommitTimestamp != HLCTimestamp.Zero)
+            return false;
+
+        Transactions.Data.PreparedIntent? durable = context.PreparedIntentStore?.Get(key);
+        return durable is null || durable.TransactionId != intent.TransactionId;
+    }
+
+    /// <summary>
+    /// Takes over the yielding intent that <paramref name="entry"/> currently holds, in the key's actor turn:
+    /// drops the owner's staged MVCC snapshot, records the loss so the owner learns of it at its next touch of
+    /// the key or at its finalize pin, clears the intent, and counts and logs the takeover. The caller then
+    /// proceeds as if no intent had been present. Only call when <see cref="IsStealableYieldingIntent"/> is true
+    /// and <see cref="RequesterMayTakeOverYieldingIntent"/> holds.
+    /// </summary>
+    protected void TakeOverYieldingIntent(KeyValueRequest message, string key, KeyValueEntry entry, HLCTimestamp currentTime)
+    {
+        KeyValueWriteIntent intent = entry.WriteIntent!;
+        HLCTimestamp owner = intent.TransactionId;
+
+        RemoveMvccEntry(entry, owner);
+
+        // Bound the loss record's lifetime the same way the intent itself is bounded: a leased intent by its
+        // lease, a session-owned (zero-deadline) intent by the liveness ceiling. Past that point the losing
+        // session is provably gone and nothing can still need to learn of the loss.
+        HLCTimestamp expiry = intent.Expires != HLCTimestamp.Zero
+            ? intent.Expires
+            : currentTime + context.SessionOwnedIntentCeilingMs;
+
+        context.RecordYieldedIntent(key, owner, expiry);
+
+        entry.WriteIntent = null;
+
+        Transactions.DurableTransactionMetrics.RecordYieldedIntent(message.Type);
+        context.Logger.LogYieldingIntentTakenOver(key, owner, message.TransactionId);
     }
 
     /// <summary>

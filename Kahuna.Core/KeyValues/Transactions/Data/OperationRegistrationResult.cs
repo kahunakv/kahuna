@@ -1,4 +1,6 @@
 
+using Kahuna.Shared.KeyValue;
+
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>
@@ -36,9 +38,17 @@ public enum OperationRegistrationOutcome
 internal readonly struct OperationRegistrationResult(
     OperationRegistrationOutcome outcome,
     object? cachedResponse = null,
-    string? recordAnchorKey = null)
+    string? recordAnchorKey = null,
+    TransactionConflictPolicy conflictPolicy = TransactionConflictPolicy.Normal)
 {
     public OperationRegistrationOutcome Outcome { get; } = outcome;
+
+    /// <summary>
+    /// The owning session's conflict policy, carried on every outcome so the routed operation stamps the
+    /// participant request from the coordinator's own record of the session rather than a caller-supplied
+    /// value. <see cref="TransactionConflictPolicy.Normal"/> when the session is unknown.
+    /// </summary>
+    public TransactionConflictPolicy ConflictPolicy { get; } = conflictPolicy;
 
     /// <summary>Non-null only when <see cref="Outcome"/> is <see cref="OperationRegistrationOutcome.AlreadyCompleted"/>.</summary>
     public object? CachedResponse { get; } = cachedResponse;

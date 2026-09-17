@@ -41,6 +41,14 @@ internal sealed class TryRollbackMutationsHandler : BaseHandler
             return KeyValueStaticResponses.ErroredResponse;
         }
 
+        // A yielding transaction rolling back a key it already lost: the rollback succeeds and the loss record is
+        // forgotten. The takeover already removed this transaction's staged state, so there is nothing to undo.
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            context.ForgetYieldedIntent(message.Key, message.TransactionId);
+            return new(KeyValueResponseType.RolledBack, 0);
+        }
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);

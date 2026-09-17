@@ -22,7 +22,15 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
     {
         if (message.TransactionId == HLCTimestamp.Zero)
             return KeyValueStaticResponses.ErroredResponse;
-        
+
+        // A yielding transaction releasing a key it already lost: the release succeeds and the loss record is
+        // forgotten. Its intent is gone (a foreground writer holds the key now), so there is nothing to unlock.
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            context.ForgetYieldedIntent(message.Key, message.TransactionId);
+            return KeyValueStaticResponses.UnlockedResponse;
+        }
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);

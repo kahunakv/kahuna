@@ -26,7 +26,15 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
     {
         if (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0)
             return KeyValueStaticResponses.ErroredResponse;
-        
+
+        // A yielding transaction that already lost this key to a foreground writer must not re-acquire it: it
+        // learns of the loss now instead of at its finalize pin, and never recreates the intent.
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            Transactions.DurableTransactionMetrics.RecordYieldAbortAtFollowUp();
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
@@ -75,7 +83,26 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
                 if (IsAwaitingSettlement(message, entry.WriteIntent.TransactionId))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
 
-                return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, entry.WriteIntent.TransactionId);
+                if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
+                {
+                    // The owner's finalize already claimed the intent: its decision is on the way, so wait for
+                    // it under the existing acquire loop instead of failing.
+                    if (entry.WriteIntent.Pinned)
+                    {
+                        Transactions.DurableTransactionMetrics.PinnedYieldingWaits.Add(1);
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                    }
+
+                    // Take the key over and plant the requester's intent below.
+                    if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
+                        TakeOverYieldingIntent(message, message.Key, entry, currentTime);
+                    else
+                        return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, entry.WriteIntent.TransactionId);
+                }
+                else
+                {
+                    return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, entry.WriteIntent.TransactionId);
+                }
             }
         }
 
@@ -84,6 +111,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             TransactionId = message.TransactionId,
             Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
             AcquiredAt = currentTime,
+            Yielding = message.ConflictPolicy == TransactionConflictPolicy.Yield,
         };
         
         context.Logger.LogAssignedWriteIntent(message.Key, message.TransactionId);

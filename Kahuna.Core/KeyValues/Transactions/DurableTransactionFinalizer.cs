@@ -829,8 +829,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // bundled decision, sharing the atomic batch, could not be withheld once proposed. Fall back to 2PC,
         // whose prepare/retry/helping machinery owns that conflict. The check is race-free when this node
         // leads the anchor: a NEW conflicting durable prepare cannot land behind it, because its producer
-        // would first need the in-memory write intents this transaction already holds on that leader
-        // (installed at PrepareMutations); the only foreign intents possible are decided-but-unsettled
+        // would first need an in-memory write intent on this key on that leader, and this transaction's own
+        // in-memory intents already exclude it — the point locks it holds, and, for the read-then-write path,
+        // the staged intents PrepareMutations installs. (An all-persistent transaction skips PrepareMutations
+        // and holds only its point-lock intents, which is why a durable transaction with modifications must
+        // hold a lock set to reach here.) The only foreign intents possible are decided-but-unsettled
         // predecessors, which already existed when this transaction acquired its locks and are therefore
         // visible to this check. With a remote anchor leader the local store sees at most a replica's view
         // and the check is advisory only — the record store's bundled-prepare gate re-checks at apply, on

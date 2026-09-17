@@ -38,5 +38,15 @@ public enum KeyValueConflictChecks
     /// Answered with <see cref="KeyValueResponseType.NotSet"/> (compare failed) rather than Aborted, so
     /// the caller can attribute the conflict precisely.
     /// </summary>
-    StagedBase = 1 << 2
+    StagedBase = 1 << 2,
+
+    /// <summary>
+    /// Pins the caller's own in-memory write intent on the key so no foreground writer can take it over
+    /// before the caller's durable prepare lands. Asked by the finalize of a yielding transaction for every
+    /// key it holds an intent on, before any other finalize step. Answers no conflict when the key's intent
+    /// is owned by the caller and was not lost to a takeover, and <see cref="KeyValueResponseType.Aborted"/>
+    /// when the intent is missing, foreign, or recorded as taken over — the loser must never commit a write
+    /// to a key it lost. Has no effect on a key whose intent is already durably prepared.
+    /// </summary>
+    PinOwnIntent = 1 << 3
 }

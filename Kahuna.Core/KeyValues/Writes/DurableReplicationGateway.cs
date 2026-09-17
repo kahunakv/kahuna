@@ -586,9 +586,11 @@ internal sealed class DurableReplicationGateway
     /// the caller falls back to the standard 2PC flow.
     /// The safety argument for deciding in the same batch as the prepare lives at the call site
     /// (<see cref="Transactions.DurableTransactionFinalizer"/>): the caller pre-checks that no foreign durable
-    /// intent holds any of the transaction's keys, and in-memory write intents on the anchor leader exclude new
-    /// conflicting prepares from being proposed behind it; the record store's apply-time gates re-check both on
-    /// every replica.
+    /// intent holds any of the transaction's keys, and the transaction's own in-memory intents on the anchor
+    /// leader — its point locks, plus the staged intents PrepareMutations installs on a read-then-write path,
+    /// but not necessarily any staged intent for an all-persistent transaction, which skips PrepareMutations —
+    /// exclude new conflicting prepares from being proposed behind it; the record store's apply-time gates
+    /// re-check both on every replica.
     /// </summary>
     internal async Task<DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,

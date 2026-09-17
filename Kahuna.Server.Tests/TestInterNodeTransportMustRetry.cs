@@ -330,7 +330,7 @@ public sealed class TestInterNodeTransportMustRetry
     [Fact]
     public async Task BeginOperation_LeaderUnreachable_ReturnsPendingMustRetry()
     {
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, string? anchor) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, string? anchor, _) =
             await BuildTransport().BeginOperation(
                 UnreachableNode, "coordinator-key", TransactionId, new TransactionOperationId(1, 2), OperationKind.Set, null,
                 TestContext.Current.CancellationToken);

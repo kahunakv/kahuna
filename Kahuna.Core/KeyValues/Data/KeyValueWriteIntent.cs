@@ -44,6 +44,23 @@ internal sealed class KeyValueWriteIntent
     /// met them.
     /// </summary>
     public bool CeilingExpiryReported { get; set; }
+
+    /// <summary>
+    /// True when the owning transaction was started with <see cref="TransactionConflictPolicy.Yield"/>: a
+    /// request from a transaction that does not yield, or from no transaction, takes this intent over instead of
+    /// being denied, as long as it is not <see cref="Pinned"/>, not prepared (<see cref="CommitTimestamp"/> is
+    /// Zero) and not backed by a durable prepared intent. Set when the intent is planted; a refresh by the same
+    /// owner keeps it.
+    /// </summary>
+    public bool Yielding { get; set; }
+
+    /// <summary>
+    /// True once the owning yielding transaction's finalize claimed this intent: from here on the intent is not
+    /// stealable, and a foreground writer that meets it waits for the owner's decision instead of taking the key
+    /// over. Set in the key's actor turn by the finalize pin, so no takeover can interleave between the pin and
+    /// the durable prepare that follows it. Meaningless on a non-yielding intent.
+    /// </summary>
+    public bool Pinned { get; set; }
 }
 
 /// <summary>

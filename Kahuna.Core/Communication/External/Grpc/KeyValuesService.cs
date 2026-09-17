@@ -97,6 +97,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
+        using YieldingIntentPolicyScope.Scope setPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
         (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -274,6 +275,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Flags = (KeyValueFlags)item.Flags,
                 Durability = (KeyValueDurability)item.Durability,
                 RoutedGeneration = item.RoutedGeneration,
+                ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(item.ConflictPolicy),
             });
         }
 
@@ -360,7 +362,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             {
                 TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
                 Key = item.Key,
-                Durability = (KeyValueDurability)item.Durability
+                Durability = (KeyValueDurability)item.Durability,
+                ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(item.ConflictPolicy)
             });
         }
 
@@ -416,6 +419,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
+        using YieldingIntentPolicyScope.Scope extendPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -472,6 +476,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
+        using YieldingIntentPolicyScope.Scope deletePolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -951,6 +956,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        using YieldingIntentPolicyScope.Scope lockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
         (KeyValueResponseType type, _, _, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireExclusiveLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -1033,6 +1039,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns></returns>
     private async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksCore(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
+        using YieldingIntentPolicyScope.Scope manyLockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetRequestLocksItems(request.Items),
@@ -2023,6 +2030,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Priority = TransactionPriorityWire.FromGrpc(request.Priority),
             ReadTimestamp = new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             AdmissionWaitMs = request.AdmissionWaitMs,
+            ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy),
         }, context.CancellationToken);
 
         GrpcStartTransactionResponse response = new()
@@ -2138,7 +2146,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
         byte[]? digest = request.HasPayloadDigest ? request.PayloadDigest.ToByteArray() : null;
 
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey) =
+        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) =
             await keyValues.LocateAndBeginOperation(request.CoordinatorKey, transactionId, operationId, (OperationKind)request.Kind, digest, context.CancellationToken);
 
         GrpcBeginOperationResponse response = new()
@@ -2148,7 +2156,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             CachedRevision = cachedRevision,
             CachedTimestampNode = cachedTimestamp.N,
             CachedTimestampPhysical = cachedTimestamp.L,
-            CachedTimestampCounter = cachedTimestamp.C
+            CachedTimestampCounter = cachedTimestamp.C,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(conflictPolicy)
         };
 
         if (recordAnchorKey is not null)

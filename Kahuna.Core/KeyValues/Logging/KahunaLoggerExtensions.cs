@@ -184,6 +184,12 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "Assigned {Key} write intent to TxId={TransactionId} (range lock)")]
     public static partial void LogAssignedWriteIntentRangeLock(this ILogger<IKahuna> logger, string key, HLCTimestamp transactionId);
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Took over yielding write intent on {Key}: owner TxId={OwnerTransactionId} lost it to requester TxId={RequesterTransactionId}")]
+    public static partial void LogYieldingIntentTakenOver(this ILogger<IKahuna> logger, string? key, HLCTimestamp ownerTransactionId, HLCTimestamp requesterTransactionId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rejected {LockKind} lock on {Key} for yielding TxId={TransactionId}: yielding transactions do not support prefix or range locks")]
+    public static partial void LogYieldingPredicateLockRejected(this ILogger<IKahuna> logger, string lockKind, string key, HLCTimestamp transactionId);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "Session-owned write intent on {Key} outlived the {CeilingMs} ms liveness ceiling and was dropped; its owner TxId={TransactionId} never released it")]
     public static partial void LogSessionOwnedIntentCeilingExpiry(this ILogger<IKahuna> logger, string? key, HLCTimestamp transactionId, int ceilingMs);
 

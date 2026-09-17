@@ -2021,7 +2021,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             ReadTimestampNode = txOptions.ReadTimestamp.N,
             ReadTimestampPhysical = txOptions.ReadTimestamp.L,
             ReadTimestampCounter = txOptions.ReadTimestamp.C,
-            AdmissionWaitMs = txOptions.AdmissionWaitMs
+            AdmissionWaitMs = txOptions.AdmissionWaitMs,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(txOptions.ConflictPolicy)
         };
 
         int retries = 0;

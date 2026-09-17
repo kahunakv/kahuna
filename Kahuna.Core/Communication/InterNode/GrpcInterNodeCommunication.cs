@@ -257,6 +257,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability) durability,
             RoutedGeneration = routedGeneration,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(YieldingIntentPolicyScope.Current),
         };
         
         if (value is not null)
@@ -407,6 +408,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
                 ExpiresMs = item.ExpiresMs,
                 Durability = (GrpcKeyValueDurability) item.Durability,
                 RoutedGeneration = item.RoutedGeneration,
+                ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(item.ConflictPolicy),
             };
 
             if (item.Value is not null)
@@ -431,7 +433,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
                 TransactionIdPhysical = item.TransactionId.L,
                 TransactionIdCounter = item.TransactionId.C,
                 Key = item.Key,
-                Durability = (GrpcKeyValueDurability)item.Durability
+                Durability = (GrpcKeyValueDurability)item.Durability,
+                ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(item.ConflictPolicy)
             });
         }
     }
@@ -460,6 +463,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C,
             Key = key,
             Durability = (GrpcKeyValueDurability)durability,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(YieldingIntentPolicyScope.Current),
         };               
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -505,6 +509,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Key = key,
             ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability)durability,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(YieldingIntentPolicyScope.Current),
         };               
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);
@@ -891,6 +896,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Key = key,
             ExpiresMs = expiresMs,
             Durability = (GrpcKeyValueDurability)durability,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(YieldingIntentPolicyScope.Current),
         };
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireExclusiveLock", node).ConfigureAwait(false);
@@ -971,7 +977,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
-            TransactionIdCounter = transactionId.C
+            TransactionIdCounter = transactionId.C,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(YieldingIntentPolicyScope.Current)
         };
 
         AddAcquireLockRequestItems(request.Items, xkeys);
@@ -1633,6 +1640,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             // Carried across the hop so a Begin that lands on a follower keeps the caller's own door-wait
             // instead of silently falling back to the leader's server default.
             AdmissionWaitMs = options.AdmissionWaitMs,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(options.ConflictPolicy),
         };
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "StartTransaction", node).ConfigureAwait(false);
@@ -1718,7 +1726,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
     
-    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1738,7 +1746,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "BeginOperation", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null);
+            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null, TransactionConflictPolicy.Normal);
 
         GrpcBeginOperationResponse remoteResponse = response.BeginOperation!;
 
@@ -1749,7 +1757,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             (KeyValueResponseType)remoteResponse.CachedType,
             remoteResponse.CachedRevision,
             cachedTimestamp,
-            remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null
+            remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null,
+            TransactionConflictPolicyWire.FromGrpc(remoteResponse.ConflictPolicy)
         );
     }
 

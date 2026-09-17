@@ -64,6 +64,14 @@ internal class TransactionContext
     public TransactionPriority Priority { get; init; } = TransactionPriority.Normal;
 
     /// <summary>
+    /// Whether this transaction yields its point-key write intents to foreground writers. Stamped onto every
+    /// participant request the coordinator registers, so a participant plants an intent that records whether
+    /// its owner yields; and consulted at finalize, where a yielding transaction pins every intent it holds
+    /// before any durable or in-memory prepare so it can never commit a key it lost.
+    /// </summary>
+    public TransactionConflictPolicy ConflictPolicy { get; init; } = TransactionConflictPolicy.Normal;
+
+    /// <summary>
     /// Admission slot held by an interactive session for its whole lifetime, released exactly once when the
     /// session leaves the active map — by commit, by rollback, or by the reaper reclaiming it. Null for script
     /// transactions, which scope their lease to their own execution instead of to a context.
@@ -278,7 +286,7 @@ internal class TransactionContext
             // Every outcome carries the transaction's current anchor so a retry recovers the same
             // canonical handle even when it lands on an already-completed operation.
             if (lifecycle != SessionLifecycle.AcceptingOperations)
-                return new(OperationRegistrationOutcome.RejectedSessionClosed, recordAnchorKey: RecordAnchorKey);
+                return new(OperationRegistrationOutcome.RejectedSessionClosed, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
 
             operations ??= new();
 
@@ -286,26 +294,26 @@ internal class TransactionContext
             {
                 // Reusing an ID with a different kind or payload is a caller error, not a retry.
                 if (existing.Kind != kind || !DigestsEqual(existing.PayloadDigest, payloadDigest))
-                    return new(OperationRegistrationOutcome.RejectedDuplicate, recordAnchorKey: RecordAnchorKey);
+                    return new(OperationRegistrationOutcome.RejectedDuplicate, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
 
                 return existing.Status switch
                 {
-                    OperationStatus.Completed => new(OperationRegistrationOutcome.AlreadyCompleted, existing.CachedResponse, RecordAnchorKey),
-                    _                         => new(OperationRegistrationOutcome.AlreadyPending, recordAnchorKey: RecordAnchorKey)
+                    OperationStatus.Completed => new(OperationRegistrationOutcome.AlreadyCompleted, existing.CachedResponse, RecordAnchorKey, ConflictPolicy),
+                    _                         => new(OperationRegistrationOutcome.AlreadyPending, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy)
                 };
             }
 
             int effectiveBudget = TestOperationBudgetOverride > 0 ? TestOperationBudgetOverride : MaxOperationsPerSession;
             if (effectiveBudget > 0 && retainedOperationCount >= effectiveBudget)
-                return new(OperationRegistrationOutcome.RejectedSessionBudget, recordAnchorKey: RecordAnchorKey);
+                return new(OperationRegistrationOutcome.RejectedSessionBudget, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
 
             if (pendingOperationCount >= MaxPendingOperations)
-                return new(OperationRegistrationOutcome.RejectedCapacity, recordAnchorKey: RecordAnchorKey);
+                return new(OperationRegistrationOutcome.RejectedCapacity, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
 
             operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest };
             pendingOperationCount++;
             retainedOperationCount++;
-            return new(OperationRegistrationOutcome.New, recordAnchorKey: RecordAnchorKey);
+            return new(OperationRegistrationOutcome.New, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
         }
     }
 
