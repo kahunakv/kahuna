@@ -238,6 +238,28 @@ internal sealed class ScriptTransactionExecutor
     }
 
     /// <summary>
+    /// The outcome of a script that reached its end without committing.
+    ///
+    /// <para>A statement whose response stopped the script reports that response as the script's own outcome.
+    /// Nothing durable happened: the script never reached two-phase commit, and the working set is released on
+    /// the way out. So a retryable answer (a leader change, a foreign intent still settling, a fenced route)
+    /// stays <see cref="KeyValueResponseType.MustRetry"/> and the client layer retries it, as the outcome
+    /// contract requires; a conflict stays <see cref="KeyValueResponseType.Aborted"/>; a malformed statement
+    /// stays <see cref="KeyValueResponseType.Errored"/>. Flattening all three into a generic abort told clients
+    /// to restart transactions that a retry would have completed, and left no trace of which key refused.</para>
+    ///
+    /// <para>A script that ended by its own control flow (ROLLBACK, RETURN, or no COMMIT) aborted by design and
+    /// keeps the plain reason.</para>
+    /// </summary>
+    private static KeyValueTransactionResult UncommittedResult(ScriptTransactionContext context)
+    {
+        if (context.StatementFailure is not { } failure)
+            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
+
+        return new() { Type = failure.Type, Reason = failure.Describe() };
+    }
+
+    /// <summary>
     /// Orders a lock set for acquisition. Ordinal, matching the ordering used for keys and range bounds
     /// everywhere else in the store.
     /// </summary>
@@ -498,13 +520,21 @@ internal sealed class ScriptTransactionExecutor
             {
                 await coordinator.TwoPhaseCommit(context, cts.Token);
 
+                // A durable finalize that ended unresolved is abandoned by this script: nothing retries its
+                // identity. Fence it now so its installed intents free their keys for the caller's re-run, and
+                // so a stalled commit that already won is reported as committed instead of retried twice.
+                if (context.Result?.Type == KeyValueResponseType.MustRetry)
+                    await coordinator.FenceAbandonedFinalize(context);
+
+                // The coordinator names why it aborted (a conflict, a moved base, a refused prepare). That reason
+                // is part of the outcome the client acts on, so it is carried through rather than flattened.
                 if (context.Result?.Type == KeyValueResponseType.Aborted)
-                    return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
+                    return new() { Type = KeyValueResponseType.Aborted, Reason = context.Result.Reason ?? "Transaction aborted" };
 
                 return context.Result ?? new() { Type = KeyValueResponseType.Errored };
             }
 
-            return new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction aborted" };
+            return UncommittedResult(context);
         }
         catch (KahunaScriptException ex)
         {
@@ -541,6 +571,12 @@ internal sealed class ScriptTransactionExecutor
             // First, and unconditionally: returning the slot must not sit behind anything that can throw,
             // or a failure here would cost the node a slot for the rest of its life.
             lease.Dispose();
+
+            // A finalize left unresolved by an exception path above is abandoned like any other: fence it
+            // before the working set goes, so its prepared intents do not outlive the script. A no-op when
+            // the commit path already fenced it, or when no durable finalize ran.
+            if (context.UnresolvedDurableFinalize is not null)
+                await coordinator.FenceAbandonedFinalize(context);
 
             // Release every confirmed lock shape not finalized by two-phase commit and clean the
             // transaction's read MVCC. Safe to run on a committed transaction: its modified keys were already

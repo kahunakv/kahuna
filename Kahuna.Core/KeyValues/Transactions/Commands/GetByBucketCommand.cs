@@ -47,10 +47,7 @@ internal sealed class GetByBucketCommand : BaseCommand
         );
         
         if (response.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
-        {
-            context.Action = KeyValueTransactionAction.Abort;
-            context.Status = KeyValueExecutionStatus.Stop;
-        }
+            context.StopOnStatementFailure("GET BY BUCKET", keyName, durability, response.Type);
 
         if (response.Items.Count == 0)
         {

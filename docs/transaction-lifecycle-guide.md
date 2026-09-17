@@ -475,6 +475,13 @@ PresumedAbort` when the frozen decision deadline passed before the commit could 
 record is then durably aborted, so retrying the commit cannot succeed and the caller restarts the
 transaction.
 
+A script transaction reports the same three outcomes. A statement that answers `MustRetry`, `Aborted` or
+`Errored` stops the script before commit, and the script reports that statement's outcome as its own. The
+reason names the statement, the key and the durability, for example `SET orders/1 (Persistent) returned
+MustRetry`. Nothing durable happened at that point, so a `MustRetry` from a statement is safe to re-run as a
+whole script. A script that ends by its own control flow (`ROLLBACK`, `RETURN`, or no `COMMIT`) answers
+`Aborted` with the reason `Transaction aborted`.
+
 ---
 
 ## 13. Bounds and backpressure

@@ -984,7 +984,7 @@ public abstract class BaseCluster
         return result;
     }
 
-    private static readonly double TimingScale = GetTimingScale();
+    protected static readonly double TimingScale = GetTimingScale();
     private static double GetTimingScale()
     {
         string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");

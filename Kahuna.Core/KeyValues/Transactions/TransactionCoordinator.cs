@@ -1837,6 +1837,54 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
+    /// Fences a durable finalize attempt that its caller abandons without a same-identity retry, and reports
+    /// what the fence found on <see cref="TransactionContext.Result"/>.
+    ///
+    /// <para>A finalize that answers MustRetry can leave the transaction's record initialized and some of its
+    /// prepared intents installed. A one-phase bundle whose prepare was refused on one key (another
+    /// transaction's committed-but-unsettled intent still held it) has already installed the bundle's other
+    /// keys, and the finalize answers MustRetry expecting a retry under the same identity to reuse them through
+    /// the standard 2PC flow. A script transaction never retries under the same identity: the caller re-runs
+    /// the script as a new transaction, so those intents are abandoned the moment the script returns. Left
+    /// alone they stay undecided until presumed-abort recovery reaches the decision deadline, and every writer
+    /// of those keys, including the script's own re-run, is refused with MustRetry for that whole window.
+    /// Fencing here installs a durable Abort through the record CAS and rolls the intents back at once, so
+    /// the re-run finds the keys free.</para>
+    ///
+    /// <para>The fence is also the last chance to learn the truth about a stalled proposal: if the attempt's
+    /// commit applied first, the CAS rejects the abort and the transaction is Committed. That is reported
+    /// instead of MustRetry, because a caller told to retry a committed script would apply it twice. A fence
+    /// that cannot be installed (replication unavailable) leaves the attempt indeterminate: MustRetry stands,
+    /// and recovery resolves the record at its deadline.</para>
+    /// </summary>
+    internal async Task FenceAbandonedFinalize(TransactionContext context)
+    {
+        if (context.UnresolvedDurableFinalize is not { } unresolved)
+            return;
+
+        DurableFinalizeOutcome fenced;
+
+        try
+        {
+            fenced = await DurableFinalizer.FenceAbandonedAsync(
+                unresolved, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Fencing the abandoned durable finalize of transaction {TransactionId} failed; recovery will resolve it", context.TransactionId);
+            return;
+        }
+
+        if (fenced.Result == DurableFinalizeResult.MustRetry)
+            return;
+
+        context.UnresolvedDurableFinalize = null;
+
+        if (fenced.Result == DurableFinalizeResult.Committed)
+            context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
+    }
+
+    /// <summary>
     /// Maps the canonical transaction record to a finalize outcome after a finalize threw. A durable Commit is
     /// Committed and a durable Abort is Aborted (terminal whatever its class); an undecided record or no resident
     /// record is the retryable MustRetry — never a fabricated abort. A remote anchor's record is read from this

@@ -116,20 +116,40 @@ public class TestBucketScanDeleteVisibility : BaseCluster
         return parameters;
     }
 
-    private static async Task<KeyValueTransactionResult> RunRetrying(IKahuna kahuna, string script, List<KeyValueParameter> parameters)
+    /// <summary>
+    /// Re-runs a script while it answers a retryable outcome, the way a client does. The transactions here run
+    /// one after another, so an Aborted can only be a residual of the previous transaction (a lock its deferred
+    /// release has not dropped yet, an intent still settling) and is retried like MustRetry; every data assertion
+    /// stays strict. The budget is a deadline scaled by <c>KAHUNA_TEST_TIMING_SCALE</c> rather than an attempt
+    /// count, so a loaded runner's slower attempts do not shrink it. A long retry run is logged with the last
+    /// refusal, so a failure that follows it names the statement and key that kept refusing.
+    /// </summary>
+    private async Task<KeyValueTransactionResult> RunRetrying(IKahuna kahuna, string script, List<KeyValueParameter> parameters)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(script);
 
+        long started = Environment.TickCount64;
+        long deadline = started + (long)(10_000 * TimingScale);
+
         KeyValueTransactionResult result = await kahuna.TryExecuteTransactionScript(bytes, null, parameters);
 
-        for (int attempt = 1; attempt < 60; attempt++)
-        {
-            if (result.Type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted))
-                break;
+        int attempts = 0;
+        KeyValueTransactionResult? lastRefusal = null;
 
-            await Task.Delay(Math.Min(5 * attempt, 50));
+        while (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted && Environment.TickCount64 < deadline)
+        {
+            attempts++;
+            lastRefusal = result;
+            await Task.Delay(Math.Min(5 * attempts, 50));
             result = await kahuna.TryExecuteTransactionScript(bytes, null, parameters);
         }
+
+        long elapsed = Environment.TickCount64 - started;
+
+        if (lastRefusal is not null && elapsed > 1000)
+            kahunaLogger.LogWarning(
+                "Script needed {Attempts} retries over {ElapsedMs} ms; last refusal {RefusalType}: {RefusalReason}; final outcome {Type}",
+                attempts, elapsed, lastRefusal.Type, lastRefusal.Reason, result.Type);
 
         return result;
     }

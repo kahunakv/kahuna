@@ -38,6 +38,8 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
 
     private const string MissCounter = "kahuna.kv.materialization_intent_missing";
 
+    private static readonly string[] SingleAcctOneRelease = ["acct/1"];
+
     private readonly ILoggerFactory loggerFactory;
 
     private readonly string dir = Path.Combine(Path.GetTempPath(), "kahuna-settled-retention-" + Guid.NewGuid().ToString("N"));
@@ -319,7 +321,7 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
         Assert.True(overlay.TryGet("acct/1", out _));
 
         overlay.RemoveFlushed("acct/1", flushedRevision: 10, flushedLastModified: Ts(10));
-        Assert.Equal(new[] { "acct/1" }, released);
+        Assert.Equal(SingleAcctOneRelease, released);
         Assert.False(overlay.TryGet("acct/1", out _));
 
         // Nothing to remove, nothing to release.

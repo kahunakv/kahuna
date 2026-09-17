@@ -33,8 +33,7 @@ internal sealed class DeleteManyCommand : BaseCommand
             switch (response.Type)
             {
                 case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry or KeyValueResponseType.InvalidInput:
-                    context.Action = KeyValueTransactionAction.Abort;
-                    context.Status = KeyValueExecutionStatus.Stop;
+                    context.StopOnStatementFailure("DELETE", response.Key ?? "", response.Durability, response.Type);
                     break;
             }
 

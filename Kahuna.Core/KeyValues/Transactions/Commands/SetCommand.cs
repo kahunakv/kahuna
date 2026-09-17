@@ -123,8 +123,7 @@ internal sealed class SetCommand : BaseCommand
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
-                context.Action = KeyValueTransactionAction.Abort;
-                context.Status = KeyValueExecutionStatus.Stop;
+                context.StopOnStatementFailure("SET", keyName, durability, type);
                 break;
         }
         

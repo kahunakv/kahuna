@@ -53,10 +53,7 @@ internal sealed class GetCommand : BaseCommand
         );
         
         if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
-        {
-            context.Action = KeyValueTransactionAction.Abort;
-            context.Status = KeyValueExecutionStatus.Stop;
-        }
+            context.StopOnStatementFailure("GET", keyName, durability, type);
 
         if (type != KeyValueResponseType.Get || readOnlyContext is null)
         {

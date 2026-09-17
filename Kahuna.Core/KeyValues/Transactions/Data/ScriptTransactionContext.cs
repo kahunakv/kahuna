@@ -20,6 +20,25 @@ internal sealed class ScriptTransactionContext : TransactionContext
     public KeyValueExecutionStatus Status { get; set; } = KeyValueExecutionStatus.Continue;
 
     /// <summary>
+    /// The first statement whose response stopped this script, or null when the script ran to its end or ended
+    /// by its own control flow (COMMIT, ROLLBACK, RETURN). The executor reports it as the script's outcome.
+    /// </summary>
+    internal ScriptStatementFailure? StatementFailure { get; private set; }
+
+    /// <summary>
+    /// Stops the script because a statement's response cannot be built on: a retryable refusal, a conflict, or
+    /// a malformed request. Marks the transaction for abort so nothing staged so far is committed, and records
+    /// the statement so the script reports that response, not a generic abort, as its outcome. The first
+    /// failure wins: once the script is stopped no later statement runs, so a second call is a no-op.
+    /// </summary>
+    internal void StopOnStatementFailure(string statement, string key, KeyValueDurability durability, KeyValueResponseType type)
+    {
+        Action = KeyValueTransactionAction.Abort;
+        Status = KeyValueExecutionStatus.Stop;
+        StatementFailure ??= new ScriptStatementFailure(statement, key, durability, type);
+    }
+
+    /// <summary>
     /// Script parameters (placeholders) passed into the script at execution time.
     /// </summary>
     public List<KeyValueParameter>? Parameters { get; init; }
