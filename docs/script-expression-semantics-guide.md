@@ -172,12 +172,43 @@ An earlier version discarded every option of a list holding two or more, so such
 defaults: `BEGIN (locking=optimistic, timeout=20000)` actually ran pessimistic with the default timeout.
 Check any script that relies on a multi-option `BEGIN`, since it was not doing what it said.
 
+The accepted options are:
+
+| Option | Values | Default |
+|---|---|---|
+| `locking` | `pessimistic`, `optimistic` | `pessimistic` |
+| `autoCommit` | `true`, `false`, `yes`, `no` | `false` |
+| `asyncRelease` | `true`, `false`, `yes`, `no` | `false` |
+| `timeout` | milliseconds, greater than zero | the server's default transaction timeout |
+| `admissionWait` | milliseconds, zero or more | the server's default admission wait |
+| `snapshot` | non-zero Unix epoch milliseconds | none (reads see the latest committed state) |
+| `priority` | `background`, `low`, `normal`, `high`, `critical` | the priority the request carried |
+| `readValidation` | `none`, `trackAndValidate` | `none` |
+| `decisionDurability` | `bestEffort`, `durable` | `bestEffort` |
+
+Option names and values are case-sensitive. An unknown name is a script error: an earlier version
+dropped it, so `BEGIN (lockng=optimistic)` or `BEGIN (Locking=optimistic)` ran pessimistic with no
+sign that anything was wrong.
+
 Repeating an option is a script error. Which of two values the author meant is unknowable, and a
 silently discarded option is the failure the option list exists to avoid.
 
 `timeout` must be greater than zero. Zero is refused rather than read as "no limit": a transaction holds
 locks and an admission slot for as long as it runs, and the deadline is the only thing that ends one that
-never completes.
+never completes. A value above the server's maximum transaction timeout is clamped to that maximum, the
+same as for an interactive transaction. An earlier version let a script run for whatever it asked.
+
+`readValidation=trackAndValidate` checks every key the script read against concurrent writes at commit,
+and aborts the transaction if one of them changed. An optimistic transaction always does this, whatever
+the option says; the option adds the check to a pessimistic one. It cannot be combined with `snapshot`:
+a read pinned to a past timestamp cannot see a write that lands after it, so the check would promise a
+guarantee it cannot keep.
+
+`decisionDurability=durable` writes the commit decision to durable storage before the script returns.
+A durable transaction cannot modify an ephemeral key, so an `ESET`, `EDELETE` or `EEXTEND` that is part of
+the commit aborts it.
+
+A script transaction cannot be a yielding transaction. See the yielding transactions guide.
 
 `admissionWait` is the separate budget for queueing to start, as distinct from `timeout`, which is how
 long the transaction may then run. An explicit `admissionWait=0` means "start only if a slot is free

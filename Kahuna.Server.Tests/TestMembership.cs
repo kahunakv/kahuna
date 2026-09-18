@@ -38,8 +38,6 @@ public sealed class TestMembership : BaseCluster
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
     }
 
-    // E1
-
     [Theory, CombinatorialData]
     public async Task NewVoterJoins_ServesAllPartitions(
         [CombinatorialValues("memory")] string walStorage,
@@ -111,8 +109,6 @@ public sealed class TestMembership : BaseCluster
         }
     }
 
-    // E2
-
     [Theory, CombinatorialData]
     public async Task GracefulLeave_ShrinksRosterAndClusterServesRequests(
         [CombinatorialValues("memory")] string walStorage,
@@ -179,8 +175,6 @@ public sealed class TestMembership : BaseCluster
         }
     }
 
-    // E3
-
     [Theory, CombinatorialData]
     public async Task SwimEviction_KilledNode_RemovedFromRoster(
         [CombinatorialValues("memory")] string walStorage,
@@ -224,8 +218,6 @@ public sealed class TestMembership : BaseCluster
             try { await LeaveClusterSingle(raft3); } catch { }
         }
     }
-
-    // E4
 
     [Theory, CombinatorialData]
     public async Task RangeRouting_StableAcrossMembershipChange(
@@ -273,7 +265,8 @@ public sealed class TestMembership : BaseCluster
             });
 
             // Settle P0 leadership before joining so the Learner→Voter promotion is not racing
-            // an in-progress election (see E1 for why the fast timers make this necessary).
+            // an in-progress election (see NewVoterJoins_ServesAllPartitions for why the fast
+            // timers make this necessary).
             await raft1.WaitForLeaderStableAsync(0, TimeSpan.FromMilliseconds(500),
                 TestContext.Current.CancellationToken);
 
@@ -332,8 +325,6 @@ public sealed class TestMembership : BaseCluster
             await LeaveCluster(raft1, raft2, raft3);
         }
     }
-
-    // E6
 
     [Theory, CombinatorialData]
     public async Task StopWithoutLeave_DoesNotShrinkRoster(
@@ -409,14 +400,12 @@ public sealed class TestMembership : BaseCluster
         }
     }
 
-    // E5
-
     [Fact]
     public async Task CompactionFloorJoin_SurfacesClearError()
 
     {
         var throwMsg = "RaftManager.JoinCluster: promotion permanently blocked — partition 1 learner start index 1 is below the WAL compaction floor 500";
-        var stubRaft = new StubRaftForE5(new InvalidOperationException(throwMsg));
+        var stubRaft = new FailingJoinStubRaft(new InvalidOperationException(throwMsg));
 
         var opts = new KahunaCommandLineOptions
         {
@@ -425,7 +414,7 @@ public sealed class TestMembership : BaseCluster
         };
 
         var svc = new Kahuna.Services.ReplicationService(
-            new StubKahunaForE5(), stubRaft, opts, raftLogger);
+            new NoopStubKahuna(), stubRaft, opts, raftLogger);
 
         // BackgroundService.StartAsync may return Task.CompletedTask before the async
         // state machine finishes (xunit SynchronizationContext defers continuations).
@@ -441,16 +430,14 @@ public sealed class TestMembership : BaseCluster
         Assert.Contains("permanently blocked", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    // E7
-
     [Fact]
     public async Task UnitLeaveTimeout_StopAsync_IsNonFatal()
     {
         // Timeout path: StopAsync catches OperationCanceledException and completes normally.
         var opts = new KahunaCommandLineOptions { RaftGracefulLeaveOnShutdown = true };
         var svc = new Kahuna.Services.ReplicationService(
-            new StubKahunaForE5(),
-            new StubRaftForE7(Task.FromCanceled(new CancellationToken(canceled: true))),
+            new NoopStubKahuna(),
+            new ControllableLeaveStubRaft(Task.FromCanceled(new CancellationToken(canceled: true))),
             opts, raftLogger);
         await svc.StopAsync(CancellationToken.None);
     }
@@ -458,13 +445,13 @@ public sealed class TestMembership : BaseCluster
     [Fact]
     public async Task UnitMembershipChanged_LogsOncePerAdvance()
     {
-        // D1: OnMembershipChanged handler emits exactly one Information log per advance and
+        // The OnMembershipChanged handler emits exactly one Information log per advance and
         // is synchronous (copy-and-return — does not block the coordinator loop).
         var captureLogger = new CaptureLogger();
-        var stubRaft = new StubRaftForE7(Task.CompletedTask);
+        var stubRaft = new ControllableLeaveStubRaft(Task.CompletedTask);
         var opts = new KahunaCommandLineOptions();
         var svc = new Kahuna.Services.ReplicationService(
-            new StubKahunaForE5(), stubRaft, opts, captureLogger);
+            new NoopStubKahuna(), stubRaft, opts, captureLogger);
 
         // ExecuteAsync registers raft.OnMembershipChanged += OnMembershipChanged,
         // then calls JoinCluster (returns immediately from the stub) and returns.
@@ -545,12 +532,12 @@ public sealed class TestMembership : BaseCluster
 
     // stubs
 
-    private sealed class StubRaftForE7 : IRaft
+    private sealed class ControllableLeaveStubRaft : IRaft
     {
         private readonly Task leaveTask;
         private Action<ClusterMembership>? membershipHandlers;
 
-        public StubRaftForE7(Task leaveTask) { this.leaveTask = leaveTask; }
+        public ControllableLeaveStubRaft(Task leaveTask) { this.leaveTask = leaveTask; }
 
         public void FireMembershipChanged(ClusterMembership membership)
             => membershipHandlers?.Invoke(membership);
@@ -668,10 +655,10 @@ public sealed class TestMembership : BaseCluster
         }
     }
 
-    private sealed class StubRaftForE5 : IRaft
+    private sealed class FailingJoinStubRaft : IRaft
     {
         private readonly Exception throwOnJoin;
-        public StubRaftForE5(Exception throwOnJoin) { this.throwOnJoin = throwOnJoin; }
+        public FailingJoinStubRaft(Exception throwOnJoin) { this.throwOnJoin = throwOnJoin; }
 
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken cancellationToken = default)
             => Task.FromException(throwOnJoin);
@@ -767,7 +754,7 @@ public sealed class TestMembership : BaseCluster
         public Task<RaftOperationStatus> ResumeConsumerAppliesForTesting(int partitionId, CancellationToken cancellationToken = default) => Task.FromResult(RaftOperationStatus.Errored);
     }
 
-    private sealed class StubKahunaForE5 : IKahuna
+    private sealed class NoopStubKahuna : IKahuna
     {
         public Task<bool> OnLogRestored(int partitionId, RaftLog log) => Task.FromResult(true);
         public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => Task.FromResult(true);

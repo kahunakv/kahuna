@@ -318,12 +318,23 @@ internal sealed class ScriptTransactionExecutor
         int? admissionWaitMs = null;
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic;
         HLCTimestamp readTimestamp = HLCTimestamp.Zero;
+        ReadValidation readValidation = ReadValidation.None;
+        DecisionDurability decisionDurability = DecisionDurability.BestEffort;
 
         if (optionsAst?.nodeType is NodeType.BeginOptionList or NodeType.BeginOption)
         {
             Dictionary<string, string> options = new();
 
             GetTransactionOptions(optionsAst, options);
+
+            // Reject a name no option answers to. A misspelled or miscased option would otherwise run the
+            // transaction on its default, which is the silent failure the duplicate check in GetTransactionOptions also guards
+            // against: the script says one thing and the transaction does another.
+            foreach (string optionName in options.Keys)
+            {
+                if (!IsKnownTransactionOption(optionName))
+                    throw new KahunaScriptException("Unknown BEGIN option: " + optionName, optionsAst.yyline);
+            }
 
             if (options.TryGetValue("locking", out string? optionValue))
             {
@@ -410,7 +421,38 @@ internal sealed class ScriptTransactionExecutor
                     _ => throw new KahunaScriptException("Unsupported priority option: " + optionValue, optionsAst.yyline)
                 };
             }
+
+            if (options.TryGetValue("readValidation", out optionValue))
+            {
+                readValidation = optionValue switch
+                {
+                    "none" => ReadValidation.None,
+                    "trackAndValidate" => ReadValidation.TrackAndValidate,
+                    _ => throw new KahunaScriptException("Unsupported readValidation option: " + optionValue, optionsAst.yyline)
+                };
+            }
+
+            if (options.TryGetValue("decisionDurability", out optionValue))
+            {
+                decisionDurability = optionValue switch
+                {
+                    "bestEffort" => DecisionDurability.BestEffort,
+                    "durable" => DecisionDurability.Durable,
+                    _ => throw new KahunaScriptException("Unsupported decisionDurability option: " + optionValue, optionsAst.yyline)
+                };
+            }
+
+            // A read pinned to a past timestamp cannot see writes that land after it, so validating those reads
+            // for write skew would promise a guarantee the engine cannot keep. Interactive transactions refuse
+            // the same combination.
+            if (!readTimestamp.IsNull() && readValidation == ReadValidation.TrackAndValidate)
+                throw new KahunaScriptException("snapshot cannot be combined with readValidation=trackAndValidate", optionsAst.yyline);
         }
+
+        // Clamp to the server's hard maximum, as interactive transactions do. The limit bounds how long any
+        // transaction can hold locks and an admission slot, and how old a transaction's read snapshot can get
+        // before age-based reclamation treats it as orphaned.
+        timeout = Math.Min(timeout, configuration.MaxTransactionTimeout);
 
         // The door-wait, deliberately separate from the execution timeout below. Clamped so no script can hold
         // a queue slot longer than the operator allows.
@@ -475,6 +517,8 @@ internal sealed class ScriptTransactionExecutor
             Priority = priority,
             Locking = locking,
             ReadTimestamp = readTimestamp,
+            ReadValidation = readValidation,
+            DecisionDurability = decisionDurability,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
             AsyncRelease = asyncRelease,
             Result = new() { Type = KeyValueResponseType.Aborted },
@@ -723,6 +767,19 @@ internal sealed class ScriptTransactionExecutor
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a BEGIN option name is one the executor reads. Names are case-sensitive, like their values.
+    /// </summary>
+    private static bool IsKnownTransactionOption(string name)
+    {
+        return name switch
+        {
+            "locking" or "autoCommit" or "asyncRelease" or "timeout" or "admissionWait" or "snapshot" or
+                "priority" or "readValidation" or "decisionDurability" => true,
+            _ => false
+        };
     }
 
     /// <summary>
