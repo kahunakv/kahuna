@@ -178,7 +178,7 @@ END
                 [new() { Key = "@empty", Value = "" }]
             );
 
-            Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+            Assert.Equal(KeyValueResponseType.InvalidInput, resp.Type);
 
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await kahuna2.LocateAndTryGetValue(
                 HLCTimestamp.Zero,
@@ -297,7 +297,7 @@ END
                 [new() { Key = "@empty", Value = "" }]
             );
 
-            Assert.Equal(KeyValueResponseType.Aborted, resp.Type);
+            Assert.Equal(KeyValueResponseType.InvalidInput, resp.Type);
 
             Assert.Equal(KeyValueResponseType.Get, (await kahuna3.LocateAndTryGetValue(
                 HLCTimestamp.Zero, keyA, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, TestContext.Current.CancellationToken)).Item1);

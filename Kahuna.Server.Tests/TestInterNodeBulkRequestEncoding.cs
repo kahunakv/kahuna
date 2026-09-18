@@ -29,6 +29,7 @@ public sealed class TestInterNodeBulkRequestEncoding
             ExpiresMs = item.ExpiresMs,
             Durability = (GrpcKeyValueDurability)item.Durability,
             RoutedGeneration = item.RoutedGeneration,
+            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(item.ConflictPolicy),
         };
 
         if (item.Value is not null)
@@ -139,7 +140,8 @@ public sealed class TestInterNodeBulkRequestEncoding
                 TransactionIdPhysical = item.TransactionId.L,
                 TransactionIdCounter = item.TransactionId.C,
                 Key = item.Key,
-                Durability = (GrpcKeyValueDurability)item.Durability
+                Durability = (GrpcKeyValueDurability)item.Durability,
+                ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(item.ConflictPolicy)
             });
 
         GrpcTryDeleteManyKeyValueRequest actual = new();
