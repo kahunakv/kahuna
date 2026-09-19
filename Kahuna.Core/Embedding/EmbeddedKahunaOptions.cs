@@ -5,7 +5,7 @@ using Writes = Kahuna.Server.KeyValues.Writes;
 namespace Kahuna;
 
 /// <summary>
-/// Options used to run a single-node Kahuna engine in-process.
+/// Options used to run a Kahuna engine in-process: a single node, or one member of an embedded cluster.
 /// </summary>
 public sealed class EmbeddedKahunaOptions
 {
@@ -1001,4 +1001,10 @@ public sealed class EmbeddedKahunaOptions
     /// phantom-witness quorum has no cluster to join and rejects it at startup.
     /// </summary>
     public List<string>? JoinExistingSeeds { get; set; }
+
+    /// <summary>
+    /// A shallow copy, for building several nodes from one set of options. Reference-typed values (the
+    /// function registry, the seed list, the test decorators) are shared with this instance.
+    /// </summary>
+    internal EmbeddedKahunaOptions Copy() => (EmbeddedKahunaOptions)MemberwiseClone();
 }

@@ -1,5 +1,6 @@
 ﻿
 using Nixie;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using CommandLine;
 
@@ -9,6 +10,7 @@ using Kahuna.Services;
 using Kahuna.Server.Configuration;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Rest;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Diagnostics;
@@ -31,7 +33,7 @@ Console.WriteLine(" |   < (_| | | | | |_| | | | | (_| |");
 Console.WriteLine(" |_|\\_\\__,_|_| |_|\\__,_|_| |_|\\__,_|");
 Console.WriteLine("");
 
-ParserResult<KahunaCommandLineOptions> optsResult = Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
+ParserResult<KahunaCommandLineOptions> optsResult = ParseCommandLine(args);
 
 KahunaCommandLineOptions? opts = optsResult.Value;
 if (opts is null)
@@ -196,6 +198,16 @@ builder.Services.AddSingleton<EngineMetricsCollector>();
 
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
+
+// The REST handlers of Kahuna and of Kommander's Raft transport bind request bodies and write
+// responses through the minimal-API JSON options. Resolving their types from generated metadata keeps
+// those endpoints working in a trimmed build, where the reflection resolver cannot see members the
+// trimmer removed. The options themselves keep the web defaults, so the wire format does not change.
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, KahunaJsonContext.Default);
+    options.SerializerOptions.TypeInfoResolverChain.Insert(1, Kommander.Communication.RestJsonContext.Default);
+});
 
 // Listen on all http/https ports in the configuration    
 builder.WebHost.ConfigureKestrel(options =>
@@ -593,3 +605,10 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         CompactionDurabilityClampReportInterval = TimeSpan.FromMilliseconds(opts.RaftCompactionDurabilityClampReportInterval)
     };
 }
+
+// CommandLineParser creates the options object and fills its properties by reflection. The trimmer
+// cannot see that use, so it would remove the constructor and the property setters, and a trimmed
+// build would fail at startup. The dependency keeps every member of the options type.
+[DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(KahunaCommandLineOptions))]
+static ParserResult<KahunaCommandLineOptions> ParseCommandLine(string[] args) =>
+    Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);

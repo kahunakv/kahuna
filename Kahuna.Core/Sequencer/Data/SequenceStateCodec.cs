@@ -32,8 +32,6 @@ internal static class SequenceStateCodec
 
     private const byte BinaryFormatVersion = 3;
 
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     /// <summary>Longest idempotency key accepted, in UTF-8 bytes. Keeps the frame's 2-byte length prefixes valid.</summary>
     public const int MaxIdempotencyKeyBytes = 1024;
 
@@ -301,7 +299,7 @@ internal static class SequenceStateCodec
 
     private static SequenceState? DeserializeJson(byte[] value)
     {
-        JsonSequenceState? parsed = JsonSerializer.Deserialize<JsonSequenceState>(value, JsonOptions);
+        JsonSequenceState? parsed = JsonSerializer.Deserialize(value, SequenceStateJsonContext.Default.JsonSequenceState);
         if (parsed is null)
             return null;
 
@@ -326,7 +324,7 @@ internal static class SequenceStateCodec
     }
 
     /// <summary>Shape of the original JSON record; read-only, never written.</summary>
-    private sealed class JsonSequenceState
+    internal sealed class JsonSequenceState
     {
         public string Name { get; set; } = "";
 

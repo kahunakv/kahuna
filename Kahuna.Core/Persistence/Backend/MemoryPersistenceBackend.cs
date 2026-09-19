@@ -562,8 +562,8 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 });
             }
 
-            File.WriteAllText(Path.Combine(tmpPath, "store.json"), JsonSerializer.Serialize(kvEntries));
-            File.WriteAllText(Path.Combine(tmpPath, "locks.json"), JsonSerializer.Serialize(lockEntries));
+            File.WriteAllText(Path.Combine(tmpPath, "store.json"), JsonSerializer.Serialize(kvEntries, PitrJsonContext.Default.ListMemoryCheckpointEntry));
+            File.WriteAllText(Path.Combine(tmpPath, "locks.json"), JsonSerializer.Serialize(lockEntries, PitrJsonContext.Default.ListMemoryCheckpointLockEntry));
 
             CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
             manifest.WriteTo(tmpPath);
@@ -588,8 +588,8 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     {
         MemoryPersistenceBackend backend = new();
 
-        List<MemoryCheckpointEntry>? kvEntries = JsonSerializer.Deserialize<List<MemoryCheckpointEntry>>(
-            File.ReadAllText(Path.Combine(checkpointPath, "store.json")));
+        List<MemoryCheckpointEntry>? kvEntries = JsonSerializer.Deserialize(
+            File.ReadAllText(Path.Combine(checkpointPath, "store.json")), PitrJsonContext.Default.ListMemoryCheckpointEntry);
 
         if (kvEntries is { Count: > 0 })
         {
@@ -611,7 +611,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         if (File.Exists(locksFile))
         {
             List<MemoryCheckpointLockEntry>? lockEntries =
-                JsonSerializer.Deserialize<List<MemoryCheckpointLockEntry>>(File.ReadAllText(locksFile));
+                JsonSerializer.Deserialize(File.ReadAllText(locksFile), PitrJsonContext.Default.ListMemoryCheckpointLockEntry);
 
             if (lockEntries is { Count: > 0 })
             {
@@ -640,7 +640,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
 
     // DTOs used exclusively by CreateCheckpoint / OpenCheckpoint serialization.
 
-    private sealed class MemoryCheckpointEntry
+    internal sealed class MemoryCheckpointEntry
     {
         public string Key { get; set; } = "";
         public byte[]? Value { get; set; }
@@ -657,7 +657,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         public int State { get; set; }
     }
 
-    private sealed class MemoryCheckpointLockEntry
+    internal sealed class MemoryCheckpointLockEntry
     {
         public string Resource { get; set; } = "";
         public byte[]? Owner { get; set; }

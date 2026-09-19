@@ -21,6 +21,22 @@ internal sealed class EmbeddedRaftCommunication : ICommunication
         new("embedded-witness-2:0")
     ];
 
+    /// <summary>
+    /// True when <paramref name="endpoint"/> names one of the phantom witnesses. The witnesses are
+    /// in the Raft roster of a standalone node, but they have no Kahuna transport and hold no data,
+    /// so a fan-out to the peers that may hold a copy of the data must leave them out.
+    /// </summary>
+    public static bool IsWitness(string endpoint)
+    {
+        foreach (RaftNode witness in Witnesses)
+        {
+            if (string.Equals(witness.Endpoint, endpoint, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
     private static readonly Task<HandshakeResponse> HandshakeResponse = Task.FromResult(new HandshakeResponse());
 
     private static readonly Task<RequestVotesResponse> RequestVotesResponse = Task.FromResult(new RequestVotesResponse());

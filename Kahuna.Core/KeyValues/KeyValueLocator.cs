@@ -2783,9 +2783,20 @@ internal sealed class KeyValueLocator
         {
             IReadOnlyList<Kommander.System.RaftReplica> replicas = raft.GetPartitionReplicas(partitionId);
 
-            // Legacy full replication: any peer may hold a copy — keep the all-node broadcast.
+            // Legacy full replication: any peer may hold a copy — keep the all-node broadcast. The
+            // phantom witnesses of a standalone node are peers in the roster only; they hold no data.
             if (replicas.Count == 0)
-                return [.. raft.GetNodes().Select(static node => node.Endpoint)];
+            {
+                List<string> peers = [];
+
+                foreach (RaftNode node in raft.GetNodes())
+                {
+                    if (!EmbeddedRaftCommunication.IsWitness(node.Endpoint))
+                        peers.Add(node.Endpoint);
+                }
+
+                return peers;
+            }
 
             foreach (Kommander.System.RaftReplica replica in replicas)
             {

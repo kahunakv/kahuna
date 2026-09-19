@@ -461,7 +461,7 @@ public static class InteractiveConsole
             try
             {
                 string historyText = await File.ReadAllTextAsync(historyPath);
-                history = JsonSerializer.Deserialize<List<string>>(historyText);
+                history = JsonSerializer.Deserialize(historyText, HistoryJsonContext.Default.ListString);
             }
             catch
             {
@@ -484,7 +484,7 @@ public static class InteractiveConsole
     private static async Task SaveHistory(string historyPath, List<string>? history)
     {
         if (history is not null)
-            await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
+            await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history, HistoryJsonContext.Default.ListString));
 
         //AnsiConsole.MarkupLine("[cyan]Saving history to {0}...[/]", Markup.Escape(historyPath));
     }

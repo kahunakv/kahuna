@@ -1,5 +1,6 @@
 using Kommander;
 using Kommander.Communication;
+using Kommander.Communication.Memory;
 using Kommander.Discovery;
 using Kommander.Time;
 using Kommander.WAL;
@@ -11,7 +12,8 @@ using Nixie;
 namespace Kahuna;
 
 /// <summary>
-/// Boots a single-node Kahuna engine in-process without the ASP.NET host.
+/// Boots a Kahuna engine in-process without the ASP.NET host: a single node with its own quorum, or
+/// one member of a cluster whose transports the caller supplies.
 /// </summary>
 public sealed class EmbeddedKahunaNode : IAsyncDisposable
 {
@@ -33,13 +35,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     private bool disposed;
 
-#if !KAHUNA_THREAD_FREE
     /// <summary>
     /// Seed endpoints of a running cluster to join at <see cref="StartAsync"/> instead of
     /// bootstrapping; null for the ordinary static-roster boot. Cluster constructor only.
     /// </summary>
     private readonly List<string>? joinExistingSeeds;
-#endif
 
     public IKahuna Kahuna { get; }
 
@@ -122,13 +122,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         raftConfiguration.ApplicationDurabilityProvider = ((KahunaManager)Kahuna).DurabilityProvider;
     }
 
-#if !KAHUNA_THREAD_FREE
-    // Not in the thread-free (browser) build: it has no inter-node transport (the gRPC client needs
-    // SocketsHttpHandler), so the only supported topology is the single-node constructor above.
     /// <summary>
-    /// Boots a Kahuna engine with externally supplied communication implementations.
-    /// Use this overload for cluster mode where real gRPC inter-node and Raft transports
-    /// replace the in-process fakes used by the parameterless constructor.
+    /// Boots one member of a cluster with externally supplied transports and discovery. A networked
+    /// cluster passes the gRPC inter-node and Raft transports; an in-process cluster passes
+    /// <see cref="MemoryInterNodeCommmunication"/> and Kommander's <see cref="InMemoryCommunication"/>,
+    /// shared by every member (see <see cref="EmbeddedKahunaCluster"/>).
+    /// <para>
+    /// The thread-free (browser) build accepts only the in-memory transports: it has no sockets, so the
+    /// gRPC client (which needs SocketsHttpHandler) is not in that build.
+    /// </para>
     /// </summary>
     public EmbeddedKahunaNode(
         EmbeddedKahunaOptions options,
@@ -141,6 +143,18 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(interNode);
         ArgumentNullException.ThrowIfNull(raftComm);
         ArgumentNullException.ThrowIfNull(discovery);
+
+#if KAHUNA_THREAD_FREE
+        if (interNode is not MemoryInterNodeCommmunication)
+            throw new ArgumentException(
+                $"The thread-free (browser) build supports only {nameof(MemoryInterNodeCommmunication)} as the inter-node transport; got {interNode.GetType().Name}.",
+                nameof(interNode));
+
+        if (raftComm is not InMemoryCommunication)
+            throw new ArgumentException(
+                $"The thread-free (browser) build supports only {nameof(InMemoryCommunication)} as the Raft transport; got {raftComm.GetType().Name}.",
+                nameof(raftComm));
+#endif
 
         ValidateOptions(options);
         EnsureStorageDirectories(options);
@@ -190,7 +204,6 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // before StartAsync joins the cluster, so the first partition restore already sees it.
         raftConfiguration.ApplicationDurabilityProvider = ((KahunaManager)Kahuna).DurabilityProvider;
     }
-#endif
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -210,10 +223,6 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             standaloneComm.SetNodes(new() { { localEndpoint, Kahuna } });
         }
 
-#if KAHUNA_THREAD_FREE
-        // The thread-free build has only the single-node constructor, which never joins seeds.
-        await Raft.JoinCluster().ConfigureAwait(false);
-#else
         // Joining a running cluster is an explicit choice, never inferred: with seeds the node
         // enters the existing roster (as a learner first, promoted once caught up); without them
         // it boots via its discovery's static roster.
@@ -221,7 +230,6 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             await Raft.JoinCluster(joinExistingSeeds, cancellationToken).ConfigureAwait(false);
         else
             await Raft.JoinCluster().ConfigureAwait(false);
-#endif
 
         started = true;
 

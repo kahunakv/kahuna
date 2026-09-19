@@ -45,8 +45,6 @@ internal sealed class WalSegmentEntry
         LogData = LogData
     };
 
-    private static readonly JsonSerializerOptions SegmentJsonOptions = new() { WriteIndented = false };
-
     /// <summary>
     /// Byte-length, digest, and endpoint metadata of a segment written by
     /// <see cref="WriteSegmentStreaming"/>. <see cref="EntryCount"/> is 0 when the source produced no
@@ -101,7 +99,7 @@ internal sealed class WalSegmentEntry
                     {
                         ct.ThrowIfCancellationRequested();
 
-                        await writer.WriteLineAsync(JsonSerializer.Serialize(entry, SegmentJsonOptions))
+                        await writer.WriteLineAsync(JsonSerializer.Serialize(entry, PitrJsonContext.Default.WalSegmentEntry))
                             .ConfigureAwait(false);
 
                         count++;
@@ -150,7 +148,7 @@ internal sealed class WalSegmentEntry
         {
             if (line.Length == 0)
                 continue;
-            WalSegmentEntry? entry = JsonSerializer.Deserialize<WalSegmentEntry>(line, SegmentJsonOptions);
+            WalSegmentEntry? entry = JsonSerializer.Deserialize(line, PitrJsonContext.Default.WalSegmentEntry);
             if (entry is not null)
                 yield return entry;
         }
@@ -160,7 +158,7 @@ internal sealed class WalSegmentEntry
     /// Async, cancellable streaming read — the same one-record-at-a-time semantics as
     /// <see cref="ReadSegment"/>, but with asynchronous file I/O so a caller (e.g. an offline restore)
     /// does not block a thread on disk reads. Legacy JSON-array segments are streamed incrementally via
-    /// <see cref="JsonSerializer.DeserializeAsyncEnumerable{TValue}(Stream, JsonSerializerOptions, CancellationToken)"/>,
+    /// <see cref="JsonSerializer.DeserializeAsyncEnumerable{TValue}(Stream, System.Text.Json.Serialization.Metadata.JsonTypeInfo{TValue}, CancellationToken)"/>,
     /// so a multi-gigabyte legacy array is bounded to the deserializer's internal buffer, not the whole file.
     /// </summary>
     public static async IAsyncEnumerable<WalSegmentEntry> ReadSegmentAsync(
@@ -169,7 +167,7 @@ internal sealed class WalSegmentEntry
         if (StartsJsonArray(source))
         {
             await foreach (WalSegmentEntry? entry in JsonSerializer
-                .DeserializeAsyncEnumerable<WalSegmentEntry>(source, SegmentJsonOptions, ct)
+                .DeserializeAsyncEnumerable(source, PitrJsonContext.Default.WalSegmentEntry, ct)
                 .ConfigureAwait(false))
             {
                 if (entry is not null)
@@ -184,7 +182,7 @@ internal sealed class WalSegmentEntry
         {
             if (line.Length == 0)
                 continue;
-            WalSegmentEntry? entry = JsonSerializer.Deserialize<WalSegmentEntry>(line, SegmentJsonOptions);
+            WalSegmentEntry? entry = JsonSerializer.Deserialize(line, PitrJsonContext.Default.WalSegmentEntry);
             if (entry is not null)
                 yield return entry;
         }
@@ -263,7 +261,7 @@ internal sealed class WalSegmentEntry
                     break;
                 }
 
-                WalSegmentEntry? entry = JsonSerializer.Deserialize<WalSegmentEntry>(ref reader, SegmentJsonOptions);
+                WalSegmentEntry? entry = JsonSerializer.Deserialize(ref reader, PitrJsonContext.Default.WalSegmentEntry);
                 if (entry is not null)
                     entries.Add(entry);
             }

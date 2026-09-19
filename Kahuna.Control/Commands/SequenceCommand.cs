@@ -13,8 +13,6 @@ namespace Kahuna.Control.Commands;
 
 public static class SequenceCommand
 {
-    private static readonly JsonSerializerOptions JsonSerializerOptions = new(JsonSerializerDefaults.Web);
-
     public static async Task Create(KahunaClient connection, string name, long initialValue, long increment, long? maxValue, int? blockSize, string? format)
     {
         KahunaSequence result = await connection.CreateSequence(name, initialValue, increment, maxValue, blockSize, SequenceDurability.Persistent);
@@ -39,7 +37,7 @@ public static class SequenceCommand
 
         if (format == "json")
         {
-            Console.WriteLine("{0}", JsonSerializer.Serialize(result, JsonSerializerOptions));
+            Console.WriteLine("{0}", JsonSerializer.Serialize(result, SequenceOutputJsonContext.Default.KahunaSequence));
             return;
         }
 
@@ -71,7 +69,7 @@ public static class SequenceCommand
         bool result = await connection.DeleteSequence(name, SequenceDurability.Persistent);
 
         if (format == "json")
-            Console.WriteLine("{0}", JsonSerializer.Serialize(new { name, deleted = result }, JsonSerializerOptions));
+            Console.WriteLine("{0}", JsonSerializer.Serialize(new SequenceDeletedOutput(name, result), SequenceOutputJsonContext.Default.SequenceDeletedOutput));
         else
             Console.WriteLine("{0}", result ? "deleted" : "not found");
     }
@@ -80,7 +78,7 @@ public static class SequenceCommand
     {
         if (format == "json")
         {
-            Console.WriteLine("{0}", JsonSerializer.Serialize(result, JsonSerializerOptions));
+            Console.WriteLine("{0}", JsonSerializer.Serialize(result, SequenceOutputJsonContext.Default.KahunaSequence));
             return;
         }
 
@@ -101,7 +99,7 @@ public static class SequenceCommand
     {
         if (format == "json")
         {
-            Console.WriteLine("{0}", JsonSerializer.Serialize(result, JsonSerializerOptions));
+            Console.WriteLine("{0}", JsonSerializer.Serialize(result, SequenceOutputJsonContext.Default.KahunaSequenceRange));
             return;
         }
 

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using System.Buffers.Text;
 using System.Text;
 using System.Text.Json;
@@ -19,8 +20,6 @@ namespace Kahuna.Client;
 /// </summary>
 public class KahunaKeyValue
 {
-    private static readonly JsonSerializerOptions DefaultJsonSerializerOptions = new() { WriteIndented = false };
-    
     private readonly KahunaClient client;
 
     private readonly KeyValueDurability durability;
@@ -178,13 +177,21 @@ public class KahunaKeyValue
     /// <returns></returns>
     public string ToJson()
     {
-        return JsonSerializer.Serialize(new
+        // Written field by field: an anonymous object has no generated serialization metadata, and
+        // serializing it by reflection breaks in a trimmed build.
+        ArrayBufferWriter<byte> buffer = new(128);
+
+        using (Utf8JsonWriter writer = new(buffer))
         {
-            Key,
-            success = Success,
-            revision = Revision,
-            value = ValueAsString(),
-            durability = durability.ToString()
-        }, DefaultJsonSerializerOptions);
+            writer.WriteStartObject();
+            writer.WriteString("Key", Key);
+            writer.WriteBoolean("success", Success);
+            writer.WriteNumber("revision", Revision);
+            writer.WriteString("value", ValueAsString());
+            writer.WriteString("durability", durability.ToString());
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 }

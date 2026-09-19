@@ -27,14 +27,14 @@ internal sealed record CheckpointManifest(
     public void WriteTo(string checkpointPath)
     {
         string file = Path.Combine(checkpointPath, FileName);
-        File.WriteAllText(file, JsonSerializer.Serialize(this));
+        File.WriteAllText(file, JsonSerializer.Serialize(this, PitrJsonContext.Default.CheckpointManifest));
     }
 
     public static CheckpointManifest ReadFrom(string checkpointPath)
     {
         string file = Path.Combine(checkpointPath, FileName);
         string json = File.ReadAllText(file);
-        return JsonSerializer.Deserialize<CheckpointManifest>(json)
+        return JsonSerializer.Deserialize(json, PitrJsonContext.Default.CheckpointManifest)
                ?? throw new InvalidDataException($"Empty checkpoint manifest at {file}");
     }
 
@@ -47,7 +47,7 @@ internal sealed record CheckpointManifest(
     {
         string key = LocalDirectoryArtifactStore.CheckpointDirectoryName + "/" + FileName;
         await using Stream stream = await store.OpenReadAsync(backupId, key, ct: ct).ConfigureAwait(false);
-        return await JsonSerializer.DeserializeAsync<CheckpointManifest>(stream, cancellationToken: ct)
+        return await JsonSerializer.DeserializeAsync(stream, PitrJsonContext.Default.CheckpointManifest, ct)
                    .ConfigureAwait(false)
                ?? throw new InvalidDataException($"Empty checkpoint manifest for backup {backupId:N}");
     }

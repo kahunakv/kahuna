@@ -2,8 +2,9 @@
 
   <!--
     Smoke check for the thread-free build of Kahuna.Core (KAHUNA_THREAD_FREE). A single-node embedded
-    Kahuna runs on the default single-threaded browser-wasm runtime (WasmEnableThreads off), under
-    Node.js, so CI can run it. scripts/run-wasm-smoke.sh builds and runs it.
+    Kahuna and then a 3-node in-memory cluster run on the default single-threaded browser-wasm runtime
+    (WasmEnableThreads off), under Node.js, so CI can run it. scripts/run-wasm-smoke.sh builds and
+    runs it.
 
     The target framework is net10.0-browser, not net10.0: only a -browser target framework selects
     the thread-free assemblies of Kahuna.Core and Kommander. With plain net10.0 the app gets the
@@ -20,11 +21,13 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <IsPackable>false</IsPackable>
-    <!-- A wasm app turns off reflection-based System.Text.Json by default. Kommander serializes the
-         partition map and other system state with reflection, so a browser host must turn it on.
-         Without it the system coordinator fails on the first partition-map proposal and the start
-         never finishes. -->
-    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <!-- A wasm app turns off reflection-based System.Text.Json by default, and this app keeps that
+         default: Kahuna and Kommander serialize only with source-generated metadata, so a new
+         reflection-based call fails this check. -->
+    <!-- A wasm app turns off System.Diagnostics.Metrics by default, and then a MeterListener gets no
+         measurements. The cluster run counts Kommander's election counter to prove that leadership
+         stays stable, so it needs metrics on. -->
+    <MetricsSupport>true</MetricsSupport>
   </PropertyGroup>
 
   <ItemGroup>

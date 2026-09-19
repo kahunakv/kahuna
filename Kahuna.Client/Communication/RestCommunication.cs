@@ -100,7 +100,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .AppendPathSegments("v1/cluster/routing")
             .SetQueryParam("keySpace", keySpace ?? "")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .GetJsonAsync<KahunaRoutingMetadataResponse>(cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
@@ -337,7 +337,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                         .AppendPathSegments("v1/locks/try-lock")
                         .WithHeader("Accept", "application/json")
                         .WithHeader("Content-Type", "application/json")
-                        .WithSettings(o => o.HttpVersion = "2.0")
+                        .WithSettings(KahunaRestJson.Http2Settings)
                         .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                         .ReceiveJson<KahunaLockResponse>()).ConfigureAwait(false);
                 }
@@ -420,7 +420,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .AppendPathSegments("v1/locks/try-unlock")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaLockResponse>())
                 .ConfigureAwait(false);
@@ -495,7 +495,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/locks/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>())
                     .ConfigureAwait(false);
@@ -563,7 +563,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                         .AppendPathSegments("v1/locks/get-info")
                         .WithHeader("Accept", "application/json")
                         .WithHeader("Content-Type", "application/json")
-                        .WithSettings(o => o.HttpVersion = "2.0")
+                        .WithSettings(KahunaRestJson.Http2Settings)
                         .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                         .ReceiveJson<KahunaGetLockResponse>())
                         .ConfigureAwait(false);
@@ -651,7 +651,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaSetKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -700,7 +700,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .AppendPathSegments("v1/kv/try-set-many")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaSetManyKeyValueResponse>())
                 .ConfigureAwait(false);
@@ -752,7 +752,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .AppendPathSegments("v1/kv/try-delete-many")
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaDeleteManyKeyValueResponse>())
                 .ConfigureAwait(false);
@@ -869,7 +869,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaSetKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -957,7 +957,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-set")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaSetKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -1040,7 +1040,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-get")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaGetKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -1125,7 +1125,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-exists")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaExistsKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -1203,7 +1203,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-delete")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaDeleteKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -1283,7 +1283,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaDeleteKeyValueResponse>())
                     .ConfigureAwait(false);
@@ -1350,7 +1350,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     .AppendPathSegments("v1/kv/try-execute-tx-script")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                     .ReceiveJson<KeyValueTransactionResponse>())
                     .ConfigureAwait(false);
@@ -1797,7 +1797,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .AppendPathSegments("v1/sequences/" + action)
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaSequenceResponse>()).ConfigureAwait(false);
 
@@ -1820,7 +1820,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/register")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(new KahunaKeyRangeRequest { KeySpace = keySpace }, cancellationToken: cancellationToken)
             .ReceiveJson<KahunaRegisterKeyRangeResponse>()
@@ -1838,7 +1838,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/unregister")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(new KahunaKeyRangeRequest { KeySpace = keySpace }, cancellationToken: cancellationToken)
             .ReceiveJson<KahunaRemoveKeyRangeResponse>()
@@ -1858,7 +1858,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/ranges")
                 .WithHeader("Accept", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0");
+                .WithSettings(KahunaRestJson.Http2Settings);
 
             if (!string.IsNullOrEmpty(keySpace))
                 request = request.SetQueryParam("keySpace", keySpace);
@@ -1881,7 +1881,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/split")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(
                 new KahunaSplitRangeRequest { KeySpace = keySpace, SplitKey = splitKey },
@@ -1901,7 +1901,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/merge")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostAsync(cancellationToken: cancellationToken)
             .ReceiveJson<KahunaMergeRangesResponse>()
@@ -1982,7 +1982,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .AppendPathSegments("v1/kv/" + verb)
                 .WithHeader("Accept", "application/json")
                 .WithHeader("Content-Type", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                 .ReceiveJson<TResponse>()).ConfigureAwait(false);
 
@@ -2040,7 +2040,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/cluster/membership")
                 .WithHeader("Accept", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .GetAsync(cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaClusterMembershipResponse>()).ConfigureAwait(false);
 
@@ -2057,7 +2057,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 .WithOAuthBearerToken("xxx")
                 .AppendPathSegments("v1/cluster/placement")
                 .WithHeader("Accept", "application/json")
-                .WithSettings(o => o.HttpVersion = "2.0")
+                .WithSettings(KahunaRestJson.Http2Settings)
                 .GetAsync(cancellationToken: cancellationToken)
                 .ReceiveJson<KahunaClusterPlacementResponse>()).ConfigureAwait(false);
 
@@ -2078,7 +2078,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/cluster/replication-factor")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(
                 new KahunaSetReplicationFactorRequest { PartitionId = partitionId, ReplicationFactor = replicationFactor },
@@ -2102,9 +2102,9 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/cluster/leave")
             .WithHeader("Accept", "application/json")
-            .WithSettings(o => o.HttpVersion = "2.0")
+            .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
-            .PostJsonAsync(new { }, cancellationToken: cancellationToken)
+            .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
             .ReceiveJson<KahunaClusterLeaveResponse>()
             .ConfigureAwait(false);
 
@@ -2119,8 +2119,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/full")
-               .WithSettings(o => o.HttpVersion = "2.0")
-               .PostJsonAsync(new { }, cancellationToken: cancellationToken)
+               .WithSettings(KahunaRestJson.Http2Settings)
+               .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
                .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeFullBackup returned null", LockResponseType.Errored);
     }
@@ -2130,7 +2130,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/incremental")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .PostJsonAsync(new KahunaBackupIncrementalRequest { ParentBackupId = parentBackupId }, cancellationToken: cancellationToken)
                .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeIncrementalBackup returned null", LockResponseType.Errored);
@@ -2141,8 +2141,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/coordinated")
-               .WithSettings(o => o.HttpVersion = "2.0")
-               .PostJsonAsync(new { }, cancellationToken: cancellationToken)
+               .WithSettings(KahunaRestJson.Http2Settings)
+               .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
                .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeCoordinatedBackup returned null", LockResponseType.Errored);
     }
@@ -2163,7 +2163,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                .AppendPathSegments("v1/kv/snapshot-hold/acquire")
                .WithHeader("Accept", "application/json")
                .WithHeader("Content-Type", "application/json")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                .ReceiveJson<KahunaAcquireSnapshotHoldResponse>()).ConfigureAwait(false);
 
@@ -2184,7 +2184,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                .AppendPathSegments("v1/kv/snapshot-hold/renew")
                .WithHeader("Accept", "application/json")
                .WithHeader("Content-Type", "application/json")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                .ReceiveJson<KahunaRenewSnapshotHoldResponse>()).ConfigureAwait(false);
 
@@ -2205,7 +2205,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                .AppendPathSegments("v1/kv/snapshot-hold/release")
                .WithHeader("Accept", "application/json")
                .WithHeader("Content-Type", "application/json")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
                .ReceiveJson<KahunaReleaseSnapshotHoldResponse>()).ConfigureAwait(false);
 
@@ -2221,7 +2221,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KahunaGetSnapshotFloorResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/kv/snapshot-floor")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .GetAsync(cancellationToken: cancellationToken)
                .ReceiveJson<KahunaGetSnapshotFloorResponse>()).ConfigureAwait(false);
 
@@ -2243,7 +2243,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         List<KahunaBackupInfo>? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .GetAsync(cancellationToken: cancellationToken)
                .ReceiveJson<List<KahunaBackupInfo>>())).ConfigureAwait(false);
         return response ?? [];
@@ -2254,7 +2254,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         List<KahunaBackupInfo>? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups", leafBackupId.ToString(), "chain")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .GetAsync(cancellationToken: cancellationToken)
                .ReceiveJson<List<KahunaBackupInfo>>())).ConfigureAwait(false);
         return response ?? [];
@@ -2265,7 +2265,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KahunaRestoreResponse? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/restore")
-               .WithSettings(o => o.HttpVersion = "2.0")
+               .WithSettings(KahunaRestJson.Http2Settings)
                .PostJsonAsync(new KahunaBackupRestoreRequest
                {
                    LeafBackupId = leafBackupId,
@@ -2282,8 +2282,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             url.WithOAuthBearerToken("xxx")
                .AppendPathSegments("v1/backups/gc")
                .SetQueryParam("dryRun", dryRun)
-               .WithSettings(o => o.HttpVersion = "2.0")
-               .PostJsonAsync(new { }, cancellationToken: cancellationToken)
+               .WithSettings(KahunaRestJson.Http2Settings)
+               .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
                .ReceiveJson<KahunaBackupGcResult>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("Backup GC returned null", LockResponseType.Errored);
     }

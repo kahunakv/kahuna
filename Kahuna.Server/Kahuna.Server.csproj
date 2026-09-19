@@ -7,6 +7,10 @@
   <RootNamespace>Kahuna.Server</RootNamespace>
   <ServerGarbageCollection>true</ServerGarbageCollection>
   <InvariantGlobalization>true</InvariantGlobalization>
+  <!-- Generates the minimal-API request binding and response writing at compile time. The runtime
+       alternative builds them by reflection when the route is first mapped, which a trimmed build
+       cannot support. -->
+  <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
 </PropertyGroup>
 
 <!-- Ships as a .NET global tool: `dotnet tool install -g Kahuna.Server` then `kahuna-server`.
@@ -19,7 +23,7 @@
   <PackAsTool>true</PackAsTool>
   <ToolCommandName>kahuna-server</ToolCommandName>
   <PackageId>Kahuna.Server</PackageId>
-  <Version>1.9.0</Version>
+  <Version>1.9.2</Version>
   <Authors>Andres Gutierrez</Authors>
   <Company>Kahuna KV</Company>
   <Description>Kahuna server node — distributed key-value store, lock manager and sequencer. Run `kahuna-server` to start a standalone node.</Description>

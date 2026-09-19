@@ -1413,8 +1413,13 @@ internal sealed class DurableMaintenanceService
 
         if (replicas.Count == 0)
         {
+            // The phantom witnesses of a standalone node are peers in the roster only; they hold no
+            // replica and cannot answer.
             foreach (RaftNode node in raft.GetNodes())
-                endpoints.Add(node.Endpoint);
+            {
+                if (!EmbeddedRaftCommunication.IsWitness(node.Endpoint))
+                    endpoints.Add(node.Endpoint);
+            }
             return endpoints;
         }
 

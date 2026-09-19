@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics.CodeAnalysis;
 using CommandLine;
 using Kahuna.Client;
 using Kahuna.Shared.Sequences;
@@ -31,7 +32,7 @@ if (forceRich)
     });
 }
 
-ParserResult<KahunaControlOptions> optsResult = Parser.Default.ParseArguments<KahunaControlOptions>(args);
+ParserResult<KahunaControlOptions> optsResult = ParseCommandLine(args);
 
 KahunaControlOptions? opts = optsResult.Value;
 if (opts is null)
@@ -463,3 +464,10 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
 
     return false;
 }
+
+// CommandLineParser creates the options object and fills its properties by reflection. The trimmer
+// cannot see that use, so it would remove the constructor and the property setters, and a trimmed
+// build would fail at startup. The dependency keeps every member of the options type.
+[DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(KahunaControlOptions))]
+static ParserResult<KahunaControlOptions> ParseCommandLine(string[] args) =>
+    Parser.Default.ParseArguments<KahunaControlOptions>(args);

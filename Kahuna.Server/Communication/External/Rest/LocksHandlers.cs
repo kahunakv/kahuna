@@ -73,7 +73,7 @@ public static class LocksHandlers
                     .AppendPathSegments("v1/locks/try-lock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>();
                 
@@ -145,7 +145,7 @@ public static class LocksHandlers
                     .AppendPathSegments("v1/locks/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>();
                 
@@ -206,7 +206,7 @@ public static class LocksHandlers
                     .AppendPathSegments("v1/locks/try-unlock")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaLockResponse>();
                 
@@ -289,7 +289,7 @@ public static class LocksHandlers
                     .AppendPathSegments("v1/locks/get-info")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaGetLockResponse>();
 

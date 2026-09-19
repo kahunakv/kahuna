@@ -4,9 +4,12 @@
 #
 # Builds Kahuna.WasmSmoke for the default single-threaded browser-wasm runtime and runs it under
 # Node.js. The app boots a single-node embedded Kahuna, waits for it to elect itself, runs a
-# key-value transaction and a transaction script, reads both values back, and disposes the node. The
-# check fails on a PlatformNotSupportedException (a Thread start or a blocking wait that the runtime
-# refuses), on a stall (a deadlock), or on a wrong result.
+# key-value transaction and a transaction script, reads both values back, and disposes the node. It
+# then starts a 3-node in-memory cluster, writes through each node, checks that leadership stays
+# stable for 60 s, stops the meta-partition leader, restarts it, and then isolates one node to show
+# that a minority cannot commit while the majority elects a leader and commits. The check fails on a
+# PlatformNotSupportedException (a Thread start or a blocking wait that the runtime refuses), on a
+# stall (a deadlock), on an election while no fault is injected, or on a wrong result.
 #
 # Needs the .NET 10 SDK and Node.js. It does not need the wasm-tools workload: the app does no
 # native relinking or AOT.

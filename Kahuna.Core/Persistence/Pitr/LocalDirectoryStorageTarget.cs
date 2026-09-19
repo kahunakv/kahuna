@@ -17,11 +17,6 @@ public sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
 
     private readonly string _directory;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
-
     public LocalDirectoryStorageTarget(string directory)
     {
         // Refuse an unsafe root before creating or touching anything — see the same check in
@@ -37,7 +32,7 @@ public sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
     {
         string path = ManifestPath(manifest.BackupId);
         string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
-        await File.WriteAllTextAsync(tmp, JsonSerializer.Serialize(manifest, JsonOptions), ct).ConfigureAwait(false);
+        await File.WriteAllTextAsync(tmp, JsonSerializer.Serialize(manifest, PitrIndentedJsonContext.Default.BackupManifest), ct).ConfigureAwait(false);
         // Restrict before the atomic rename so the published manifest is owner-only (0600) from the
         // instant it appears at its final path — never briefly world-readable.
         BackupFilePermissions.RestrictFile(tmp);
@@ -58,8 +53,8 @@ public sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
         if (!File.Exists(path))
             return null;
 
-        return JsonSerializer.Deserialize<BackupManifest>(
-            await File.ReadAllTextAsync(path, ct).ConfigureAwait(false), JsonOptions);
+        return JsonSerializer.Deserialize(
+            await File.ReadAllTextAsync(path, ct).ConfigureAwait(false), PitrIndentedJsonContext.Default.BackupManifest);
     }
 
     public async Task<IReadOnlyList<BackupManifest>> ListAsync(CancellationToken ct = default)
@@ -71,8 +66,8 @@ public sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
             ct.ThrowIfCancellationRequested();
             try
             {
-                BackupManifest? m = JsonSerializer.Deserialize<BackupManifest>(
-                    await File.ReadAllTextAsync(file, ct).ConfigureAwait(false), JsonOptions);
+                BackupManifest? m = JsonSerializer.Deserialize(
+                    await File.ReadAllTextAsync(file, ct).ConfigureAwait(false), PitrIndentedJsonContext.Default.BackupManifest);
                 if (m is not null)
                     results.Add(m);
             }
@@ -96,8 +91,8 @@ public sealed class LocalDirectoryStorageTarget : IBackupStorageTarget
             ct.ThrowIfCancellationRequested();
             try
             {
-                BackupManifest? m = JsonSerializer.Deserialize<BackupManifest>(
-                    await File.ReadAllTextAsync(file, ct).ConfigureAwait(false), JsonOptions);
+                BackupManifest? m = JsonSerializer.Deserialize(
+                    await File.ReadAllTextAsync(file, ct).ConfigureAwait(false), PitrIndentedJsonContext.Default.BackupManifest);
                 if (m is null)
                     corrupt.Add((ParseId(file), "Manifest deserialized to null."));
             }

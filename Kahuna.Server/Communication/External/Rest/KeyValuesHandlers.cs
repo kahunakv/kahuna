@@ -106,7 +106,7 @@ public static class KeyValuesHandlers
                     .AppendPathSegments("v1/kv/try-extend")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaExtendKeyValueResponse>();
 
@@ -170,7 +170,7 @@ public static class KeyValuesHandlers
                     .AppendPathSegments("v1/kv/try-delete")
                     .WithHeader("Accept", "application/json")
                     .WithHeader("Content-Type", "application/json")
-                    .WithSettings(o => o.HttpVersion = "2.0")
+                    .WithSettings(KahunaRestJson.Http2Settings)
                     .PostStringAsync(payload, cancellationToken: cancellationToken)
                     .ReceiveJson<KahunaDeleteKeyValueResponse>();
                 
