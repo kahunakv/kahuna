@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net10.0-browser</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Kahuna</RootNamespace>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <IsPackable>true</IsPackable>
     <PackageId>Kahuna.Core</PackageId>
-    <Version>1.8.7</Version>
+    <Version>1.9.0</Version>
     <Description>.NET embeddable core for Kahuna: Distributed locks, reliable key-value store and idempotent sequencer</Description>
     <Authors>Andres Gutierrez</Authors>
     <Company>Andres Gutierrez</Company>
@@ -26,14 +26,46 @@
     <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 
-  <ItemGroup>
+  <!--
+    Thread-free build (KAHUNA_THREAD_FREE). The net10.0-browser target runs an embedded node on the
+    default single-threaded browser-wasm runtime. It resolves the thread-free assembly of Kommander
+    (KOMMANDER_THREAD_FREE), whose host pump replaces the worker threads.
+
+    A default build does not define the symbol, so the net10.0 assembly compiles from the same code
+    as before. The browser target leaves out everything the browser cannot load:
+    - ASP.NET Core, which has no browser-wasm runtime pack (NETSDK1082), and the gRPC and REST
+      server surface built on it;
+    - the gRPC inter-node client, which needs SocketsHttpHandler;
+    - the RocksDB and SQLite persistence backends, whose native libraries the browser does not have
+      (the browser target of Kommander has no RocksDB or SQLite package either);
+    - Blake3, whose native library has no browser-wasm build.
+  -->
+  <PropertyGroup Condition="$(TargetFramework.EndsWith('-browser'))">
+    <DefineConstants>$(DefineConstants);KAHUNA_THREAD_FREE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="!$(TargetFramework.EndsWith('-browser'))">
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Blake3" Version="3.0.2" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="$(TargetFramework.EndsWith('-browser'))">
+    <!-- The script parser pool. The default build gets it from the ASP.NET Core shared framework. -->
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.12" />
+    <Compile Remove="Communication/InterNodeHeaders.cs" />
+    <Compile Remove="Communication/NodeTransportGate.cs" />
+    <Compile Remove="Communication/External/ClusterLeave.cs" />
+    <Compile Remove="Communication/External/Grpc/**/*.cs" />
+    <Compile Remove="Communication/InterNode/GrpcInterNodeCommunication.cs" />
+    <Compile Remove="Communication/InterNode/Grpc/**/*.cs" />
+    <Compile Remove="Persistence/Backend/RocksDbPersistenceBackend.cs" />
+    <Compile Remove="Persistence/Backend/SqlitePersistenceBackend.cs" />
+    <Compile Remove="Embedding/RaftWalTuningFactory.cs" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Blake3" Version="3.0.2" />
     <PackageReference Include="Google.Protobuf" Version="3.29.6" />
-    <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
     <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
     <PackageReference Include="Grpc.Tools" Version="2.67.0">
       <PrivateAssets>all</PrivateAssets>

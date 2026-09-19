@@ -65,9 +65,13 @@ internal sealed partial class scriptParser
         // stream + StreamReader + StringBuilder buffering the stream-based scanner would use.
         NodeAst? root = ParseSource(Encoding.UTF8.GetString(inputBuffer));
 
+#if !KAHUNA_THREAD_FREE
         // Computed here rather than trusted, and only on a miss, so the hash cost is paid once per distinct
         // script instead of once per request. An absent caller hash means the caller does not want the script
         // cached at all, so nothing is stored and nothing is hashed.
+        //
+        // The thread-free (browser) build never fills the cache: Blake3 has no browser-wasm native library,
+        // and a cache keyed by any other hash would never match the Blake3 hash a caller sends.
         if (!string.IsNullOrEmpty(hash) && Cache.Count < configuration.ScriptCacheMaxEntries)
         {
             string computedHash = Blake3.Hasher.Hash(inputBuffer).ToString();
@@ -76,6 +80,7 @@ internal sealed partial class scriptParser
 
             Cache.TryAdd(computedHash, new(computedHash, root, Environment.TickCount64 + (long)configuration.ScriptCacheExpiration.TotalMilliseconds));
         }
+#endif
 
         return root;
     }

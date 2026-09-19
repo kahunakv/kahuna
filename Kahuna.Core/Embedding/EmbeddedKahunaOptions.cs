@@ -418,6 +418,22 @@ public sealed class EmbeddedKahunaOptions
 
     public int PartitionExecutorPoolSize { get; set; }
 
+#if KAHUNA_THREAD_FREE
+    /// <summary>
+    /// When true, Kommander runs the node's scheduling work (partition executors, WAL writes, outbound
+    /// transport) as async continuations on the ambient scheduler instead of on worker threads. On
+    /// single-threaded WebAssembly that scheduler is the browser event loop. Maps to
+    /// <c>RaftConfiguration.EnableHostPumpedScheduling</c>.
+    ///
+    /// <para>Exists only in the thread-free build (<c>KAHUNA_THREAD_FREE</c>, the <c>net10.0-browser</c>
+    /// target), which cannot start threads. Default is true there, so a browser host needs no
+    /// configuration. It requires <see cref="EnableSharedExecutorPool"/>, <c>memory</c>
+    /// <see cref="Storage"/>, and <c>memory</c> <see cref="WalStorage"/>. Set it to false only when
+    /// something else pumps the node; with it false and no external driver, nothing runs.</para>
+    /// </summary>
+    public bool EnableHostPumpedScheduling { get; set; } = true;
+#endif
+
     public string HttpScheme { get; set; } = "https://";
 
     public string HttpAuthBearerToken { get; set; } = "";

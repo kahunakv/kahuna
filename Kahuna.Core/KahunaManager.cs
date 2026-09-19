@@ -99,9 +99,16 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
     /// Constructor
     /// </summary>
     public KahunaManager(ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, IInterNodeCommunication interNodeCommunication, ILogger<IKahuna> logger, ILogger<IRaft>? raftLogger = null)
+#if KAHUNA_THREAD_FREE
+        : this(actorSystem, raft, configuration, interNodeCommunication, KahunaNodeComposer.CreateBackend(configuration), logger, raftLogger)
+#else
         : this(actorSystem, raft, configuration, interNodeCommunication, KahunaNodeComposer.CreateBackend(configuration, logger, null), logger, raftLogger)
+#endif
     {
     }
+
+#if !KAHUNA_THREAD_FREE
+    // The RocksDB memory bundle does not exist in the thread-free (browser) build, which has no RocksDB.
 
     /// <summary>
     /// Constructor variant that shares a RocksDB memory bundle (block cache + WriteBufferManager) with the
@@ -126,6 +133,7 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         : this(actorSystem, raft, configuration, interNodeCommunication, KahunaNodeComposer.CreateBackend(configuration, logger, sharedResources), logger, raftLogger, writeBatchExecutorDecorator)
     {
     }
+#endif
 
     /// <summary>
     /// Constructor variant used by PITR bootstrap: accepts a pre-seeded <paramref name="preSeededBackend"/>

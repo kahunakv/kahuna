@@ -39,6 +39,11 @@ public static class ConfigurationValidator
     {
         if (!string.IsNullOrEmpty(configuration.HttpsCertificate))
         {
+#if KAHUNA_THREAD_FREE
+            // The browser has no X509 certificate support, and the thread-free (browser) build has no
+            // HTTPS listener to present one on.
+            throw new KahunaServerException("An HTTPS certificate is not supported in the thread-free (browser) build");
+#else
             if (!File.Exists(configuration.HttpsCertificate))
                 throw new KahunaServerException("Invalid HTTPS certificate");
     
@@ -46,6 +51,7 @@ public static class ConfigurationValidator
             X509Certificate2 xcertificate = new(configuration.HttpsCertificate, configuration.HttpsCertificatePassword);
 #pragma warning restore SYSLIB0057
             configuration.HttpsTrustedThumbprint = xcertificate.Thumbprint;
+#endif
         }
 
         // Create the directories a backend is about to open. RocksDB creates its own, but SQLite does
@@ -328,6 +334,8 @@ public static class ConfigurationValidator
                 replicationFactor, seedNodeCount);
     }
 
+#if !KAHUNA_THREAD_FREE
+    // The shard knobs tune the RocksDB WAL, which the thread-free (browser) build does not have.
     /// <summary>
     /// Validates the eight Raft WAL shard column-family knobs on <paramref name="options"/> before a
     /// WAL is built from them.
@@ -382,6 +390,7 @@ public static class ConfigurationValidator
                 $"{nameof(options.RaftWalShardLevel0StopWritesTrigger)} ({stop}) does not hold; " +
                 "writers would be slowed or stopped before compaction is ever asked to run");
     }
+#endif
 
     private static void RequirePositive(int? value, string option)
     {

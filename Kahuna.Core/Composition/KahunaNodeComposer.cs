@@ -37,6 +37,18 @@ internal static class KahunaNodeComposer
     /// that does so — wrapping twice would give a node two independent unflushed-write indexes, and
     /// a read that missed the live one would answer DoesNotExist for a durably committed key.
     /// </summary>
+#if KAHUNA_THREAD_FREE
+    // The thread-free (browser) build has only the in-memory backend: RocksDB and SQLite need native
+    // libraries that the browser does not have.
+    internal static IPersistenceBackend CreateBackend(KahunaConfiguration configuration)
+    {
+        return configuration.Storage switch
+        {
+            "memory" => new MemoryPersistenceBackend(),
+            _ => throw new KahunaServerException("Invalid storage type for the thread-free build (only 'memory' is supported): " + configuration.Storage)
+        };
+    }
+#else
     internal static IPersistenceBackend CreateBackend(KahunaConfiguration configuration, ILogger<IKahuna> logger, RocksDbSharedResources? sharedResources)
     {
         return configuration.Storage switch
@@ -47,6 +59,7 @@ internal static class KahunaNodeComposer
             _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
         };
     }
+#endif
 
     /// <summary>
     /// Builds the node's subsystems over <paramref name="backend"/> and registers this node's
@@ -98,8 +111,17 @@ internal static class KahunaNodeComposer
         // in-memory entry is never served from disk, so disk is only read when it is authoritative),
         // and with the standalone default of one Raft partition the scheduler's single-flight
         // invariant otherwise serializes every backend read in the node onto one thread at a time.
+#if KAHUNA_THREAD_FREE
+        // The thread-free build cannot start worker threads, so both schedulers run each operation
+        // inline on the enqueuing thread. This is safe only because the build has the in-memory
+        // backend alone: no backend operation waits for I/O, so an inline read cannot stall the
+        // actor or the partition that issued it.
+        FairReadScheduler backendReadScheduler = new(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth, concurrentPerPartition: true, inlineExecution: true);
+        FairReadScheduler backendWriteScheduler = new(raftLogger, configuration.BackendWriteIOThreads, configuration.BackendReadQueueDepth, inlineExecution: true);
+#else
         FairReadScheduler backendReadScheduler = new(raftLogger, configuration.BackendReadIOThreads, configuration.BackendReadQueueDepth, concurrentPerPartition: true);
         FairReadScheduler backendWriteScheduler = new(raftLogger, configuration.BackendWriteIOThreads, configuration.BackendReadQueueDepth);
+#endif
 
         SnapshotFloorStore snapshotFloorStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger, configuration.SnapshotHoldStartupGraceWindow);
 

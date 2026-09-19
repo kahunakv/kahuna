@@ -19,6 +19,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     private readonly MemoryInterNodeCommmunication? standaloneComm;
 
+#if !KAHUNA_THREAD_FREE
     /// <summary>
     /// Shared RocksDB memory bundle (block cache + WriteBufferManager) when both the backend and WAL are
     /// RocksDB and sharing is enabled; otherwise null. This node <b>owns</b> it: it is injected into both
@@ -26,16 +27,19 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
     /// databases are closed.
     /// </summary>
     private readonly RocksDbSharedResources? sharedResources;
+#endif
 
     private bool started;
 
     private bool disposed;
 
+#if !KAHUNA_THREAD_FREE
     /// <summary>
     /// Seed endpoints of a running cluster to join at <see cref="StartAsync"/> instead of
     /// bootstrapping; null for the ordinary static-roster boot. Cluster constructor only.
     /// </summary>
     private readonly List<string>? joinExistingSeeds;
+#endif
 
     public IKahuna Kahuna { get; }
 
@@ -69,7 +73,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         EmbeddedRaftCommunication raftCommunication = new();
 
         InstallProcessFaultPolicy(options);
+#if !KAHUNA_THREAD_FREE
         this.sharedResources = CreateSharedResources(options);
+#endif
 
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
@@ -92,7 +98,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         this.Raft = new RaftManager(
             raftConfiguration,
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
+#if KAHUNA_THREAD_FREE
+            CreateWal(options, raftLogger),
+#else
             CreateWal(options, raftLogger, sharedResources),
+#endif
             raftCommunication,
             new HybridLogicalClock(),
             raftLogger
@@ -101,13 +111,20 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         KahunaConfiguration kahunaConfiguration = CreateKahunaConfiguration(options, singleProcessRaftGroup: true);
 
         this.standaloneComm = new();
+#if KAHUNA_THREAD_FREE
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, CreateBackend(options, kahunaConfiguration), kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+#else
         this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, standaloneComm, CreateBackend(options, kahunaConfiguration, kahunaLogger, sharedResources), kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+#endif
 
         // Restart replay and WAL compaction consult Kahuna's application-durability floor; wired
         // before StartAsync joins the cluster, so the first partition restore already sees it.
         raftConfiguration.ApplicationDurabilityProvider = ((KahunaManager)Kahuna).DurabilityProvider;
     }
 
+#if !KAHUNA_THREAD_FREE
+    // Not in the thread-free (browser) build: it has no inter-node transport (the gRPC client needs
+    // SocketsHttpHandler), so the only supported topology is the single-node constructor above.
     /// <summary>
     /// Boots a Kahuna engine with externally supplied communication implementations.
     /// Use this overload for cluster mode where real gRPC inter-node and Raft transports
@@ -141,14 +158,20 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         actorSystem = new(logger: raftLogger);
 
         InstallProcessFaultPolicy(options);
+#if !KAHUNA_THREAD_FREE
         this.sharedResources = CreateSharedResources(options);
+#endif
 
         RaftConfiguration raftConfiguration = CreateRaftConfiguration(options);
 
         this.Raft = new RaftManager(
             raftConfiguration,
             discovery,
+#if KAHUNA_THREAD_FREE
+            CreateWal(options, raftLogger),
+#else
             CreateWal(options, raftLogger, sharedResources),
+#endif
             raftComm,
             new HybridLogicalClock(),
             raftLogger
@@ -157,12 +180,17 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         KahunaConfiguration kahunaConfiguration = CreateKahunaConfiguration(options, singleProcessRaftGroup: false);
 
         this.standaloneComm = null;
+#if KAHUNA_THREAD_FREE
+        this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, CreateBackend(options, kahunaConfiguration), kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+#else
         this.Kahuna = new KahunaManager(actorSystem, Raft, kahunaConfiguration, interNode, CreateBackend(options, kahunaConfiguration, kahunaLogger, sharedResources), kahunaLogger, raftLogger, options.WriteBatchExecutorDecorator);
+#endif
 
         // Restart replay and WAL compaction consult Kahuna's application-durability floor; wired
         // before StartAsync joins the cluster, so the first partition restore already sees it.
         raftConfiguration.ApplicationDurabilityProvider = ((KahunaManager)Kahuna).DurabilityProvider;
     }
+#endif
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -182,6 +210,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             standaloneComm.SetNodes(new() { { localEndpoint, Kahuna } });
         }
 
+#if KAHUNA_THREAD_FREE
+        // The thread-free build has only the single-node constructor, which never joins seeds.
+        await Raft.JoinCluster().ConfigureAwait(false);
+#else
         // Joining a running cluster is an explicit choice, never inferred: with seeds the node
         // enters the existing roster (as a learner first, promoted once caught up); without them
         // it boots via its discovery's static roster.
@@ -189,6 +221,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             await Raft.JoinCluster(joinExistingSeeds, cancellationToken).ConfigureAwait(false);
         else
             await Raft.JoinCluster().ConfigureAwait(false);
+#endif
 
         started = true;
 
@@ -280,15 +313,26 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (Kahuna is IDisposable disposable)
             disposable.Dispose();
 
+#if !KAHUNA_THREAD_FREE
         // Dispose the shared bundle LAST — only after both the Raft/WAL and the Kahuna backend above are
         // closed. This node owns it; the WAL and backend only borrow it.
         sharedResources?.Dispose();
+#endif
     }
 
     /// <summary>
     /// The raw persistence backend the configuration selects, wrapped by the test-only decorator when the
     /// options carry one. The manager's composer puts the unflushed-write overlay over whatever is returned.
     /// </summary>
+#if KAHUNA_THREAD_FREE
+    private static Server.Persistence.Backend.IPersistenceBackend CreateBackend(
+        EmbeddedKahunaOptions options, KahunaConfiguration configuration)
+    {
+        Server.Persistence.Backend.IPersistenceBackend backend = Server.Composition.KahunaNodeComposer.CreateBackend(configuration);
+
+        return options.PersistenceBackendDecorator?.Invoke(backend) ?? backend;
+    }
+#else
     private static Server.Persistence.Backend.IPersistenceBackend CreateBackend(
         EmbeddedKahunaOptions options, KahunaConfiguration configuration, ILogger<IKahuna> logger, RocksDbSharedResources? sharedResources)
     {
@@ -296,7 +340,20 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         return options.PersistenceBackendDecorator?.Invoke(backend) ?? backend;
     }
+#endif
 
+#if KAHUNA_THREAD_FREE
+    // The thread-free (browser) build has only the in-memory WAL: Kommander's browser assembly has no
+    // RocksDB or SQLite WAL.
+    private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger)
+    {
+        return options.WalStorage switch
+        {
+            "memory" => new InMemoryWAL(logger),
+            _ => throw new KahunaServerException("Invalid WAL storage type for the thread-free build (only 'memory' is supported): " + options.WalStorage)
+        };
+    }
+#else
     private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger, RocksDbSharedResources? sharedResources)
     {
         string revision = string.IsNullOrWhiteSpace(options.WalRevision) ? Guid.NewGuid().ToString() : options.WalRevision;
@@ -315,6 +372,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             _ => throw new KahunaServerException("Invalid WAL storage type: " + options.WalStorage)
         };
     }
+#endif
 
     /// <summary>
     /// Builds the shared RocksDB memory bundle when sharing is enabled and both the backend and WAL are
@@ -331,6 +389,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         global::Kahuna.Server.Diagnostics.ProcessFaults.InstallFirstChancePolicy();
     }
 
+#if !KAHUNA_THREAD_FREE
     private static RocksDbSharedResources? CreateSharedResources(EmbeddedKahunaOptions options)
     {
         if (!options.RocksDbSharedMemoryEnabled)
@@ -344,6 +403,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         return RocksDbSharedResources.CreateWithUnifiedBudget(totalBytes, memtableBytes);
     }
+#endif
 
 
     /// <summary>
@@ -536,7 +596,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             DecommissionDrainTimeout = options.DecommissionDrainTimeout,
             ReplicaCountDeadband = options.ReplicaCountDeadband,
             Zone = options.Zone,
-            EnableLoadReports = options.EnableLoadReports
+            EnableLoadReports = options.EnableLoadReports,
+#if KAHUNA_THREAD_FREE
+            // The thread-free build cannot start threads: Kommander's host pump drives the node instead.
+            EnableHostPumpedScheduling = options.EnableHostPumpedScheduling
+#endif
         };
     }
 
@@ -554,6 +618,24 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.InitialPartitions <= 0)
             throw new ArgumentException("InitialPartitions must be greater than zero.", nameof(options));
 
+#if KAHUNA_THREAD_FREE
+        // The thread-free (browser) build has only in-memory storage, and a partition executor on its
+        // own thread has nothing to pump it. Refused here, with the Kahuna option named, instead of
+        // deep inside the backend or Raft construction.
+        if (options.Storage != "memory")
+            throw new ArgumentException(
+                $"Storage '{options.Storage}' is not supported in the thread-free (browser) build; use 'memory'.", nameof(options));
+
+        if (options.WalStorage != "memory")
+            throw new ArgumentException(
+                $"WalStorage '{options.WalStorage}' is not supported in the thread-free (browser) build; use 'memory'.", nameof(options));
+
+        if (!options.EnableSharedExecutorPool)
+            throw new ArgumentException(
+                "EnableSharedExecutorPool must be true in the thread-free (browser) build: a partition executor on its own thread cannot run there.",
+                nameof(options));
+#endif
+
         if (options.EnableLeaderBalancer &&
             options.LeaderBalancerReportInterval >= options.LeaderBalancerReportTtl)
             throw new ArgumentException(
@@ -568,10 +650,12 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
                 new() { RangeSplitSettleWindow = options.RangeSplitSettleWindow },
                 (long)options.MinLeaderStability.TotalMilliseconds);
 
+#if !KAHUNA_THREAD_FREE
             // Checked here and not only where the WAL is built: on the memory and sqlite backends
             // the shard knobs are inert, so nothing downstream would ever read them and a typo
             // would survive until the deployment that switches the WAL to RocksDB.
             ConfigurationValidator.ValidateRaftWalShardTuning(options);
+#endif
         }
         catch (KahunaServerException ex)
         {

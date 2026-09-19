@@ -29,6 +29,12 @@ jobs:
             8.0.x
             9.0.x
             10.0.x
+      - name: Thread-free browser-wasm smoke
+        # A single-node embedded Kahuna on the default single-threaded browser-wasm runtime, under
+        # Node.js: the net10.0-browser build of Kahuna.Core (KAHUNA_THREAD_FREE). It fails on a Thread
+        # start or a blocking wait that the runtime refuses, on a deadlock, or on a wrong transaction
+        # result. Normal .NET cannot catch a blocking wait: it has other threads to release it.
+        run: bash scripts/run-wasm-smoke.sh
       - name: Run Kahuna Server
         run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)
       - name: Run Client Tests

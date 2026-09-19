@@ -10,6 +10,8 @@ Kahuna.Tests/bin
 Kahuna.Tests/.idea
 Kahuna.Client.Tests/obj
 Kahuna.Client.Tests/bin
+Kahuna.WasmSmoke/obj
+Kahuna.WasmSmoke/bin
 Kahuna.Client.Tests/.idea
 Kahuna.Client.Tests/TestResults/
 Kahuna.Server.Tests/obj

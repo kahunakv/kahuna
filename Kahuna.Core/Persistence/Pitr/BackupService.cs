@@ -803,8 +803,11 @@ internal sealed class BackupService : IDisposable
 
     private IPersistenceBackend OpenBackendAt(string path) => _storageType switch
     {
+#if !KAHUNA_THREAD_FREE
+        // The thread-free (browser) build has no RocksDB or SQLite backend.
         "rocksdb" => new RocksDbPersistenceBackend(path, _storageRevision),
         "sqlite"  => new SqlitePersistenceBackend(path, _storageRevision, _logger),
+#endif
         _         => MemoryPersistenceBackend.OpenCheckpoint(path)
     };
 

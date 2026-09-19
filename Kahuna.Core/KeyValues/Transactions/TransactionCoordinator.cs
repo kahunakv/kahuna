@@ -1563,7 +1563,11 @@ internal sealed class TransactionCoordinator : IDisposable
     {
         // Give in-flight deferred resolutions a bounded window to finish, then cancel any straggler (recovery
         // completes a cancelled/lost run on restart), before disposing.
+#if !KAHUNA_THREAD_FREE
+        // Not in the thread-free build: on a single thread the resolutions run on the thread this wait
+        // blocks, so it could only spin to its timeout. The stragglers are cancelled below instead.
         try { Task.WhenAll(deferredResolutions.Keys).Wait(TimeSpan.FromSeconds(5)); } catch { /* best-effort drain */ }
+#endif
         try { deferredResolutionCts.Cancel(); } catch (ObjectDisposedException) { /* already disposed */ }
         deferredResolutionCts.Dispose();
         durableFinalizer?.Dispose();

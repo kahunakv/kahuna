@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+
+  <!--
+    Smoke check for the thread-free build of Kahuna.Core (KAHUNA_THREAD_FREE). A single-node embedded
+    Kahuna runs on the default single-threaded browser-wasm runtime (WasmEnableThreads off), under
+    Node.js, so CI can run it. scripts/run-wasm-smoke.sh builds and runs it.
+
+    The target framework is net10.0-browser, not net10.0: only a -browser target framework selects
+    the thread-free assemblies of Kahuna.Core and Kommander. With plain net10.0 the app gets the
+    normal assemblies and fails to build with NETSDK1082 (no ASP.NET Core runtime pack).
+
+    Deliberately not in Kahuna.sln, so the default build does not change.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-browser</TargetFramework>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <WasmEnableThreads>false</WasmEnableThreads>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
+    <!-- A wasm app turns off reflection-based System.Text.Json by default. Kommander serializes the
+         partition map and other system state with reflection, so a browser host must turn it on.
+         Without it the system coordinator fails on the first partition-map proposal and the start
+         never finishes. -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Kahuna.Core\Kahuna.Core.csproj" />
+  </ItemGroup>
+
+</Project>

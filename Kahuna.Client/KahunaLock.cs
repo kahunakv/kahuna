@@ -38,6 +38,8 @@ public sealed class KahunaLock : IAsyncDisposable
 
     private bool disposed;
 
+    private bool released;
+
     /// <summary>
     /// Indicates whether the lock has been successfully acquired.
     /// Returns true if the lock acquisition operation completed with a success result; otherwise, false.
@@ -139,19 +141,36 @@ public sealed class KahunaLock : IAsyncDisposable
     }
 
     /// <summary>
-    /// Frees the lock after it's no longer needed
+    /// Releases the lock and reports whether the server released it.
+    /// Returns false if the lock was never acquired, was already released through this instance,
+    /// or the server no longer holds it for this owner (for example, because it expired).
     /// </summary>
-    public async ValueTask DisposeAsync()
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<bool> TryUnlock(CancellationToken cancellationToken = default)
     {
         disposed = true;
 
         GC.SuppressFinalize(this);
 
-        if (IsAcquired && owner is not null)
-        {
-            await client.Communication.TryUnlock(
-                client.GetLockUrl(resource, servedFrom), resource, owner, durability, CancellationToken.None);
-        }
+        if (released || !IsAcquired || owner is null)
+            return false;
+
+        bool unlocked = await client.Communication.TryUnlock(
+            client.GetLockUrl(resource, servedFrom), resource, owner, durability, cancellationToken);
+
+        // Mark as released only once the server answered, so a transport failure leaves the caller free to retry.
+        released = true;
+
+        return unlocked;
+    }
+
+    /// <summary>
+    /// Frees the lock after it's no longer needed
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        await TryUnlock(CancellationToken.None);
     }
 
     /// <summary>
