@@ -485,7 +485,13 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         ProposalTimeout = TimeSpan.FromMilliseconds(opts.RaftProposalTimeout),
         WalStallStepDownTimeout = TimeSpan.FromMilliseconds(opts.RaftWalStallStepDownTimeout),
         WalStallWarnThreshold = TimeSpan.FromMilliseconds(opts.RaftWalStallWarnThreshold),
-        EnableCheckQuorum = opts.RaftEnableCheckQuorum,
+        // Check-quorum: a leader that hears no same-term ack from a majority of voters for the
+        // window steps down, which bounds how long an isolated leader keeps answering as one. On
+        // by default because the acknowledged-write loss of a two-leader window is silent to
+        // clients. KAHUNA_CHECK_QUORUM=0 forces it off (the CLI bool is a bare switch and cannot
+        // express "false").
+        EnableCheckQuorum = opts.RaftEnableCheckQuorum
+            && Environment.GetEnvironmentVariable("KAHUNA_CHECK_QUORUM") != "0",
         CheckQuorumIntervalMultiplier = opts.RaftCheckQuorumIntervalMultiplier,
         TimerInitialDelay = TimeSpan.FromMilliseconds(opts.RaftTimerInitialDelay),
         UpdateNodesInterval = TimeSpan.FromMilliseconds(opts.RaftUpdateNodesInterval),

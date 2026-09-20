@@ -222,11 +222,11 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-wal-stall-warn-threshold", Required = false, HelpText = "Age past which a pending WAL write on this node is logged as a stall and, when reported by a peer, excluded from entry-carrying backfill and snapshot transfers, in milliseconds. Values <= 0 disable the log lines only; the peer rules still use 500 ms.", Default = 500)]
     public int RaftWalStallWarnThreshold { get; set; } = 500;
 
-    [Option("raft-enable-check-quorum", Required = false, HelpText = "When set, a leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower", Default = false)]
-    public bool RaftEnableCheckQuorum { get; set; }
+    [Option("raft-enable-check-quorum", Required = false, HelpText = "A leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower. On by default; set the environment variable KAHUNA_CHECK_QUORUM=0 to turn it off (the CLI bool is a bare switch and cannot express false)", Default = true)]
+    public bool RaftEnableCheckQuorum { get; set; } = true;
 
-    [Option("raft-check-quorum-interval-multiplier", Required = false, HelpText = "Number of heartbeat intervals without a majority of same-term acks after which a leader with check-quorum enabled steps down", Default = 8)]
-    public int RaftCheckQuorumIntervalMultiplier { get; set; } = 8;
+    [Option("raft-check-quorum-interval-multiplier", Required = false, HelpText = "Number of heartbeat intervals without a majority of same-term acks after which a leader with check-quorum enabled steps down. 0 derives the window from the election timeout (the largest window that still steps an isolated leader down before a follower can start an election). An explicit value must be at least 2 and must keep heartbeat-interval x multiplier at or below the election timeout start", Default = 0)]
+    public int RaftCheckQuorumIntervalMultiplier { get; set; }
 
     [Option("raft-check-leader-interval", Required = false, HelpText = "Raft leader check interval in milliseconds", Default = 250)]
     public int RaftCheckLeaderInterval { get; set; } = 250;

@@ -1,4 +1,6 @@
 using Kommander;
+using Kahuna.Server.KeyValues.Logging;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Data;
 using Kommander.Time;
 
@@ -40,11 +42,64 @@ internal sealed class KeyValueReplicationDispatcher
     // never is. One dictionary write per applied entry.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> lastAppliedByPartition = new();
 
+    // Partitions whose promotion-time fingerprint comparison is in flight, so a burst of leadership changes
+    // on one partition runs one comparison at a time instead of a pile of them.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> promotionComparisonsInFlight = new();
+
+    /// <summary>Bound on the whole promotion-time comparison, peers included.</summary>
+    private const int PromotionComparisonTimeoutMs = 5_000;
+
     internal KeyValueReplicationDispatcher(KeyValuesRuntime runtime, KeyValueRestorer restorer, KeyValueReplicator replicator)
     {
         this.runtime = runtime;
         this.restorer = restorer;
         this.replicator = replicator;
+
+        ApplyFingerprintProbe = new PartitionApplyFingerprintProbe(runtime.Raft, runtime.InterNodeCommunication, GetApplyFingerprint);
+    }
+
+    /// <summary>Compares this partition's apply fingerprint across replicas; shared with the split path.</summary>
+    internal PartitionApplyFingerprintProbe ApplyFingerprintProbe { get; }
+
+    /// <summary>
+    /// This node's apply fingerprint for <paramref name="partitionId"/>, or null when the node does not host
+    /// it. The applied log id is the subsystem's own high-water mark (0 before the first apply); the committed
+    /// heads are the partition's ledger slice; the live-intent count is node-wide, because prepared intents
+    /// are not attributed to a partition in memory.
+    /// </summary>
+    internal KeyValueApplyFingerprint? GetApplyFingerprint(int partitionId)
+    {
+        KeyValueApplyFingerprint? real = null;
+
+        if (runtime.Raft.HostsPartition(partitionId))
+        {
+            lastAppliedByPartition.TryGetValue(partitionId, out long lastApplied);
+
+            real = new KeyValueApplyFingerprint(
+                lastApplied,
+                runtime.PreparedIntentStore.CommittedHeadCountForPartition(partitionId),
+                runtime.PreparedIntentStore.LiveIntentCount);
+        }
+
+        Func<int, KeyValueApplyFingerprint?, KeyValueApplyFingerprint?>? overrideForTesting = ApplyFingerprintOverrideForTesting;
+        return overrideForTesting is null ? real : overrideForTesting(partitionId, real);
+    }
+
+    /// <summary>
+    /// Test-only injection point: receives (partition, real fingerprint or null when not hosted) and answers
+    /// what this node reports in its place, on every reader — the inter-node surface and the local read the
+    /// promotion and split comparisons make — so a fixture can make one replica report a diverged
+    /// committed-head count without corrupting a real apply stream. Never wired in production paths.
+    /// </summary>
+    internal Func<int, KeyValueApplyFingerprint?, KeyValueApplyFingerprint?>? ApplyFingerprintOverrideForTesting { get; set; }
+
+    /// <summary>Per-partition applied log ids for the gauge.</summary>
+    internal IReadOnlyList<(int PartitionId, long AppliedLogId)> SnapshotAppliedLogIds()
+    {
+        List<(int, long)> applied = new(lastAppliedByPartition.Count);
+        foreach (KeyValuePair<int, long> entry in lastAppliedByPartition)
+            applied.Add((entry.Key, entry.Value));
+        return applied;
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -303,7 +358,67 @@ internal sealed class KeyValueReplicationDispatcher
                 runtime.PreparedIntentStore.CommittedHeadCount, runtime.PreparedIntentStore.LiveIntentCount);
         }
 
+        // Promotion is the moment a divergent apply projection starts to serve as authoritative, and the
+        // moment every replica can still be asked: compare this node's fingerprint with its peers' off the
+        // notification path. The comparison cannot veto the promotion — Kommander already elected — so its
+        // output is the error-level signal and the divergence counter, which is what makes a replica that
+        // silently dropped part of its apply stream visible in the cluster's own signals.
+        if (node == runtime.Raft.GetLocalEndpoint() && promotionComparisonsInFlight.TryAdd(partitionId, 0))
+            _ = ReportDivergenceAtPromotionAsync(partitionId);
+
         return Task.FromResult(true);
+    }
+
+    private async Task ReportDivergenceAtPromotionAsync(int partitionId)
+    {
+        try
+        {
+            using CancellationTokenSource timeout = new(PromotionComparisonTimeoutMs);
+
+            ApplyFingerprintComparison comparison = await ApplyFingerprintProbe
+                .CompareWithReplicasAsync(partitionId, timeout.Token).ConfigureAwait(false);
+
+            // An indeterminate comparison at promotion is routine at startup (the cluster is still
+            // initializing) and is not evidence of anything: keep it out of the warning stream.
+            if (comparison.IsDeterminate)
+                ReportDivergence(comparison, "promotion");
+            else if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("KeyValues: apply fingerprint comparison at promotion of partition {PartitionId} is indeterminate", partitionId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "KeyValues: apply fingerprint comparison at promotion of partition {PartitionId} did not complete", partitionId);
+        }
+        finally
+        {
+            promotionComparisonsInFlight.TryRemove(partitionId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Logs every divergent peer of a determinate comparison at error level and counts it. Shared by the
+    /// promotion report and the split's pre-copy check so both moments produce the same evidence.
+    /// </summary>
+    internal void ReportDivergence(ApplyFingerprintComparison comparison, string moment)
+    {
+        if (!comparison.IsDeterminate)
+        {
+            logger.LogWarning(
+                "KeyValues: apply fingerprint comparison of partition {PartitionId} at {Moment} is indeterminate (leader {Leader})",
+                comparison.PartitionId, moment, comparison.Leader ?? "unresolved");
+            return;
+        }
+
+        if (!comparison.HasDivergence)
+            return;
+
+        foreach ((string peer, KeyValueApplyFingerprint fingerprint) in comparison.Divergent)
+        {
+            KeyValueApplyMetrics.DivergenceDetected.Add(1);
+            logger.LogApplyFingerprintDivergence(
+                comparison.PartitionId, moment, comparison.Leader!, comparison.LeaderFingerprint.CommittedHeads,
+                peer, fingerprint.CommittedHeads, comparison.LeaderFingerprint.AppliedLogId);
+        }
     }
 
     /// <summary>Records the highest applied log id per partition for the leadership-change fingerprint.

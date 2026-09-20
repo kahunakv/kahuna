@@ -83,4 +83,15 @@ internal static class RangeSplitMetrics
         Meter.CreateCounter<long>(
             "kahuna.range.merge.warm_skips",
             description: "Merge candidates skipped because at least one partition is warm (ops ≥ split threshold).");
+
+    /// <summary>
+    /// Splits refused before their bulk copy because the source partition's leader held fewer
+    /// committed heads than one of its replicas at the same applied kv log id — an incomplete
+    /// source whose copy would carry the loss into the new partition. Any non-zero value is a
+    /// replica divergence that also shows up as <c>kahuna.keyvalues.apply_divergence_detected</c>.
+    /// </summary>
+    internal static readonly Counter<long> IncompleteSourceRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.range.split.incomplete_source_refusals",
+            description: "Splits refused because the source partition leader's apply state was incomplete versus a replica.");
 }

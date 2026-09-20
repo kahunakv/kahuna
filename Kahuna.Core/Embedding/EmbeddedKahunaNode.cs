@@ -216,6 +216,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         Raft.OnReplicationReceived += Kahuna.OnReplicationReceived;
         Raft.OnReplicationError += Kahuna.OnReplicationError;
         Raft.OnLeaderChanged += Kahuna.OnLeaderChanged;
+        Raft.OnLeadershipLost += Kahuna.OnLeadershipLost;
 
         if (standaloneComm is not null)
         {
@@ -289,6 +290,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Raft.OnLogRestored -= Kahuna.OnLogRestored;
             Raft.OnReplicationReceived -= Kahuna.OnReplicationReceived;
             Raft.OnReplicationError -= Kahuna.OnReplicationError;
+            Raft.OnLeadershipLost -= Kahuna.OnLeadershipLost;
 
             // Drain the direct-write aggregator FIRST, while its lane actors and Raft are still alive: it
             // releases queued writes retryably and awaits in-flight batches settling their Raft round trip.
@@ -558,6 +560,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             HeartbeatInterval = options.HeartbeatInterval,
             RecentHeartbeat = options.RecentHeartbeat,
             VotingTimeout = options.VotingTimeout,
+            EnableCheckQuorum = options.EnableCheckQuorum,
+            CheckQuorumIntervalMultiplier = options.CheckQuorumIntervalMultiplier,
             CheckLeaderInterval = options.CheckLeaderInterval,
             TimerInitialDelay = options.TimerInitialDelay,
             UpdateNodesInterval = options.UpdateNodesInterval,

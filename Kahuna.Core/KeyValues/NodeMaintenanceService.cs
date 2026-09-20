@@ -139,6 +139,36 @@ internal sealed class NodeMaintenanceService
         await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Tells every key-value shard to drop the belief-only state it holds for a partition this node stopped
+    /// leading (see <see cref="Handlers.DropLeaderStateHandler"/>). Fire-and-forget by design: Raft raises the
+    /// leadership-lost notification on the partition executor thread, which must not wait on actor mailboxes.
+    /// </summary>
+    internal void DropLeaderState(int partitionId)
+    {
+        KeyValueRequest request = new(
+            KeyValueRequestType.DropLeaderState,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            string.Empty,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            partitionId,
+            default);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in ephemeralInstances)
+            actor.Send(request);
+
+        foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actor in persistentInstances)
+            actor.Send(request);
+    }
+
     /// <summary>Observable async drain of the direct-write aggregator: rejects new writes, releases queued
     /// ones retryably, and awaits in-flight batch settlement. Must run while the actor system and Raft are
     /// still alive (before their disposal), so in-flight batches can report their outcome.</summary>

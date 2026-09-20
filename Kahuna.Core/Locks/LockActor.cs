@@ -620,7 +620,8 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
             proposal.Durability,
             SerializeProposal(message.Type, proposal, currentTime),
             actorContext.Self,
-            actorContext.Reply.Value.Promise
+            actorContext.Reply.Value.Promise,
+            expectedTerm: raft.GetPartitionTerm(message.PartitionId)
         );
 
         if (!writeAggregator.TryEnqueue(submission))

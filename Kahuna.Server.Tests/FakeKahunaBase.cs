@@ -1,4 +1,5 @@
 using Kahuna.Server.KeyValues.Writes;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Data;
 using Kommander.Time;
 using Kommander.WAL;
@@ -132,6 +133,7 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => throw new NotImplementedException();
     public virtual void OnReplicationError(int partitionId, RaftLog log) => throw new NotImplementedException();
     public virtual Task<bool> OnLeaderChanged(int partitionId, string node) => throw new NotImplementedException();
+    public virtual Task OnLeadershipLost(int partitionId, long term) => Task.CompletedTask;
     public virtual Task FlushPersistenceAsync() => throw new NotImplementedException();
     public virtual Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
     public virtual void RegisterKeyRange(string keySpace) => throw new NotImplementedException();
@@ -159,6 +161,8 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => throw new NotImplementedException();
+
+    public virtual Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotImplementedException();
     public virtual Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotImplementedException();
 }

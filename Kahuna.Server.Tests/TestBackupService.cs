@@ -1313,6 +1313,7 @@ public sealed class TestBackupService : IDisposable
         public event Action<int>? OnRestoreStarted { add { } remove { } }
         public event Action<int>? OnRestoreFinished { add { } remove { } }
         public event Func<int, string, Task<bool>>? OnLeaderChanged { add { } remove { } }
+        public event Func<int, long, Task>? OnLeadershipLost { add { } remove { } }
         public event Action<IReadOnlyList<RaftPartitionRange>>? OnPartitionMapChanged { add { } remove { } }
 
         public Task JoinCluster(IEnumerable<string> seeds, CancellationToken ct = default) => Task.CompletedTask;
@@ -1322,6 +1323,7 @@ public sealed class TestBackupService : IDisposable
         public int GetPartitionKey(string partitionKey) => 0;
         public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
         public long GetPartitionGeneration(int partitionId) => 0;
+        public long GetPartitionTerm(int partitionId) => 0;
         public ValueTask<long?> GetFollowerLagAsync(int partitionId, string followerEndpoint) => ValueTask.FromResult<long?>(null);
         // Settable so a test can stand this stub up as the meta-partition leader (backup coordinator).
         // Defaults to false to preserve the behavior every other StubRaft-based test relies on.
@@ -1374,8 +1376,8 @@ public sealed class TestBackupService : IDisposable
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }
 
         public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) { }
-        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftBatchReplicationResult> ReplicateEntries(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         /// <summary>Partitions checkpointed through this stub, in order, so a test can assert the
         /// background writer's checkpoint cadence.</summary>

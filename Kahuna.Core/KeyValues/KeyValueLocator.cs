@@ -216,6 +216,91 @@ internal sealed class KeyValueLocator
     }
 
     /// <summary>
+    /// Gates an operation that mutates in-memory actor state <em>without</em> a Raft proposal on the
+    /// same quorum-confirmed leadership check reads use. A transactional set/delete/extend stages an
+    /// MVCC entry plus its write intent, a point/prefix/range exclusive lock and its release live in
+    /// the actor, and a prepare/commit/rollback mutation ticket is answered from actor state: none of
+    /// them replicate, so "replication itself fails on a deposed leader" does not protect them. A
+    /// leader cut off from its voters would stage a write, hand out a lock or release one from a
+    /// memory no other node will ever see, and the client would take the answer as authoritative.
+    /// Answering <see cref="KeyValueResponseType.MustRetry"/> instead costs one retry against a
+    /// settled view.
+    /// <para>A node that still believes it leads (<see cref="IRaft.AmILeaderQuick"/>, local belief)
+    /// while the quorum will not confirm it is the two-leader window itself, so that case is logged
+    /// at warning level, rate-limited per partition, and is the node-log evidence of the window.</para>
+    /// </summary>
+    private async ValueTask<bool> ConfirmLeadershipForActorMutation(int partitionId, CancellationToken cancellationToken)
+    {
+        if (await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+            return true;
+
+        if (await raft.AmILeaderQuickIfHosted(partitionId))
+            LogBeliefOnlyLeaderRefusal(partitionId);
+
+        return false;
+    }
+
+    /// <summary>
+    /// <see cref="ConfirmLeadershipForActorMutation"/> for a locally-led key group: every distinct
+    /// partition the group's keys route to must confirm before any key in the group mutates local
+    /// actor state. Mirrors <see cref="ConfirmLeadershipForGroupRead"/>.
+    /// </summary>
+    private async ValueTask<bool> ConfirmLeadershipForGroupMutation(
+        string leader,
+        Dictionary<int, string> leaderByPartition,
+        CancellationToken cancellationToken
+    )
+    {
+        foreach ((int partitionId, string partitionLeader) in leaderByPartition)
+        {
+            if (partitionLeader != leader)
+                continue;
+
+            if (!await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+                return false;
+        }
+
+        return true;
+    }
+
+    // Last warning per partition for the belief-only leader refusal, in Environment.TickCount64
+    // milliseconds. A deposed leader receives every operation its stale routers still send it until
+    // the cluster's view settles, and one warning per partition per cooldown is enough to place the
+    // window in the node log without flooding it.
+    private readonly ConcurrentDictionary<int, long> beliefOnlyLeaderWarnedAt = new();
+
+    private const long BeliefOnlyLeaderWarnCooldownMs = 5_000;
+
+    private static bool AnyTransactional(List<KahunaSetKeyValueRequestItem> items)
+    {
+        foreach (KahunaSetKeyValueRequestItem item in items)
+            if (item.TransactionId != HLCTimestamp.Zero)
+                return true;
+
+        return false;
+    }
+
+    private static bool AnyTransactional(List<KahunaDeleteKeyValueRequestItem> items)
+    {
+        foreach (KahunaDeleteKeyValueRequestItem item in items)
+            if (item.TransactionId != HLCTimestamp.Zero)
+                return true;
+
+        return false;
+    }
+
+    private void LogBeliefOnlyLeaderRefusal(int partitionId)
+    {
+        long now = Environment.TickCount64;
+
+        if (beliefOnlyLeaderWarnedAt.TryGetValue(partitionId, out long last) && now - last < BeliefOnlyLeaderWarnCooldownMs)
+            return;
+
+        beliefOnlyLeaderWarnedAt[partitionId] = now;
+        logger.LogBeliefOnlyLeaderRefusedActorMutation(partitionId, raft.GetLocalEndpoint());
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -269,7 +354,13 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
-        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        // A transactional set stages an MVCC entry in the actor and never proposes to Raft, so it
+        // needs the quorum-confirmed gate; a direct set replicates and fails on a deposed leader by itself.
+        bool stagesInActor = transactionId != HLCTimestamp.Zero;
+
+        if (stagesInActor
+                ? await ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
+                : await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             RecordLocalKeyRoute(key, partitionId, routedGeneration);
 
@@ -291,6 +382,11 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         if (leader == raft.GetLocalEndpoint())
         {
+            // The election view names this node but the quorum did not confirm it above: a staged
+            // write must not land on a belief-only leader.
+            if (stagesInActor)
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
             RecordLocalKeyRoute(key, partitionId, routedGeneration);
             return await manager.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
         }
@@ -381,7 +477,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<KahunaSetKeyValueRequestItem> items) in acquisitionPlan)
-            tasks.Add(TrySetManyNodeKeyValue(leader, localNode, items, lockSync, responses, cancellationToken));
+            tasks.Add(TrySetManyNodeKeyValue(leader, localNode, leaderByPartition, items, lockSync, responses, cancellationToken));
         
         await Task.WhenAll(tasks);
 
@@ -394,6 +490,7 @@ internal sealed class KeyValueLocator
     private async Task TrySetManyNodeKeyValue(
         string leader, 
         string localNode, 
+        Dictionary<int, string> leaderByPartition,
         List<KahunaSetKeyValueRequestItem> items, 
         Lock lockSync, 
         List<KahunaSetKeyValueResponseItem> responses, 
@@ -404,6 +501,19 @@ internal sealed class KeyValueLocator
         
         if (leader == localNode)
         {
+            // A transactional item stages in the actor without a proposal: the whole local group
+            // then needs the quorum-confirmed gate (see the single-key set path).
+            if (AnyTransactional(items) && !await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach (KahunaSetKeyValueRequestItem item in items)
+                        responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
+                }
+
+                return;
+            }
+
             List<KahunaSetKeyValueResponseItem> acquireResponses = await manager.SetManyNodeKeyValue(items);
 
             lock (lockSync)            
@@ -457,7 +567,7 @@ internal sealed class KeyValueLocator
         List<Task> tasks = new(acquisitionPlan.Count);
 
         foreach ((string leader, List<KahunaDeleteKeyValueRequestItem> items) in acquisitionPlan)
-            tasks.Add(TryDeleteManyNodeKeyValue(leader, localNode, items, lockSync, responses, cancellationToken));
+            tasks.Add(TryDeleteManyNodeKeyValue(leader, localNode, leaderByPartition, items, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
 
@@ -467,6 +577,7 @@ internal sealed class KeyValueLocator
     private async Task TryDeleteManyNodeKeyValue(
         string leader,
         string localNode,
+        Dictionary<int, string> leaderByPartition,
         List<KahunaDeleteKeyValueRequestItem> items,
         Lock lockSync,
         List<KahunaDeleteKeyValueResponseItem> responses,
@@ -477,6 +588,18 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
+            // A transactional item stages in the actor without a proposal (see the set-many path).
+            if (AnyTransactional(items) && !await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach (KahunaDeleteKeyValueRequestItem item in items)
+                        responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
+                }
+
+                return;
+            }
+
             List<KahunaDeleteKeyValueResponseItem> acquireResponses = await manager.DeleteManyNodeKeyValue(items);
 
             lock (lockSync)
@@ -511,7 +634,12 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
-        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        // A transactional delete stages in the actor without a proposal (see the set path).
+        bool stagesInActor = transactionId != HLCTimestamp.Zero;
+
+        if (stagesInActor
+                ? await ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
+                : await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             RecordLocalKeyRoute(key, partitionId);
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
@@ -522,6 +650,9 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         if (leader == raft.GetLocalEndpoint())
         {
+            if (stagesInActor)
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
             RecordLocalKeyRoute(key, partitionId);
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
         }
@@ -552,7 +683,12 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
 
-        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        // A transactional extend stages in the actor without a proposal (see the set path).
+        bool stagesInActor = transactionId != HLCTimestamp.Zero;
+
+        if (stagesInActor
+                ? await ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
+                : await raft.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
@@ -563,6 +699,9 @@ internal sealed class KeyValueLocator
             return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
         if (leader == raft.GetLocalEndpoint())
         {
+            if (stagesInActor)
+                return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+
             RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
         }
@@ -1062,14 +1201,12 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
 
-        if (await raft.AmILeaderIfHosted(partitionId, cancelationToken))
+        if (await ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
             return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancelationToken);
-        if (leader is null)
+        if (leader is null || leader == raft.GetLocalEndpoint())
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
-        if (leader == raft.GetLocalEndpoint())
-            return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
 
         logger.LogAcquireLockKeyValueRedirected(key, partitionId, leader);
 
@@ -1110,14 +1247,12 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return KeyValueResponseType.MustRetry;
 
-        if (await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
             return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
             
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
-        if (leader is null)
+        if (leader is null || leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
-        if (leader == raft.GetLocalEndpoint())
-            return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
 
         logger.LogAcquirePrefixLockKeyValueRedirected(prefixKey, partitionId, leader);
         
@@ -1165,7 +1300,7 @@ internal sealed class KeyValueLocator
 
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryAcquireNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryAcquireNodeExclusiveLocks(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancelationToken));
 
         await Task.WhenAll(tasks);
 
@@ -1176,6 +1311,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp transactionId,
         string leader,
         string localNode,
+        Dictionary<int, string> leaderByPartition,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses,
@@ -1186,6 +1322,17 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, int _, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> acquireResponses = await manager.TryAcquireManyExclusiveLocks(transactionId, xkeys);
 
             lock (lockSync)
@@ -1215,7 +1362,7 @@ internal sealed class KeyValueLocator
         
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
             return await manager.TryReleaseExclusiveLock(transactionId, key, durability);
             
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
@@ -1257,7 +1404,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = RoutePrefixKey(prefixKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
             return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
             
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
@@ -1519,7 +1666,7 @@ internal sealed class KeyValueLocator
         RangeLockMode mode,
         CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
             return await manager.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
@@ -1540,7 +1687,7 @@ internal sealed class KeyValueLocator
         KeyValueDurability durability,
         CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
             return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
@@ -1593,7 +1740,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryReleaseNodeExclusiveLocks(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryReleaseNodeExclusiveLocks(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
 
@@ -1604,6 +1751,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp transactionId, 
         string leader, 
         string localNode, 
+        Dictionary<int, string> leaderByPartition,
         List<(string key, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
@@ -1614,6 +1762,17 @@ internal sealed class KeyValueLocator
         
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancelationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, key, durability));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryReleaseManyExclusiveLocks(transactionId, xkeys);
 
             lock (lockSync)
@@ -1658,7 +1817,7 @@ internal sealed class KeyValueLocator
         if (routedGeneration == 0)
             routedGeneration = freshGeneration;
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancelationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
             return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
 
         string? leader = await TryWaitForLeader(partitionId, cancelationToken);
@@ -1714,7 +1873,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryPrepareNodeMutations(transactionId, commitId, leader, localNode, xkeys, lockSync, responses, cancelationToken, recordAnchorKey));
+            tasks.Add(TryPrepareNodeMutations(transactionId, commitId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancelationToken, recordAnchorKey));
         
         await Task.WhenAll(tasks);
 
@@ -1726,6 +1885,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp commitId,
         string leader, 
         string localNode, 
+        Dictionary<int, string> leaderByPartition,
         List<(string key, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, HLCTimestamp, string key, KeyValueDurability durability)> responses,
@@ -1737,6 +1897,17 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability)> prepareResponses = await manager.TryPrepareManyMutations(transactionId, commitId, xkeys, recordAnchorKey);
 
             lock (lockSync)
@@ -1767,7 +1938,7 @@ internal sealed class KeyValueLocator
         
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancelationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
             return await manager.TryCommitMutations(transactionId, key, ticketId, durability);
             
         string? leader = await TryWaitForLeader(partitionId, cancelationToken);
@@ -1820,7 +1991,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryCommitManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryCommitManyMutations(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
 
@@ -1831,6 +2002,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp transactionId, 
         string leader, 
         string localNode, 
+        Dictionary<int, string> leaderByPartition,
         List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType, string, long, KeyValueDurability)> responses,
@@ -1841,6 +2013,17 @@ internal sealed class KeyValueLocator
         
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancelationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, HLCTimestamp _, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, key, 0, durability));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> commitResponses = await manager.TryCommitManyMutations(transactionId, xkeys);
 
             lock (lockSync)
@@ -1871,7 +2054,7 @@ internal sealed class KeyValueLocator
         
         int partitionId = RouteKey(key);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancelationToken))
+        if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
             return await manager.TryRollbackMutations(transactionId, key, ticketId, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancelationToken);
@@ -1924,7 +2107,7 @@ internal sealed class KeyValueLocator
         
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys) in acquisitionPlan)
-            tasks.Add(TryRollbackManyMutations(transactionId, leader, localNode, xkeys, lockSync, responses, cancelationToken));
+            tasks.Add(TryRollbackManyMutations(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancelationToken));
         
         await Task.WhenAll(tasks);
 
@@ -1935,6 +2118,7 @@ internal sealed class KeyValueLocator
         HLCTimestamp transactionId, 
         string leader, 
         string localNode, 
+        Dictionary<int, string> leaderByPartition,
         List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType, string, long, KeyValueDurability)> responses,
@@ -1945,6 +2129,17 @@ internal sealed class KeyValueLocator
         
         if (leader == localNode)
         {
+            if (!await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancelationToken))
+            {
+                lock (lockSync)
+                {
+                    foreach ((string key, HLCTimestamp _, KeyValueDurability durability) in xkeys)
+                        responses.Add((KeyValueResponseType.MustRetry, key, 0, durability));
+                }
+
+                return;
+            }
+
             List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> commitResponses = await manager.TryRollbackManyMutations(transactionId, xkeys);
 
             lock (lockSync)

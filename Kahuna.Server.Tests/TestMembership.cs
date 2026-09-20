@@ -1,5 +1,6 @@
 
 using Kahuna.Server.KeyValues.Writes;
+using Kahuna.Server.KeyValues.Data;
 using System.Text;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
@@ -563,6 +564,7 @@ public sealed class TestMembership : BaseCluster
         public event Action<int>? OnRestoreStarted { add { } remove { } }
         public event Action<int>? OnRestoreFinished { add { } remove { } }
         public event Func<int, string, Task<bool>>? OnLeaderChanged { add { } remove { } }
+        public event Func<int, long, Task>? OnLeadershipLost { add { } remove { } }
         public event Action<IReadOnlyList<RaftPartitionRange>>? OnPartitionMapChanged { add { } remove { } }
 
         public bool Joined => false;
@@ -578,6 +580,7 @@ public sealed class TestMembership : BaseCluster
         public int GetPartitionKey(string partitionKey) => 0;
         public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
         public long GetPartitionGeneration(int partitionId) => 0;
+        public long GetPartitionTerm(int partitionId) => -1;
         public ValueTask<long?> GetFollowerLagAsync(int partitionId, string followerEndpoint) => ValueTask.FromResult<long?>(null);
         public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(false);
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
@@ -605,8 +608,8 @@ public sealed class TestMembership : BaseCluster
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }
 
         public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) { }
-        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftBatchReplicationResult> ReplicateEntries(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftReplicationResult> ReplicateCheckpoint(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
@@ -678,6 +681,7 @@ public sealed class TestMembership : BaseCluster
         public event Action<int>? OnRestoreStarted { add { } remove { } }
         public event Action<int>? OnRestoreFinished { add { } remove { } }
         public event Func<int, string, Task<bool>>? OnLeaderChanged { add { } remove { } }
+        public event Func<int, long, Task>? OnLeadershipLost { add { } remove { } }
         public event Action<IReadOnlyList<RaftPartitionRange>>? OnPartitionMapChanged { add { } remove { } }
 
         public bool Joined => false;
@@ -693,6 +697,7 @@ public sealed class TestMembership : BaseCluster
         public int GetPartitionKey(string partitionKey) => 0;
         public int GetPrefixPartitionKey(string prefixPartitionKey) => 0;
         public long GetPartitionGeneration(int partitionId) => 0;
+        public long GetPartitionTerm(int partitionId) => -1;
         public ValueTask<long?> GetFollowerLagAsync(int partitionId, string followerEndpoint) => ValueTask.FromResult<long?>(null);
         public ValueTask<bool> AmILeaderQuick(int partitionId) => ValueTask.FromResult(false);
         public ValueTask<bool> AmILeader(int partitionId, CancellationToken cancellationToken) => ValueTask.FromResult(false);
@@ -720,8 +725,8 @@ public sealed class TestMembership : BaseCluster
         public void RegisterStateMachineTransfer(IRaftStateMachineTransfer? transfer) { }
 
         public void RegisterSystemStateTransfer(IRaftSystemStateTransfer? transfer) { }
-        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftBatchReplicationResult> ReplicateEntries(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<RaftReplicationResult> ReplicateCheckpoint(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
@@ -760,6 +765,7 @@ public sealed class TestMembership : BaseCluster
         public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => Task.FromResult(true);
         public void OnReplicationError(int partitionId, RaftLog log) { }
         public Task<bool> OnLeaderChanged(int partitionId, string node) => Task.FromResult(true);
+        public Task OnLeadershipLost(int partitionId, long term) => Task.CompletedTask;
         public Task FlushPersistenceAsync() => Task.CompletedTask;
         public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, Kommander.WAL.IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
         public void RegisterKeyRange(string keySpace) { }
@@ -897,5 +903,7 @@ public sealed class TestMembership : BaseCluster
         public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) => throw new NotImplementedException();
         public Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => throw new NotImplementedException();
         public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => throw new NotImplementedException();
+
+        public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => throw new NotImplementedException();
     }
 }

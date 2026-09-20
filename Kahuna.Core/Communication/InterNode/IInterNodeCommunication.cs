@@ -1,5 +1,6 @@
 
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Data;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
@@ -217,4 +218,12 @@ public interface IInterNodeCommunication
     /// leadership and refused to answer from possibly-stale local state.
     /// </summary>
     public Task<(KeyValueResponseType Type, HLCTimestamp Floor, int LiveHolds)> GetSnapshotFloor(string node, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads <paramref name="node"/>'s own apply fingerprint for a partition — its applied kv log id and
+    /// committed-head count. Answered from that node's memory, leader or not; Type is
+    /// <see cref="KeyValueResponseType.Get"/> on an answer, <see cref="KeyValueResponseType.DoesNotExist"/>
+    /// when the node does not host the partition, <see cref="KeyValueResponseType.MustRetry"/> on a transport failure.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken);
 }

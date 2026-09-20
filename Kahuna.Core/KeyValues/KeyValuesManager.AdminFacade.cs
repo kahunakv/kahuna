@@ -1,4 +1,6 @@
 using Nixie;
+using Kahuna.Server.KeyValues.Logging;
+using Kahuna.Server.KeyValues.Data;
 using Nixie.Routers;
 
 using Kommander;
@@ -199,6 +201,43 @@ internal sealed partial class KeyValuesManager
 
     /// <summary>Invoked when a partition's leader changes.</summary>
     public Task<bool> OnLeaderChanged(int partitionId, string node) => replicationDispatcher.OnLeaderChanged(partitionId, node);
+
+    /// <summary>
+    /// Invoked when this node stops leading a partition. Drops the belief-only actor state of that partition
+    /// (staged transactional writes, exclusive locks): it was admitted under the lost term, no other node can
+    /// see it, and the term fence refuses any proposal derived from it. Returns at once — the notification is
+    /// raised on the partition executor thread.
+    /// </summary>
+    public Task OnLeadershipLost(int partitionId, long term)
+    {
+        logger.LogLeadershipLostDroppingActorState(partitionId, term);
+        nodeMaintenance.DropLeaderState(partitionId);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// This node's apply fingerprint for a partition (see <see cref="IKahuna.GetPartitionApplyFingerprint"/>).
+    /// </summary>
+    public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct)
+    {
+        KeyValueApplyFingerprint? fingerprint = replicationDispatcher.GetApplyFingerprint(partitionId);
+
+        return Task.FromResult(fingerprint is null
+            ? (KeyValueResponseType.DoesNotExist, default)
+            : (KeyValueResponseType.Get, fingerprint.Value));
+    }
+
+    /// <summary>
+    /// Compares the apply fingerprint of <paramref name="partitionId"/>'s leader with its other replicas —
+    /// the pre-copy completeness check of a split. See <see cref="PartitionApplyFingerprintProbe"/>.
+    /// </summary>
+    internal Task<ApplyFingerprintComparison> CompareApplyFingerprintWithReplicasAsync(int partitionId, CancellationToken ct) =>
+        replicationDispatcher.ApplyFingerprintProbe.CompareWithReplicasAsync(partitionId, ct);
+
+    /// <summary>Logs and counts every divergent replica of a comparison; see <see cref="KeyValueReplicationDispatcher.ReportDivergence"/>.</summary>
+    internal void ReportApplyDivergence(ApplyFingerprintComparison comparison, string moment) =>
+        replicationDispatcher.ReportDivergence(comparison, moment);
+
 
     /// <summary>Runs one auto-merge pass at the configured minimum range size.</summary>
     internal Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => keySpaceAdmin.TriggerAutoMergeAsync(ct);

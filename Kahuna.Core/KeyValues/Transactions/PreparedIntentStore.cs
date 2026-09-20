@@ -1015,6 +1015,12 @@ internal sealed class PreparedIntentStore
         }
     }
 
+    /// <summary>Number of keys the committed-head ledger slice of <paramref name="partitionId"/> holds; 0 when the
+    /// node holds no slice for it. Feeds the per-partition apply fingerprint, where two replicas at the same
+    /// applied log id must report the same count.</summary>
+    internal int CommittedHeadCountForPartition(int partitionId) =>
+        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? ledger.Heads.Count : 0;
+
     /// <summary>Approximate bytes retained by every committed-head ledger slice (gauge).</summary>
     internal long CommittedHeadLedgerBytes
     {

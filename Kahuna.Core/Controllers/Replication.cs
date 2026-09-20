@@ -48,4 +48,6 @@ public sealed partial class KahunaManager
 
         return keyValues.OnLeaderChanged(partitionId, node);
     }
+
+    public Task OnLeadershipLost(int partitionId, long term) => keyValues.OnLeadershipLost(partitionId, term);
 }

@@ -338,9 +338,15 @@ internal sealed class DurableReplicationGateway
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // Term fence: the term read here, under the leadership that admitted this write, is compared by
+        // the Raft executor before the entry is appended. A node that lost and regained leadership in a
+        // newer term between admission and flush refuses the proposal with TermMismatch (retryable)
+        // instead of appending a write whose preconditions were judged under a leadership that ended.
+        long expectedTerm = raft.GetPartitionTerm(partitionId);
+
         Writes.DurableProposalSubmission submission = new(
             partitionId,
-            [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0)],
+            [new RaftProposalEntry(logType, data, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)],
             completion,
             admissionClass,
             stage,
@@ -489,9 +495,12 @@ internal sealed class DurableReplicationGateway
                 return new DurableBundleWireReply(false, false, 0);
         }
 
+        // Term fence, see ReplicateDurableLocal.
+        long expectedTerm = raft.GetPartitionTerm(partitionId);
+
         RaftProposalEntry[] proposal = new RaftProposalEntry[entries.Count];
         for (int i = 0; i < entries.Count; i++)
-            proposal[i] = new RaftProposalEntry(entries[i].LogType, entries[i].Payload, AutoCommit: true, ExpectedGeneration: 0);
+            proposal[i] = new RaftProposalEntry(entries[i].LogType, entries[i].Payload, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
 
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         bool batchCommitted = false;
@@ -709,12 +718,15 @@ internal sealed class DurableReplicationGateway
 
         bool batchCommitted = false;
 
+        // Term fence, see ReplicateDurableLocal.
+        long expectedTerm = raft.GetPartitionTerm(partitionId);
+
         Writes.DurableProposalSubmission submission = new(
             partitionId,
             [
-                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0),
-                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0),
-                new RaftProposalEntry(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0)
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
+                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)
             ],
             completion,
             // Ordinary admission, matching the 2PC record-init/prepare stage: nothing is prepared yet, so a
@@ -781,11 +793,14 @@ internal sealed class DurableReplicationGateway
         // Committed bool cannot express on its own.
         bool batchCommitted = false;
 
+        // Term fence, see ReplicateDurableLocal.
+        long expectedTerm = raft.GetPartitionTerm(partitionId);
+
         Writes.DurableProposalSubmission submission = new(
             partitionId,
             [
-                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0),
-                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0)
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
+                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)
             ],
             completion,
             Writes.WriteAdmissionClass.Ordinary,

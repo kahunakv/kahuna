@@ -245,6 +245,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// </summary>
     private readonly EvictPartitionHandler evictPartitionHandler;
 
+    private readonly DropLeaderStateHandler dropLeaderStateHandler;
+
     /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
@@ -357,6 +359,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         resumeReadHandler = new(context);
         invalidateOrApplyHandler = new(context);
         evictPartitionHandler = new(context);
+        dropLeaderStateHandler = new(context);
     }
 
     /// <summary>
@@ -441,6 +444,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
                 KeyValueRequestType.FlushAck => FlushAck(message),
                 KeyValueRequestType.EvictPartition => evictPartitionHandler.Execute(message),
+                KeyValueRequestType.DropLeaderState => dropLeaderStateHandler.Execute(message),
                 KeyValueRequestType.Collect => CollectMessage(),
                 _ => KeyValueStaticResponses.ErroredResponse
             };

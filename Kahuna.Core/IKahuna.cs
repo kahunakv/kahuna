@@ -1,5 +1,6 @@
 
 using Kommander.Data;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Time;
 using Kommander.WAL;
 
@@ -364,6 +365,14 @@ public interface IKahuna
 
     public Task<bool> OnLeaderChanged(int partitionId, string node);
 
+    /// <summary>
+    /// Invoked when this node stops leading <paramref name="partitionId"/>, with the term it led in.
+    /// Belief-only actor state for the partition (staged transactional writes, exclusive locks) is
+    /// dropped: a new leader cannot see it, and a proposal derived from it under the lost term is
+    /// refused by Raft's term fence.
+    /// </summary>
+    public Task OnLeadershipLost(int partitionId, long term);
+
     public Task FlushPersistenceAsync();
 
     /// <summary>
@@ -632,4 +641,13 @@ public interface IKahuna
     /// </summary>
     public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)>
         GetSnapshotFloor(CancellationToken ct);
+
+    /// <summary>
+    /// This node's apply fingerprint for <paramref name="partitionId"/>: the highest kv log id it applied
+    /// and the committed heads it holds for the partition. Type is <see cref="KeyValueResponseType.Get"/>
+    /// when the node hosts the partition and <see cref="KeyValueResponseType.DoesNotExist"/> otherwise.
+    /// Answered from local state by any replica, leader or not: the value is about this node's memory.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
+        GetPartitionApplyFingerprint(int partitionId, CancellationToken ct);
 }

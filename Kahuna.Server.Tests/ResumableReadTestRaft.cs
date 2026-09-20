@@ -74,6 +74,7 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public event Func<int, RaftLog, Task<bool>>? OnLogRestored { add => inner.OnLogRestored += value; remove => inner.OnLogRestored -= value; }
     public event Func<int, RaftLog, Task<bool>>? OnReplicationReceived { add => inner.OnReplicationReceived += value; remove => inner.OnReplicationReceived -= value; }
     public event Func<int, string, Task<bool>>? OnLeaderChanged { add => inner.OnLeaderChanged += value; remove => inner.OnLeaderChanged -= value; }
+    public event Func<int, long, Task>? OnLeadershipLost { add => inner.OnLeadershipLost += value; remove => inner.OnLeadershipLost -= value; }
     public event Action<IReadOnlyList<RaftPartitionRange>>? OnPartitionMapChanged { add => inner.OnPartitionMapChanged += value; remove => inner.OnPartitionMapChanged -= value; }
     public event Action<ClusterMembership>? OnMembershipChanged { add => inner.OnMembershipChanged += value; remove => inner.OnMembershipChanged -= value; }
 
@@ -91,8 +92,8 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public void Vote(VoteRequest request) => inner.Vote(request);
     public void AppendLogs(AppendLogsRequest request) => inner.AppendLogs(request);
     public void CompleteAppendLogs(CompleteAppendLogsRequest request) => inner.CompleteAppendLogs(request);
-    public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => inner.ReplicateLogs(partitionId, type, data, autoCommit, expectedGeneration, cancellationToken);
-    public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, CancellationToken cancellationToken = default) => inner.ReplicateLogs(partitionId, type, logs, autoCommit, expectedGeneration, cancellationToken);
+    public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => inner.ReplicateLogs(partitionId, type, data, autoCommit, expectedGeneration, expectedTerm, cancellationToken);
+    public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, IEnumerable<byte[]> logs, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default) => inner.ReplicateLogs(partitionId, type, logs, autoCommit, expectedGeneration, expectedTerm, cancellationToken);
     public Task<RaftBatchReplicationResult> ReplicateEntries(int partitionId, IReadOnlyList<RaftProposalEntry> entries, CancellationToken cancellationToken = default) => inner.ReplicateEntries(partitionId, entries, cancellationToken);
     public Task<RaftReplicationResult> ReplicateCheckpoint(int partitionId, CancellationToken cancellationToken = default) => inner.ReplicateCheckpoint(partitionId, cancellationToken);
     public Task<(bool success, RaftOperationStatus status, long commitLogId)> CommitLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => inner.CommitLogs(partitionId, ticketId, cancellationToken);
@@ -123,6 +124,7 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public Task<RaftPartitionLifecycleResult> SplitPartitionAsync(int sourcePartitionId, int targetPartitionId = 0, RaftSplitPlan? plan = null, CancellationToken ct = default) => inner.SplitPartitionAsync(sourcePartitionId, targetPartitionId, plan, ct);
     public Task<RaftPartitionLifecycleResult> MergePartitionsAsync(int survivorPartitionId, int sourcePartitionId, RaftMergePlan? plan = null, CancellationToken ct = default) => inner.MergePartitionsAsync(survivorPartitionId, sourcePartitionId, plan, ct);
     public long GetPartitionGeneration(int partitionId) => inner.GetPartitionGeneration(partitionId);
+    public long GetPartitionTerm(int partitionId) => inner.GetPartitionTerm(partitionId);
     public double GetPartitionLogOpsPerSecond(int partitionId) => inner.GetPartitionLogOpsPerSecond(partitionId);
     public int GetPartitionWalQueueDepth(int partitionId) => inner.GetPartitionWalQueueDepth(partitionId);
     public double GetPartitionCommitWaitMs(int partitionId) => inner.GetPartitionCommitWaitMs(partitionId);

@@ -43,6 +43,7 @@ service KeyValuer {
   rpc RenewSnapshotHold   (GrpcRenewSnapshotHoldRequest)   returns (GrpcRenewSnapshotHoldResponse);
   rpc ReleaseSnapshotHold (GrpcReleaseSnapshotHoldRequest)  returns (GrpcReleaseSnapshotHoldResponse);
   rpc GetSnapshotFloor    (GrpcGetSnapshotFloorRequest)     returns (GrpcGetSnapshotFloorResponse);
+  rpc GetPartitionApplyFingerprint (GrpcGetPartitionApplyFingerprintRequest) returns (GrpcGetPartitionApplyFingerprintResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -1788,4 +1789,19 @@ message GrpcGetSnapshotFloorResponse {
   // confirm meta-partition leadership and refused to report from possibly-stale local state.
   // Absent (TYPE_SET, the enum default) from servers predating this field — treated as success.
   GrpcKeyValueResponseType Type = 5;
+}
+
+// The answering node's own apply state for one partition. Answered by any replica from its memory —
+// no leader confirmation, because the value is about THIS node's apply stream.
+message GrpcGetPartitionApplyFingerprintRequest {
+  int32 PartitionId = 1;
+}
+
+message GrpcGetPartitionApplyFingerprintResponse {
+  // TYPE_GOT on an answer; TYPE_DOES_NOT_EXIST when the node does not host the partition;
+  // TYPE_MUST_RETRY when the node could not answer.
+  GrpcKeyValueResponseType Type = 1;
+  int64 AppliedLogId = 2;
+  int64 CommittedHeads = 3;
+  int64 LiveIntents = 4;
 }

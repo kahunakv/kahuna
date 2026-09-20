@@ -319,4 +319,16 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Error, Message = "User function {Name} threw for transaction {TransactionId}. The transaction is rolled back and the client sees Errored")]
     public static partial void LogUserFunctionThrew(this ILogger<IKahuna> logger, Exception exception, string name, HLCTimestamp transactionId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Refusing an actor-state mutation on partition {PartitionId}: node {Node} believes it leads but a quorum of voters did not confirm the leadership. A second leader may be serving this partition; the caller gets MustRetry")]
+    public static partial void LogBeliefOnlyLeaderRefusedActorMutation(this ILogger<IKahuna> logger, int partitionId, string node);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "KeyValues: leadership of partition {PartitionId} lost in term {Term}; dropping the staged transactional writes and exclusive locks admitted under it")]
+    public static partial void LogLeadershipLostDroppingActorState(this ILogger<IKahuna> logger, int partitionId, long term);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: apply divergence on partition {PartitionId} at {Moment}: leader {Leader} holds {LeaderHeads} committed heads but replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. One replica's apply stream diverged from the log; reads served from the smaller state miss acknowledged writes")]
+    public static partial void LogApplyFingerprintDivergence(this ILogger<IKahuna> logger, int partitionId, string moment, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitter: refusing to split {Space} at {Key}: the source partition {PartitionId} leader {Leader} holds {LeaderHeads} committed heads while replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. A copy from an incomplete source would move the loss into the new partition")]
+    public static partial void LogRangeSplitRefusedIncompleteSource(this ILogger<IKahuna> logger, string space, string key, int partitionId, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);
 }

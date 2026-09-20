@@ -54,7 +54,8 @@ internal sealed class LockProposalSubmission : IProposalSubmission
         LockDurability durability,
         byte[] serializedMessage,
         IActorRef<LockActor, LockRequest, LockResponse> lockActor,
-        TaskCompletionSource<LockResponse?>? promise
+        TaskCompletionSource<LockResponse?>? promise,
+        long expectedTerm = 0
     )
     {
         Resource = resource;
@@ -64,7 +65,9 @@ internal sealed class LockProposalSubmission : IProposalSubmission
         ByteLength = serializedMessage.Length;
         LockActor = lockActor;
         Promise = promise;
-        Entries = [new RaftProposalEntry(ReplicationTypes.Locks, serializedMessage, AutoCommit: true, ExpectedGeneration: 0)];
+        // Term fence: the Raft executor refuses the batch with TermMismatch when the partition's term
+        // moved since the actor judged this lock transition (see IRaft.GetPartitionTerm).
+        Entries = [new RaftProposalEntry(ReplicationTypes.Locks, serializedMessage, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)];
     }
 
     /// <summary>Hash-routed resources never move between admission and flush.</summary>

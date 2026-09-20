@@ -1,5 +1,6 @@
 
 using System.Collections.Concurrent;
+using Kahuna.Server.KeyValues.Data;
 
 using Nixie;
 using Nixie.Routers;
@@ -241,6 +242,17 @@ internal sealed partial class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Test-only injection point: when set, receives (partition, real fingerprint or null when not hosted)
+    /// and answers what this node reports in its place, so a fixture can make one replica report a
+    /// diverged committed-head count without corrupting a real apply stream. Never wired in production paths.
+    /// </summary>
+    internal Func<int, KeyValueApplyFingerprint?, KeyValueApplyFingerprint?>? ApplyFingerprintOverrideForTesting
+    {
+        get => replicationDispatcher.ApplyFingerprintOverrideForTesting;
+        set => replicationDispatcher.ApplyFingerprintOverrideForTesting = value;
+    }
+
+    /// <summary>
     /// Test-only injection point: when set and it returns true for a target endpoint, the
     /// range-copy page send to that endpoint throws as an unreachable node's transport would.
     /// Never wired in production paths.
@@ -293,6 +305,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     private readonly System.Diagnostics.Metrics.Meter durableGaugeMeter;
 
     private readonly System.Diagnostics.Metrics.Meter admissionGaugeMeter;
+
+    // Instance-owned meter for the per-partition applied-log-id gauge; same ownership rule.
+    private readonly System.Diagnostics.Metrics.Meter applyGaugeMeter;
 
     private readonly System.Diagnostics.Metrics.Meter functionGaugeMeter;
 
@@ -485,6 +500,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         this.scriptExecutor = built.scriptExecutor;
         this.durableGaugeMeter = built.durableGaugeMeter;
         this.admissionGaugeMeter = built.admissionGaugeMeter;
+        this.applyGaugeMeter = built.applyGaugeMeter;
         this.functionGaugeMeter = built.functionGaugeMeter;
         this.locator = built.locator;
         this.preparedIntentRecovery = built.preparedIntentRecovery;
@@ -584,6 +600,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         rangeSplitTrigger?.Dispose();
         durableGaugeMeter.Dispose();
         admissionGaugeMeter.Dispose();
+        applyGaugeMeter.Dispose();
         functionGaugeMeter.Dispose();
 
         // Fail anything still waiting for a slot rather than leaving callers awaiting an admission that a

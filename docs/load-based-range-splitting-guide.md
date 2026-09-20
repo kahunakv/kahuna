@@ -160,6 +160,7 @@ with `keyspace`:
 | `kahuna.range.split.no_relief_skips` | Load splits skipped: no peer node to host the child | **Any sustained value = load splitting is inert.** Single-node cluster, or balancer off / peers silent. |
 | `kahuna.range.split.indivisible_refusals` | Splits refused: all writes on one key | Persistently high = a **hot-key** workload that splitting cannot relieve (re-key, don't expect splits to help). |
 | `kahuna.range.split.settle_skips` | Descriptors skipped inside the settle window | Normal during active splitting. Never dropping to 0 may mean the settle window is too long. |
+| `kahuna.range.split.incomplete_source_refusals` | Splits refused before the copy: the source leader held fewer committed heads than a replica at the same applied log id | **Any value = a replica divergence.** See the [leadership fencing and apply-fingerprint guide](leadership-fencing-and-apply-fingerprint-guide.md). |
 | `kahuna.range.merge.warm_skips` | Merges skipped because a side is still warm | The oscillation guard working — merge declined to coalesce an active range. |
 
 ---
@@ -178,6 +179,8 @@ with a shallow queue is "busy but keeping up," and Kahuna intentionally won't sp
 **"Ranges merge and re-split repeatedly."** Shouldn't happen — the merge trigger refuses to merge a warm
 range (`warm_skips`). If you see it, a side's rate is below `RangeSplitLoadThreshold` (so "cold" to the
 merge guard) but its centroid still splits; widen the gap or raise the threshold.
+
+**"`incomplete_source_refusals` is non-zero."** The split refused to copy from the source partition because one replica holds more committed heads than the leader at the same applied kv log id: the leader's apply state is incomplete, and a copy would carry the missing writes' loss into the new partition. The same comparison logs the divergence at error level. Repair the source partition first; the trigger retries the split on its next cadence.
 
 **"`indivisible_refusals` keeps climbing."** A single key (or tiny key span) holds essentially all the
 writes. No split key can balance it — this is a workload/schema problem (a hot row, a monotonic counter),

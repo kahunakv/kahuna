@@ -485,6 +485,25 @@ public sealed class EmbeddedKahunaOptions
 
     public TimeSpan CheckLeaderInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>
+    /// Check-quorum step-down. A leader that hears no same-term append/heartbeat ack from a majority
+    /// of its voters for <see cref="HeartbeatInterval"/> × <see cref="CheckQuorumIntervalMultiplier"/>
+    /// steps down to follower. On by default: without it an isolated leader keeps the role until it
+    /// receives a higher-term message, and in that window it keeps staging writes and releasing locks
+    /// that no quorum will ever see.
+    /// </summary>
+    public bool EnableCheckQuorum { get; set; } = true;
+
+    /// <summary>
+    /// Number of heartbeat intervals without a majority of same-term acks after which a leader with
+    /// <see cref="EnableCheckQuorum"/> steps down. 0 (the default) derives the window from
+    /// <see cref="StartElectionTimeout"/>: the largest window that still steps an isolated leader down
+    /// before any follower can start an election. An explicit value must be at least 2 and must keep
+    /// <see cref="HeartbeatInterval"/> × multiplier at or below <see cref="StartElectionTimeout"/>;
+    /// Kommander refuses to start otherwise.
+    /// </summary>
+    public int CheckQuorumIntervalMultiplier { get; set; }
+
     public TimeSpan TimerInitialDelay { get; set; } = TimeSpan.FromMilliseconds(2500);
 
     public TimeSpan UpdateNodesInterval { get; set; } = TimeSpan.FromMilliseconds(5000);

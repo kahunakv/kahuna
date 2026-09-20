@@ -574,7 +574,9 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     /// <summary>The returned statuses that definitively mean the same request cannot succeed by retrying — the
     /// Raft layer reported a structural error, or the cluster can no longer form a majority. Every other
     /// non-success status (leadership churn, timeout, queue-full, restore, moved partition, proposal-not-found,
-    /// cancellation, or an unknown value) is retryable per <see cref="ClassifyOutcome"/>.</summary>
+    /// cancellation, or an unknown value) is retryable per <see cref="ClassifyOutcome"/>. A term-fence refusal
+    /// (<see cref="RaftOperationStatus.TermMismatch"/>) is retryable too: it is a definite "did not take effect"
+    /// answered before anything was appended, and the retry re-judges the write under the current leadership.</summary>
     internal static bool IsPermanentStatus(RaftOperationStatus status) => status switch
     {
         RaftOperationStatus.Errored or RaftOperationStatus.InsufficientVoters => true,

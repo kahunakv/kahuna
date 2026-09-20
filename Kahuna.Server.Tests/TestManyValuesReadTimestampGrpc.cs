@@ -1,5 +1,6 @@
 
 using Kahuna.Server.Communication;
+using Kahuna.Server.KeyValues.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Google.Protobuf;
 using Kommander.Data;
@@ -254,6 +255,7 @@ public class TestManyValuesReadTimestampGrpc
         public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => throw new NotImplementedException();
         public void OnReplicationError(int partitionId, RaftLog log) => throw new NotImplementedException();
         public Task<bool> OnLeaderChanged(int partitionId, string node) => throw new NotImplementedException();
+        public Task OnLeadershipLost(int partitionId, long term) => Task.CompletedTask;
         public Task FlushPersistenceAsync() => throw new NotImplementedException();
         public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
         public void RegisterKeyRange(string keySpace) => throw new NotImplementedException();
@@ -281,5 +283,7 @@ public class TestManyValuesReadTimestampGrpc
         public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) => throw new NotImplementedException();
         public Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => throw new NotImplementedException();
         public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => throw new NotImplementedException();
+
+        public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => throw new NotImplementedException();
     }
 }

@@ -98,6 +98,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
@@ -173,6 +174,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
@@ -248,6 +250,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
@@ -431,6 +434,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
@@ -601,6 +605,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
@@ -711,6 +716,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 
@@ -822,6 +828,7 @@ public abstract class BaseCluster
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
 
         TestClusterNodeRegistry.Register(raft, kahuna, actorSystem);
 

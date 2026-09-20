@@ -1,5 +1,6 @@
 
 using Kommander;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Time;
 using Kahuna.Server;
 using Kahuna.Server.Communication.Internode;
@@ -589,4 +590,8 @@ public sealed partial class KahunaManager
     public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)>
         GetSnapshotFloor(CancellationToken ct) =>
         keyValues.GetSnapshotFloor(ct);
+
+    public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
+        GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) =>
+        keyValues.GetPartitionApplyFingerprint(partitionId, ct);
 }

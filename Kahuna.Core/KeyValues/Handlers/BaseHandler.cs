@@ -303,7 +303,8 @@ internal abstract class BaseHandler
             serialized,
             actorContext.Self,
             KeyValueReplyRef.From(actorContext.Reply.Value),
-            0 // placeholder: the aggregator stamps EnqueueTicks from its own TimeProvider at admission.
+            0, // placeholder: the aggregator stamps EnqueueTicks from its own TimeProvider at admission.
+            expectedTerm: context.Raft.GetPartitionTerm(partitionId)
         );
 
         // Hand the staged write to the partition aggregator. On synchronous backpressure (the partition's

@@ -7,6 +7,7 @@
  */
 
 using System.Runtime.CompilerServices;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Time;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
@@ -2775,6 +2776,24 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             EffectiveFloorPhysical = floor.L,
             EffectiveFloorCounter  = floor.C,
             LiveHolds              = liveHolds
+        };
+    }
+
+    public override Task<GrpcGetPartitionApplyFingerprintResponse> GetPartitionApplyFingerprint(GrpcGetPartitionApplyFingerprintRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.GetPartitionApplyFingerprintCore(r, c), static _ => KeyValueMustRetry.GetPartitionApplyFingerprint());
+
+    private async Task<GrpcGetPartitionApplyFingerprintResponse> GetPartitionApplyFingerprintCore(
+        GrpcGetPartitionApplyFingerprintRequest request, ServerCallContext context)
+    {
+        (KeyValueResponseType type, KeyValueApplyFingerprint fingerprint) =
+            await keyValues.GetPartitionApplyFingerprint(request.PartitionId, context.CancellationToken).ConfigureAwait(false);
+
+        return new()
+        {
+            Type           = (GrpcKeyValueResponseType)type,
+            AppliedLogId   = fingerprint.AppliedLogId,
+            CommittedHeads = fingerprint.CommittedHeads,
+            LiveIntents    = fingerprint.LiveIntents
         };
     }
 

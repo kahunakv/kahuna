@@ -1,5 +1,6 @@
 
 using Kommander;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Time;
 using Kommander.Communication.Grpc;
 using Microsoft.Extensions.Logging;
@@ -2485,6 +2486,38 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             type,
             new HLCTimestamp(r.EffectiveFloorNode, r.EffectiveFloorPhysical, r.EffectiveFloorCounter),
             r.LiveHolds
+        );
+    }
+
+    /// <summary>
+    /// Reads a peer's apply fingerprint for one partition as a plain unary call on the shared channel: the
+    /// read is rare (a promotion, a split) and has nothing for a batching lane to coalesce.
+    /// </summary>
+    public async Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
+        GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken)
+    {
+        GrpcGetPartitionApplyFingerprintRequest request = new() { PartitionId = partitionId };
+
+        GrpcGetPartitionApplyFingerprintResponse response;
+
+        try
+        {
+            global::KeyValuer.KeyValuerClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+            response = await client
+                .GetPartitionApplyFingerprintAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("GetPartitionApplyFingerprint", node, ex.StatusCode);
+
+            return (KeyValueResponseType.MustRetry, default);
+        }
+
+        return (
+            (KeyValueResponseType)response.Type,
+            new KeyValueApplyFingerprint(response.AppliedLogId, response.CommittedHeads, response.LiveIntents)
         );
     }
 

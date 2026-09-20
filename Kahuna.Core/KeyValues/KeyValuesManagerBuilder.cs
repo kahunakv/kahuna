@@ -72,6 +72,7 @@ internal sealed class KeyValuesManagerBuilder
     internal ScriptTransactionExecutor scriptExecutor = null!;
     internal System.Diagnostics.Metrics.Meter durableGaugeMeter = null!;
     internal System.Diagnostics.Metrics.Meter admissionGaugeMeter = null!;
+    internal System.Diagnostics.Metrics.Meter applyGaugeMeter = null!;
 
     internal System.Diagnostics.Metrics.Meter functionGaugeMeter = null!;
     internal KeyValueLocator locator = null!;
@@ -483,6 +484,9 @@ internal sealed class KeyValuesManagerBuilder
             }
         });
         replicationDispatcher = new(runtime, restorer, replicator);
+        // The applied-log-id gauge, per partition, on its own instance-owned meter so a disposed node's
+        // dispatcher is not kept reachable through the callback.
+        applyGaugeMeter = KeyValueApplyMetrics.RegisterGauges(replicationDispatcher.SnapshotAppliedLogIds);
         durableReplication = new(runtime, replicator);
         runtime.DurableReplication = durableReplication;
         rangeStateTransfer = new(runtime, manager);

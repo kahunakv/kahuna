@@ -1,4 +1,5 @@
 using Kommander;
+using Kahuna.Server.KeyValues.Data;
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
@@ -194,6 +195,48 @@ internal sealed class RangeSplitter
         // observes an empty range and every first split of a key space starves — and a completed
         // cutover would hand foreign key spaces' records and intents to P'.
         string? movingEndKey = KeySpaceBounds.MovingEndKey(keySpace, descriptor.EndKey);
+
+        // ── 3a. Source completeness gate ──────────────────────────────────────────────────────
+        // The bulk copy reads the moving half through the source partition's leader, so the
+        // leader's apply state is what the new partition inherits. A leader whose committed-head
+        // count is below a replica's at the same applied kv log id did not apply everything the log
+        // holds (a snapshot install it acknowledged without importing is the known shape), and a
+        // copy from it would move the missing writes' loss into P' where no replica can repair it.
+        // Refuse before any cost; the trigger retries on its next cadence, by which time the
+        // divergence is either repaired or still reported at error level by the same comparison.
+        {
+            ApplyFingerprintComparison completeness =
+                await manager.CompareApplyFingerprintWithReplicasAsync(descriptor.PartitionId, ct);
+
+            if (!completeness.IsDeterminate)
+            {
+                logger.LogWarning(
+                    "RangeSplitter: source partition {PartitionId} completeness is indeterminate (leader {Leader}); retrying later",
+                    descriptor.PartitionId, completeness.Leader ?? "unresolved");
+                return SplitOutcome.ProbeIndeterminate;
+            }
+
+            if (completeness.HasDivergence)
+            {
+                foreach ((string peer, KeyValueApplyFingerprint fingerprint) in completeness.Divergent)
+                {
+                    if (fingerprint.CommittedHeads <= completeness.LeaderFingerprint.CommittedHeads)
+                        continue;
+
+                    RangeSplitMetrics.IncompleteSourceRefusals.Add(1);
+                    logger.LogRangeSplitRefusedIncompleteSource(
+                        keySpace, splitKey, descriptor.PartitionId, completeness.Leader!,
+                        completeness.LeaderFingerprint.CommittedHeads, peer, fingerprint.CommittedHeads,
+                        completeness.LeaderFingerprint.AppliedLogId);
+                    return SplitOutcome.SourceStateIncomplete;
+                }
+
+                // A replica BELOW the leader is that replica's divergence, not the source's: the copy
+                // reads the leader, which holds the larger state. Reported through the same path the
+                // promotion check uses so the replica is still visible; the split proceeds.
+                manager.ReportApplyDivergence(completeness, "split");
+            }
+        }
 
         // ── 3b. Zero-impact admission gate: settle what can settle, judge the rest ──────────
         // Everything past this point costs the cluster real work — the bulk copy replicates the
@@ -643,6 +686,9 @@ internal enum SplitStatus
     CutoverFailed,
     ConcurrentSplit,
     UnsettledMovingIntents,
+    /// <summary>The source partition's leader holds fewer committed heads than a replica at the same applied
+    /// log id; copying from it would carry an incomplete state into the new partition. Retryable.</summary>
+    SourceStateIncomplete,
 }
 
 /// <summary>Result of <see cref="RangeSplitter.SplitAsync"/>.</summary>
@@ -678,6 +724,7 @@ internal readonly struct SplitOutcome
     public static SplitOutcome CutoverFailed => new(SplitStatus.CutoverFailed);
     public static SplitOutcome ConcurrentSplit => new(SplitStatus.ConcurrentSplit);
     public static SplitOutcome UnsettledMovingIntents => new(SplitStatus.UnsettledMovingIntents);
+    public static SplitOutcome SourceStateIncomplete => new(SplitStatus.SourceStateIncomplete);
 
     /// <summary>A <see cref="SplitStatus.TransferFailed"/> outcome naming the step that failed.</summary>
     public static SplitOutcome TransferFailedAt(string detail) => new(SplitStatus.TransferFailed, detail: detail);

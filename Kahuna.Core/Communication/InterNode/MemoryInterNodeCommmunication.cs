@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Kahuna.Server.KeyValues.Data;
 using System.Diagnostics.CodeAnalysis;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -1845,6 +1846,19 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
             return await kahunaNode.GetSnapshotFloor(cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
+
+    public async Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
+        GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.GetPartitionApplyFingerprint(partitionId, cancellationToken);
         }
 
         throw Unreachable(node);

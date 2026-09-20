@@ -45,6 +45,7 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
         raft.OnReplicationError += kahuna.OnReplicationError;
         raft.OnLeaderChanged += kahuna.OnLeaderChanged;
+        raft.OnLeadershipLost += kahuna.OnLeadershipLost;
         raft.OnMembershipChanged += OnMembershipChanged;
 
         if (options.PitrBootstrapFrom.HasValue)

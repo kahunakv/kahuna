@@ -72,7 +72,8 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
         IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> keyValueActor,
         KeyValueReplyRef promise,
         long enqueueTicks,
-        string? logType = null
+        string? logType = null,
+        long expectedTerm = 0
     )
     {
         Key = key;
@@ -86,7 +87,9 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
         Promise = promise;
         EnqueueTicks = enqueueTicks;
         LogType = logType ?? ReplicationTypes.KeyValues;
-        Entries = [new RaftProposalEntry(LogType, serializedMessage, AutoCommit: true, ExpectedGeneration: 0)];
+        // The term fence: the Raft executor refuses the batch with TermMismatch when the partition's
+        // term moved since the actor judged this write's preconditions (see IRaft.GetPartitionTerm).
+        Entries = [new RaftProposalEntry(LogType, serializedMessage, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)];
     }
 
     /// <summary>Key-range fence: release the write if its descriptor moved/split since admission. Hash spaces are

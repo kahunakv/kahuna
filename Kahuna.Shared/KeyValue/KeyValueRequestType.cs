@@ -45,6 +45,13 @@ public enum KeyValueRequestType
     EvictPartition,
 
     /// <summary>
+    /// Drops the belief-only state an actor holds for a partition this node stopped leading: staged
+    /// transactional entries with their write intents, and exclusive prefix and range locks. Committed
+    /// entries stay resident. Sent to every shard when Raft reports the leadership lost.
+    /// </summary>
+    DropLeaderState,
+
+    /// <summary>
     /// A committed durable-transaction mutation replicated BY REFERENCE: the record names the prepared
     /// intent (transaction id, epoch, key) whose value every replica already holds, and carries no value
     /// bytes of its own. Consumers resolve the value from their own prepared-intent store and apply it
