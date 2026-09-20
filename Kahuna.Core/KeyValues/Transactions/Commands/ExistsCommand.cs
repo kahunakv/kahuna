@@ -58,7 +58,7 @@ internal sealed class ExistsCommand : BaseCommand
                 RecordReadKey(context, keyName, durability, false, -1);
 
             if (ast.rightAst is not null)
-                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, new(KeyValueExpressionType.NullType));
+                context.SetVariable(ast.rightAst, ast.rightAst.yytext!, KeyValueExpressionResult.Null);
 
             return new()
             {

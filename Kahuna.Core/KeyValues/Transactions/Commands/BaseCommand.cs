@@ -44,6 +44,107 @@ internal abstract class BaseCommand
         return new HLCTimestamp(0, ms, uint.MaxValue);
     }
 
+    /// <summary>
+    /// The options a <c>SET</c> statement carries: its TTL, its comparison operands, and the flag bits
+    /// the store reads. Collected in one value so the flag walk can fill them without a closure.
+    /// </summary>
+    internal struct SetOptions
+    {
+        internal int ExpiresMs;
+
+        internal long CompareRevision;
+
+        internal byte[]? CompareValue;
+
+        internal KeyValueFlags Flags;
+    }
+
+    /// <summary>
+    /// Reads a <c>SET</c> statement's flag list into <paramref name="options"/>.
+    ///
+    /// <para>The flags are walked straight from the syntax tree. Collecting them into a list of flag
+    /// objects first rebuilt constant parse output on every execution of the statement — one list, its
+    /// backing array, and one object per flag — and a <c>SET</c> inside a loop paid that per iteration.
+    /// The tree it reads is already the same tree on every execution.</para>
+    ///
+    /// <para><paramref name="options"/> travels by reference because the walk recurses into the left
+    /// branch of the flag list, and a captured local would put a closure back on the path this exists to
+    /// clear.</para>
+    /// </summary>
+    internal static void ReadSetOptions(ScriptTransactionContext context, NodeAst ast, ref SetOptions options)
+    {
+        while (true)
+        {
+            switch (ast.nodeType)
+            {
+                case NodeType.SetFlagsList:
+                {
+                    if (ast.leftAst is not null)
+                        ReadSetOptions(context, ast.leftAst, ref options);
+
+                    if (ast.rightAst is not null)
+                    {
+                        ast = ast.rightAst;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                case NodeType.SetEx:
+                {
+                    if (ast.leftAst is null)
+                        throw new KahunaScriptException("Invalid SET EX expression", ast.yyline);
+
+                    KeyValueExpressionResult ex = KeyValueTransactionExpression.Eval(context, ast.leftAst);
+
+                    if (ex.Type != KeyValueExpressionType.LongType)
+                        throw new KahunaScriptException("Invalid SET EX expression", ast.yyline);
+
+                    options.ExpiresMs = (int)ex.LongValue;
+                    break;
+                }
+
+                case NodeType.SetExists:
+                    options.Flags |= KeyValueFlags.SetIfExists;
+                    break;
+
+                case NodeType.SetNotExists:
+                    options.Flags |= KeyValueFlags.SetIfNotExists;
+                    break;
+
+                case NodeType.SetCmp:
+                {
+                    if (ast.leftAst is null)
+                        throw new KahunaScriptException("Invalid SET CMP expression", ast.yyline);
+
+                    options.Flags |= KeyValueFlags.SetIfEqualToValue;
+                    options.CompareValue = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToBytes();
+                    break;
+                }
+
+                case NodeType.SetCmpRev:
+                {
+                    if (ast.leftAst is null)
+                        throw new KahunaScriptException("Invalid SET CMPREV expression", ast.yyline);
+
+                    options.Flags |= KeyValueFlags.SetIfEqualToRevision;
+                    options.CompareRevision = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToLong();
+                    break;
+                }
+
+                case NodeType.SetNoRev:
+                    options.Flags |= KeyValueFlags.SetNoRevision;
+                    break;
+
+                default:
+                    throw new NotImplementedException();
+            }
+
+            break;
+        }
+    }
+
     internal static void RecordReadKey(
         ScriptTransactionContext context,
         string key,

@@ -115,16 +115,14 @@ public class TestServers
     [Fact]
     public void TestParseLongFromBytesPositive()
     {
-        var result = new KeyValueExpressionResult(KeyValueExpressionType.BytesType);
-        result.BytesValue = "42"u8.ToArray();
+        var result = new KeyValueExpressionResult("42"u8.ToArray());
         Assert.Equal(42, result.ToLong());
     }
 
     [Fact]
     public void TestParseLongFromBytesNegative()
     {
-        var result = new KeyValueExpressionResult(KeyValueExpressionType.BytesType);
-        result.BytesValue = "-9876543210"u8.ToArray();
+        var result = new KeyValueExpressionResult("-9876543210"u8.ToArray());
         Assert.Equal(-9876543210L, result.ToLong());
     }
 
@@ -133,8 +131,7 @@ public class TestServers
     {
         // Long encoded by EncodeLong, decoded by ToLong — round-trips through UTF-8 bytes
         var encoded = new KeyValueExpressionResult(long.MaxValue).ToBytes();
-        var roundTrip = new KeyValueExpressionResult(KeyValueExpressionType.BytesType);
-        roundTrip.BytesValue = encoded;
+        var roundTrip = new KeyValueExpressionResult(encoded);
         Assert.Equal(long.MaxValue, roundTrip.ToLong());
     }
 

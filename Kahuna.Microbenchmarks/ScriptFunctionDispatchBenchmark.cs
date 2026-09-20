@@ -78,17 +78,19 @@ public class ScriptFunctionDispatchBenchmark
         customCallSixArgs = Call("bench_min", Literal(1), Literal(2), Literal(3), Literal(4), Literal(5), Literal(6));
     }
 
+    // Returned as object because the result type is internal to the evaluator and a benchmark method must
+    // be public. The return still keeps the value alive, which is all it is here for.
     [Benchmark(Baseline = true)]
-    public KeyValueExpressionResult BuiltInTwoArgs() => CallFunction.Eval(context, builtInCall);
+    public object BuiltInTwoArgs() => CallFunction.Eval(context, builtInCall);
 
     [Benchmark]
-    public KeyValueExpressionResult CustomTwoArgs() => CallFunction.Eval(context, customCall);
+    public object CustomTwoArgs() => CallFunction.Eval(context, customCall);
 
     [Benchmark]
-    public KeyValueExpressionResult CustomTwoArgsTimed() => CallFunction.Eval(timedContext, customCall);
+    public object CustomTwoArgsTimed() => CallFunction.Eval(timedContext, customCall);
 
     [Benchmark]
-    public KeyValueExpressionResult CustomSixArgs() => CallFunction.Eval(context, customCallSixArgs);
+    public object CustomSixArgs() => CallFunction.Eval(context, customCallSixArgs);
 
     private static NodeAst Literal(int value) => new(NodeType.IntegerType, null, null, null, null, null, null, value.ToString(), 1);
 

@@ -81,10 +81,10 @@ internal static class ScriptFunctionMarshal
         switch (value.Kind)
         {
             case KahunaValueKind.Null:
-                return new(KeyValueExpressionType.NullType);
+                return KeyValueExpressionResult.Null;
 
             case KahunaValueKind.Bool:
-                return new(value.AsBool());
+                return KeyValueExpressionResult.FromBool(value.AsBool());
 
             case KahunaValueKind.Long:
                 return new(value.AsLong());
@@ -96,7 +96,7 @@ internal static class ScriptFunctionMarshal
                 return new(value.AsString());
 
             case KahunaValueKind.Bytes:
-                return new(KeyValueExpressionType.BytesType) { BytesValue = value.AsBytes().ToArray() };
+                return new(value.AsBytes().ToArray());
 
             case KahunaValueKind.Array:
             {
@@ -111,7 +111,7 @@ internal static class ScriptFunctionMarshal
             }
 
             default:
-                return new(KeyValueExpressionType.NullType);
+                return KeyValueExpressionResult.Null;
         }
     }
 }

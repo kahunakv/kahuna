@@ -13,7 +13,7 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 /// </summary>
 internal sealed class LetCommand : BaseCommand
 {
-    public static KeyValueTransactionResult Execute(
+    public static void Execute(
         ScriptTransactionContext context,
         NodeAst ast
     )
@@ -25,6 +25,8 @@ internal sealed class LetCommand : BaseCommand
         
         context.SetVariable(ast.leftAst, ast.leftAst.yytext!, result);
 
-        return result.ToTransactionResult();
+        // The assigned value is the statement's result, recorded rather than built: the variable already
+        // holds it, and only the script's final statement ever has its result answered to the caller.
+        context.DeferResult(result);
     }
 }

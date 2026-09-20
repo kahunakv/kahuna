@@ -57,31 +57,31 @@ internal sealed class DeleteCommand : BaseCommand
                 break;
         }
         
+        // One list, referenced by both results. The two carried identical values, so building the list
+        // twice produced a second copy of the same three objects per statement. Nothing downstream
+        // mutates a result's values, and the caller's result is discarded unless this is the script's
+        // last statement, so the two can never diverge.
+        List<KeyValueTransactionResultValue> values =
+        [
+            new()
+            {
+                Key = keyName,
+                Revision = revision,
+                LastModified = lastModified
+            }
+        ];
+
         context.ModifiedResult = new()
         {
             Type = type,
-            Values = [
-                new()
-                {
-                    Key = keyName,
-                    Revision = revision,
-                    LastModified = lastModified
-                }
-            ]
+            Values = values
         };
 
         return new()
         {
             ServedFrom = "",
             Type = type,
-            Values = [
-                new()
-                {
-                    Key = keyName,
-                    Revision = revision,
-                    LastModified = lastModified
-                }
-            ]
+            Values = values
         };
     }
 }

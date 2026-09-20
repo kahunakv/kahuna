@@ -78,10 +78,49 @@ internal class TransactionContext
     /// </summary>
     internal AdmissionLease? AdmissionLease { get; set; }
 
+    private KeyValueTransactionResult? result;
+
+    private KeyValueExpressionResult? deferredResult;
+
     /// <summary>
     /// Last result of the current key-value execution.
+    ///
+    /// <para>Every statement overwrites this, and only the last one is ever answered to the caller: on
+    /// commit the coordinator keeps a non-failure value as the script's outcome, and a script that does
+    /// not commit never reads it at all. So a statement whose result can be rebuilt on demand records the
+    /// value instead of the result object, through <see cref="DeferResult"/>, and the three objects that
+    /// describe it are built here only if something asks. A script that assigns in a loop built and threw
+    /// away one set per iteration.</para>
     /// </summary>
-    public KeyValueTransactionResult? Result { get; set; }
+    public KeyValueTransactionResult? Result
+    {
+        get
+        {
+            if (deferredResult is null)
+                return result;
+
+            result = deferredResult.ToTransactionResult();
+            deferredResult = null;
+
+            return result;
+        }
+
+        set
+        {
+            deferredResult = null;
+            result = value;
+        }
+    }
+
+    /// <summary>
+    /// Records an expression as this statement's result without building the client-facing form of it.
+    /// Reading <see cref="Result"/> builds it; nothing else observes the difference.
+    /// </summary>
+    internal void DeferResult(KeyValueExpressionResult value)
+    {
+        result = null;
+        deferredResult = value;
+    }
 
     /// <summary>
     /// Last result of a key-value write operation.

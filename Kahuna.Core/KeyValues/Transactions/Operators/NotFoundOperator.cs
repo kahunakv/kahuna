@@ -11,6 +11,6 @@ internal static class NotFoundOperator
         if (context.Result is null)
             throw new KahunaScriptException("Invalid NOT FOUND expression", ast.yyline);
         
-        return new(context.Result.Type != KeyValueResponseType.Get);
+        return KeyValueExpressionResult.FromBool(context.Result.Type != KeyValueResponseType.Get);
     }
 }

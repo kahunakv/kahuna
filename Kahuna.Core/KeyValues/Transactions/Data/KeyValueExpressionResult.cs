@@ -6,10 +6,32 @@ using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
 
-public sealed class KeyValueExpressionResult
+internal sealed class KeyValueExpressionResult
 {
     private static readonly byte[] TrueBytes  = [.. "true"u8];
     private static readonly byte[] FalseBytes = [.. "false"u8];
+
+    /// <summary>
+    /// The three results that carry no data beyond their own type. A comparison, a logical operator and a
+    /// null literal each produced a fresh object per evaluation, which inside a loop is one object per
+    /// operator per iteration. These carry the default revision and expiry, so one instance of each serves
+    /// every such evaluation. They are safe to share only because this type is immutable — see
+    /// <see cref="BytesValue"/>, which is get-only for exactly this reason.
+    /// </summary>
+    private static readonly KeyValueExpressionResult TrueResult  = new(true);
+
+    private static readonly KeyValueExpressionResult FalseResult = new(false);
+
+    private static readonly KeyValueExpressionResult NullResult  = new(KeyValueExpressionType.NullType);
+
+    /// <summary>
+    /// The shared result for a boolean that carries no revision and no expiry, which is every boolean an
+    /// operator produces. A boolean read back from a key carries both, so it still needs its own instance.
+    /// </summary>
+    public static KeyValueExpressionResult FromBool(bool value) => value ? TrueResult : FalseResult;
+
+    /// <summary>The shared null result.</summary>
+    public static KeyValueExpressionResult Null => NullResult;
 
     public KeyValueExpressionType Type { get; }
 
@@ -21,7 +43,7 @@ public sealed class KeyValueExpressionResult
 
     public double DoubleValue { get; }
 
-    public byte[]? BytesValue { get; set; }
+    public byte[]? BytesValue { get; }
 
     public List<KeyValueExpressionResult>? ArrayValue { get; }
 
@@ -64,6 +86,14 @@ public sealed class KeyValueExpressionResult
     {
         Type = KeyValueExpressionType.StringType;
         StrValue = strValue;
+        Revision = revision;
+        Expires = expires;
+    }
+
+    public KeyValueExpressionResult(byte[]? bytesValue, long revision = -1, long expires = 0)
+    {
+        Type = KeyValueExpressionType.BytesType;
+        BytesValue = bytesValue;
         Revision = revision;
         Expires = expires;
     }

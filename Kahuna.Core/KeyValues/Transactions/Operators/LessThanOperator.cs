@@ -21,16 +21,16 @@ internal sealed class LessThanOperator
         switch (left.Type)
         {
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return new(left.LongValue < right.LongValue);
+                return KeyValueExpressionResult.FromBool(left.LongValue < right.LongValue);
         
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return new(left.DoubleValue < right.LongValue);
+                return KeyValueExpressionResult.FromBool(left.DoubleValue < right.LongValue);
         
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return new(left.LongValue < right.DoubleValue);
+                return KeyValueExpressionResult.FromBool(left.LongValue < right.DoubleValue);
         
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return new(left.DoubleValue < right.DoubleValue);
+                return KeyValueExpressionResult.FromBool(left.DoubleValue < right.DoubleValue);
             
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.DoubleType:
             {
@@ -39,10 +39,10 @@ internal sealed class LessThanOperator
                     if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                 
-                    return new(leftDouble < right.DoubleValue);
+                    return KeyValueExpressionResult.FromBool(leftDouble < right.DoubleValue);
                 }
 
-                return new(leftLong < right.DoubleValue);
+                return KeyValueExpressionResult.FromBool(leftLong < right.DoubleValue);
             }
 
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.LongType:
@@ -52,10 +52,10 @@ internal sealed class LessThanOperator
                     if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                 
-                    return new(leftDouble < right.LongValue);
+                    return KeyValueExpressionResult.FromBool(leftDouble < right.LongValue);
                 }
 
-                return new(leftLong < right.LongValue);
+                return KeyValueExpressionResult.FromBool(leftLong < right.LongValue);
             }
 
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.StringType:
@@ -65,10 +65,10 @@ internal sealed class LessThanOperator
                     if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
-                    return new(left.LongValue < rightDouble);
+                    return KeyValueExpressionResult.FromBool(left.LongValue < rightDouble);
                 }
 
-                return new(left.LongValue < rightLong);
+                return KeyValueExpressionResult.FromBool(left.LongValue < rightLong);
             }
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.StringType:
@@ -78,10 +78,10 @@ internal sealed class LessThanOperator
                     if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
-                    return new(left.DoubleValue < rightDouble);
+                    return KeyValueExpressionResult.FromBool(left.DoubleValue < rightDouble);
                 }
 
-                return new(left.DoubleValue < rightLong);
+                return KeyValueExpressionResult.FromBool(left.DoubleValue < rightLong);
             }
             
             default:

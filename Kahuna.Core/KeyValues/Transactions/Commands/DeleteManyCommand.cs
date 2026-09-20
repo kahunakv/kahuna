@@ -43,15 +43,24 @@ internal sealed class DeleteManyCommand : BaseCommand
                 context.StageMutation(response.Key ?? "", null, KeyValueState.Deleted, response.Revision, 0, noRevision: false); // deletes have no TTL and retain history
             }
 
+        }
+
+        // The last response is the one that survives: the prepare path raises the commit timestamp from
+        // the recorded result, and this command hands it back as the statement's result. Building a
+        // result per response inside the loop made garbage of every response but the last.
+        if (responses.Count > 0)
+        {
+            KahunaDeleteKeyValueResponseItem last = responses[^1];
+
             context.ModifiedResult = new()
             {
-                Type = response.Type,
+                Type = last.Type,
                 Values = [
                     new()
                     {
-                        Key = response.Key ?? "",
-                        Revision = response.Revision,
-                        LastModified = response.LastModified
+                        Key = last.Key ?? "",
+                        Revision = last.Revision,
+                        LastModified = last.LastModified
                     }
                 ]
             };

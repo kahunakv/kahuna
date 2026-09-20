@@ -1,4 +1,6 @@
 
+using System.Buffers;
+
 using Kommander;
 using Kommander.Time;
 
@@ -260,16 +262,40 @@ internal sealed class ScriptTransactionExecutor
     }
 
     /// <summary>
-    /// Orders a lock set for acquisition. Ordinal, matching the ordering used for keys and range bounds
-    /// everywhere else in the store.
+    /// Copies a lock set into <paramref name="buffer"/> in ordinal order and returns how many keys it
+    /// wrote. Ordinal, matching the ordering used for keys and range bounds everywhere else in the store.
+    ///
+    /// <para>The caller supplies the buffer so the two prefix sets can share one, which is what they did
+    /// not do before: each was copied into a list of its own to be sorted, and the list was thrown away
+    /// straight after the loop that read it. What acquisition needs is the order, not the container.</para>
     /// </summary>
-    private static List<string> SortedOrdinal(HashSet<string> keys)
+    private static int SortOrdinalInto(HashSet<string> keys, string[] buffer)
     {
-        List<string> sorted = new(keys);
+        int count = 0;
 
-        sorted.Sort(StringComparer.Ordinal);
+        foreach (string key in keys)
+            buffer[count++] = key;
 
-        return sorted;
+        buffer.AsSpan(0, count).Sort(StringComparer.Ordinal);
+
+        return count;
+    }
+
+    /// <summary>
+    /// The one key in a single-element lock set.
+    ///
+    /// <para>Reads it through the set's own enumerator. <c>First()</c> cannot see a hash set as a list, so
+    /// it reached the enumerator through the interface and boxed it — one allocation on the shape that is
+    /// by far the most common, a transaction that locks exactly one key.</para>
+    /// </summary>
+    private static string OnlyKey(HashSet<string> keys)
+    {
+        foreach (string key in keys)
+            return key;
+
+        // Unreachable: the caller checks the count first. Kept as the same exception First() raised, so an
+        // impossible state reports as an internal error rather than as a transaction conflict.
+        throw new InvalidOperationException("A lock set counted as non-empty held no key");
     }
 
     /// <summary>
@@ -469,8 +495,10 @@ internal sealed class ScriptTransactionExecutor
         // synchronously and costs nothing.
         AdmissionLease? lease;
 
-        using (CancellationTokenSource admissionCts = new())
+        using (PooledCancellationSource pooledAdmission = CancellationSourcePool.Rent())
         {
+            CancellationTokenSource admissionCts = pooledAdmission.Source;
+
             if (admissionWait > 0)
                 admissionCts.CancelAfter(TimeSpan.FromMilliseconds(admissionWait));
 
@@ -505,7 +533,9 @@ internal sealed class ScriptTransactionExecutor
         // The execution deadline starts here rather than at submission, so a script that queued behind a
         // saturated node still gets the full time it asked for to do its work. It is measured from the same
         // point as the transaction's identity below, for the same reason.
-        using CancellationTokenSource cts = new();
+        using PooledCancellationSource pooledExecution = CancellationSourcePool.Rent();
+
+        CancellationTokenSource cts = pooledExecution.Source;
 
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
 
@@ -528,16 +558,21 @@ internal sealed class ScriptTransactionExecutor
             LocalNodeId = raft.GetLocalNodeId()
         };
 
-        HashSet<string> ephemeralLocksToAcquire = [];
-        HashSet<string> persistentLocksToAcquire = [];
-        HashSet<string> ephemeralPrefixLocksToAcquire = [];
-        HashSet<string> persistentPrefixLocksToAcquire = [];
-
         try
         {
             // Inside the try so that a malformed script surfacing here still runs the finally that returns
             // the admission slot — a slot lost to an early throw would shrink node capacity permanently.
+            //
+            // The four lock sets live inside this branch because only a pessimistic transaction has any use
+            // for them. Declared outside, an optimistic script — and a pessimistic one that locks nothing —
+            // allocated four sets that were never read.
             if (locking == KeyValueTransactionLocking.Pessimistic)
+            {
+                HashSet<string> ephemeralLocksToAcquire = [];
+                HashSet<string> persistentLocksToAcquire = [];
+                HashSet<string> ephemeralPrefixLocksToAcquire = [];
+                HashSet<string> persistentPrefixLocksToAcquire = [];
+
                 KeyValueLockHelper.GetLocksToAcquire(
                     context,
                     ast,
@@ -547,7 +582,6 @@ internal sealed class ScriptTransactionExecutor
                     persistentPrefixLocksToAcquire
                 );
 
-            if (locking == KeyValueTransactionLocking.Pessimistic)
                 await AcquireLocksPessimistically(
                     context,
                     ephemeralLocksToAcquire,
@@ -557,6 +591,7 @@ internal sealed class ScriptTransactionExecutor
                     timeout,
                     cts.Token
                 );
+            }
 
             await ExecuteTransactionInternal(context, ast, cts.Token);
 
@@ -664,36 +699,21 @@ internal sealed class ScriptTransactionExecutor
         {
             context.PrefixLocksAcquired = new(numberLocks);
 
-            foreach (string prefixKey in SortedOrdinal(ephemeralPrefixLocksToAcquire))
+            // One buffer for both sets, sized for the larger. The ephemeral pass finishes before the
+            // persistent one starts, so the second reuse cannot read the first pass's keys.
+            string[] buffer = ArrayPool<string>.Shared.Rent(
+                Math.Max(ephemeralPrefixLocksToAcquire.Count, persistentPrefixLocksToAcquire.Count));
+
+            try
             {
-                KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
-                    context.TransactionId,
-                    prefixKey,
-                    timeout + ExtraLockingDelay,
-                    KeyValueDurability.Ephemeral,
-                    ctsToken
-                );
-
-                if (acquirePrefixResponse != KeyValueResponseType.Locked)
-                    throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Ephemeral);
-
-                context.PrefixLocksAcquired.Add((prefixKey, KeyValueDurability.Ephemeral));
+                await AcquirePrefixLocks(context, ephemeralPrefixLocksToAcquire, buffer, KeyValueDurability.Ephemeral, timeout, ctsToken);
+                await AcquirePrefixLocks(context, persistentPrefixLocksToAcquire, buffer, KeyValueDurability.Persistent, timeout, ctsToken);
             }
-
-            foreach (string prefixKey in SortedOrdinal(persistentPrefixLocksToAcquire))
+            finally
             {
-                KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
-                    context.TransactionId,
-                    prefixKey,
-                    timeout + ExtraLockingDelay,
-                    KeyValueDurability.Persistent,
-                    ctsToken
-                );
-
-                if (acquirePrefixResponse != KeyValueResponseType.Locked)
-                    throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + KeyValueDurability.Persistent);
-
-                context.PrefixLocksAcquired.Add((prefixKey, KeyValueDurability.Persistent));
+                // Cleared on the way back: the buffer holds key strings, and a pooled array that keeps
+                // them alive pins them until the slot is next used.
+                ArrayPool<string>.Shared.Return(buffer, clearArray: true);
             }
         }
 
@@ -709,7 +729,7 @@ internal sealed class ScriptTransactionExecutor
                 {
                     (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) = await manager.LocateAndTryAcquireExclusiveLock(
                         context.TransactionId,
-                        ephemeralLocksToAcquire.First(),
+                        OnlyKey(ephemeralLocksToAcquire),
                         timeout + ExtraLockingDelay,
                         KeyValueDurability.Ephemeral,
                         ctsToken
@@ -725,7 +745,7 @@ internal sealed class ScriptTransactionExecutor
                 if (persistentLocksToAcquire.Count > 0)
                 {
                     (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) =
-                        await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, persistentLocksToAcquire.First(), timeout + ExtraLockingDelay, KeyValueDurability.Persistent, ctsToken);
+                        await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, OnlyKey(persistentLocksToAcquire), timeout + ExtraLockingDelay, KeyValueDurability.Persistent, ctsToken);
 
                     if (acquireResponse != KeyValueResponseType.Locked)
                         throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
@@ -766,6 +786,44 @@ internal sealed class ScriptTransactionExecutor
                 if (response != KeyValueResponseType.Locked)
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
             }
+        }
+    }
+
+    /// <summary>
+    /// Acquires one durability's prefix locks, in ordinal order, recording each one on the context.
+    ///
+    /// <para>The order is the deadlock-avoidance contract described on the caller: two transactions whose
+    /// prefixes overlap must attempt them in the same relative order, and a hash set's enumeration order
+    /// depends on what else the set holds. <paramref name="buffer"/> is the caller's, and is large enough
+    /// for this set.</para>
+    /// </summary>
+    private async Task AcquirePrefixLocks(
+        ScriptTransactionContext context,
+        HashSet<string> prefixKeys,
+        string[] buffer,
+        KeyValueDurability durability,
+        int timeout,
+        CancellationToken ctsToken
+    )
+    {
+        int count = SortOrdinalInto(prefixKeys, buffer);
+
+        for (int i = 0; i < count; i++)
+        {
+            string prefixKey = buffer[i];
+
+            KeyValueResponseType acquirePrefixResponse = await manager.LocateAndTryAcquireExclusivePrefixLock(
+                context.TransactionId,
+                prefixKey,
+                timeout + ExtraLockingDelay,
+                durability,
+                ctsToken
+            );
+
+            if (acquirePrefixResponse != KeyValueResponseType.Locked)
+                throw new KahunaAbortedException("Failed to acquire prefix lock: " + prefixKey + " " + durability);
+
+            context.PrefixLocksAcquired!.Add((prefixKey, durability));
         }
     }
 
@@ -834,8 +892,11 @@ internal sealed class ScriptTransactionExecutor
     {
         if (ast.nodeType == NodeType.StmtList)
         {
-            if (!spineProbed)
+            if (!spineProbed && !context.TryRestoreBatchProbe(ast))
+            {
                 ProbeBatchablePrefix(context, ast);
+                context.RecordBatchProbe(ast);
+            }
 
             // The probe stashed the largest batchable prefix subtree; the descent executes nothing
             // until it reaches that exact node, so batching here is equivalent to the per-level
@@ -884,7 +945,7 @@ internal sealed class ScriptTransactionExecutor
 
                 case NodeType.Let:
                 {
-                    context.Result = LetCommand.Execute(context, ast);
+                    LetCommand.Execute(context, ast);
                     break;
                 }
 
@@ -975,9 +1036,7 @@ internal sealed class ScriptTransactionExecutor
                     break;
 
                 case NodeType.Return:
-                    KeyValueTransactionResult? result = ReturnCommand.Execute(context, ast);
-                    if (result is not null)
-                        context.Result = result;
+                    ReturnCommand.Execute(context, ast);
                     break;
 
                 case NodeType.Sleep:
@@ -1016,8 +1075,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.ArgumentList:
                 case NodeType.NullType:
                 case NodeType.Placeholder:
-                    KeyValueExpressionResult evalResult = KeyValueTransactionExpression.Eval(context, ast);
-                    context.Result = evalResult.ToTransactionResult();
+                    context.DeferResult(KeyValueTransactionExpression.Eval(context, ast));
                     break;
 
                 case NodeType.SetNotExists:
@@ -1093,14 +1151,15 @@ internal sealed class ScriptTransactionExecutor
     {
         context.BatchBoundary = null;
 
-        // Collect the left spine top-down: spine[i] covers statements [0 .. (n-1) - i], where
-        // n = spine.Count + 1 statements. The deepest left leaf is statement 0.
-        List<NodeAst> spine = [];
-
+        // The spine depth is counted first so the array below is exact. Both walks only follow
+        // already-built references, and the second replaces a list that grew by doubling and was
+        // discarded a few lines later.
+        int depth = 0;
         NodeAst node = ast;
+
         while (node.nodeType == NodeType.StmtList)
         {
-            spine.Add(node);
+            depth++;
 
             if (node.leftAst is null)
                 return;
@@ -1108,7 +1167,8 @@ internal sealed class ScriptTransactionExecutor
             node = node.leftAst;
         }
 
-        // The first statement fixes the batch kind; anything else is not batchable.
+        // The first statement fixes the batch kind; anything else is not batchable. Checked before any
+        // buffer is taken, because this is where most probes end.
         bool isSetMany;
         switch (node.nodeType)
         {
@@ -1124,29 +1184,65 @@ internal sealed class ScriptTransactionExecutor
                 return;
         }
 
-        int n = spine.Count + 1;
-        HashSet<(string, KeyValueDurability)> keys = [];
-        int k = 0;
+        // Collect the left spine top-down: spine[i] covers statements [0 .. (n-1) - i], where
+        // n = depth + 1 statements. The deepest left leaf is statement 0.
+        NodeAst[] spine = ArrayPool<NodeAst>.Shared.Rent(depth);
 
-        // Statements in execution order: the deepest left leaf, then each spine node's right
-        // statement bottom-up. Stop at the first statement that breaks the batch shape.
-        for (int i = 0; i < n; i++)
+        try
         {
-            NodeAst? stmt = i == 0 ? node : spine[n - 1 - i].rightAst;
+            node = ast;
 
-            if (stmt is null || !IsBatchableStatement(context, stmt, isSetMany, keys))
-                break;
+            for (int i = 0; i < depth; i++)
+            {
+                spine[i] = node;
+                node = node.leftAst!;
+            }
 
-            k++;
+            int n = depth + 1;
+
+            // Reused across probes on this thread. The probe is synchronous from end to end, so the set
+            // cannot be observed by another script while this one is using it.
+            HashSet<(string, KeyValueDurability)> keys = probeKeys ??= new(n);
+            keys.Clear();
+
+            int k = 0;
+
+            // Statements in execution order: the deepest left leaf, then each spine node's right
+            // statement bottom-up. Stop at the first statement that breaks the batch shape.
+            for (int i = 0; i < n; i++)
+            {
+                NodeAst? stmt = i == 0 ? node : spine[n - 1 - i].rightAst;
+
+                if (stmt is null || !IsBatchableStatement(context, stmt, isSetMany, keys))
+                    break;
+
+                k++;
+            }
+
+            // A batch needs at least two statements; the subtree covering [0..k-1] is spine[n - k].
+            if (k < 2)
+                return;
+
+            context.BatchBoundary = spine[n - k];
+            context.BatchBoundaryIsSetMany = isSetMany;
         }
-
-        // A batch needs at least two statements; the subtree covering [0..k-1] is spine[n - k].
-        if (k < 2)
-            return;
-
-        context.BatchBoundary = spine[n - k];
-        context.BatchBoundaryIsSetMany = isSetMany;
+        finally
+        {
+            // Cleared on the way back: the buffer holds syntax-tree references, and a pooled array that
+            // keeps them alive pins a whole parsed script until the slot is next used.
+            ArrayPool<NodeAst>.Shared.Return(spine, clearArray: true);
+        }
     }
+
+    /// <summary>
+    /// The duplicate-key set the batch probe fills, reused between probes on the same thread.
+    ///
+    /// <para>The probe allocated one set per call, and a statement list is probed once per entry — which
+    /// for a loop body is once per iteration. The set is only ever live inside one synchronous probe, so
+    /// one instance per thread is enough and no two scripts can share it.</para>
+    /// </summary>
+    [ThreadStatic]
+    private static HashSet<(string, KeyValueDurability)>? probeKeys;
 
     /// <summary>
     /// True when <paramref name="stmt"/> fits the batch being probed: a set/eset (or

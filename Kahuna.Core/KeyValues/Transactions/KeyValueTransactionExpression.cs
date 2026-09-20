@@ -29,22 +29,18 @@ internal static class KeyValueTransactionExpression
                 return context.GetVariable(ast, ast.yytext!);
             
             case NodeType.IntegerType:
-                return new(ParseIntegerLiteral(ast));
-
             case NodeType.StringType:
-                return new(ast.yytext!);
-
             case NodeType.FloatType:
-                return new(ParseFloatLiteral(ast));
+                return Literal(ast);
             
             case NodeType.BooleanType:
-                return new(ast.yytext! == "true");
+                return KeyValueExpressionResult.FromBool(ast.yytext! == "true");
             
             case NodeType.Placeholder:
                 return new(context.GetParameter(ast));
             
             case NodeType.NullType:
-                return new(KeyValueExpressionType.NullType);
+                return KeyValueExpressionResult.Null;
             
             case NodeType.Equals:
                 return EqualsOperator.Eval(context, ast, "==");
@@ -58,19 +54,19 @@ internal static class KeyValueTransactionExpression
             case NodeType.LessThanEquals:
             {
                 KeyValueExpressionResult result = GreaterThanOperator.Eval(context, ast, "<=");
-                return new(!result.BoolValue);
+                return KeyValueExpressionResult.FromBool(!result.BoolValue);
             }
             
             case NodeType.GreaterThanEquals:
             {
                 KeyValueExpressionResult result = LessThanOperator.Eval(context, ast, ">=");
-                return new(!result.BoolValue);
+                return KeyValueExpressionResult.FromBool(!result.BoolValue);
             }
             
             case NodeType.NotEquals:
             {
                 KeyValueExpressionResult result = EqualsOperator.Eval(context, ast, "!=");
-                return new(!result.BoolValue);
+                return KeyValueExpressionResult.FromBool(!result.BoolValue);
             }
             
             case NodeType.Add:
@@ -149,7 +145,60 @@ internal static class KeyValueTransactionExpression
                 throw new NotImplementedException();
         }
 
-        return new(KeyValueExpressionType.NullType);
+        return KeyValueExpressionResult.Null;
+    }
+
+    /// <summary>
+    /// The value of a literal node, read once and kept on the node for every later execution.
+    ///
+    /// <para>A parsed tree is shared by every execution of the same script and a literal's text never
+    /// changes, so the read and the wrapper are both fixed work. Keeping them removes one parse and one
+    /// object per literal per evaluation, which inside a loop is per literal per iteration.</para>
+    ///
+    /// <para>Read on first use, not at parse time: a literal in a branch that is not taken is never
+    /// evaluated, and reading it early would report an out-of-range literal in dead code as a script
+    /// error. Two executions of the same tree may both fill the field; both derive the same value from
+    /// the same text, so the loser's work is wasted and nothing else.</para>
+    /// </summary>
+    private static KeyValueExpressionResult Literal(NodeAst ast)
+    {
+        KeyValueExpressionResult? memo = Volatile.Read(ref ast.literalMemo);
+
+        if (memo is not null)
+            return memo;
+
+        KeyValueExpressionResult value = ast.nodeType switch
+        {
+            NodeType.IntegerType => new(ParseIntegerLiteral(ast)),
+            NodeType.FloatType   => new(ParseFloatLiteral(ast)),
+            NodeType.StringType  => new(ast.yytext!),
+            _ => throw new KahunaScriptException("Not a literal: " + ast.nodeType, ast.yyline)
+        };
+
+        Volatile.Write(ref ast.literalMemo, value);
+
+        return value;
+    }
+
+    /// <summary>
+    /// The value of a node read as a revision number, kept on the node the same way a literal is.
+    ///
+    /// <para>A revision option is a plain decimal integer, which is a narrower rule than the one a
+    /// literal expression follows, so it has its own memo. Reading it here keeps the parse out of the
+    /// statement path, where it ran on every execution of the statement.</para>
+    /// </summary>
+    internal static long RevisionOption(NodeAst ast)
+    {
+        KeyValueExpressionResult? memo = Volatile.Read(ref ast.revisionMemo);
+
+        if (memo is not null)
+            return memo.LongValue;
+
+        KeyValueExpressionResult value = new((long)int.Parse(ast.yytext!, CultureInfo.InvariantCulture));
+
+        Volatile.Write(ref ast.revisionMemo, value);
+
+        return value.LongValue;
     }
 
     /// <summary>

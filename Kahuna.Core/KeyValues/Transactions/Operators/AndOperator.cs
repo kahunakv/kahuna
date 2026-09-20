@@ -26,8 +26,8 @@ internal static class AndOperator
             throw new KahunaScriptException("Invalid right expression", ast.yyline);
 
         if (!BooleanOperand.Require(context, ast.leftAst, ast, "&&"))
-            return new(false);
+            return KeyValueExpressionResult.FromBool(false);
 
-        return new(BooleanOperand.Require(context, ast.rightAst, ast, "&&"));
+        return KeyValueExpressionResult.FromBool(BooleanOperand.Require(context, ast.rightAst, ast, "&&"));
     }
 }

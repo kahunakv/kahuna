@@ -10,20 +10,18 @@ namespace Kahuna.Server.KeyValues.Transactions.Commands;
 /// </summary>
 internal sealed class ReturnCommand : BaseCommand
 {
-    public static KeyValueTransactionResult? Execute(
+    public static void Execute(
         ScriptTransactionContext context,
         NodeAst ast
     )
     {
         context.Status = KeyValueExecutionStatus.Stop;
         
-        if (ast.leftAst is not null)
-        {
-            KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.leftAst);
+        if (ast.leftAst is null)
+            return;
 
-            return result.ToTransactionResult();
-        }
-
-        return null;
+        // Recorded, not built. A script that returns without committing never has this answered at all —
+        // the uncommitted outcome is decided by the statement that stopped the script.
+        context.DeferResult(KeyValueTransactionExpression.Eval(context, ast.leftAst));
     }
 }

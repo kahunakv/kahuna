@@ -44,19 +44,6 @@ internal sealed class SetManyCommand : BaseCommand
                     break;
             }
             
-            context.ModifiedResult = new()
-            {
-                Type = response.Type,
-                Values = [
-                    new()
-                    {
-                        Key = response.Key ?? "",
-                        Revision = response.Revision,
-                        LastModified = response.LastModified
-                    }
-                ]
-            };
-            
             context.RecordModifiedKey((response.Key ?? "", response.Durability));
 
             // Stage the value for the durable-intent path, carrying the item's relative TTL (0 = none), mirroring
@@ -66,6 +53,27 @@ internal sealed class SetManyCommand : BaseCommand
                 context.StageMutation(response.Key, argument.Value, KeyValueState.Set, response.Revision, argument.ExpiresMs, (argument.Flags & KeyValueFlags.SetNoRevision) != 0);
         }
         
+        // The last response is the one that survives: the prepare path raises the commit timestamp from
+        // the recorded result, and this command hands it back as the statement's result. Building a
+        // result per response inside the loop made garbage of every response but the last.
+        if (responses.Count > 0)
+        {
+            KahunaSetKeyValueResponseItem last = responses[^1];
+
+            context.ModifiedResult = new()
+            {
+                Type = last.Type,
+                Values = [
+                    new()
+                    {
+                        Key = last.Key ?? "",
+                        Revision = last.Revision,
+                        LastModified = last.LastModified
+                    }
+                ]
+            };
+        }
+
         if (context.ModifiedResult is null)
             return new()
             {
@@ -127,65 +135,10 @@ internal sealed class SetManyCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }
 
-        int expiresMs = 0;
-        long compareRevision = 0;
-        byte[]? compareValue = null;
-        KeyValueFlags flags = KeyValueFlags.Set;
+        SetOptions options = new() { Flags = KeyValueFlags.Set };
 
         if (ast.extendedOne is not null)
-        {
-            List<KeyValueSetFlag> arguments = [];
-
-            GetSetFlags(ast.extendedOne, arguments);
-            
-            foreach (KeyValueSetFlag flag in arguments)
-            {
-                switch (flag.NodeType)
-                {
-                    case NodeType.SetEx:
-                        if (flag.ExprAst is null)
-                            throw new KahunaScriptException("Invalid SET EX expression", ast.yyline); 
-                        
-                        KeyValueExpressionResult ex = KeyValueTransactionExpression.Eval(context, flag.ExprAst);
-                        if (ex.Type != KeyValueExpressionType.LongType)
-                            throw new KahunaScriptException("Invalid SET EX expression", ast.yyline);
-                        
-                        expiresMs = (int)ex.LongValue;
-                        break;
-                    
-                    case NodeType.SetExists:
-                        flags |= KeyValueFlags.SetIfExists;
-                        break;
-                    
-                    case NodeType.SetNotExists:
-                        flags |= KeyValueFlags.SetIfNotExists;
-                        break;
-                    
-                    case NodeType.SetCmp:
-                        if (flag.ExprAst is null)
-                            throw new KahunaScriptException("Invalid SET CMP expression", ast.yyline); 
-                        
-                        flags |= KeyValueFlags.SetIfEqualToValue;
-                        compareValue = KeyValueTransactionExpression.Eval(context, flag.ExprAst).ToBytes();
-                        break;
-                    
-                    case NodeType.SetCmpRev:
-                        if (flag.ExprAst is null)
-                            throw new KahunaScriptException("Invalid SET CMPREV expression", ast.yyline); 
-                        
-                        flags |= KeyValueFlags.SetIfEqualToRevision;
-                        compareRevision = KeyValueTransactionExpression.Eval(context, flag.ExprAst).ToLong();
-                        break;
-
-                    case NodeType.SetNoRev:
-                        flags |= KeyValueFlags.SetNoRevision;
-                        break;
-
-                    default:
-                        throw new NotImplementedException();
-                }
-            }
-        }
+            ReadSetOptions(context, ast.extendedOne, ref options);
 
         KeyValueExpressionResult result = KeyValueTransactionExpression.Eval(context, ast.rightAst);
         
@@ -194,48 +147,11 @@ internal sealed class SetManyCommand : BaseCommand
             TransactionId = context.TransactionId,
             Key = keyName,
             Value = result.ToBytes(),
-            CompareValue = compareValue,
-            CompareRevision = compareRevision,
-            Flags = flags,
-            ExpiresMs = expiresMs,
+            CompareValue = options.CompareValue,
+            CompareRevision = options.CompareRevision,
+            Flags = options.Flags,
+            ExpiresMs = options.ExpiresMs,
             Durability = durability            
         };
-    }
-    
-    private static void GetSetFlags(NodeAst ast, List<KeyValueSetFlag> flags)
-    {
-        while (true)
-        {
-            switch (ast.nodeType)
-            {
-                case NodeType.SetFlagsList:
-                {
-                    if (ast.leftAst is not null)
-                        GetSetFlags(ast.leftAst, flags);
-
-                    if (ast.rightAst is not null)
-                    {
-                        ast = ast.rightAst!;
-                        continue;
-                    }
-
-                    break;
-                }
-                
-                case NodeType.SetCmp:
-                case NodeType.SetCmpRev:
-                case NodeType.SetEx:
-                case NodeType.SetNotExists:
-                case NodeType.SetExists:
-                case NodeType.SetNoRev:
-                    flags.Add(new(ast.nodeType, ast.leftAst));
-                    break;
-                
-                default:
-                    throw new NotImplementedException();
-            }
-
-            break;
-        }
     }
 }

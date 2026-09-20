@@ -132,6 +132,11 @@ public class TestKeyValueScriptSemantics : BaseCluster
             // An integer literal too large for the type is a script error rather than an overflow exception.
             string reason = await AssertErrored(kahuna1, "RETURN 99999999999999999999");
             Assert.Contains("out of range", reason, StringComparison.Ordinal);
+
+            // A literal is read when it is evaluated, and a branch that is not taken never evaluates one.
+            // So the same out-of-range literal in dead code is not an error. This is what keeps the literal
+            // cache lazy: reading every literal up front would report this script as broken.
+            await AssertReturns(kahuna1, "IF false THEN RETURN 99999999999999999999 END RETURN 'ok'", "ok");
         }
         finally
         {
@@ -506,5 +511,58 @@ public class TestKeyValueScriptSemantics : BaseCluster
         {
             await LeaveCluster(node1, node2, node3);
         }
+    }
+
+    /// <summary>
+    /// A mutation statement records its outcome twice: once on the context, where the prepare path reads
+    /// the highest modification timestamp and the batched forms read the whole thing, and once as the
+    /// result answered to the caller. The two are not interchangeable.
+    ///
+    /// <para>A <c>SET</c>'s recorded outcome carries the value it wrote, because the durable path needs
+    /// it; the answered result deliberately does not. A <c>DELETE</c> and an <c>EXTEND</c> carry no value
+    /// in either, which is why those two may share one list and a <c>SET</c> may not. Sharing the list in
+    /// a <c>SET</c> would start returning the written bytes on every set response, so the shapes are
+    /// asserted here rather than left to a reviewer to notice.</para>
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestMutationResultsCarryNoValue([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            string key = GetRandomKey();
+
+            KeyValueTransactionResult set = await Run(kahuna1, $"BEGIN SET '{key}' 'payload' COMMIT END");
+
+            Assert.Equal(KeyValueResponseType.Set, set.Type);
+            Assert.Null(set.Value);
+            Assert.NotNull(set.Values);
+            Assert.Equal(key, set.Values![0].Key);
+
+            // A read of the same key does carry the value, so the assertion above is about the set
+            // response and not about an empty store.
+            KeyValueTransactionResult get = await Run(kahuna1, $"BEGIN GET '{key}' COMMIT END");
+
+            Assert.Equal("payload", Encoding.UTF8.GetString(get.Value ?? []));
+
+            KeyValueTransactionResult extend = await Run(kahuna1, $"BEGIN EXTEND '{key}' 60000 COMMIT END");
+
+            Assert.Null(extend.Value);
+
+            KeyValueTransactionResult delete = await Run(kahuna1, $"BEGIN DELETE '{key}' COMMIT END");
+
+            Assert.Null(delete.Value);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    private static Task<KeyValueTransactionResult> Run(IKahuna kahuna, string script)
+    {
+        return kahuna.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, null);
     }
 }

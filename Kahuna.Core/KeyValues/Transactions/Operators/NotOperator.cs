@@ -16,6 +16,6 @@ internal static class NotOperator
         if (ast.leftAst is null)
             throw new KahunaScriptException("Invalid left expression", ast.yyline);
 
-        return new(!BooleanOperand.Require(context, ast.leftAst, ast, "!"));
+        return KeyValueExpressionResult.FromBool(!BooleanOperand.Require(context, ast.leftAst, ast, "!"));
     }
 }
