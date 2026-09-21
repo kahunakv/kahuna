@@ -365,6 +365,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-snapshot-transfer-step-timeout", Required = false, HelpText = "Upper bound on one awaited step of an outbound snapshot transfer (an export call, one stream read, or one chunk send), in milliseconds. A step that makes progress resets the clock; only a step that stalls trips the timeout.", Default = 120000)]
     public int RaftSnapshotTransferStepTimeout { get; set; } = 120000;
 
+    [Option("raft-snapshot-chunk-ack-timeout", Required = false, HelpText = "Upper bound on the acknowledgement of one snapshot chunk, in milliseconds. A receiver whose install path is stuck fails the transfer after this bound instead of holding it open for the whole transfer step timeout. The effective bound is the smaller of the two options. Must be positive.", Default = 15000)]
+    public int RaftSnapshotChunkAckTimeout { get; set; } = 15000;
+
     [Option("raft-max-pre-auth-request-body-bytes", Required = false, HelpText = "Ceiling on a Raft REST request body before it is authenticated/signed, in bytes. Bounds buffering independent of the host's own request-size limit.", Default = 32L * 1024 * 1024)]
     public long RaftMaxPreAuthRequestBodyBytes { get; set; } = 32L * 1024 * 1024;
 

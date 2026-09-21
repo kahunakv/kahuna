@@ -24,13 +24,6 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
     private const string Space = "t:rlh";
     private const string InsideKey = Space + "/m";
 
-    private static readonly double TimingScale = GetTimingScale();
-    private static double GetTimingScale()
-    {
-        string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");
-        return val is not null && double.TryParse(val, out double scale) ? scale : 1.0;
-    }
-
     private readonly ILogger<IRaft>   raftLogger;
     private readonly ILogger<IKahuna> kahunaLogger;
 

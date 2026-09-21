@@ -41,14 +41,6 @@ public sealed class TestRangeSplitUnderPlacement : BaseCluster
 
     private const string Space = "rp:s";
 
-    private static readonly double TimingScale = GetTimingScale();
-
-    private static double GetTimingScale()
-    {
-        string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");
-        return val is not null && double.TryParse(val, out double s) && s >= 1.0 ? s : 1.0;
-    }
-
     private async Task<(IRaft[] Rafts, KahunaManager[] Kahunas, CancellationTokenSource Cts)> AssembleRf1Cluster()
     {
         InMemoryCommunication raftComm = new();

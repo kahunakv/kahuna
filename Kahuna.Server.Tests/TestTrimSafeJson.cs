@@ -33,6 +33,13 @@ public sealed class TestTrimSafeJson
         TypeInfoResolver = new DefaultJsonTypeInfoResolver()
     };
 
+    // Flurl's default serializer uses no naming policy and case-insensitive reads.
+    private static readonly JsonSerializerOptions FlurlDefaults = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver()
+    };
+
     [Fact]
     public void WalSegmentEntry_GeneratedOutputMatchesReflection()
     {
@@ -178,17 +185,11 @@ public sealed class TestTrimSafeJson
     {
         // Flurl's default serializer uses no naming policy and case-insensitive reads. A property with
         // no explicit JSON name must keep its .NET name on the wire.
-        JsonSerializerOptions flurlDefaults = new()
-        {
-            PropertyNameCaseInsensitive = true,
-            TypeInfoResolver = new DefaultJsonTypeInfoResolver()
-        };
-
         KahunaBackupIncrementalRequest request = new() { ParentBackupId = Guid.NewGuid() };
 
         string generated = KahunaRestJson.FlurlSerializer.Serialize(request);
 
-        Assert.Equal(JsonSerializer.Serialize(request, flurlDefaults), generated);
+        Assert.Equal(JsonSerializer.Serialize(request, FlurlDefaults), generated);
         Assert.Contains("\"ParentBackupId\"", generated);
         Assert.Equal("{}", KahunaRestJson.FlurlSerializer.Serialize(KahunaEmptyRequest.Instance));
 

@@ -31,14 +31,6 @@ public sealed class TestReplicaPlacementForwarding : BaseCluster
 
     private readonly ILogger<IKahuna> kahunaLogger = NullLogger<IKahuna>.Instance;
 
-    private static readonly double TimingScale = GetTimingScale();
-
-    private static double GetTimingScale()
-    {
-        string? val = Environment.GetEnvironmentVariable("KAHUNA_TEST_TIMING_SCALE");
-        return val is not null && double.TryParse(val, out double s) && s >= 1.0 ? s : 1.0;
-    }
-
     private const int Partitions = 6;
 
     /// <summary>
