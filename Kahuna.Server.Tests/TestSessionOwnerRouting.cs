@@ -16,7 +16,7 @@ namespace Kahuna.Server.Tests;
 /// node owns locally whatever the current leader is, and a leader that receives one for a session begun on the
 /// previous leader must forward it there — not answer "No transaction session". Before this, every commit in
 /// flight on a leader that stepped down was routed to the successor, which had no such session, and spun until the
-/// client's deadline (CamusDB slow-disk runs sd2–sd6, ~100 indeterminate commits per leader pause).
+/// client's deadline (~100 indeterminate commits per leader pause under a paused disk).
 /// </summary>
 public sealed class TestSessionOwnerRouting : BaseCluster
 {

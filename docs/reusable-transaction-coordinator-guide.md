@@ -593,8 +593,8 @@ counts it), and the floor is what recovery uses as the "record may have been rec
 early reclaim never turns a reclaimed commit into a presumed abort.
 
 Being over the budget is the **steady state** at a few thousand commits per second: the commit rate
-times the floor exceeds the budget, and only a configuration change alters that (the 1.7.8 soaks sat
-at 1.8–1.9× the record budget on every node for 45 minutes, bounded by the floor). The sweep
+times the floor exceeds the budget, and only a configuration change alters that (under sustained load every
+node sits at 1.8–1.9× the record budget, bounded by the floor). The sweep
 therefore logs it sparingly — one warning when a streak starts, one reminder every ten minutes with
 the current numbers and the streak's length, and one information line when the node is back under
 budget — and leaves the continuous signal to the instruments: `kahuna.durable_tx.retention_over_budget`

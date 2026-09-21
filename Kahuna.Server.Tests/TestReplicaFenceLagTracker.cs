@@ -240,7 +240,7 @@ public sealed class TestReplicaFenceLagTracker
     private static ReplicaFrontier Stalled => new(Known: true, EntriesBehind: 40, WalStalled: true);
 
     /// <summary>
-    /// Ask 2 of Vorpal 029dad72. A healthy replica whose durable frontier is more than the bound behind the
+    /// A healthy replica whose durable frontier is more than the bound behind the
     /// leader's commit index cannot have applied a prepare the leader just committed, so the fence must stop
     /// waiting on it at once — no three strikes — and say why. Within the bound, nothing changes.
     /// </summary>
@@ -296,7 +296,7 @@ public sealed class TestReplicaFenceLagTracker
     }
 
     /// <summary>
-    /// The lk8 shape: a lagging replica attests fast probes while tens of thousands of entries behind. Such a
+    /// The lagging-attester shape: a lagging replica attests fast probes while tens of thousands of entries behind. Such a
     /// probe must not count, and while the evidence says it is behind no probe is even sent — the due probe
     /// is withheld and the streak restarts — so it is restored only by consecutive probes made and answered
     /// with its frontier within the bound.

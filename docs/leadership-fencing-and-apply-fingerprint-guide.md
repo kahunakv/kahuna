@@ -142,6 +142,46 @@ heads than the leader at the same applied log id, the split is refused with the 
 retries the split on its next cadence. A replica with **fewer** heads than the leader is reported
 through the promotion path and the split proceeds, because the copy reads the leader.
 
+### Why the leader's apply order is the log order
+
+The apply fingerprint detects a divergence; the rule below prevents the one in which an ex-leader alone
+rejects a bundled commit its peers admitted, seconds after a graceful handover, and one acknowledged
+write is then missing on that replica.
+
+The transaction-record and prepared-intent stores have exactly one live writer on every node: the
+per-partition consumer apply that Raft drives in log order. The write scheduler's completion for a
+locally proposed durable entry runs when the proposal is quorum-durable, which is before the leader's own
+consumer apply of that entry and of the entries below it, and can also trail that apply by an arbitrary
+delay (a handover storm is exactly such a delay). It therefore never applies the delta. It waits for the
+ordered apply of its entries and reads the result that apply recorded, so a prepare is judged against a
+competitor's intent, and a bundled commit against the committed-head ledger, at the entry's own log
+position and only there.
+
+The wait is only served while the node leads the partition. A leader whose device stalls is stepped
+down by Kommander's durable-write watchdog (3 s by default), and its own apply then cannot advance until
+the device heals, while the entries it proposed are quorum-durable and are applied and judged by the new
+leader. Serving the wait out there would only turn the stall into a long unknown outcome at the client, so
+the moment leadership moves away every parked completion is released and answered as **unobserved**, which
+the producer treats exactly like "not committed": it re-drives against the current leader, where the same
+entries are idempotent in the log. One bound (10 s, the proposal timeout) covers a whole submission, never
+one per entry, and a completion that exhausts it is answered the same way.
+
+Three counters watch the rendezvous:
+
+| Metric | Meaning |
+|---|---|
+| `kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss` | Completions released before the ordered apply because the node stopped leading the partition. Bursts at every leadership change with writes in flight; the producers retried against the new leader. |
+| `kahuna.durable_tx.ordered_apply_wait_timeouts` | Completions that did not see the ordered apply of their committed entry within the bound while the node still led. The producer retried. A sustained rate means a leader's apply stream is stalled without the watchdog stepping it down, or completions and applies disagree on log identity. |
+| `kahuna.durable_tx.ordered_apply_results_displaced` | Completions that trailed the ordered apply by more than the result window and read the acknowledgement back from the store. Expected to stay at zero. |
+
+The node logs the release once per leadership change, at information level, and a timed-out completion at
+warning level:
+
+```
+Released 116 durable completions parked on the ordered apply of partition 1 (leadership lost in term 3); this node no longer leads it, so their producers re-drive against the current leader, where the same entries are idempotent
+Completion of committed durable entry #4917 on partition 2 (PreparedIntent) did not see its ordered apply within 10000ms while this node still led the partition; answering the producer as unobserved so it re-drives against the current leader instead of applying the entry out of log order here
+```
+
 ---
 
 ## 3. Metrics
@@ -152,5 +192,8 @@ through the promotion path and the split proceeds, because the copy reads the le
 | `kahuna.durable_tx.committed_head_ledger_entries{partition}` | gauge | Committed heads this node holds for the partition |
 | `kahuna.keyvalues.apply_divergence_detected` | counter | Replicas found divergent at a promotion or before a split |
 | `kahuna.range.split.incomplete_source_refusals` | counter | Splits refused because the source leader's state was incomplete |
+| `kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss` | counter | Durable completions released because the node stopped leading the partition |
+| `kahuna.durable_tx.ordered_apply_wait_timeouts` | counter | Durable completions that never saw the ordered apply of their committed entry |
+| `kahuna.durable_tx.ordered_apply_results_displaced` | counter | Durable completions that read their acknowledgement back from the store |
 
 Alert on any increase of the two counters.

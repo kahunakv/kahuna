@@ -19,8 +19,8 @@ namespace Kahuna.Server.KeyValues;
 /// Three pieces of mutable state live here rather than inside one collaborator because more than one
 /// reads them: <see cref="KeySpaceRegistry"/> (routing, router construction, replication apply and the
 /// snapshot floor), <see cref="WriteFrequencyRegistry"/> (replication apply and the split/merge triggers),
-/// and <see cref="DurableApplyResults"/> (written by the durable replication gateway, read by the
-/// replication dispatcher for the same log entry). Everything else stays owned by its single collaborator.
+/// and <see cref="DurableApplyResults"/> (written by the replication dispatcher's ordered apply, awaited by the
+/// durable replication gateway's completion for the same log entry). Everything else stays owned by its single collaborator.
 ///
 /// <see cref="Locator"/> and the collaborator slots are assigned after construction: the locator is built
 /// late (it takes the manager), and collaborators reference each other, so they are wired in a second pass
@@ -54,9 +54,10 @@ internal sealed class KeyValuesRuntime
     /// <summary>Per-key write counters feeding the load-based split trigger.</summary>
     internal required KeyWriteFrequencyRegistry WriteFrequencyRegistry { get; init; }
 
-    /// <summary>Carries each durable entry's apply result from the consumer apply to the write scheduler's
-    /// completion for the same log entry, so the completion reuses it instead of deserializing and
-    /// re-applying an identical delta.</summary>
+    /// <summary>The rendezvous between the ordered consumer apply of a durable entry and the write scheduler's
+    /// completion for the same log entry: the consumer records each entry's result here, and the completion
+    /// waits for it instead of applying the delta itself, so the durable stores have exactly one live writer
+    /// and their state stays a pure function of the log.</summary>
     internal required DurableApplyResultLedger DurableApplyResults { get; init; }
 
     internal required RangeMapStore RangeMapStore { get; init; }

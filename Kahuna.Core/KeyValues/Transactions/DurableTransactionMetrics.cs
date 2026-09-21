@@ -160,7 +160,7 @@ internal static class DurableTransactionMetrics
     /// the write was validated against — a competitor committed the same base between the pre-propose
     /// staged-base validation and this prepare landing. On the 2PC path each refusal becomes a truthful
     /// conflict abort and is a prevented lost update (before this fence existed, exactly this interleaving
-    /// silently dropped committed writes under a paused coordinator — the bank-soak conservation loss). In a
+    /// silently dropped committed writes under a paused coordinator — an observed conservation loss). In a
     /// one-phase bundle the refusal cannot withhold the bundled decision; the bundle's guard is its own
     /// pre-propose re-validation, so a bundle-path occurrence only marks the accepted residual window.
     /// </summary>
@@ -212,7 +212,7 @@ internal static class DurableTransactionMetrics
     /// remembered committed head. A late re-driven materialization that the head guards no-op is the benign
     /// producer; anything else is a fork witness — a committed record entering the log below history this node
     /// already saw settle, which is how a stale-base commit permanently overwrites acknowledged writes. Each
-    /// occurrence is logged with both revisions and the transaction id so a conserved-total drift in a soak run
+    /// occurrence is logged with both revisions and the transaction id so a conserved-total drift under load
     /// attributes to its producer from the log alone.
     /// </summary>
     internal static readonly Counter<long> BelowHeadMaterializations =
@@ -1491,15 +1491,17 @@ internal static class DurableTransactionMetrics
     internal static void ReceiptsExpired(int count) => GcReceiptsExpired.Add(count);
 
     /// <summary>
-    /// Durable record/intent applies skipped by the write scheduler's completion because the consumer apply of that
-    /// exact log entry already ran and left its result. Each skip avoids a full re-deserialization of a delta whose
-    /// effect is already in the store. A value that stays near zero on a busy leader means the two apply paths are no
-    /// longer agreeing on log identity — the redundant parse is back.
+    /// Durable record/intent results the write scheduler's completion took from the ordered consumer apply of the
+    /// same log entry instead of applying the delta itself. On a busy leader this counts (nearly) every locally
+    /// proposed durable entry: the completion never applies, it waits for the ordered apply and reads its result.
+    /// A value that stays near zero on a busy leader means the executor's per-entry log indices and the indices
+    /// Raft stamps on the entries it delivers no longer agree — completions are then timing out rather than
+    /// rendezvousing (see <see cref="OrderedApplyWaitTimeouts"/>).
     /// </summary>
     internal static readonly Counter<long> RedundantAppliesSkipped =
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.redundant_applies_skipped",
-            description: "Durable applies skipped because that log entry's apply already ran.");
+            description: "Durable completions that took the ordered apply's result for their log entry instead of applying the delta themselves.");
 
     private static long redundantAppliesSkipped;
 
@@ -1511,6 +1513,74 @@ internal static class DurableTransactionMetrics
     {
         Interlocked.Increment(ref redundantAppliesSkipped);
         RedundantAppliesSkipped.Add(1);
+    }
+
+    /// <summary>
+    /// Completions of a committed durable entry that found the entry applied by the ordered consumer apply but its
+    /// recorded acknowledgement already displaced from the bounded result window (the completion trailed the apply
+    /// by more than the window's worth of durable entries). The acknowledgement is then read back from the intent
+    /// store. Expected to stay at zero; a steady rate means the write scheduler's completions are lagging far
+    /// behind the apply stream.
+    /// </summary>
+    internal static readonly Counter<long> OrderedApplyResultsDisplaced =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.ordered_apply_results_displaced",
+            description: "Durable completions whose entry was applied but whose recorded acknowledgement was displaced before they claimed it.");
+
+    /// <summary>
+    /// Completions of a committed durable entry that did not see the ordered consumer apply of that entry within
+    /// the submission's wait bound while this node still led the partition, and answered their producer as
+    /// unobserved (a clean retry) instead of applying the delta themselves. The shapes that produce it: a leader
+    /// whose apply stream is stalled without the durable-write watchdog stepping it down, or a snapshot install
+    /// that covered the entry. Alert on a sustained rate. (A leadership loss releases parked completions earlier and
+    /// is counted separately.)
+    /// </summary>
+    internal static readonly Counter<long> OrderedApplyWaitTimeouts =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.ordered_apply_wait_timeouts",
+            description: "Durable completions that did not see the ordered apply of their committed entry within the wait bound.");
+
+    /// <summary>
+    /// Completions of a committed durable entry released before the ordered apply because this node stopped leading
+    /// the partition (a step-down under a stalled device, a graceful transfer). The producer re-drives against the
+    /// current leader. Expected in bursts at every leadership change of a partition with writes in flight.
+    /// </summary>
+    internal static readonly Counter<long> OrderedApplyWaitsReleasedOnLeadershipLoss =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss",
+            description: "Durable completions released before the ordered apply because this node stopped leading the partition.");
+
+    private static long orderedApplyWaitsReleasedOnLeadershipLoss;
+
+    /// <summary>Process-wide count behind <see cref="OrderedApplyWaitsReleasedOnLeadershipLoss"/>, readable for tests.</summary>
+    internal static long OrderedApplyWaitsReleasedOnLeadershipLossCount => Interlocked.Read(ref orderedApplyWaitsReleasedOnLeadershipLoss);
+
+    internal static void OrderedApplyWaitReleasedOnLeadershipLoss()
+    {
+        Interlocked.Increment(ref orderedApplyWaitsReleasedOnLeadershipLoss);
+        OrderedApplyWaitsReleasedOnLeadershipLoss.Add(1);
+    }
+
+    private static long orderedApplyResultsDisplaced;
+
+    private static long orderedApplyWaitTimeouts;
+
+    /// <summary>Process-wide count behind <see cref="OrderedApplyResultsDisplaced"/>, readable for tests.</summary>
+    internal static long OrderedApplyResultsDisplacedCount => Interlocked.Read(ref orderedApplyResultsDisplaced);
+
+    /// <summary>Process-wide count behind <see cref="OrderedApplyWaitTimeouts"/>, readable for tests.</summary>
+    internal static long OrderedApplyWaitTimeoutsCount => Interlocked.Read(ref orderedApplyWaitTimeouts);
+
+    internal static void OrderedApplyResultDisplaced()
+    {
+        Interlocked.Increment(ref orderedApplyResultsDisplaced);
+        OrderedApplyResultsDisplaced.Add(1);
+    }
+
+    internal static void OrderedApplyWaitTimedOut()
+    {
+        Interlocked.Increment(ref orderedApplyWaitTimeouts);
+        OrderedApplyWaitTimeouts.Add(1);
     }
 
     /// <summary>

@@ -256,7 +256,7 @@ public sealed class TestAbandonedDurableFinalizeFence
     }
 
     /// <summary>
-    /// The coordinator-side liveness half of the fence (Vorpal 3c7f6b99, finding 2): a commit whose anchor
+    /// The coordinator-side liveness half of the fence: a commit whose anchor
     /// proposal never committed answers MustRetry, and the client's contract is to retry COMMIT on the same
     /// session. Once the frozen decision deadline has passed, no retry can ever commit — the record's deadline
     /// gate compares against an attempt HLC that only advances — so a retry that re-drove the frozen input

@@ -111,8 +111,8 @@ public sealed class TestGrpcServerBatcherLiveness
     /// A previous write stuck on a stalled stream holds the per-stream semaphore. The next write
     /// must not queue behind it forever: after the write timeout it fails retryably, fails the
     /// stream's pending requests, and evicts the URL's streams so later enqueues rebuild.
-    /// This wedge — one silent stuck write serializing all forwarding to a peer — was the
-    /// permanent-outage mechanism of the Caraxes run-J soak.
+    /// This wedge — one silent stuck write serializing all forwarding to a peer — is a
+    /// permanent-outage mechanism under a SIGSTOPed peer.
     /// </summary>
     [Fact]
     public async Task WriteBounded_SemaphoreHeldPastTimeout_FailsRetryablyAndEvicts()

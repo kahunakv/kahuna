@@ -10,7 +10,7 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// What a whole-partition snapshot install leaves behind in the prepared-intent store, and how the advisory
-/// staged-base fence reads it afterwards (Vorpal 029dad72, the leader-kill runs).
+/// staged-base fence reads it afterwards (the state a leader kill leaves behind).
 ///
 /// <para>A whole-partition snapshot is newer than the WAL boundary it is installed at: the exporter walks its
 /// state well after the boundary and the receiver replays every retained entry above the boundary on top of

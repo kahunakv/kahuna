@@ -20,7 +20,7 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 /// The deadline is the only backstop for a stream that goes quiet WITHOUT dying — a SIGSTOPed peer
 /// leaves the TCP session established and the HTTP/2 window stalls with no error, so nothing else
 /// would ever complete the promise (observed as 126k unresolved promises and a permanently silent
-/// data plane in the Caraxes run-J soak). Writes are bounded by <see cref="WriteTimeout"/> for the
+/// data plane under a SIGSTOPed peer). Writes are bounded by <see cref="WriteTimeout"/> for the
 /// same reason: one stuck <c>WriteAsync</c> would otherwise hold the per-stream semaphore forever
 /// and silently wedge every future forwarded operation to that peer. A failed or stalled stream is
 /// evicted from the process-wide registry so the next enqueue rebuilds fresh streams instead of
@@ -1114,7 +1114,7 @@ internal sealed class GrpcServerBatcher
     /// <summary>
     /// Serializes one write onto the given stream writer under its own semaphore, bounded by
     /// <see cref="WriteTimeout"/> on both the semaphore acquisition and the write itself. Either
-    /// bound firing means the stream is stalled (the run-J failure mode: a SIGSTOPed peer's
+    /// bound firing means the stream is stalled (the SIGSTOPed-peer failure mode: the peer's
     /// HTTP/2 window fills and the write never completes, holding the semaphore forever): the
     /// stream is evicted and disposed, its pending requests fail retryably, and the thrown
     /// <see cref="RpcException"/> makes the caller's write group fail the same way instead of

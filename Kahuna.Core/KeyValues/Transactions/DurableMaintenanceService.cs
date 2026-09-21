@@ -83,8 +83,8 @@ internal sealed class DurableMaintenanceService
     private const double BudgetLowWaterFraction = 0.9;
 
     // One warning per streak of budget-driven reclaim, then a reminder at this interval while it continues: the
-    // condition is the steady state under sustained load (the 1.7.8 soaks sat 1.8-1.9x over the record budget for
-    // 45 minutes on every node, bounded by the floor) and must not become a line per tick or per minute. The
+    // condition is the steady state under sustained load (under sustained load every node sits 1.8-1.9x over the record budget,
+    // bounded by the floor) and must not become a line per tick or per minute. The
     // continuous signal is the kahuna.durable_tx.retention_over_budget gauge and the gc_budget_sweeps counter.
     internal static readonly TimeSpan BudgetLogInterval = TimeSpan.FromMinutes(10);
 
@@ -299,7 +299,7 @@ internal sealed class DurableMaintenanceService
 
         // Visibility for the one outcome the sweep cannot resolve: a record-less intent past the retention horizon
         // with no receipt. Each holds its key read-only, so the count is a gauge and one line per pass names it —
-        // 30 such holds wedged a whole partition for the rest of CamusDB run sd6 with nothing but per-key error
+        // a few dozen such holds once wedged a whole partition with nothing but per-key error
         // lines to show for it.
         DurableTransactionMetrics.SetRecordlessIntentsHeld(recovery.HeldRecordlessIntents);
 

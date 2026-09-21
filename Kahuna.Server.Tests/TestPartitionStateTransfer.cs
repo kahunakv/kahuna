@@ -233,7 +233,7 @@ public sealed class TestPartitionStateTransfer : IDisposable
         // The target held partition 2 before it fell behind: a transaction it saw prepare but whose settlement
         // applied below the snapshot boundary — never to be replayed here — left it a pending intent, a
         // receipt and an undecided record. Merged over the install, the intent is a permanent phantom holder
-        // of its key (the leader-kill runs: 400 keys rejecting every commit for the rest of the run). Other
+        // of its key (after a leader kill: hundreds of keys rejecting every commit indefinitely). Other
         // partitions' slices must not be touched.
         HLCTimestamp stale = Ts(1000);
         Node target = MakeNode();

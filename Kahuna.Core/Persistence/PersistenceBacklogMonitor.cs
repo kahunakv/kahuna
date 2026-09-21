@@ -33,7 +33,7 @@ namespace Kahuna.Server.Persistence;
 /// The monitor also samples itself every <see cref="SamplePeriod"/> and logs through an
 /// <see cref="UnflushedBacklogAlertPolicy"/>: a warning when the backlog crosses 75% of a budget, a
 /// warning when back-pressure engages, reminders every ten minutes while either holds, and an
-/// information line when it clears. On the 1.7.8 soaks a follower's durable-apply lag saw-toothed to
+/// information line when it clears. Under sustained load a follower's durable-apply lag once saw-toothed to
 /// two thirds of the item budget for 45 minutes with nothing in the log; the gauges showed it only to
 /// whoever was scraping them.
 /// </para>

@@ -320,7 +320,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <summary>
     /// Test-only interleaving hook, awaited after the pre-propose staged-base validation passes and before
     /// anything durable is proposed. Lets a test run a competing commit inside the probe→prepare window — the
-    /// interleaving behind the bank-soak run-K lost update — which no external caller can time
+    /// interleaving behind the observed lost update — which no external caller can time
     /// deterministically. Null (zero-cost) in production.
     /// </summary>
     internal Func<CancellationToken, Task>? TestAfterPreValidationHook;
@@ -364,7 +364,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         //
         // This pre-propose pass is the cheap early half only: it cannot see a competitor that commits inside
         // the window between this probe and the prepare landing (its intent settled and garbage-collected, or
-        // settled by the prepare-retry helping pass below) — exactly the window that admitted the bank-soak
+        // settled by the prepare-retry helping pass below) — exactly the window that admitted the observed
         // lost update. The authoritative half runs at the prepare's own apply position: the intent store's
         // staged-base fence compares the validated base against the last transactionally committed head of the
         // key and refuses the prepare acknowledgement on a mismatch, which drives the truthful abort below.
@@ -1487,9 +1487,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <summary>
     /// Concludes a commit the record's deadline gate withheld. The gate compares the attempt HLC with the frozen
     /// decision deadline, and HLCs only advance, so every later attempt of this transaction is rejected the same
-    /// way: answering MustRetry here sent the client into a retry loop that could never terminate (CamusDB run
-    /// sd3, Vorpal 3c7f6b99: the same twelve transactions re-driven for eight minutes after their coordinator's
-    /// disk healed, each retry re-initialising the record on the new anchor leader and losing to the deadline
+    /// way: answering MustRetry here sent the client into a retry loop that could never terminate (the same dozen
+    /// transactions were once re-driven for eight minutes after their coordinator's disk healed, each retry re-initialising the record on the new anchor leader and losing to the deadline
     /// again). The transaction yields to presumed abort by design; instead of leaving that to the recovery sweep's
     /// schedule, drive the presumed abort through the record CAS now and report what the record answers: an abort
     /// (the common case) is terminal and the client restarts, while a commit that applied under the ordered log

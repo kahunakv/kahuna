@@ -212,6 +212,10 @@ internal sealed partial class KeyValuesManager
     {
         logger.LogLeadershipLostDroppingActorState(partitionId, term);
         nodeMaintenance.DropLeaderState(partitionId);
+
+        // Durable completions parked on this node's ordered apply of entries it proposed under the lost term
+        // resolve now, as unobserved: their producers re-drive against the current leader.
+        replicationDispatcher.ReleaseParkedCompletions(partitionId, $"leadership lost in term {term}");
         return Task.CompletedTask;
     }
 

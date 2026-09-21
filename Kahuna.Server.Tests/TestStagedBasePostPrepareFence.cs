@@ -20,7 +20,7 @@ namespace Kahuna.Server.Tests;
 /// inside that window — reachable when the writer's in-memory write intent is lost to a lease lapse, cache
 /// eviction, or leader change — was invisible to every earlier guard: the pre-propose probe ran too early,
 /// the prepare's single-live-intent check saw no live foreign intent (the competitor already settled), and
-/// read-set validation skips a read-then-written key. A bank soak lost 3 units of SUM(balance) over ~900k
+/// read-set validation skips a read-then-written key. A bank-transfer workload once lost 3 units of SUM(balance) over ~900k
 /// transfers through exactly this interleaving.
 ///
 /// Two mechanisms close the window: the one-phase bundle re-runs the pre-propose staged-base validation
@@ -176,7 +176,7 @@ public sealed class TestStagedBasePostPrepareFence
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Reproduces the bank-soak run-K interleaving deterministically. T2 reads a key at its committed base
+    /// Reproduces the observed lost-update interleaving deterministically. T2 reads a key at its committed base
     /// and stages a write computed from that read. Inside T2's finalize — after the pre-propose staged-base
     /// validation passed, before anything durable is proposed — a competitor's commit of the same base
     /// materializes (applied exactly as a replicated committed value is, emulating the competitor that

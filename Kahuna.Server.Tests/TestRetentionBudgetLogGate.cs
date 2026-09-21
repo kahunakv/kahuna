@@ -5,8 +5,8 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Being over the durable-2PC resident-metadata budget is the steady state under sustained load (the commit
-/// rate times the floor exceeds the budget), so the retention sweep must not log it per tick: the 1.7.8
-/// soaks carried one warning per minute per node for 45 minutes. The gate allows one line when a streak
+/// rate times the floor exceeds the budget), so the retention sweep must not log it per tick: under sustained
+/// load it once carried one warning per minute per node for 45 minutes. The gate allows one line when a streak
 /// starts, one reminder per interval while it lasts, and one line when it ends.
 /// </summary>
 public sealed class TestRetentionBudgetLogGate

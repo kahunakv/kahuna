@@ -251,20 +251,14 @@ internal sealed class KeyValueReplicationDispatcher
             return BoolTask(result);
         }
 
-        // Durable records apply here, in Raft commit order, on every node. On the leader the write scheduler's
-        // completion applies the identical delta too, and the fast-path ticket release means either side can run
-        // first — so whichever applies records the outcome against the log entry, and the other consumes it
-        // instead of deserializing and applying the same delta a second time.
+        // Durable records apply HERE and only here, in Raft commit order, on every node — leader included. This
+        // is the single live writer of the record and intent stores, which is what makes their state a pure
+        // function of the partition's log. The write scheduler's completion for a locally proposed entry does
+        // not apply the delta a second time (it could run ahead of this apply, or of the entries below it, or
+        // long after it); it waits on the ledger for the result recorded here.
         if (log.LogType == ReplicationTypes.TransactionRecord)
         {
             durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.TransactionRecords);
-
-            if (durableApplyResults.TryConsume(partitionId, log.Id, out bool recorded))
-            {
-                if (recorded)
-                    durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.TransactionRecords);
-                return BoolTask(recorded);
-            }
 
             bool applied = transactionRecordStore.Replicate(partitionId, log);
             durableApplyResults.RecordApplied(partitionId, log.Id, applied);
@@ -279,8 +273,7 @@ internal sealed class KeyValueReplicationDispatcher
 
             // The prepare acknowledgement is what a local producer needs from this apply; a prepare rejected on its
             // merits is still a successfully applied log entry, so it never fails replication.
-            if (!durableApplyResults.TryConsume(partitionId, log.Id, out _))
-                durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log));
+            durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log));
 
             // A rejected prepare is still an applied entry (the store recorded the rejection), so the
             // snapshot that covers this apply certifies it either way.
@@ -358,15 +351,37 @@ internal sealed class KeyValueReplicationDispatcher
                 runtime.PreparedIntentStore.CommittedHeadCount, runtime.PreparedIntentStore.LiveIntentCount);
         }
 
+        bool leadingNow = node == runtime.Raft.GetLocalEndpoint();
+
+        // The ordered-apply rendezvous parks a locally proposed entry's completion until this node's consumer
+        // applies it, which is only worth waiting for while this node leads: an ex-leader's apply decides nothing
+        // for the producer (the new leader applies and judges the same quorum-durable entry), and a stalled
+        // ex-leader's apply may not advance for a long time. Release what is parked the moment leadership moves
+        // away, and let completions park again once this node leads.
+        if (leadingNow)
+            durableApplyResults.NoteLeadershipRegained(partitionId);
+        else
+            ReleaseParkedCompletions(partitionId, "leader changed");
+
         // Promotion is the moment a divergent apply projection starts to serve as authoritative, and the
         // moment every replica can still be asked: compare this node's fingerprint with its peers' off the
         // notification path. The comparison cannot veto the promotion — Kommander already elected — so its
         // output is the error-level signal and the divergence counter, which is what makes a replica that
         // silently dropped part of its apply stream visible in the cluster's own signals.
-        if (node == runtime.Raft.GetLocalEndpoint() && promotionComparisonsInFlight.TryAdd(partitionId, 0))
+        if (leadingNow && promotionComparisonsInFlight.TryAdd(partitionId, 0))
             _ = ReportDivergenceAtPromotionAsync(partitionId);
 
         return Task.FromResult(true);
+    }
+
+    /// <summary>Marks the partition as no longer led here and releases every durable completion parked on its
+    /// ordered apply (see <see cref="DurableApplyResultLedger.NoteLeadershipLost"/>). Called from the leader-changed
+    /// and leadership-lost notifications alike; idempotent.</summary>
+    internal void ReleaseParkedCompletions(int partitionId, string reason)
+    {
+        int released = durableApplyResults.NoteLeadershipLost(partitionId);
+        if (released > 0)
+            logger.LogDurableCompletionsReleasedOnLeadershipLoss(released, partitionId, reason);
     }
 
     private async Task ReportDivergenceAtPromotionAsync(int partitionId)

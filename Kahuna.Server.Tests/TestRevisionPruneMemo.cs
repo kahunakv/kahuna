@@ -8,7 +8,7 @@ namespace Kahuna.Server.Tests;
 /// <summary>
 /// The targeted revision prune runs inside every flush cycle for every key the cycle flushed, and
 /// used to walk each key's whole revision block every time even when nothing was old enough to
-/// delete — a cost that grows with the key's write rate and starved the flush (the 1.7.7 bank-soak
+/// delete — a cost that grows with the key's write rate and starved the flush (a flush-starvation
 /// regression). The RocksDB backend now memoizes what a walk learned and answers later visits in
 /// O(1) until something could actually be deletable. These tests pin the memo's contract: a skip is
 /// only ever taken when a walk would delete nothing, and every event that could make rows deletable
@@ -184,7 +184,7 @@ public sealed class TestRevisionPruneMemo : IDisposable
     [Fact]
     public void SkipsInsideTheRetentionWindow_AreNotReportedAsFloorBlocked()
     {
-        // The 1.7.8 soak shape: count retention off, age retention one hour, every row younger than that.
+        // The long-retention shape: count retention off, age retention one hour, every row younger than that.
         // Millions of memo skips and zero deletions is the policy at work, not a hold that never lifts —
         // and the result must say so by keeping the floor-blocked count at zero.
         const string key = "memo/policy";

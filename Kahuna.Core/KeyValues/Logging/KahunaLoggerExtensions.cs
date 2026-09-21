@@ -326,6 +326,12 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "KeyValues: leadership of partition {PartitionId} lost in term {Term}; dropping the staged transactional writes and exclusive locks admitted under it")]
     public static partial void LogLeadershipLostDroppingActorState(this ILogger<IKahuna> logger, int partitionId, long term);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Released {Count} durable completions parked on the ordered apply of partition {PartitionId} ({Reason}); this node no longer leads it, so their producers re-drive against the current leader, where the same entries are idempotent")]
+    public static partial void LogDurableCompletionsReleasedOnLeadershipLoss(this ILogger<IKahuna> logger, int count, int partitionId, string reason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Completion of committed durable entry #{LogIndex} on partition {PartitionId} ({LogType}) did not see its ordered apply within {TimeoutMs}ms while this node still led the partition; answering the producer as unobserved so it re-drives against the current leader instead of applying the entry out of log order here")]
+    public static partial void LogDurableCompletionWithoutOrderedApply(this ILogger<IKahuna> logger, long logIndex, int partitionId, string logType, long timeoutMs);
+
     [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: apply divergence on partition {PartitionId} at {Moment}: leader {Leader} holds {LeaderHeads} committed heads but replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. One replica's apply stream diverged from the log; reads served from the smaller state miss acknowledged writes")]
     public static partial void LogApplyFingerprintDivergence(this ILogger<IKahuna> logger, int partitionId, string moment, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);
 

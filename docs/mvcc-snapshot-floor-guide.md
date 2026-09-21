@@ -191,7 +191,7 @@ background writer with the flush and must never starve it:
 | `kahuna.persistence.revision_prune.sweep_pass_duration` | histogram (ms) | Time one sweep pass spent on the writer; bounded by its budget plus one key. |
 
 Read the counters against the policy. With `PersistentRevisionRetentionCount = 0` and
-`PersistentRevisionRetentionAge = 1h` (the 1.7.8 soak configuration) nothing is deletable for the
+`PersistentRevisionRetentionAge = 1h` (a common long-retention configuration) nothing is deletable for the
 first hour, so a 45-minute run shows millions of memo skips, zero deletions, zero floor-blocked keys,
 and a store growing at the write rate — the policy at work, not a gate that never opens. The
 background writer logs the effective policy once at startup ("Persistent revision retention on this

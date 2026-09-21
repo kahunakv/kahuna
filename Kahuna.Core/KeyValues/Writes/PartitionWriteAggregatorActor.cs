@@ -352,7 +352,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // High-resolution start stamp. Environment.TickCount64 is a coarse clock (a jiffy — 4 ms on a typical
         // Linux kernel — and integer milliseconds at best), and with the post-completion hold shortening each
         // round to a few milliseconds most rounds read as 0 or 1 ms: the raft_duration histogram under-read the
-        // round by 4-5x on the 1.7.8 soaks (0.73 ms sampled against ~3.4 ms implied by the batch rate).
+        // round by 4-5x under sustained load (0.73 ms sampled against ~3.4 ms implied by the batch rate).
         long start = Stopwatch.GetTimestamp();
 
         RaftBatchReplicationResult? result = null;

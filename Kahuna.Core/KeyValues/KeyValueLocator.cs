@@ -2566,7 +2566,7 @@ internal sealed class KeyValueLocator
     /// finalizer forwards its durable operations to whichever node leads the partition now. Routing a commit,
     /// rollback or operation for a session this node owns to the current leader — which has no such session —
     /// answered every commit in flight on a stepped-down leader with "No transaction session" until the client's
-    /// deadline (CamusDB slow-disk runs sd2–sd6, ~100 indeterminate commits per leader pause).
+    /// deadline (~100 indeterminate commits per leader pause under a paused disk).
     /// </summary>
     private bool OwnsSession(HLCTimestamp transactionId) => manager?.Coordinator?.HasSession(transactionId) == true;
 

@@ -4,7 +4,7 @@ using Kahuna.Server.Persistence;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// The unflushed-backlog gauges existed since 1.7.8, but on the 45-minute learned-routing soak a follower's
+/// The unflushed-backlog gauges existed since 1.7.8, but under 45 minutes of sustained load a follower's
 /// durable-apply lag saw-toothed to two thirds of the item budget without a single log line. The alert policy
 /// turns samples into a warning at 75% of a budget, a warning when back-pressure actually engages, reminders
 /// while either lasts, and a clear line — with hysteresis so a backlog hovering at the line does not flap.

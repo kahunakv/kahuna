@@ -220,7 +220,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // numerous enough, to delete. A hot key accrues revisions at its write rate, so that walk grows
     // without bound and the prune's share of the flush cycle grows with it, until the writer spends
     // most of every cycle pruning nothing and the unflushed backlog grows faster than it drains.
-    // (Kahuna 1.7.7 bank soak: ~4,000 hot keys at hundreds of revisions each cost seconds of prune
+    // (Observed under a bank-transfer workload: ~4,000 hot keys at hundreds of revisions each cost seconds of prune
     // per cycle against a one-second flush budget; the backlog filled the heap in ten minutes.)
     //
     // The memo records, per key, what the last walk learned and what changed since: the number of

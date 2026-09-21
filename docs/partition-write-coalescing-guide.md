@@ -74,10 +74,10 @@ client → gRPC/REST/SDK
 
 The flow above is the **direct-write** case (a `KeyValueProposalRequest` submission). A durable-intent
 2PC record follows the same lane/batch/complete path but through a `DurableProposalSubmission`: its
-completion applies the record/intent delta to the transaction-record / prepared-intent store in
-Raft-commit order and resolves the finalizer's task, rather than routing `CompleteProposal` to a key
-actor. The batch executor issues one `ReplicateEntries` proposal carrying whatever mix of entry types
-the selected submissions contributed.
+completion waits for the ordered Raft consumer apply of the record/intent delta (it never applies the
+delta itself — see below) and resolves the finalizer's task with that apply's prepare acknowledgement,
+rather than routing `CompleteProposal` to a key actor. The batch executor issues one `ReplicateEntries`
+proposal carrying whatever mix of entry types the selected submissions contributed.
 
 The key structural point is that the **owning `KeyValueActor` stages the write and installs the
 replication intent, but does not perform the Raft call**. It serializes the committed record, hands a
@@ -128,10 +128,29 @@ All types live in `Kahuna.Core/KeyValues/Writes/`.
   back to that actor.
 
 - **`DurableProposalSubmission`** — the durable-intent 2PC submission (a canonical record init/decision, a
-  prepared-intent prepare, or a resolution). Its completion applies the delta to the record/intent store in
-  Raft-commit order and resolves the finalizer's task; a rejected prepare is reported as a non-commit so
-  the finalizer aborts. It re-fences the pre-decision record/prepare against the range map at dispatch, so
-  a split/merge since freeze releases it retryably rather than appending to a retired partition.
+  prepared-intent prepare, or a resolution). Its completion resolves the finalizer's task once the ordered
+  consumer apply of its entries has run, with that apply's result; a rejected prepare is reported as a
+  non-commit so the finalizer aborts. It re-fences the pre-decision record/prepare against the range map at
+  dispatch, so a split/merge since freeze releases it retryably rather than appending to a retired partition.
+
+  The completion **does not apply the delta**. The transaction-record and prepared-intent stores have one
+  live writer: the per-partition consumer apply that Raft drives in log order, on the leader exactly as on
+  a follower. A completion runs when the proposal is quorum-durable, which on the proposing node can be
+  before the leader's own consumer has applied the entry (or the entries below it) and can also trail that
+  apply by an arbitrary delay. An apply run from the completion is therefore not at the entry's log
+  position: it can refuse a prepare against a competitor's intent the ordered stream has not yet removed,
+  or re-install a prepare the ordered stream already settled and removed. Either forks the proposing node's
+  state from its peers' — the mechanism behind an ex-leader alone rejecting a bundled commit its peers
+  admitted right after a leadership handover. Instead the completion waits on the
+  `DurableApplyResultLedger` for the consumer's result of each entry (identified by the log index the
+  executor reports per entry), under one bound per submission (the proposal timeout). The wait is released
+  the moment this node stops leading the partition — a stalled leader is stepped down within seconds and
+  its apply may not advance until its device heals, while the new leader applies and judges the same
+  quorum-durable entries — and a released or timed-out completion answers the producer as *unobserved*,
+  which every producer treats as "not committed, retry": the re-driven entries are idempotent in the log and
+  the retry resolves the leader afresh. `kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss`
+  and `kahuna.durable_tx.ordered_apply_wait_timeouts` count those; `kahuna.durable_tx.redundant_applies_skipped`
+  counts the completions that took the ordered apply's result, which on a busy leader is nearly all of them.
 
 - **`IPartitionBatchExecutor`** / `RaftPartitionBatchExecutor` — the one Raft round trip for a batch (one
   `ReplicateEntries` call carrying the batch's mixed entry types), behind an interface (replaceable in

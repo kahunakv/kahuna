@@ -68,7 +68,7 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
         // prepared intents are live on every written key. The pre-propose staged-base compare-and-set leaves a
         // window between its probe and the prepare landing; a competitor that commits the same base inside that
         // window (its intent already settled and garbage-collected, or settled by the prepare-retry helping pass)
-        // is invisible to the prepare's single-live-intent check — the observed bank-soak lost update. Here the
+        // is invisible to the prepare's single-live-intent check — the observed lost update. Here the
         // committed head is compared directly: the caller's live intent excludes any later competing commit, so
         // a matching head cannot move again before the decision. MVCC stagings and intents never touch
         // entry.Revision (only materialization advances it), so the committed head is exactly what a validated

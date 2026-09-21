@@ -515,7 +515,7 @@ public sealed class TestReplicaFenceConfirmation : BaseCluster
     }
 
     /// <summary>
-    /// The follower-pause shape of Vorpal 3c7f6b99 (finding 3): one replica's apply stalls while the leader and
+    /// The follower-pause shape: one replica's apply stalls while the leader and
     /// the other replica stay healthy. The fence keeps asking the stalled replica and it keeps answering
     /// NotApplied after the full apply wait, so every commit paid that wait for a verdict that carried nothing.
     /// After a few such rounds the breaker must stop waiting on it — asking it with no wait, so its instant

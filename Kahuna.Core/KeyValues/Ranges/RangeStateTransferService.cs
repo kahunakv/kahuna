@@ -693,7 +693,8 @@ internal sealed class RangeStateTransferService
             completion,
             Writes.WriteAdmissionClass.Terminal,
             Writes.WriteSubmissionStage.Other,
-            durableReplication.ApplyDurableEntriesOnCommit,
+            // Key/value copies only: the awaiter has no durable record/intent entry to wait for and resolves at once.
+            (batchPartitionId, batchEntries, entryLogIndices) => durableReplication.AwaitDurableEntriesAppliedAsync(batchPartitionId, batchEntries, entryLogIndices, cancellationToken),
             fenceKey: null,
             fenceGeneration: 0);
 

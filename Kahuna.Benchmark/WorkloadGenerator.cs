@@ -292,8 +292,8 @@ internal static class WorkloadGenerator
                         // Contended read-modify-write: read two random accounts inside one
                         // transaction, move one unit between them, commit. Under optimistic
                         // locking the commit validates the read revisions, so concurrent
-                        // transfers of the same account conflict at commit — the workload the
-                        // bank soak runs.
+                        // transfers of the same account conflict at commit — the bank-transfer
+                        // workload.
                         int fromIdx = keyIndex;
                         int toIdx = rng.Next(keySpace);
                         if (toIdx == fromIdx)

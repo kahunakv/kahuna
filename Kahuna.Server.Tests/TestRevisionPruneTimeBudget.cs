@@ -10,8 +10,8 @@ namespace Kahuna.Server.Tests;
 /// The revision prune shares the single background writer with the flush. Its targeted pass used to
 /// check its time budget only between 64-key chunks, and the backend-wide sweep had no budget at all
 /// and stepped every history row in the column family — on a hot store that was seconds of writer
-/// time every cleanup interval, taken from the flush while committed writes kept arriving (the
-/// five-minute backlog spikes on the 1.7.8-flusher.1 soak). The RocksDB backend now takes the budget
+/// time every cleanup interval, taken from the flush while committed writes kept arriving (observed as
+/// five-minute backlog spikes). The RocksDB backend now takes the budget
 /// itself: it stops starting keys once the budget elapses, pauses a sweep on row progress as well,
 /// resumes from where it stopped, and jumps a sweep over each key's revision block instead of
 /// stepping it. These tests pin that contract and that nothing is skipped or double-counted by the

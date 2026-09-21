@@ -242,7 +242,7 @@ The rejection is final, not transient: attempt HLCs only advance, so every later
 frozen input is rejected the same way. The finalizer therefore does not answer `MustRetry` and leave the
 record to the recovery sweep — that produced a client retry loop that could never terminate (a
 coordinator whose disk paused mid-commit re-drove the same dozen transactions for eight minutes after it
-healed, CamusDB run sd3) — it drives the presumed abort through the record CAS itself, right where the
+healed) — it drives the presumed abort through the record CAS itself, right where the
 gate refused it, and reports what the record answers: `Aborted` with class `PresumedAbort`
 (`kahuna.durable_tx.late_commit_conclusions{outcome=aborted}`), or `Committed` when a stalled bundle's
 commit had already applied under the ordered log (`…{outcome=committed}`). A retry of a frozen finalize
@@ -257,8 +257,8 @@ work (the anchor bundle, the decision, materialization) to whichever node leads 
 entry points (`LocateAndCommitTransaction`, `LocateAndRollbackTransaction`, operation registration and
 completion, the working-set query) therefore serve a session **this node owns** locally whatever the current
 leader is. Before this rule, a leader that stepped down routed every commit for its own sessions to its
-successor, which had no such session, and each spun as `MustRetry` until the client's deadline (the ~100
-indeterminate commits per leader pause in the CamusDB slow-disk runs sd2–sd6).
+successor, which had no such session, and each spun as `MustRetry` until the client's deadline (~100
+indeterminate commits per leader pause under a paused disk).
 
 A leader that receives a commit or rollback for a session it does not hold (the client learned the new
 leader) offers it to its peers once, in turn; the owner serves it and every other peer answers unknown. The
@@ -286,8 +286,8 @@ moved (`kahuna.durable_tx.replica_fence_refusals`). A replica that cannot answer
 a down replica cannot veto either — but before the lag breaker (Kahuna.Core 1.8.2 and earlier) the
 finalizer still *waited* for it: a replica whose
 apply had stalled (its disk paused, its WAL saturated) answered `NotApplied` only after the full 400 ms
-apply wait, and every commit on the leader paid that wait for a verdict that carried nothing. In the
-CamusDB slow-disk runs one follower's 30 s device pause cost a leader with an intact Raft quorum 70% of
+apply wait, and every commit on the leader paid that wait for a verdict that carried nothing. In one
+observed case a follower's 30 s device pause cost a leader with an intact Raft quorum 70% of
 its throughput, and the follower's catch-up kept the cluster below half speed for minutes afterwards.
 
 The fence now carries a per-replica breaker (`ReplicaFenceLagTracker`). After three consecutive
@@ -300,8 +300,8 @@ up to 24).
 
 Probe latency alone is the wrong evidence for whether a replica can attest. A replica tens of thousands
 of entries behind the leader answers a probe instantly from state that old, and a replica whose disk is
-paused answers from memory until the entry it is asked about is the one it cannot write. In the CamusDB
-leader-kill run lk8 a restarted replica attested three fast probes while 75,000 entries behind and
+paused answers from memory until the entry it is asked about is the one it cannot write. After a
+leader kill a restarted replica attested three fast probes while 75,000 entries behind and
 stalling on a shared NVMe; the fence restored it and every commit then waited the full apply wait for a
 verdict it could not give. The leader already knows both facts from every Raft acknowledgement, so the
 fence reads Kommander's per-follower snapshot (`IRaft.GetFollowerProgress`, Kommander 1.6.10) on every
@@ -335,8 +335,9 @@ A submission carries:
   *finishes* an already-prepared transaction;
 - an optional **fence** (key + generation) re-checked at dispatch, so a split/merge since freeze releases
   the submission retryably;
-- an **apply-on-commit callback**, which is the single ordered apply owner: it applies each record/intent
-  delta to its store in Raft-commit order and reports whether every prepare took ownership of its key.
+- an **on-commit callback**, which waits for the ordered Raft consumer apply of each record/intent entry
+  (never applying the delta itself — the consumer apply is the stores' single live writer, on the leader as
+  on a follower) and reports whether every prepare took ownership of its key.
 
 The executor issues one `IRaft.ReplicateEntries` per batch (`IPartitionBatchExecutor`).
 

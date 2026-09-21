@@ -269,7 +269,7 @@ public sealed class TestDurableTransactionRecovery
     /// was told Committed, and this intent is the only durable copy of the committed value. Driving the
     /// presumed-abort protocol here creates an abort tombstone over a committed transaction's history and
     /// discards the value forever — observed downstream as a transfer with one leg missing (a durable
-    /// SUM(balance) deficit in the bank soak). The sweep must leave such an intent alone (or materialize it),
+    /// SUM(balance) deficit under a bank-transfer workload). The sweep must leave such an intent alone (or materialize it),
     /// never resolve it to abort.
     /// </summary>
     [Fact]

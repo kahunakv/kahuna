@@ -21,7 +21,7 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Convergence coverage for the <c>InvalidateOrApply</c> apply paths, driven at the handler level so the
-/// exact interleavings that wedged hot keys in the Caraxes soaks are deterministic here:
+/// exact interleavings that wedged hot keys under sustained load are deterministic here:
 ///
 /// <list type="bullet">
 ///   <item>A replicated materialization whose transaction owns the entry's write intent must APPLY, not
@@ -773,7 +773,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     }
 
     /// <summary>
-    /// The lost-commit kernel from the learned-routing bank soak: the leader's own one-phase commit
+    /// The lost-commit kernel under learned routing: the leader's own one-phase commit
     /// advanced the RESIDENT head (LastAppliedTransactionId records the transaction; nothing was
     /// persisted for it — that is ApplyOwnCommittedMaterialization's contract), while the replicator's
     /// durable apply for the same log entry never ran, so the durable state still stands at the base

@@ -15,16 +15,18 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 {
     private readonly TaskCompletionSource<bool> completion;
 
-    // The single ordered apply of this submission's durable records to their partition-scoped stores. It runs on
-    // Complete() — the scheduler's per-partition, Raft-commit-ordered completion path — so every durable
-    // transition (record init/decision, prepared-intent prepare/resolve/remove) applies in one place, in log
-    // order, with no unordered producer-side apply that could let a losing transition overwrite the winner. It
-    // returns whether every PREPARE in the bundle was acknowledged (took ownership of its key); a rejected prepare
-    // resolves the producer's Committed task false so the finalizer aborts instead of committing an unrecoverable
-    // mutation. Null in tests that only assert scheduling, not store state.
-    // It also receives each entry's committed Raft log index, so the apply can be attributed to the exact log
-    // entries it covered and the redundant consumer apply of those same entries can be skipped.
-    private readonly Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, bool>? applyOnCommit;
+    // Runs on Complete() — the scheduler's per-partition completion path — once the batch committed. It does NOT
+    // apply the submission's durable records: the record/intent stores are mutated only by the ordered consumer
+    // apply that Raft drives in log order, and a completion can run before that apply (the quorum-durable fast
+    // path releases the proposal ahead of the leader's own consumer) or long after it. Instead it waits for the
+    // ordered apply of each entry — identified by the committed Raft log index the executor reported per entry —
+    // and resolves whether every PREPARE in the bundle was acknowledged (took ownership of its key); a rejected
+    // prepare resolves the producer's Committed task false so the finalizer aborts instead of committing an
+    // unrecoverable mutation. Null in tests that only assert scheduling, not store state.
+    private readonly Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, Task<DurableCompletionAnswer>>? applyOnCommit;
+
+    // Written before the producer's task resolves (the TrySetResult publishes it), read by the producer after.
+    private DurableCompletionAnswer answer = DurableCompletionAnswer.NotCommitted;
 
     // The logical key + range-descriptor generation this submission's partition was resolved against at freeze. A
     // null key opts out of the fence (post-decision settle/materialize, recovery, and state-transfer imports,
@@ -54,7 +56,7 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         TaskCompletionSource<bool> completion,
         WriteAdmissionClass admissionClass,
         WriteSubmissionStage stage,
-        Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, bool>? applyOnCommit = null,
+        Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, Task<DurableCompletionAnswer>>? applyOnCommit = null,
         string? fenceKey = null,
         long fenceGeneration = 0)
     {
@@ -74,15 +76,65 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     }
 
     /// <summary>Resolves true once the batch carrying this record committed to Raft and every prepare it carried
-    /// took ownership of its key; false when the batch did not commit or a prepare was rejected.</summary>
+    /// took ownership of its key; false when the batch did not commit, a prepare was refused, or this node did not
+    /// observe the ordered apply (<see cref="Answer"/> tells which).</summary>
     public Task<bool> Committed => completion.Task;
+
+    /// <summary>How the submission ended, valid once <see cref="Committed"/> has resolved. A producer that must tell a
+    /// durable batch with a refused prepare (drive the truthful outcome against the record) from one whose apply
+    /// this node never observed (retry as if nothing were durable) reads this rather than the folded bool.</summary>
+    public DurableCompletionAnswer Answer => answer;
+
+    /// <summary>Whether the batch is known durable on this node's account: the ordered apply was observed, whatever
+    /// it said about the prepares. False for a released submission and for an unobserved apply, both of which the
+    /// producer treats as a clean retry.</summary>
+    public bool BatchObserved => answer is DurableCompletionAnswer.Acknowledged or DurableCompletionAnswer.Refused;
 
     public bool IsStale(IWriteRangeFence fence) => fenceKey is not null && fence.IsStale(fenceKey, fenceGeneration, PartitionId);
 
-    /// <summary>The batch committed: apply this submission's records to their stores in Raft-commit order, then
-    /// resolve the producer with whether every prepare was acknowledged.</summary>
-    public void Complete(IReadOnlyList<long>? entryLogIndices) =>
-        completion.TrySetResult(applyOnCommit is null || applyOnCommit(PartitionId, Entries, entryLogIndices));
+    /// <summary>The batch committed: wait for the ordered apply of this submission's records (never applying them
+    /// here), then resolve the producer with the answer. Never blocks the scheduler's lane: a wait that is not
+    /// already satisfied resolves the producer from its continuation. An adapter that faults resolves
+    /// <see cref="DurableCompletionAnswer.Unobserved"/>: the batch is durable but this node cannot say how its apply
+    /// went, and a retry against the current leader is idempotent.</summary>
+    public void Complete(IReadOnlyList<long>? entryLogIndices)
+    {
+        if (applyOnCommit is null)
+        {
+            Resolve(DurableCompletionAnswer.Acknowledged);
+            return;
+        }
 
-    public void Release(bool transient) => completion.TrySetResult(false);
+        Task<DurableCompletionAnswer> awaited;
+        try
+        {
+            awaited = applyOnCommit(PartitionId, Entries, entryLogIndices);
+        }
+        catch (Exception)
+        {
+            Resolve(DurableCompletionAnswer.Unobserved);
+            return;
+        }
+
+        if (awaited.IsCompleted)
+        {
+            Resolve(awaited.IsCompletedSuccessfully ? awaited.Result : DurableCompletionAnswer.Unobserved);
+            return;
+        }
+
+        _ = awaited.ContinueWith(
+            static (task, state) => ((DurableProposalSubmission)state!).Resolve(task.IsCompletedSuccessfully ? task.Result : DurableCompletionAnswer.Unobserved),
+            this,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void Resolve(DurableCompletionAnswer outcome)
+    {
+        answer = outcome;
+        completion.TrySetResult(outcome == DurableCompletionAnswer.Acknowledged);
+    }
+
+    public void Release(bool transient) => Resolve(DurableCompletionAnswer.NotCommitted);
 }

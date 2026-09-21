@@ -30,6 +30,7 @@ internal sealed class DurableReplicationGateway
 
     internal DurableReplicationGateway(KeyValuesRuntime runtime, KeyValueReplicator replicator)
     {
+        orderedApply = new DurableOrderedApplyAwaiter(runtime.DurableApplyResults, runtime.PreparedIntentStore, runtime.Logger);
         this.runtime = runtime;
         this.replicator = replicator;
     }
@@ -50,6 +51,10 @@ internal sealed class DurableReplicationGateway
     private PreparedIntentStore preparedIntentStore => runtime.PreparedIntentStore;
 
     private DurableApplyResultLedger durableApplyResults => runtime.DurableApplyResults;
+
+    // The completion side of every locally proposed durable submission: waits for the ordered consumer apply of the
+    // committed entries and folds their prepare acknowledgements; it never applies a delta itself.
+    private readonly DurableOrderedApplyAwaiter orderedApply;
 
     internal (int PartitionId, long Generation) LocateDurablePartition(string key) => locator.LocateRange(key);
 
@@ -350,7 +355,7 @@ internal sealed class DurableReplicationGateway
             completion,
             admissionClass,
             stage,
-            ApplyDurableEntriesOnCommit,
+            (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
             fenceKey,
             fenceGeneration
         );
@@ -503,7 +508,6 @@ internal sealed class DurableReplicationGateway
             proposal[i] = new RaftProposalEntry(entries[i].LogType, entries[i].Payload, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
 
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        bool batchCommitted = false;
 
         DurableProposalSubmission submission = new(
             partitionId,
@@ -511,11 +515,7 @@ internal sealed class DurableReplicationGateway
             completion,
             admissionClass,
             submissionStage,
-            (batchPartitionId, batchEntries, entryLogIndices) =>
-            {
-                batchCommitted = true;
-                return ApplyDurableEntriesOnCommit(batchPartitionId, batchEntries, entryLogIndices);
-            },
+            (batchPartitionId, batchEntries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, batchEntries, entryLogIndices, cancellationToken),
             fenceKey,
             fenceGeneration);
 
@@ -524,6 +524,11 @@ internal sealed class DurableReplicationGateway
 
         using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
         bool acknowledged = await submission.Committed.ConfigureAwait(false);
+
+        // Durable on this node's account only when its ordered apply was observed: an apply this node never saw
+        // (it stopped leading, or the wait bound elapsed) is answered as not committed, so the origin re-drives
+        // against the current leader instead of aborting a transaction the log may well have admitted.
+        bool batchCommitted = submission.BatchObserved;
 
         // A committed batch whose prepare was refused: name the refusal from this leader's memo so the origin
         // classifies it exactly as a local refusal.
@@ -716,8 +721,6 @@ internal sealed class DurableReplicationGateway
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        bool batchCommitted = false;
-
         // Term fence, see ReplicateDurableLocal.
         long expectedTerm = raft.GetPartitionTerm(partitionId);
 
@@ -734,11 +737,7 @@ internal sealed class DurableReplicationGateway
             // transactions that already hold durable intents.
             Writes.WriteAdmissionClass.Ordinary,
             WriteSubmissionStage.OnePhase,
-            (batchPartitionId, entries, entryLogIndices) =>
-            {
-                batchCommitted = true;
-                return ApplyDurableEntriesOnCommit(batchPartitionId, entries, entryLogIndices);
-            },
+            (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
             fenceKey,
             fenceGeneration);
 
@@ -756,7 +755,10 @@ internal sealed class DurableReplicationGateway
 
         double bundleMs = System.Diagnostics.Stopwatch.GetElapsedTime(bundleStart).TotalMilliseconds;
 
-        if (!batchCommitted)
+        // Not committed, or committed but this node never observed the ordered apply (it stopped leading, or the
+        // wait bound elapsed): both are the clean retry. The re-driven bundle is idempotent in the log, and the
+        // retry resolves the leader afresh, so it lands where the entry is applied and judged.
+        if (!submission.BatchObserved)
             return NotCommittedOnePhaseReply with { BundleMs = bundleMs };
 
         // A committed batch with a refused prepare: name the refusal from this leader's memo, as the typed
@@ -786,13 +788,6 @@ internal sealed class DurableReplicationGateway
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // Set only from the scheduler's ordered completion, which runs iff the batch committed; its write
-        // happens-before the awaiter through the completion's TrySetResult, so a true read means the record init
-        // (the first bundled entry) is durably applied. The batch's autocommit round is a single proposal, so both
-        // entries share one fate on the commit dimension — this flag is the "did the record land" signal the folded
-        // Committed bool cannot express on its own.
-        bool batchCommitted = false;
-
         // Term fence, see ReplicateDurableLocal.
         long expectedTerm = raft.GetPartitionTerm(partitionId);
 
@@ -806,11 +801,7 @@ internal sealed class DurableReplicationGateway
             Writes.WriteAdmissionClass.Ordinary,
             // The anchor bundle is the transaction's first prepare barrier; the record init rides in it.
             WriteSubmissionStage.Prepare,
-            (batchPartitionId, entries, entryLogIndices) =>
-            {
-                batchCommitted = true;
-                return ApplyDurableEntriesOnCommit(batchPartitionId, entries, entryLogIndices);
-            },
+            (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
             fenceKey,
             fenceGeneration);
 
@@ -819,57 +810,36 @@ internal sealed class DurableReplicationGateway
 
         using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
         bool prepareAcknowledged = await submission.Committed.ConfigureAwait(false);
-        return (batchCommitted, prepareAcknowledged);
+
+        // "The record landed" is claimed only when this node observed the ordered apply of the bundle: an apply it
+        // never saw (it stopped leading, or the wait bound elapsed) answers as not committed, the clean retry, so
+        // the finalizer re-drives against the current leader rather than aborting a healthy commit.
+        return (submission.BatchObserved, prepareAcknowledged);
     }
 
-    // The scheduler's ordered per-partition completion applies each durable record/intent delta to its store, in
-    // Raft-commit order — the single authoritative apply owner on the leader. Key/value materialization records are
-    // applied by their own leader path (ApplyDurableCommit / the replicator), not here. Returns whether every
-    // PREPARE in the bundle took ownership of its key so a rejected prepare fails the producer's replicate.
-    internal bool ApplyDurableEntriesOnCommit(int partitionId, IReadOnlyList<RaftProposalEntry> entries, IReadOnlyList<long>? entryLogIndices)
-    {
-        bool preparesAcknowledged = true;
-
-        for (int i = 0; i < entries.Count; i++)
-        {
-            RaftProposalEntry entry = entries[i];
-
-            if (entry.Type != ReplicationTypes.TransactionRecord && entry.Type != ReplicationTypes.PreparedIntent)
-                continue;
-
-            // Raft's commit path applies committed entries to the consumer before this completion can run, so the
-            // apply of this very log entry has normally already happened and left its result. Reusing it keeps this
-            // path's contract (the record is applied before the producer is resolved) without a second parse of the
-            // same delta.
-            long logIndex = entryLogIndices is not null && i < entryLogIndices.Count ? entryLogIndices[i] : 0;
-            if (durableApplyResults.TryConsume(partitionId, logIndex, out bool recorded))
-            {
-                if (entry.Type == ReplicationTypes.PreparedIntent)
-                    preparesAcknowledged &= recorded;
-
-                continue;
-            }
-
-            // No recorded result — this completion overtook the consumer apply, so apply it here and leave the
-            // outcome for the consumer to reuse when Raft delivers the same entry, mirroring the consumer-first
-            // direction. The batch's partition is the log's partition: it selects the committed-head ledger
-            // slice a settlement feeds and a bundled commit is judged against, so it must be the real one.
-            RaftLog log = new() { LogType = entry.Type, LogData = entry.Data };
-
-            bool applied;
-            if (entry.Type == ReplicationTypes.TransactionRecord)
-                applied = transactionRecordStore.Replicate(partitionId, log);
-            else
-            {
-                applied = preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log);
-                preparesAcknowledged &= applied;
-            }
-
-            durableApplyResults.RecordApplied(partitionId, logIndex, applied);
-        }
-
-        return preparesAcknowledged;
-    }
+    /// <summary>
+    /// The scheduler's completion for a committed durable submission. It applies nothing: the record/intent stores
+    /// are mutated only by the ordered consumer apply that Raft drives in log order (the dispatcher's
+    /// <c>OnReplicationReceived</c>), on the leader exactly as on a follower. The completion waits for that apply of
+    /// each of its entries — identified by the committed log index the executor reported per entry — and reports
+    /// whether every PREPARE in the bundle took ownership of its key, so a rejected prepare fails the producer's
+    /// replicate. The read-back the callers do afterwards (the canonical record, the gate verdict memo) is therefore
+    /// the post-apply state, as before. An apply this node never observes — it stopped leading the partition, or
+    /// the submission's wait bound elapsed — is <see cref="DurableCompletionAnswer.Unobserved"/>, which every
+    /// caller answers as "not committed": the re-driven entries are idempotent in the log and the retry resolves the
+    /// leader afresh.
+    ///
+    /// <para>This used to apply the delta here when the completion overtook the consumer, and skip the consumer
+    /// apply through the ledger. On the proposing node the completion runs at quorum durability — ahead of the
+    /// leader's own consumer apply of the entry and of the entries below it — and can also trail it by an arbitrary
+    /// delay, so that apply was not at the entry's log position: a prepare could be refused against a competitor's
+    /// intent the ordered stream had not yet removed, and a late completion could re-install a prepare the ordered
+    /// stream had already settled and removed. Either forks this node's intent state from its peers' on the one node
+    /// that proposed the entry, which is how an ex-leader alone rejected a bundled commit its peers admitted right
+    /// after a leadership handover.</para>
+    /// </summary>
+    internal Task<DurableCompletionAnswer> AwaitDurableEntriesAppliedAsync(int partitionId, IReadOnlyList<RaftProposalEntry> entries, IReadOnlyList<long>? entryLogIndices, CancellationToken cancellationToken) =>
+        orderedApply.AwaitAppliedAsync(partitionId, entries, entryLogIndices, cancellationToken);
 
     /// <summary>
     /// Runs a durable operation that this node received via inter-node forwarding because it is the partition

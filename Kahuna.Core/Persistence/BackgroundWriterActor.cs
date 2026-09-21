@@ -506,7 +506,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <summary>
     /// One line at startup saying what bounds persisted revision history on this node, so a prune that walks
     /// thousands of keys and deletes nothing can be read against the policy instead of suspected of being
-    /// stuck. (The 1.7.8 soaks ran count retention off and age retention at one hour for 45 minutes: 5.3 M memo
+    /// stuck. (With count retention off and age retention at one hour, 45 minutes of load once showed 5.3 M memo
     /// skips, 0 deletions, and a store growing at the write rate — exactly the configured policy, but nothing
     /// in the log or the metrics said so.)
     /// </summary>
@@ -1667,8 +1667,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <para>
     /// The sweep runs on the same writer as the flush, after the targeted prune of the same cycle.
     /// Unbudgeted it cost O(rows in the store) per pass — on a hot store that was seconds of writer
-    /// time every cleanup interval, during which the unflushed backlog grew by the ingest rate (the
-    /// five-minute backlog spikes of the 1.7.8-flusher.1 soak). It now gets what the targeted prune
+    /// time every cleanup interval, during which the unflushed backlog grew by the ingest rate (observed as
+    /// five-minute backlog spikes). It now gets what the targeted prune
     /// left of <see cref="KahunaConfiguration.PersistentRevisionCleanupTimeBudget"/>, never less than a
     /// quarter of it so a saturated targeted queue cannot starve it, and the backend pauses on that
     /// budget and resumes next cycle.

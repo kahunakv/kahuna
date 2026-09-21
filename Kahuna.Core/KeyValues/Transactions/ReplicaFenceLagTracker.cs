@@ -40,7 +40,7 @@ internal enum ReplicaFenceLagReason
 /// (its disk paused, its WAL saturated, a snapshot install in progress) cannot attest: its handler waits the
 /// full server-side apply budget and answers <c>NotApplied</c> for every key, or does not answer at all. The
 /// answer carries no information the commit can use, yet every commit on the leader paid the full wait for
-/// it. In the CamusDB slow-disk runs (Vorpal 3c7f6b99) that turned one follower's 30-second device pause into
+/// it. In one observed case that turned a follower's 30-second device pause into
 /// a 70% throughput loss on a leader whose Raft quorum was intact, and the paused replica's catch-up kept the
 /// cluster below half speed for minutes after the pause ended. Waiting on a replica that has proven it cannot
 /// attest is pure cost: a replica that cannot answer contributes nothing to the fence by design (a down node
@@ -59,8 +59,8 @@ internal enum ReplicaFenceLagReason
 /// <para><b>The leader's frontier evidence gates both directions.</b> Probe latency is the wrong evidence
 /// for whether a replica can attest: a replica tens of thousands of entries behind answers a probe
 /// instantly and truthfully from state that old, and a replica whose disk is paused answers from memory
-/// until the entry it is asked about is the one it cannot write. In the CamusDB leader-kill run lk8
-/// (Vorpal 029dad72, ask 2) a restarted replica attested three fast probes while 75,000 entries behind
+/// until the entry it is asked about is the one it cannot write. After a leader kill
+/// a restarted replica attested three fast probes while 75,000 entries behind
 /// the leader's commit index and stalling on its shared NVMe; the fence restored it, every commit then
 /// waited the full apply wait for a verdict it could not give, and throughput sat at 60% for three
 /// minutes. The leader already holds the facts that settle this — the replica's durable frontier and
@@ -77,7 +77,7 @@ internal enum ReplicaFenceLagReason
 /// CONSECUTIVE attesting probes, and only probes count while it is lagging. The first version restored the
 /// endpoint on the first attesting answer of any full-wait ask, and that flapped: finalizes run concurrently,
 /// so when a replica that attests for some keys and not for others (a restarted node whose install left it
-/// unable to apply a subset of keys — Vorpal 029dad72) tripped the breaker, dozens of full-wait asks planned
+/// unable to apply a subset of keys) tripped the breaker, dozens of full-wait asks planned
 /// before the trip were still in flight, the first of them to attest restored the endpoint within
 /// milliseconds, every concurrent commit paid the full wait again, three of those timed out and tripped it
 /// again — about once per second for the rest of the run, at half throughput. Requiring several consecutive
@@ -110,7 +110,7 @@ internal sealed class ReplicaFenceLagTracker
     /// <summary>
     /// How far a replica's durable frontier may trail the leader's commit index, in committed entries, before
     /// the fence stops waiting on it. A healthy follower trails by the entries in flight over one
-    /// commit-broadcast hop plus its fsync — tens of entries at the ~7,000 ops/s of the CamusDB bank runs —
+    /// commit-broadcast hop plus its fsync — tens of entries at ~7,000 ops/s —
     /// so a thousand is well clear of normal jitter and a small fraction of the 400 ms apply wait's worth of
     /// entries at that rate, while a replica catching up from a restart or a snapshot install (tens of
     /// thousands behind) or ridden by a disk pause is far past it. Sized in entries rather than time because

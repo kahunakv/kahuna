@@ -1687,8 +1687,8 @@ internal sealed class TransactionCoordinator : IDisposable
         // A retry of a frozen finalize whose decision deadline is already behind this attempt's clock cannot
         // commit: the record's deadline gate rejects every commit whose attempt HLC passed the deadline, and HLCs
         // only advance. Re-driving the prepares would only re-initialise the record on the (possibly new) anchor
-        // leader and lose to the gate again — the loop CamusDB run sd3 spun in for eight minutes after a
-        // coordinator's disk pause (Vorpal 3c7f6b99). Conclude it now through the same record-CAS fence the reaper
+        // leader and lose to the gate again — a loop that once spun for eight minutes after a
+        // coordinator's disk pause. Conclude it now through the same record-CAS fence the reaper
         // and rollback use: a presumed abort that yields to a commit the ordered log applied first.
         if (context.UnresolvedDurableFinalize is not null && opId > input.DecisionDeadline)
         {
@@ -2005,7 +2005,7 @@ internal sealed class TransactionCoordinator : IDisposable
     /// re-checks then cover only written keys — a stalled bundle surfacing after a leader change would decide
     /// on a long-stale read validation. A validated base (a read-then-written key) disqualifies it for the same
     /// shape of reason: on the 2PC path a competitor that commits the same base between the pre-propose probe
-    /// and this transaction's prepare landing (the bank-soak lost update) is caught by the intent store's
+    /// and this transaction's prepare landing (the observed lost update) is caught by the intent store's
     /// staged-base fence at prepare apply, but the bundle's decision shares the prepare's atomic batch, so a
     /// refused acknowledgement cannot withhold it — the bundle's only guard is its pre-propose re-validation,
     /// whose unguarded tail is the validate→apply gap of the proposal. Both rules apply in multi-process groups

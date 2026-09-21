@@ -411,8 +411,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             // that retention does not age out: a pending intent whose settlement this node never saw stays a
             // phantom holder of its key for good, rejecting every later prepare of the key as a foreign holder,
             // refusing every bundled commit of it at apply, freezing the key's row and committed head on this
-            // node and answering NotApplied to every fence ask about it (the shape of the leader-kill runs,
-            // where the restarted node re-attested to the fence at half throughput for the rest of the run).
+            // node and answering NotApplied to every fence ask about it (the shape seen after a leader kill,
+            // where the restarted node re-attested to the fence at half throughput indefinitely).
             Func<string, bool> isOwned = OwnedKeyPredicate(currentMap(), partitionId);
             completionReceiptStore.PurgeWhere(isOwned);
             transactionRecordStore.PurgeWhere(isOwned);

@@ -109,7 +109,7 @@ internal sealed class KeyValueReplicator
     /// applies at a revision strictly below the key's remembered committed head. The benign producer is a late
     /// re-driven materialization the head guards no-op; anything else is a committed record entering the log
     /// below settled history — the permanent-overwrite shape of a lost update — and this line is what lets a
-    /// conserved-total drift in a soak run attribute to its producing transaction from the node log alone.
+    /// conserved-total drift under load attribute to its producing transaction from the node log alone.
     /// </summary>
     private void WitnessBelowHeadMaterialization(int partitionId, KeyValueMessage keyValueMessage, long logIndex)
     {
