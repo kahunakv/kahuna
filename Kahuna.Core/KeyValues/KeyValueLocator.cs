@@ -1923,6 +1923,55 @@ internal sealed class KeyValueLocator
     }
     
     /// <summary>
+    /// Whether the actor that owns <paramref name="key"/> is on this node, with leadership of the key's
+    /// partition confirmed the way any actor mutation confirms it, and the key is routed by hash. A key in a
+    /// range-routed space is left out: its operations carry a routing generation that fences them against a
+    /// range move, and work that bypasses the locator would bypass that fence.
+    /// </summary>
+    public async Task<bool> IsLocallyLedHashKey(string key, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(key) || !raft.Joined)
+            return false;
+
+        (int partitionId, _, bool isKeyRange, _) = LocateRangeWithMode(key);
+
+        if (isKeyRange)
+            return false;
+
+        return await ConfirmLeadershipForActorMutation(partitionId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Finalizes one ephemeral mutation in a single turn of the actor that owns the key, when that actor is
+    /// on this node. Returns null when it is not — the partition is led elsewhere, or leadership could not be
+    /// confirmed — and the caller then takes the ordinary prepare, probe, and commit path, which knows how
+    /// to reach a remote leader. There is deliberately no inter-node form of this message: the fallback is
+    /// the path every transaction used before, so a remote key loses nothing but the shortcut.
+    ///
+    /// <para>Leadership is confirmed the same way as for any actor mutation, so a deposed leader cannot
+    /// commit through here what it could not commit through the three messages.</para>
+    /// </summary>
+    public async Task<(KeyValueResponseType, Handlers.KeyValueFinalizeStage)?> TryFinalizeMutationIfLocal(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        string? recordAnchorKey,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrEmpty(key))
+            return null;
+
+        int partitionId = RouteKey(key);
+
+        if (raft.Joined && !await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+            return null;
+
+        return await manager.TryFinalizeMutation(transactionId, commitId, key, durability, recordAnchorKey);
+    }
+
+    /// <summary>
     /// Locates the leader node for the given key and executes the TryCommitMutations request.
     /// </summary>
     /// <param name="transactionId"></param>

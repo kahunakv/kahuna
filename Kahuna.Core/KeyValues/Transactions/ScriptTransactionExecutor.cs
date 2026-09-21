@@ -539,11 +539,11 @@ internal sealed class ScriptTransactionExecutor
 
         cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
 
-        HLCTimestamp transactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
-
-        ScriptTransactionContext context = new()
+        // A factory rather than a single instance: a script that started inside an actor turn and had to leave it
+        // runs again from the start, and that second run is a new transaction with an identity of its own.
+        ScriptTransactionContext NewContext() => new()
         {
-            TransactionId = transactionId,
+            TransactionId = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId()),
             Priority = priority,
             Locking = locking,
             ReadTimestamp = readTimestamp,
@@ -558,8 +558,12 @@ internal sealed class ScriptTransactionExecutor
             LocalNodeId = raft.GetLocalNodeId()
         };
 
+        ScriptTransactionContext context = NewContext();
+
         try
         {
+            bool ranInActorTurn = false;
+
             // Inside the try so that a malformed script surfacing here still runs the finally that returns
             // the admission slot — a slot lost to an early throw would shrink node capacity permanently.
             //
@@ -582,22 +586,67 @@ internal sealed class ScriptTransactionExecutor
                     persistentPrefixLocksToAcquire
                 );
 
-                await AcquireLocksPessimistically(
-                    context,
-                    ephemeralLocksToAcquire,
-                    persistentLocksToAcquire,
-                    ephemeralPrefixLocksToAcquire,
-                    persistentPrefixLocksToAcquire,
-                    timeout,
-                    cts.Token
-                );
+                // An auto-commit script whose whole lock set is one ephemeral key led by this node runs inside a
+                // single turn of the actor that owns the key. A script that started there and had to leave — it
+                // reached for something the turn cannot serve — committed nothing and released its key, so it
+                // starts over below as a new transaction on the general path.
+                if (autoCommit
+                    && ephemeralLocksToAcquire.Count == 1
+                    && persistentLocksToAcquire.Count == 0
+                    && ephemeralPrefixLocksToAcquire.Count == 0
+                    && persistentPrefixLocksToAcquire.Count == 0
+                    && HasActorTurnShape(ast)
+                    && coordinator.CanRunInActorTurn(context))
+                {
+                    ActorTurnOutcome outcome = await TryRunInActorTurn(context, ast, OnlyKey(ephemeralLocksToAcquire), timeout, cts.Token);
+
+                    if (outcome == ActorTurnOutcome.Escaped)
+                    {
+                        if (!context.PerKeyWorkingSetReleased)
+                            _ = coordinator.ReleaseWorkingSet(context);
+
+                        context = NewContext();
+
+                        ephemeralLocksToAcquire.Clear();
+                        persistentLocksToAcquire.Clear();
+                        ephemeralPrefixLocksToAcquire.Clear();
+                        persistentPrefixLocksToAcquire.Clear();
+
+                        KeyValueLockHelper.GetLocksToAcquire(
+                            context,
+                            ast,
+                            ephemeralLocksToAcquire,
+                            persistentLocksToAcquire,
+                            ephemeralPrefixLocksToAcquire,
+                            persistentPrefixLocksToAcquire
+                        );
+                    }
+
+                    ranInActorTurn = outcome == ActorTurnOutcome.Completed;
+                }
+
+                if (!ranInActorTurn)
+                {
+                    await AcquireLocksPessimistically(
+                        context,
+                        ephemeralLocksToAcquire,
+                        persistentLocksToAcquire,
+                        ephemeralPrefixLocksToAcquire,
+                        persistentPrefixLocksToAcquire,
+                        timeout,
+                        cts.Token
+                    );
+                }
             }
 
-            await ExecuteTransactionInternal(context, ast, cts.Token);
+            if (!ranInActorTurn)
+                await ExecuteTransactionInternal(context, ast, cts.Token);
 
             if (context.Action == KeyValueTransactionAction.Commit)
             {
-                await coordinator.TwoPhaseCommit(context, cts.Token);
+                // A script that ran inside an actor turn finalized there, before it let the actor go.
+                if (!ranInActorTurn)
+                    await coordinator.TwoPhaseCommit(context, cts.Token);
 
                 // A durable finalize that ended unresolved is abandoned by this script: nothing retries its
                 // identity. Fence it now so its installed intents free their keys for the caller's re-run, and
@@ -665,6 +714,137 @@ internal sealed class ScriptTransactionExecutor
             else
                 await coordinator.ReleaseWorkingSet(context);
         }
+    }
+
+    private enum ActorTurnOutcome
+    {
+        /// <summary>The turn did not start: the key is led elsewhere, or the actor did not take the message.</summary>
+        NotRun,
+
+        /// <summary>The script ran, finalized and released inside the turn. Its outcome is on the context.</summary>
+        Completed,
+
+        /// <summary>The script left the turn half way. Nothing was committed and the key was released.</summary>
+        Escaped
+    }
+
+    /// <summary>
+    /// Runs the script inside one turn of the actor that owns <paramref name="key"/>, if that actor is on this
+    /// node. Whatever the script or its finalize threw inside the turn is rethrown here, so it reaches the same
+    /// handlers, and becomes the same result, as if the general path had thrown it.
+    /// </summary>
+    private async Task<ActorTurnOutcome> TryRunInActorTurn(
+        ScriptTransactionContext context, NodeAst ast, string key, int timeout, CancellationToken cancellationToken)
+    {
+        if (!await manager.IsLocallyLedHashKey(key, cancellationToken))
+            return ActorTurnOutcome.NotRun;
+
+        ScriptActorTurn turn = new(
+            manager, coordinator, ExecuteTransactionInternal, context, ast, key, timeout + ExtraLockingDelay, cancellationToken);
+
+        await manager.RunActorTurn(key, turn);
+
+        if (!turn.Started)
+            return ActorTurnOutcome.NotRun;
+
+        if (turn.Escaped)
+        {
+            DurableTransactionMetrics.ScriptActorTurnEscape();
+
+            return ActorTurnOutcome.Escaped;
+        }
+
+        DurableTransactionMetrics.ScriptActorTurn();
+
+        turn.Failure?.Throw();
+
+        return ActorTurnOutcome.Completed;
+    }
+
+    /// <summary>
+    /// Whether every node of the script is one a single actor turn can run: expressions, LET, IF, RETURN, THROW,
+    /// and the point operations over the ephemeral key space. A turn holds its actor for as long as it runs, so
+    /// anything that waits (SLEEP), loops (FOR), reaches other partitions (bucket reads, scans), touches the
+    /// persistent key space, or controls a transaction by hand (BEGIN, COMMIT, ROLLBACK) keeps the script on
+    /// the general path. The list names what is allowed, so a node type added later is left out until someone
+    /// decides it belongs. The answer is remembered on the root of the cached tree.
+    /// </summary>
+    private static bool HasActorTurnShape(NodeAst root)
+    {
+        int memo = Volatile.Read(ref root.actorTurnShapeMemo);
+
+        if (memo == 0)
+        {
+            memo = EveryNodeFitsAnActorTurn(root) ? 1 : 2;
+            Volatile.Write(ref root.actorTurnShapeMemo, memo);
+        }
+
+        return memo == 1;
+    }
+
+    private static bool EveryNodeFitsAnActorTurn(NodeAst? node)
+    {
+        if (node is null)
+            return true;
+
+        switch (node.nodeType)
+        {
+            case NodeType.NullType:
+            case NodeType.IntegerType:
+            case NodeType.StringType:
+            case NodeType.FloatType:
+            case NodeType.BooleanType:
+            case NodeType.Identifier:
+            case NodeType.Placeholder:
+            case NodeType.StmtList:
+            case NodeType.Let:
+            case NodeType.If:
+            case NodeType.Return:
+            case NodeType.Throw:
+            case NodeType.Eset:
+            case NodeType.Eget:
+            case NodeType.Eexists:
+            case NodeType.Edelete:
+            case NodeType.Eextend:
+            case NodeType.Equals:
+            case NodeType.NotEquals:
+            case NodeType.LessThan:
+            case NodeType.GreaterThan:
+            case NodeType.LessThanEquals:
+            case NodeType.GreaterThanEquals:
+            case NodeType.And:
+            case NodeType.Or:
+            case NodeType.Not:
+            case NodeType.Negate:
+            case NodeType.Add:
+            case NodeType.Subtract:
+            case NodeType.Mult:
+            case NodeType.Div:
+            case NodeType.Range:
+            case NodeType.ArrayIndex:
+            case NodeType.FuncCall:
+            case NodeType.ArgumentList:
+            case NodeType.NotSet:
+            case NodeType.NotFound:
+            case NodeType.SetFlagsList:
+            case NodeType.SetEx:
+            case NodeType.SetNotExists:
+            case NodeType.SetExists:
+            case NodeType.SetCmp:
+            case NodeType.SetCmpRev:
+            case NodeType.SetNoRev:
+                break;
+
+            default:
+                return false;
+        }
+
+        return EveryNodeFitsAnActorTurn(node.leftAst)
+            && EveryNodeFitsAnActorTurn(node.rightAst)
+            && EveryNodeFitsAnActorTurn(node.extendedOne)
+            && EveryNodeFitsAnActorTurn(node.extendedTwo)
+            && EveryNodeFitsAnActorTurn(node.extendedThree)
+            && EveryNodeFitsAnActorTurn(node.extendedFour);
     }
 
     /// <summary>
@@ -910,6 +1090,9 @@ internal sealed class ScriptTransactionExecutor
 
             if (boundary is not null)
             {
+                // A batched write fans out through the locator, which a turn must never do.
+                RefuseInsideActorTurn(context);
+
                 context.BatchBoundary = null;
 
                 context.Result = context.BatchBoundaryIsSetMany
@@ -947,6 +1130,7 @@ internal sealed class ScriptTransactionExecutor
                     break;
 
                 case NodeType.For:
+                    RefuseInsideActorTurn(context);
                     await ExecuteFor(context, ast, cancellationToken);
                     break;
 
@@ -1017,10 +1201,12 @@ internal sealed class ScriptTransactionExecutor
                     break;
 
                 case NodeType.GetByBucket:
+                    RefuseInsideActorTurn(context);
                     context.Result = await GetByBucketCommand.Execute(manager, context, ast, KeyValueDurability.Persistent, cancellationToken);
                     break;
 
                 case NodeType.EGetByBucket:
+                    RefuseInsideActorTurn(context);
                     context.Result = await GetByBucketCommand.Execute(manager, context, ast, KeyValueDurability.Ephemeral, cancellationToken);
                     break;
 
@@ -1030,6 +1216,7 @@ internal sealed class ScriptTransactionExecutor
                 // transaction-carrying scan exists. GET BY BUCKET is the prefix read that does work here.
                 case NodeType.ScanByPrefix:
                 case NodeType.EscanByPrefix:
+                    RefuseInsideActorTurn(context);
                     throw new KahunaScriptException("SCAN BY PREFIX is not supported inside transactions, use GET BY BUCKET", ast.yyline);
 
                 case NodeType.Commit:
@@ -1047,6 +1234,7 @@ internal sealed class ScriptTransactionExecutor
                     break;
 
                 case NodeType.Sleep:
+                    RefuseInsideActorTurn(context);
                     await SleepCommand.Execute(ast, cancellationToken);
                     break;
 
@@ -1102,6 +1290,18 @@ internal sealed class ScriptTransactionExecutor
             if (statements is null)
                 break;
         }
+    }
+
+    /// <summary>
+    /// Stops a script that runs inside an actor turn from doing what a turn must never do: wait, loop without a
+    /// bound, or send work through the locator. Static analysis keeps such scripts out of a turn in the first
+    /// place; this is the check that holds if that analysis is ever wrong. The turn ends, releases its key, and
+    /// the script runs again on the general path.
+    /// </summary>
+    private static void RefuseInsideActorTurn(ScriptTransactionContext context)
+    {
+        if (context.ActorTurn is not null)
+            throw new ActorTurnEscapeException("The statement cannot run inside an actor turn");
     }
 
     /// <summary>

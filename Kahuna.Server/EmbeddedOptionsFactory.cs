@@ -83,6 +83,8 @@ public static class EmbeddedOptionsFactory
         BackendWriteIOThreads = opts.BackendWriteIOThreads,
         BackendReadQueueDepth = opts.BackendReadQueueDepth,
         DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
+        FusedEphemeralFinalize = !opts.DisableFusedEphemeralFinalize,
+        ScriptActorTurns = !opts.DisableScriptActorTurns,
         DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
         MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,
         MaxConcurrentTransactions = opts.MaxConcurrentTransactions,

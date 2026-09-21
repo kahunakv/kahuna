@@ -40,14 +40,17 @@ internal sealed class ExistsCommand : BaseCommand
 
         HLCTimestamp readTimestamp = ResolveReadTimestamp(context, ast);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = await manager.LocateAndTryExistsValue(
-            context.TransactionId,
-            keyName,
-            compareRevision,
-            readTimestamp,
-            durability,
-            cancellationToken
-        );
+        // Inside an actor turn the request is served by the actor that is already running the script.
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = context.ActorTurn is { } turn
+            ? await turn.TryExists(keyName, compareRevision, readTimestamp, durability)
+            : await manager.LocateAndTryExistsValue(
+                context.TransactionId,
+                keyName,
+                compareRevision,
+                readTimestamp,
+                durability,
+                cancellationToken
+            );
         
         if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
             context.StopOnStatementFailure("EXISTS", keyName, durability, type);

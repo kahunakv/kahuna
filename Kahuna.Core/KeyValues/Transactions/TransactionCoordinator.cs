@@ -12,6 +12,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Communication.Grpc;
 using TransactionHandle = Kahuna.Shared.KeyValue.TransactionHandle;
+using Kahuna.Server.KeyValues.Handlers;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
@@ -1135,8 +1136,9 @@ internal sealed class TransactionCoordinator : IDisposable
         int pendingModifiedCount = context.State == KeyValueTransactionState.Pending ? (context.ModifiedKeys?.Count ?? 0) : 0;
         int readCount = context.ReadKeys?.Count ?? 0;
 
-        // A transaction with no per-key footprint skips straight to the prefix/range releases below.
-        if (lockCount > 0 || pendingModifiedCount > 0 || readCount > 0)
+        // A transaction with no per-key footprint — or one whose per-key footprint was already released inside
+        // the actor turn it ran in — skips straight to the prefix/range releases below.
+        if (!context.PerKeyWorkingSetReleased && (lockCount > 0 || pendingModifiedCount > 0 || readCount > 0))
         {
             // Intent-bearing per-key cleanup: point locks and, when not committed, staged (un-prepared) writes.
             // The set stays authoritative for the acknowledgement checks below; eligible read keys append to
@@ -1407,6 +1409,13 @@ internal sealed class TransactionCoordinator : IDisposable
 
         {
             if (!await ValidateReadSet(context, cancellationToken))
+                return;
+
+            // One ephemeral key led by this node: the prepare, the range-lock probe and the commit below all go
+            // to the same actor, so they run as one turn of it. Anything else, and a key led elsewhere, falls
+            // through to the three messages.
+            if (CanFinalizeInOneActorTurn(context, out string onlyKey)
+                && await TryFinalizeInOneActorTurn(context, onlyKey, cancellationToken))
                 return;
 
             // Place write intents before probing for commit conflicts so that a racing peer's own probe sees
@@ -2608,6 +2617,217 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
+    /// The commit id the manual (ephemeral) prepare carries: a fresh HLC event that is also past the highest
+    /// LastModified the transaction's last write observed, so the prepare's "was this key modified after the
+    /// commit id" check cannot trip on the transaction's own staged write.
+    /// </summary>
+    private HLCTimestamp MintManualCommitId(TransactionContext context)
+    {
+        HLCTimestamp highestModifiedTime = context.TransactionId;
+
+        if (context.ModifiedResult?.Type is KeyValueResponseType.Set or KeyValueResponseType.Extended or KeyValueResponseType.Deleted)
+        {
+            if (context.ModifiedResult.Values is not null)
+            {
+                foreach (KeyValueTransactionResultValue result in context.ModifiedResult.Values)
+                {
+                    if (result.LastModified != HLCTimestamp.Zero && result.LastModified > highestModifiedTime)
+                        highestModifiedTime = result.LastModified;
+                }
+            }
+        }
+
+        return raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
+    }
+
+    /// <summary>
+    /// Whether the transaction's finalize is exactly one prepare, one range-lock probe, and one commit, all
+    /// addressed to the same ephemeral key — the shape a single actor turn can stand in for.
+    ///
+    /// <para>A transaction that validates its reads is left out: its commit-time probe also asks other keys
+    /// about concurrent writers, which one key's actor cannot answer. A yielding transaction is left out
+    /// because its finalize is preceded by a pin whose interplay with a fused turn has not been exercised.</para>
+    /// </summary>
+    private bool CanFinalizeInOneActorTurn(TransactionContext context, out string key)
+    {
+        key = "";
+
+        if (!configuration.FusedEphemeralFinalize
+            || context.ModifiedKeys is not { Count: 1 }
+            || context.LocksAcquired is null
+            || context.ConflictPolicy == TransactionConflictPolicy.Yield
+            || RequiresReadSetValidation(context))
+            return false;
+
+        foreach ((string modifiedKey, KeyValueDurability durability) in context.ModifiedKeys)
+        {
+            if (durability != KeyValueDurability.Ephemeral || string.IsNullOrEmpty(modifiedKey))
+                return false;
+
+            key = modifiedKey;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a transaction with these options may run inside one turn of the actor that owns its only key:
+    /// the finalize of such a transaction must be the single-key, no-read-validation shape, decided before
+    /// the script runs because the turn cannot change its mind half way.
+    /// </summary>
+    internal bool CanRunInActorTurn(TransactionContext context) =>
+        configuration.ScriptActorTurns
+        && context.ConflictPolicy != TransactionConflictPolicy.Yield
+        && context.DecisionDurability != DecisionDurability.Durable
+        && context.ReadTimestamp.IsNull()
+        && !RequiresReadSetValidation(context);
+
+    /// <summary>
+    /// The two-phase commit of a transaction that ran inside one turn of the actor that owns its only key. It
+    /// is the all-ephemeral, single-key branch of <see cref="TwoPhaseCommit"/> and nothing else: the turn's
+    /// eligibility rules out read validation, a durable decision and a yielding policy, and the turn itself
+    /// refuses any key but its own.
+    /// </summary>
+    internal async Task FinalizeInActorTurn(TransactionContext context, string key, IActorTurnFinalizer turn, CancellationToken cancellationToken)
+    {
+        if (context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
+            return;
+
+        if (context.ModifiedKeys.Count != 1 || !context.ModifiedKeys.Contains((key, KeyValueDurability.Ephemeral)))
+            throw new ActorTurnEscapeException("The write set is not the key the actor turn owns");
+
+        if (context.LocksAcquired is null)
+        {
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction modified keys but holds no lock set" };
+            return;
+        }
+
+        if (!await TryFinalizeInOneActorTurn(context, key, cancellationToken, turn))
+            throw new ActorTurnEscapeException("The actor turn could not finalize its own key");
+    }
+
+    /// <summary>
+    /// Finalizes a single-ephemeral-key transaction in one turn of the actor that owns the key. Returns false,
+    /// with the transaction back in <see cref="KeyValueTransactionState.Pending"/> and nothing done, when the
+    /// key is not led by this node or the actor did not take the message; the caller then runs the ordinary
+    /// three-message finalize. Returns true when the transaction was finalized here, whatever the outcome.
+    ///
+    /// <para>Every outcome is reported exactly as the three-message path reports it — the same state
+    /// transitions, the same result, reason text, metric and log line, and the same exception for a failed
+    /// commit — so nothing above this method can tell which path ran.</para>
+    /// </summary>
+    private async Task<bool> TryFinalizeInOneActorTurn(
+        TransactionContext context, string key, CancellationToken cancellationToken, IActorTurnFinalizer? turn = null)
+    {
+        const KeyValueDurability durability = KeyValueDurability.Ephemeral;
+
+        if (!context.SetState(KeyValueTransactionState.Preparing, KeyValueTransactionState.Pending))
+            throw new KahunaAbortedException("Failed to set transaction state to Preparing");
+
+        HLCTimestamp commitId = MintManualCommitId(context);
+
+        // Inside an actor turn the request is served by the running actor itself; the locator is not consulted
+        // because whoever started the turn already confirmed that the key is led here.
+        (KeyValueResponseType, KeyValueFinalizeStage)? answer = turn is not null
+            ? await turn.TryFinalize(context.TransactionId, commitId, key, context.RecordAnchorKey)
+            : await manager.TryFinalizeMutationIfLocal(
+                context.TransactionId, commitId, key, durability, context.RecordAnchorKey, cancellationToken);
+
+        // Not led here, or the mailbox refused the message: in both cases nothing ran on the key.
+        if (answer is null || answer.Value is (KeyValueResponseType.MustRetry, KeyValueFinalizeStage.Unknown))
+        {
+            if (!context.SetState(KeyValueTransactionState.Pending, KeyValueTransactionState.Preparing))
+                throw new KahunaAbortedException("Failed to set transaction state back to Pending");
+
+            return false;
+        }
+
+        (KeyValueResponseType type, KeyValueFinalizeStage stage) = answer.Value;
+
+        DurableTransactionMetrics.FusedEphemeralFinalize();
+
+        if (!context.SetState(KeyValueTransactionState.Prepared, KeyValueTransactionState.Preparing))
+            throw new KahunaAbortedException("Failed to set transaction state to Prepared");
+
+        switch (stage)
+        {
+            case KeyValueFinalizeStage.Commit:
+                if (!context.SetState(KeyValueTransactionState.Committing, KeyValueTransactionState.Prepared))
+                    throw new KahunaAbortedException("Failed to set transaction state to Committing");
+
+                if (type != KeyValueResponseType.Committed)
+                {
+                    string reason = $"Failed to commit mutation {key}: {type}";
+                    context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+                    logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", type, key, HLCTimestamp.Zero);
+                    throw new KahunaAbortedException(reason);
+                }
+
+                if (!context.SetState(KeyValueTransactionState.Committed, KeyValueTransactionState.Committing))
+                    throw new KahunaAbortedException("Failed to set transaction state to Committed");
+
+                return true;
+
+            case KeyValueFinalizeStage.RangeLock:
+            {
+                DurableTransactionMetrics.RangeLockFenceAborts.Add(1);
+
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.Aborted,
+                    Reason = $"Foreign range lock covers written key {key}"
+                };
+
+                logger.LogWriteSkewGuardAborted(context.TransactionId, key);
+
+                // Inside an actor turn the rollback is served by the running actor too: the ordinary rollback
+                // goes through the mailbox, and would wait for a turn that cannot start until this one ends.
+                if (turn is not null)
+                {
+                    if (!context.SetState(KeyValueTransactionState.RollingBack, KeyValueTransactionState.Prepared))
+                        throw new KahunaAbortedException("Failed to set transaction state to RollingBack");
+
+                    KeyValueResponseType rolledBack = await turn.TryRollback(context.TransactionId, key);
+
+                    if (rolledBack == KeyValueResponseType.MustRetry)
+                    {
+                        // The turn releases the key on its way out, which clears the intent as well.
+                        logger.LogWarning("RollbackMutations: transient failure on {Key} inside the actor turn", key);
+                        return true;
+                    }
+
+                    if (rolledBack != KeyValueResponseType.RolledBack)
+                        logger.LogWarning("RollbackMutations: {Type} {Key} {TicketId}", rolledBack, key, HLCTimestamp.Zero);
+
+                    if (!context.SetState(KeyValueTransactionState.RolledBack, KeyValueTransactionState.RollingBack))
+                        throw new KahunaAbortedException("Failed to set transaction state to RolledBack");
+
+                    return true;
+                }
+
+                // The prepare ran, so its write intent is in place and is rolled back the ordinary way.
+                List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> prepared = [(key, HLCTimestamp.Zero, durability)];
+
+                if (context.AsyncRelease)
+                    _ = RollbackMutations(context, prepared, CancellationToken.None);
+                else
+                    await RollbackMutations(context, prepared, cancellationToken);
+
+                return true;
+            }
+
+            case KeyValueFinalizeStage.Prepare:
+            case KeyValueFinalizeStage.Unknown:
+            default:
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+
+                logger.LogWarning("Couldn't propose {Key} {Response}", key, type);
+
+                return true;
+        }
+    }
+
+    /// <summary>
     /// Places write intents on every confirmed modified key (prepare phase of 2PC).
     /// </summary>
     internal async Task<(bool, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>?)> PrepareMutations(
@@ -2628,21 +2848,7 @@ internal sealed class TransactionCoordinator : IDisposable
         if (!context.SetState(KeyValueTransactionState.Preparing, KeyValueTransactionState.Pending))
             throw new KahunaAbortedException("Failed to set transaction state to Preparing");
 
-        HLCTimestamp highestModifiedTime = context.TransactionId;
-
-        if (context.ModifiedResult?.Type is KeyValueResponseType.Set or KeyValueResponseType.Extended or KeyValueResponseType.Deleted)
-        {
-            if (context.ModifiedResult.Values is not null)
-            {
-                foreach (KeyValueTransactionResultValue result in context.ModifiedResult.Values)
-                {
-                    if (result.LastModified != HLCTimestamp.Zero && result.LastModified > highestModifiedTime)
-                        highestModifiedTime = result.LastModified;
-                }
-            }
-        }
-
-        HLCTimestamp commitId = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
+        HLCTimestamp commitId = MintManualCommitId(context);
 
         if (keys.Count == 1)
         {

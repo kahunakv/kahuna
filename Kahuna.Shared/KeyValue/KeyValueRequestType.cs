@@ -61,4 +61,17 @@ public enum KeyValueRequestType
     /// WAL segments, so no existing member may be renumbered.</para>
     /// </summary>
     MaterializeIntent,
+
+    /// <summary>
+    /// Prepare, commit-time range-lock check, and commit of one ephemeral mutation in a single actor turn.
+    /// Sent only to the local actor that owns the key, by the coordinator of a transaction whose whole write
+    /// set is that one key. Never replicated and never sent between nodes.
+    /// </summary>
+    TryFinalizeMutation,
+
+    /// <summary>
+    /// Runs a unit of work inside one turn of the actor that owns a key, so the requests that work issues for
+    /// the key are served without a mailbox hop each. Local to a node; never replicated, never sent between nodes.
+    /// </summary>
+    RunActorTurn,
 }

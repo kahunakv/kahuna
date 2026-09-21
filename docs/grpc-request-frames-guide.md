@@ -152,7 +152,9 @@ Computed as process CPU (from `top`) divided by completed requests per second.
 With frames, the `rate-limit` run has the node at about 610% CPU and the client at about 110%. The
 transport is no longer the limit for that workload; the work of the transaction itself is. An admitted
 rate-limit request is a pessimistic single-key transaction that sends six messages to the actor that owns
-the key (lock, read, write, prepare, conflict probe, commit). For reference, Valkey on the same machine
+the key (lock, read, write, prepare, conflict probe, commit). The
+[single-key script fast path](single-key-script-fast-path-guide.md) removes most of those messages and takes
+the same workload to about 200k req/s. For reference, Valkey on the same machine
 ran the same counter as a Lua `EVAL` at 169k req/s and a plain `GET` at 255k req/s with
 `valkey-benchmark -c 64`.
 

@@ -45,17 +45,20 @@ internal sealed class SetCommand : BaseCommand
         // value arrays are never mutated downstream, and each ToBytes call allocates a fresh copy.
         byte[]? valueBytes = result.ToBytes();
 
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTrySetKeyValue(
-            context.TransactionId,
-            key: keyName,
-            value: valueBytes,
-            options.CompareValue,
-            options.CompareRevision,
-            options.Flags,
-            options.ExpiresMs,
-            durability,
-            cancellationToken
-        );
+        // Inside an actor turn the request is served by the actor that is already running the script.
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = context.ActorTurn is { } turn
+            ? await turn.TrySet(keyName, valueBytes, options.CompareValue, options.CompareRevision, options.Flags, options.ExpiresMs, durability)
+            : await manager.LocateAndTrySetKeyValue(
+                context.TransactionId,
+                key: keyName,
+                value: valueBytes,
+                options.CompareValue,
+                options.CompareRevision,
+                options.Flags,
+                options.ExpiresMs,
+                durability,
+                cancellationToken
+            );
 
         switch (type)
         {

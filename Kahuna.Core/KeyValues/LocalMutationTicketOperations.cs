@@ -334,6 +334,71 @@ internal sealed class LocalMutationTicketOperations
     }
 
     /// <summary>
+    /// Hands the local actor that owns an ephemeral key to <paramref name="turn"/> for one turn. Returns when
+    /// the turn has run, or at once when the actor's mailbox did not take the message — the caller tells the
+    /// two apart by asking the turn whether it started.
+    /// </summary>
+    public async Task RunActorTurn(string key, IKeyValueActorTurn turn)
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.RunActorTurn,
+            HLCTimestamp.Zero, HLCTimestamp.Zero, key,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
+
+        request.Turn = turn;
+
+        try
+        {
+            await AskKeyValueActor(ephemeralKeyValuesRouter, request);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Asks the local actor that owns an ephemeral key to prepare, range-lock-check, and commit the
+    /// transaction's staged mutation in one turn, and reports which of those steps the answer came from.
+    ///
+    /// <para>A stage of <see cref="Handlers.KeyValueFinalizeStage.Unknown"/> with <c>MustRetry</c> means the
+    /// actor's mailbox did not take the message, so nothing ran and the caller is free to take the ordinary
+    /// three-message path instead.</para>
+    /// </summary>
+    public async Task<(KeyValueResponseType, Handlers.KeyValueFinalizeStage)> TryFinalizeMutation(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        string? recordAnchorKey
+    )
+    {
+        if (durability != KeyValueDurability.Ephemeral)
+            return (KeyValueResponseType.Errored, Handlers.KeyValueFinalizeStage.Prepare);
+
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryFinalizeMutation,
+            transactionId, commitId, key,
+            null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, durability, 0, 0, default);
+
+        request.RecordAnchorKey = recordAnchorKey;
+
+        try
+        {
+            KeyValueResponse? response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
+
+            if (response is null)
+                return (KeyValueResponseType.Errored, Handlers.KeyValueFinalizeStage.Unknown);
+
+            return (response.Type, Handlers.TryFinalizeMutationHandler.StageOf(response));
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
     /// Passes many TryCommit requests to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="transactionId"></param>

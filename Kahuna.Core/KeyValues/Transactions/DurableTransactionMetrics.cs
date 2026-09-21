@@ -133,6 +133,71 @@ internal static class DurableTransactionMetrics
             description: "Durable commits rejected because the attempt passed the frozen decision deadline.");
 
     /// <summary>
+    /// Scripts that ran start to finish inside one turn of the actor that owns their only key. A script that
+    /// started in a turn and had to leave it is not counted here; it is counted by
+    /// <see cref="ScriptActorTurnEscapes"/> and then runs on the general path.
+    /// </summary>
+    internal static readonly Counter<long> ScriptActorTurns =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.script_actor_turns",
+            description: "Scripts that ran inside one turn of the actor that owns their only key.");
+
+    private static long scriptActorTurns;
+
+    /// <summary>Process-wide count behind <see cref="ScriptActorTurns"/>, readable so tests can assert which
+    /// path a script took rather than assume it.</summary>
+    internal static long ScriptActorTurnsCount => Interlocked.Read(ref scriptActorTurns);
+
+    internal static void ScriptActorTurn()
+    {
+        Interlocked.Increment(ref scriptActorTurns);
+        ScriptActorTurns.Add(1);
+    }
+
+    /// <summary>
+    /// Scripts that started inside an actor turn and left it because they needed something the turn cannot
+    /// serve. Each one ran again on the general path. A sustained rate means the static shape check admits
+    /// scripts it should not, which costs the wasted first attempt and nothing else.
+    /// </summary>
+    internal static readonly Counter<long> ScriptActorTurnEscapes =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.script_actor_turn_escapes",
+            description: "Scripts that left an actor turn and ran again on the general path.");
+
+    private static long scriptActorTurnEscapes;
+
+    internal static long ScriptActorTurnEscapesCount => Interlocked.Read(ref scriptActorTurnEscapes);
+
+    internal static void ScriptActorTurnEscape()
+    {
+        Interlocked.Increment(ref scriptActorTurnEscapes);
+        ScriptActorTurnEscapes.Add(1);
+    }
+
+    /// <summary>
+    /// Single-ephemeral-key transactions finalized in one turn of the actor that owns the key, instead of the
+    /// three-message prepare, probe and commit. Counted whatever the outcome. The gap between this and the
+    /// number of such transactions is the share that took the three messages: the key was led by another
+    /// node, the transaction validated its reads, or the shortcut is switched off.
+    /// </summary>
+    internal static readonly Counter<long> FusedEphemeralFinalizes =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.fused_ephemeral_finalizes",
+            description: "Single-ephemeral-key transactions finalized in one actor turn.");
+
+    private static long fusedEphemeralFinalizes;
+
+    /// <summary>Process-wide count behind <see cref="FusedEphemeralFinalizes"/>, readable so tests can assert
+    /// which finalize path a transaction took rather than assume it.</summary>
+    internal static long FusedEphemeralFinalizesCount => Interlocked.Read(ref fusedEphemeralFinalizes);
+
+    internal static void FusedEphemeralFinalize()
+    {
+        Interlocked.Increment(ref fusedEphemeralFinalizes);
+        FusedEphemeralFinalizes.Add(1);
+    }
+
+    /// <summary>
     /// Transactions aborted at the commit barrier because a foreign range lock covered a key they had written —
     /// a range lock acquired after the write was staged, which the write-time fence cannot see. Each occurrence
     /// is a prevented phantom write. A sustained rate means real contention between writers and range-locking

@@ -850,6 +850,23 @@ public sealed class KahunaConfiguration
     public bool OnePhaseApplyTimeValidation { get; set; }
 
     /// <summary>
+    /// Lets a transaction whose whole write set is one ephemeral key, led by this node, finalize in a single
+    /// turn of the actor that owns the key instead of three messages to it (prepare, commit-time range-lock
+    /// probe, commit). The single turn runs the same three steps in the same order and answers as they do, so
+    /// this changes cost only. Off, every transaction takes the three-message path. Defaults to true.
+    /// </summary>
+    public bool FusedEphemeralFinalize { get; set; } = true;
+
+    /// <summary>
+    /// Lets an auto-commit script whose only key is one ephemeral key led by this node run inside a single turn
+    /// of the actor that owns the key: the lock, the script's reads and writes, the finalize and the release are
+    /// served by that actor directly instead of as one routed mailbox round trip each. The same handlers run
+    /// in the same order, so this changes cost only. A script that turns out to need anything else is run again
+    /// on the general path. Off, every script takes the general path. Defaults to true.
+    /// </summary>
+    public bool ScriptActorTurns { get; set; } = true;
+
+    /// <summary>
     /// Milliseconds a transactional staged write's in-memory write intent stays live before other
     /// transactions may treat it as abandoned and write past it. This lease is the window guard between a
     /// transaction staging a write and its durable prepare landing; once it lapses (a paused coordinator,

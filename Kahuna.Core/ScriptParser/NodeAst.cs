@@ -72,6 +72,13 @@ public sealed class NodeAst
     /// </summary>
     internal NodeAst[]? statementsMemo;
 
+    /// <summary>
+    /// Whether the script rooted here has the shape that may run inside one actor turn: 0 not decided yet,
+    /// 1 yes, 2 no. The shape is a property of the parsed tree, which is cached and never changes, so it is
+    /// decided once. Set only on a script's root. Concurrent fills compute the same answer.
+    /// </summary>
+    internal int actorTurnShapeMemo;
+
     public NodeAst(
         NodeType nodeType,
         NodeAst? leftAst,

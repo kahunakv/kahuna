@@ -163,6 +163,13 @@ internal class TransactionContext
     public HashSet<(string, KeyValueDurability)>? LocksAcquired { get; set; }
 
     /// <summary>
+    /// True when the per-key part of the working set — point locks, staged writes, read snapshots — was already
+    /// released and acknowledged, so the working-set release has nothing left to send for it. Set by a
+    /// transaction that ran, and cleaned up, inside one turn of the actor that owns its only key.
+    /// </summary>
+    internal bool PerKeyWorkingSetReleased { get; set; }
+
+    /// <summary>
     /// Prefix locks acquired during execution.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? PrefixLocksAcquired { get; set; }

@@ -137,6 +137,20 @@ internal sealed class RoutedScanOperations
         return locator.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken, recordAnchorKey);
     }
     
+    /// <summary>Whether the hash-routed key is led by this node, with leadership confirmed.</summary>
+    public Task<bool> IsLocallyLedHashKey(string key, CancellationToken cancellationToken) =>
+        locator.IsLocallyLedHashKey(key, cancellationToken);
+
+    /// <summary>
+    /// Finalizes one ephemeral mutation in a single actor turn when the key is led by this node; null otherwise.
+    /// </summary>
+    public Task<(KeyValueResponseType, Handlers.KeyValueFinalizeStage)?> TryFinalizeMutationIfLocal(
+        HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability,
+        string? recordAnchorKey, CancellationToken cancellationToken)
+    {
+        return locator.TryFinalizeMutationIfLocal(transactionId, commitId, key, durability, recordAnchorKey, cancellationToken);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryCommitMutations request.
     /// </summary>

@@ -63,10 +63,12 @@ internal static class KeyValueRequestPool
                 partitionId,
                 promise
             );
-            
+
+            request.Inline = KeyValueInlineScope.Current;
+
             return request;
         }
-        
+
         return new(
             type,
             transactionId,
@@ -82,7 +84,10 @@ internal static class KeyValueRequestPool
             proposalId, 
             partitionId,
             promise
-        );
+        )
+        {
+            Inline = KeyValueInlineScope.Current
+        };
     }
     
     /// <summary>

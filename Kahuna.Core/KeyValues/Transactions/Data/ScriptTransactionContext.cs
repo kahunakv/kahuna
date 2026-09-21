@@ -104,6 +104,13 @@ internal sealed class ScriptTransactionContext : TransactionContext
     /// </summary>
     internal NodeAst? BatchBoundary { get; set; }
 
+    /// <summary>
+    /// Set while the script runs inside a turn of the actor that owns its one key. The key-value statements
+    /// send their requests through it, so they are served by that actor directly instead of through the
+    /// locator and the actor's mailbox. Null on the general path, which is every other script.
+    /// </summary>
+    internal ScriptActorTurn? ActorTurn { get; set; }
+
     /// <summary>True when <see cref="BatchBoundary"/> batches as set-many; false for delete-many.</summary>
     internal bool BatchBoundaryIsSetMany { get; set; }
 

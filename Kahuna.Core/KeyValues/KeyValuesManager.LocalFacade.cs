@@ -228,6 +228,18 @@ internal sealed partial class KeyValuesManager
     ) =>
         localMutationTickets.TryPrepareManyMutations(transactionId, commitId, keys, recordAnchorKey);
 
+    public Task RunActorTurn(string key, IKeyValueActorTurn turn) =>
+        localMutationTickets.RunActorTurn(key, turn);
+
+    public Task<(KeyValueResponseType, Handlers.KeyValueFinalizeStage)> TryFinalizeMutation(
+        HLCTimestamp transactionId,
+        HLCTimestamp commitId,
+        string key,
+        KeyValueDurability durability,
+        string? recordAnchorKey
+    ) =>
+        localMutationTickets.TryFinalizeMutation(transactionId, commitId, key, durability, recordAnchorKey);
+
     public Task<(KeyValueResponseType, long)> TryCommitMutations(
         HLCTimestamp transactionId, 
         string key,

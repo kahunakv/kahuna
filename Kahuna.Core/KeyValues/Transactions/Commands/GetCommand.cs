@@ -43,14 +43,17 @@ internal sealed class GetCommand : BaseCommand
 
         HLCTimestamp readTimestamp = ResolveReadTimestamp(context, ast);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = await manager.LocateAndTryGetValue(
-            context.TransactionId,
-            keyName,
-            compareRevision,
-            readTimestamp,
-            durability,
-            cancellationToken
-        );
+        // Inside an actor turn the request is served by the actor that is already running the script.
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? readOnlyContext) = context.ActorTurn is { } turn
+            ? await turn.TryGet(keyName, compareRevision, readTimestamp, durability)
+            : await manager.LocateAndTryGetValue(
+                context.TransactionId,
+                keyName,
+                compareRevision,
+                readTimestamp,
+                durability,
+                cancellationToken
+            );
         
         if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
             context.StopOnStatementFailure("GET", keyName, durability, type);

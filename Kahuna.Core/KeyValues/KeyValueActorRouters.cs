@@ -116,6 +116,11 @@ internal sealed class KeyValueActorRouters
         KeyValueActorRing router,
         KeyValueRequest request)
     {
+        // A request issued from inside an actor turn is served by that actor at once. Sending it to the
+        // mailbox instead would wait for an answer that cannot come until the turn — which is waiting — ends.
+        if (request.Inline is { } inline)
+            return inline.DispatchInline(request);
+
         if (router.TryAsk(request, out ValueTask<KeyValueResponse?> reply))
             return reply;
 

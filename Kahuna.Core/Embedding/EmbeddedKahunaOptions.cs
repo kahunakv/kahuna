@@ -872,6 +872,20 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool OnePhaseApplyTimeValidation { get; set; }
 
+    /// <summary>
+    /// Lets a transaction whose whole write set is one ephemeral key led by this node finalize in a single
+    /// turn of the actor that owns the key. Defaults to true. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.FusedEphemeralFinalize"/>.
+    /// </summary>
+    public bool FusedEphemeralFinalize { get; set; } = true;
+
+    /// <summary>
+    /// Lets an auto-commit script over one ephemeral key led by this node run inside a single turn of the actor
+    /// that owns the key. Defaults to true. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.ScriptActorTurns"/>.
+    /// </summary>
+    public bool ScriptActorTurns { get; set; } = true;
+
     // ── Leader-balancer knobs ────────────────────────────────────────────────
     // The Kommander leader balancer redistributes partition leadership across cluster nodes.
     // A freshly split partition starts with LeaderSinceMs = 0 and becomes a balancer candidate

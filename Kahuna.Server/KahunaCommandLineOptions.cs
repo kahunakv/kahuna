@@ -36,6 +36,14 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-dashboard", Required = false, HelpText = "Do not serve the browser operator dashboard at the HTTP root")]
     public bool DisableDashboard { get; set; }
 
+    // A switch that turns a default-on behaviour off, for the same reason as the dashboard's: a boolean
+    // option can only be set, never cleared, from the command line.
+    [Option("disable-fused-ephemeral-finalize", Required = false, HelpText = "Finalize every ephemeral transaction with the three-message prepare, probe and commit, even when its whole write set is one key led by this node")]
+    public bool DisableFusedEphemeralFinalize { get; set; }
+
+    [Option("disable-script-actor-turns", Required = false, HelpText = "Run every script on the general path, even an auto-commit script whose only key is one ephemeral key led by this node")]
+    public bool DisableScriptActorTurns { get; set; }
+
     [Option("dashboard-refresh-seconds", Required = false, HelpText = "How often the dashboard polls this node, in seconds (1-300)", Default = 5)]
     public int DashboardRefreshSeconds { get; set; }
 

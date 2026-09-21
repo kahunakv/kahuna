@@ -38,12 +38,15 @@ internal sealed class DeleteCommand : BaseCommand
             context.LocksAcquired.Add((keyName, durability));
         }
 
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTryDeleteKeyValue(
-            context.TransactionId,
-            key: keyName,
-            durability,
-            cancellationToken
-        );
+        // Inside an actor turn the request is served by the actor that is already running the script.
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = context.ActorTurn is { } turn
+            ? await turn.TryDelete(keyName, durability)
+            : await manager.LocateAndTryDeleteKeyValue(
+                context.TransactionId,
+                key: keyName,
+                durability,
+                cancellationToken
+            );
         
         switch (type)
         {

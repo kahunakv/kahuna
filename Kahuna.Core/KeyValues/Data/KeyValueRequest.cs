@@ -125,6 +125,15 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal TransactionConflictPolicy ConflictPolicy { get; set; }
 
     /// <summary>
+    /// Set on a request that must be served from inside the turn of the actor that is already running,
+    /// instead of through its mailbox. Stamped at rent time from <see cref="KeyValueInlineScope"/>.
+    /// </summary>
+    internal IKeyValueInlineDispatcher? Inline { get; set; }
+
+    /// <summary>The work of a <see cref="KeyValueRequestType.RunActorTurn"/> request. Null on every other type.</summary>
+    internal IKeyValueActorTurn? Turn { get; set; }
+
+    /// <summary>
     ///
     /// </summary>
     public KeyValueReplyRef Promise { get; private set; }
@@ -277,6 +286,8 @@ public sealed class KeyValueRequest : IConsistentHashable
         RoutedGeneration = 0;
         RecordAnchorKey = null;
         ConflictPolicy = TransactionConflictPolicy.Normal;
+        Inline = null;
+        Turn = null;
         ReturnToPoolOnReceive = false;
     }
 

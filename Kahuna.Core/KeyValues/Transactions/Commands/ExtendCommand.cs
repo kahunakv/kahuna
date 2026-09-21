@@ -38,13 +38,16 @@ internal sealed class ExtendCommand : BaseCommand
         if (ast.rightAst is not null)
             expiresMs = int.Parse(ast.rightAst.yytext!);
         
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await manager.LocateAndTryExtendKeyValue(
-            context.TransactionId,
-            key: keyName,
-            expiresMs: expiresMs,
-            durability,
-            cancellationToken
-        );
+        // Inside an actor turn the request is served by the actor that is already running the script.
+        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = context.ActorTurn is { } turn
+            ? await turn.TryExtend(keyName, expiresMs, durability)
+            : await manager.LocateAndTryExtendKeyValue(
+                context.TransactionId,
+                key: keyName,
+                expiresMs: expiresMs,
+                durability,
+                cancellationToken
+            );
         
         switch (type)
         {
@@ -56,8 +59,10 @@ internal sealed class ExtendCommand : BaseCommand
                 // the intent carries the key's current value and revision (read back within this transaction, so it
                 // sees the extend's own MVCC snapshot) plus the new relative TTL, resolved to an absolute expiry at
                 // freeze. If the value cannot be read back, staging is skipped and the transaction falls back.
-                (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await manager.LocateAndTryGetValue(
-                    context.TransactionId, keyName, -1, HLCTimestamp.Zero, durability, cancellationToken);
+                (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = context.ActorTurn is { } readTurn
+                    ? await readTurn.TryGet(keyName, -1, HLCTimestamp.Zero, durability)
+                    : await manager.LocateAndTryGetValue(
+                        context.TransactionId, keyName, -1, HLCTimestamp.Zero, durability, cancellationToken);
 
                 if (readType == KeyValueResponseType.Get && entry is not null)
                     context.StageMutation(keyName, entry.Value, KeyValueState.Set, entry.Revision, expiresMs, noRevision: false); // extend re-materializes the value under a new revision, retaining history

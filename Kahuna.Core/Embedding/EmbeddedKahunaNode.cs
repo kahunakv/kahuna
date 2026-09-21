@@ -539,6 +539,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             SessionOwnedIntentCeilingMs = options.SessionOwnedIntentCeilingMs,
             StagedBaseFenceRetentionMs = options.StagedBaseFenceRetentionMs,
             OnePhaseApplyTimeValidation = options.OnePhaseApplyTimeValidation,
+            FusedEphemeralFinalize = options.FusedEphemeralFinalize,
+            ScriptActorTurns = options.ScriptActorTurns,
             SingleProcessRaftGroup = singleProcessRaftGroup
         }, options.WalPath);
     }

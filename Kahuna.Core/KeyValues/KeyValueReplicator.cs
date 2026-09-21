@@ -1090,6 +1090,8 @@ internal sealed class KeyValueReplicator
                 case KeyValueRequestType.TryPrepareMutations:
                 case KeyValueRequestType.TryCommitMutations:
                 case KeyValueRequestType.TryRollbackMutations:
+                case KeyValueRequestType.TryFinalizeMutation:
+                case KeyValueRequestType.RunActorTurn:
                 case KeyValueRequestType.ScanByPrefix:
                 case KeyValueRequestType.GetByBucket:
                 case KeyValueRequestType.GetByRange:

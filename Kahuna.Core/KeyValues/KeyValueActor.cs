@@ -21,7 +21,7 @@ namespace Kahuna.Server.KeyValues;
 /// The actor maintains an in-memory cache and if a key is not found, it attempts to retrieve it from disk.
 /// Operations with Linearizable consistency persist all modifications to disk.
 /// </summary>
-internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
+internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>, IKeyValueInlineDispatcher
 {
     /// <summary>
     /// Represents the threshold for triggering a collection operation in the actor.
@@ -205,6 +205,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     private readonly TryCommitMutationsHandler tryCommitMutationsHandler;
 
     /// <summary>
+    /// Runs the prepare, the commit-time range-lock check, and the commit of one ephemeral mutation in a
+    /// single turn, for a transaction whose whole write set is one key of this actor.
+    /// </summary>
+    private readonly TryFinalizeMutationHandler tryFinalizeMutationHandler;
+
+    /// <summary>
     /// Handles the operation of rolling back a set of mutations in the key-value store.
     /// Responsible for ensuring that any changes made during a transactional scope
     /// are reverted in cases where the transaction cannot be successfully completed.
@@ -353,6 +359,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
         tryPrepareMutationsHandler = new(context);
         tryCommitMutationsHandler = new(context);
         tryRollbackMutationsHandler = new(context);
+        tryFinalizeMutationHandler = new(context, tryPrepareMutationsHandler, tryCommitMutationsHandler);
         tryCollectHandler = new(context);
         completeProposalHandler = new(context);
         releaseProposalHandler = new(context);
@@ -367,6 +374,88 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
     /// per-entry accounting state (CachedBytes) without going through the public API.
     /// </summary>
     internal KeyValueContext GetContext() => kvContext!;
+
+    /// <summary>
+    /// Runs the handler of one request. Shared by the mailbox path and by <see cref="DispatchInline"/>, so a
+    /// request served inside a turn reaches exactly the handler it would have reached through the mailbox.
+    /// </summary>
+    private async ValueTask<KeyValueResponse?> RunHandler(KeyValueRequest message)
+    {
+    return message.Type switch
+        {
+            KeyValueRequestType.TrySet => await TrySet(message),
+            KeyValueRequestType.TryExtend => await TryExtend(message),
+            KeyValueRequestType.TryDelete => await TryDelete(message),
+            KeyValueRequestType.TryGet => await TryGet(message),
+            KeyValueRequestType.TryExists => await TryExists(message),
+            KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
+            KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
+            KeyValueRequestType.TryAcquireExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
+            KeyValueRequestType.TryAcquireExclusiveRangeLock => AcquireExclusiveRangeLock(message),
+            KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
+            KeyValueRequestType.TryReleaseExclusivePrefixLock => TryReleaseExclusivePrefixLock(message),
+            KeyValueRequestType.TryReleaseExclusiveRangeLock => ReleaseExclusiveRangeLock(message),
+            KeyValueRequestType.GetRangeLocks => GetRangeLocks(message),
+            KeyValueRequestType.ImportRangeLocks => ImportRangeLocks(message),
+            KeyValueRequestType.GetSafeTimestamp => await getSafeTimestampHandler.Execute(message),
+            KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
+            KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
+            KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
+            KeyValueRequestType.TryFinalizeMutation => await tryFinalizeMutationHandler.Execute(message),
+            KeyValueRequestType.GetByBucket => await GetByBucket(message),
+            KeyValueRequestType.GetByRange => await GetByRange(message),
+            KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
+            KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
+            KeyValueRequestType.CompleteProposal => CompleteProposal(message),
+            KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
+            KeyValueRequestType.ResumeRead => ResumeRead(message),
+            KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
+            KeyValueRequestType.FlushAck => FlushAck(message),
+            KeyValueRequestType.EvictPartition => evictPartitionHandler.Execute(message),
+            KeyValueRequestType.DropLeaderState => dropLeaderStateHandler.Execute(message),
+            KeyValueRequestType.Collect => CollectMessage(),
+            KeyValueRequestType.RunActorTurn => await RunActorTurn(message),
+            _ => KeyValueStaticResponses.ErroredResponse
+        };
+    }
+
+    /// <summary>True while a turn started by <see cref="RunActorTurn"/> is running on this actor.</summary>
+    private bool turnRunning;
+
+    /// <summary>
+    /// Hands the actor to a unit of work for one turn. The work reaches the actor's handlers through
+    /// <see cref="DispatchInline"/>; nothing else runs on the actor until it returns.
+    /// </summary>
+    private async ValueTask<KeyValueResponse?> RunActorTurn(KeyValueRequest message)
+    {
+        if (message.Turn is null || turnRunning)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        turnRunning = true;
+
+        try
+        {
+            await message.Turn.RunAsync(this);
+        }
+        finally
+        {
+            turnRunning = false;
+        }
+
+        return KeyValueStaticResponses.DoesNotExistContextResponse;
+    }
+
+    /// <summary>
+    /// Serves a request from inside the running turn. A turn cannot start another turn, and a dispatcher that
+    /// is used after its turn ended is refused: by then the actor is free to be serving someone else.
+    /// </summary>
+    public ValueTask<KeyValueResponse?> DispatchInline(KeyValueRequest request)
+    {
+        if (!turnRunning || request.Type == KeyValueRequestType.RunActorTurn)
+            return new(KeyValueStaticResponses.MustRetryResponse);
+
+        return RunHandler(request);
+    }
 
     /// <summary>
     /// Main entry point for the actor.
@@ -414,40 +503,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>
                 }
             }
 
-            response = message.Type switch
-            {
-                KeyValueRequestType.TrySet => await TrySet(message),
-                KeyValueRequestType.TryExtend => await TryExtend(message),
-                KeyValueRequestType.TryDelete => await TryDelete(message),
-                KeyValueRequestType.TryGet => await TryGet(message),
-                KeyValueRequestType.TryExists => await TryExists(message),
-                KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
-                KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
-                KeyValueRequestType.TryAcquireExclusivePrefixLock => TryAcquireExclusivePrefixLock(message),
-                KeyValueRequestType.TryAcquireExclusiveRangeLock => AcquireExclusiveRangeLock(message),
-                KeyValueRequestType.TryReleaseExclusiveLock => await TryReleaseExclusiveLock(message),
-                KeyValueRequestType.TryReleaseExclusivePrefixLock => TryReleaseExclusivePrefixLock(message),
-                KeyValueRequestType.TryReleaseExclusiveRangeLock => ReleaseExclusiveRangeLock(message),
-                KeyValueRequestType.GetRangeLocks => GetRangeLocks(message),
-                KeyValueRequestType.ImportRangeLocks => ImportRangeLocks(message),
-                KeyValueRequestType.GetSafeTimestamp => await getSafeTimestampHandler.Execute(message),
-                KeyValueRequestType.TryPrepareMutations => await TryPrepareMutations(message),
-                KeyValueRequestType.TryCommitMutations => await TryCommitMutations(message),
-                KeyValueRequestType.TryRollbackMutations => await TryRollbackMutations(message),
-                KeyValueRequestType.GetByBucket => await GetByBucket(message),
-                KeyValueRequestType.GetByRange => await GetByRange(message),
-                KeyValueRequestType.ScanByPrefix => await ScanByPrefix(message),
-                KeyValueRequestType.ScanByPrefixFromDisk => await ScanByPrefixFromDisk(message),
-                KeyValueRequestType.CompleteProposal => CompleteProposal(message),
-                KeyValueRequestType.ReleaseProposal => ReleaseProposal(message),
-                KeyValueRequestType.ResumeRead => ResumeRead(message),
-                KeyValueRequestType.InvalidateOrApply => InvalidateOrApply(message),
-                KeyValueRequestType.FlushAck => FlushAck(message),
-                KeyValueRequestType.EvictPartition => evictPartitionHandler.Execute(message),
-                KeyValueRequestType.DropLeaderState => dropLeaderStateHandler.Execute(message),
-                KeyValueRequestType.Collect => CollectMessage(),
-                _ => KeyValueStaticResponses.ErroredResponse
-            };
+            response = await RunHandler(message);
 
             return response;
         }
