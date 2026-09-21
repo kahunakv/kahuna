@@ -114,7 +114,7 @@ public sealed class TestDurableApplyResultLedger
         DurableApplyResultLedger ledger = new();
 
         ValueTask<DurableApplyWaitOutcome> wait = ledger.WaitAppliedAsync(PartitionId, 42, Long, CancellationToken.None);
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.False(wait.IsCompleted);
 
         ledger.RecordApplied(PartitionId, 42, result: true);
@@ -175,7 +175,7 @@ public sealed class TestDurableApplyResultLedger
         ValueTask<DurableApplyWaitOutcome> first = ledger.WaitAppliedAsync(PartitionId, 42, Long, CancellationToken.None);
         ValueTask<DurableApplyWaitOutcome> second = ledger.WaitAppliedAsync(PartitionId, 43, Long, CancellationToken.None);
         ValueTask<DurableApplyWaitOutcome> other = ledger.WaitAppliedAsync(PartitionId + 1, 42, Long, CancellationToken.None);
-        await Task.Delay(20);
+        await Task.Delay(20, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, ledger.NoteLeadershipLost(PartitionId));
         Assert.Equal(DurableApplyWaitStatus.LeadershipLost, (await first).Status);
@@ -199,7 +199,7 @@ public sealed class TestDurableApplyResultLedger
         ledger.NoteLeadershipRegained(PartitionId);
         Assert.False(ledger.HasLostLeadership(PartitionId));
         ValueTask<DurableApplyWaitOutcome> parked = ledger.WaitAppliedAsync(PartitionId, 46, Long, CancellationToken.None);
-        await Task.Delay(20);
+        await Task.Delay(20, TestContext.Current.CancellationToken);
         Assert.False(parked.IsCompleted);
         ledger.RecordApplied(PartitionId, 46, result: true);
         Assert.Equal(DurableApplyWaitStatus.Recorded, (await parked).Status);

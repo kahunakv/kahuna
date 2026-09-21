@@ -109,7 +109,7 @@ public sealed class TestClientRequestFrames
         GrpcBatcher batcher = stream.NewBatcher();
 
         List<GrpcBatcherItem> items = NewGets(4);
-        items[1].Promise.TrySetCanceled();
+        items[1].Promise.TrySetCanceled(TestContext.Current.CancellationToken);
 
         await batcher.RunBatch(items);
 
@@ -128,7 +128,7 @@ public sealed class TestClientRequestFrames
         GrpcBatcher batcher = stream.NewBatcher();
 
         List<GrpcBatcherItem> pair = NewGets(2);
-        pair[0].Promise.TrySetCanceled();
+        pair[0].Promise.TrySetCanceled(TestContext.Current.CancellationToken);
 
         await batcher.RunBatch(pair);
 
@@ -138,7 +138,7 @@ public sealed class TestClientRequestFrames
 
         List<GrpcBatcherItem> none = NewGets(3);
         foreach (GrpcBatcherItem item in none)
-            item.Promise.TrySetCanceled();
+            item.Promise.TrySetCanceled(TestContext.Current.CancellationToken);
 
         await batcher.RunBatch(none);
 
@@ -264,7 +264,7 @@ public sealed class TestClientRequestFrames
 
         stream.AnswerAll();
         GrpcBatcher.DispatchKeyValueResponse(new() { RequestId = lockItem.RequestId });
-        lockItem.Promise.TrySetCanceled();
+        lockItem.Promise.TrySetCanceled(TestContext.Current.CancellationToken);
     }
 
     [Fact]

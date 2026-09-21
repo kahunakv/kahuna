@@ -291,34 +291,23 @@ public sealed class TestRangeMapReplication : RaftTrackingTest
             [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
         try
         {
-            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
-
             const int writers = 8;
 
             // Each writer appends a distinct key space as one full range. If the read-modify-write
             // were not serialized, racing transforms would clobber earlier appends (last snapshot
             // wins) and the final map would have fewer than `writers` spaces.
-            IEnumerable<Task<bool>> mutations = Enumerable.Range(0, writers).Select(i =>
-                leader.Kahuna.RangeMapStore.MutateAsync(current =>
-                {
-                    List<RangeDescriptor> next = [.. current];
-                    next.Add(new RangeDescriptor
-                    {
-                        KeySpace = "ks" + i,
-                        StartKey = null,
-                        EndKey = null,
-                        PartitionId = i + 2, // data partitions are >= 2
-                        Generation = 1
-                    });
-
-                    // The map must satisfy the no-gap/no-overlap invariant after every commit.
-                    Assert.True(new RangeMap(next).Validate(out string? error), error);
-                    return next;
-                }, TestContext.Current.CancellationToken));
+            //
+            // The store is leader-only, and a stall on a loaded host can depose the meta leader
+            // mid-run: the store then settles its own proposal against the committed map, but a
+            // writer whose node no longer leads must re-drive on whichever node leads now. The
+            // append is idempotent so a re-drive after a landed-but-unconfirmed commit is a no-op.
+            IEnumerable<Task<bool>> mutations = Enumerable.Range(0, writers)
+                .Select(i => AppendKeySpaceOnCurrentLeader(nodes, "ks" + i, partitionId: i + 2)); // data partitions are >= 2
 
             bool[] results = await Task.WhenAll(mutations);
             Assert.All(results, Assert.True);
 
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
             RangeMap finalMap = leader.Kahuna.RangeMapStore.Current;
             Assert.True(finalMap.Validate(out string? finalError), finalError);
 
@@ -326,6 +315,105 @@ public sealed class TestRangeMapReplication : RaftTrackingTest
             Assert.Equal(writers, finalMap.Descriptors.Count);
             for (int i = 0; i < writers; i++)
                 Assert.Equal(i + 2, finalMap.Find("ks" + i, "x")!.PartitionId);
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Appends <paramref name="keySpace"/> as one full range on the node that currently leads the
+    /// meta partition, re-driving on the new leader after a leadership change until the append is
+    /// confirmed or the deadline passes. The transform leaves the map unchanged when the key space
+    /// is already present, so a re-drive can never add it twice.
+    /// </summary>
+    private static async Task<bool> AppendKeySpaceOnCurrentLeader(Node[] nodes, string keySpace, int partitionId)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        long deadline = Environment.TickCount64 + (long)(10_000 * TimingScale);
+
+        while (true)
+        {
+            Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            bool committed = await leader.Kahuna.RangeMapStore.MutateAsync(current =>
+            {
+                foreach (RangeDescriptor existing in current)
+                {
+                    if (string.Equals(existing.KeySpace, keySpace, StringComparison.Ordinal))
+                        return current;
+                }
+
+                List<RangeDescriptor> next = [.. current];
+                next.Add(new RangeDescriptor
+                {
+                    KeySpace = keySpace,
+                    StartKey = null,
+                    EndKey = null,
+                    PartitionId = partitionId,
+                    Generation = 1
+                });
+
+                // The map must satisfy the no-gap/no-overlap invariant after every commit.
+                Assert.True(new RangeMap(next).Validate(out string? error), error);
+                return next;
+            }, ct);
+
+            if (committed)
+                return true;
+
+            if (Environment.TickCount64 >= deadline)
+                return false;
+
+            await Task.Delay(50, ct);
+        }
+    }
+
+    // ── Mutate_SurvivesMetaLeaderStepDownMidRun ─────────────────────────────────
+
+    /// <summary>
+    /// A voluntary same-term step-down of the meta leader while appends are in flight is the path
+    /// a stalled host takes in CI: the proposal completion lands on a node that no longer leads and
+    /// Kommander answers without a verdict. Every append must still be confirmed — by the store
+    /// settling its own proposal against the committed map, or by the writer re-driving on the new
+    /// leader — and the final map must hold each append exactly once on every node.
+    /// </summary>
+    [Fact]
+    public async Task Mutate_SurvivesMetaLeaderStepDownMidRun()
+    {
+        Node[] nodes = await Assemble("memory",
+            [Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString()]);
+        try
+        {
+            const int writers = 8;
+            const int stepDowns = 3;
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            Task<bool>[] mutations = Enumerable.Range(0, writers)
+                .Select(i => AppendKeySpaceOnCurrentLeader(nodes, "ks" + i, partitionId: i + 2))
+                .ToArray();
+
+            for (int round = 0; round < stepDowns; round++)
+            {
+                Node leader = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+                await leader.Raft.StepDownAsync(RangeMapStore.MetaPartitionId, ct);
+                await Task.Delay((int)(100 * TimingScale), ct);
+            }
+
+            bool[] results = await Task.WhenAll(mutations);
+            Assert.All(results, Assert.True);
+
+            foreach (Node node in nodes)
+            {
+                await WaitUntil(node, map => map.Descriptors.Count == writers);
+
+                RangeMap map = node.Kahuna.RangeMapStore.Current;
+                Assert.True(map.Validate(out string? error), error);
+
+                for (int i = 0; i < writers; i++)
+                    Assert.Equal(i + 2, map.Find("ks" + i, "x")!.PartitionId);
+            }
         }
         finally
         {

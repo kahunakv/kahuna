@@ -65,6 +65,24 @@ internal sealed class RangeMapStore : IDisposable
 
     private readonly int checkpointEveryMutations;
 
+    /// <summary>
+    /// Upper bound on how long <see cref="MutateAsync"/> waits for the meta partition to settle
+    /// after a proposal ended without a verdict, before it reports the mutation unconfirmed.
+    /// </summary>
+    private readonly TimeSpan indeterminateOutcomeBudget;
+
+    /// <summary>Default for the settle wait: matches the election budget Kommander gives <see cref="IRaft.WaitForLeader"/>.</summary>
+    public static readonly TimeSpan DefaultIndeterminateOutcomeBudget = TimeSpan.FromSeconds(10);
+
+    /// <summary>Pause between confirmed-read attempts while the meta partition is still electing or arming its barrier.</summary>
+    private static readonly TimeSpan IndeterminateOutcomePollInterval = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// Proposals one <see cref="MutateAsync"/> call issues at most: the original plus re-proposals
+    /// after a confirmed read showed the entry did not land. Bounds a call under sustained churn.
+    /// </summary>
+    internal const int MaxProposeAttempts = 3;
+
     /// <summary>Mutated only under <see cref="mutateGate"/>.</summary>
     private int mutationsSinceCheckpoint;
 
@@ -81,16 +99,19 @@ internal sealed class RangeMapStore : IDisposable
     /// <param name="storagePath">Directory for the durable snapshot file; empty disables disk persistence.</param>
     /// <param name="storageRevision">Per-node revision so each node's snapshot file is distinct and stable across restarts.</param>
     /// <param name="checkpointEveryMutations">Committed mutations between meta-partition checkpoints; ≤ 0 disables periodic checkpointing.</param>
+    /// <param name="indeterminateOutcomeBudget">Settle wait after a proposal without a verdict; null selects <see cref="DefaultIndeterminateOutcomeBudget"/>.</param>
     public RangeMapStore(
         IRaft raft,
         string? storagePath,
         string? storageRevision,
         ILogger<IKahuna> logger,
-        int checkpointEveryMutations = DefaultCheckpointEveryMutations)
+        int checkpointEveryMutations = DefaultCheckpointEveryMutations,
+        TimeSpan? indeterminateOutcomeBudget = null)
     {
         this.raft = raft;
         this.logger = logger;
         this.checkpointEveryMutations = checkpointEveryMutations;
+        this.indeterminateOutcomeBudget = indeterminateOutcomeBudget ?? DefaultIndeterminateOutcomeBudget;
 
         snapshotPath = string.IsNullOrEmpty(storagePath)
             ? null
@@ -113,9 +134,24 @@ internal sealed class RangeMapStore : IDisposable
     /// <see cref="IRaft.ReplicateLogs(int,string,byte[],bool,System.Threading.CancellationToken,long)"/>
     /// on a non-leader, and this returns <c>false</c>. The in-memory map is swapped only after the
     /// entry commits, so a failed replication leaves the map untouched.
+    ///
+    /// <para>
+    /// A proposal can end without a verdict: when the meta leader steps down with the entry in
+    /// flight, Kommander answers <see cref="RaftOperationStatus.ProposalOutcomeUnknown"/> (or
+    /// <see cref="RaftOperationStatus.ProposalTimeout"/>). The entry is in this node's log and the
+    /// next leader's promotion barrier may still commit it, so answering <c>false</c> right away
+    /// would contradict the map the apply path installs moments later. The call instead waits for
+    /// the meta partition to settle and reads the verdict from the committed map: the entry landed
+    /// → <c>true</c>; the committed map is not the proposed one → the transform is re-run against
+    /// the fresh map and proposed again (at most <see cref="MaxProposeAttempts"/> proposals per call,
+    /// and only while this node still leads — a re-proposal from a deposed node is rejected as
+    /// not-leader); no confirmed read within the settle budget → <c>false</c>, and the caller must
+    /// re-read <see cref="Current"/> before it acts on that answer.
+    /// </para>
     /// </summary>
-    /// <returns><c>true</c> if the mutation committed; <c>false</c> if it was rejected (invalid map,
-    /// reserved-partition violation) or replication failed (not leader, no quorum).</returns>
+    /// <returns><c>true</c> if the mutation is committed; <c>false</c> if it was rejected (invalid map,
+    /// reserved-partition violation), replication failed (not leader, no quorum), or its outcome
+    /// could not be confirmed after a leadership change.</returns>
     public async Task<bool> MutateAsync(
         Func<IReadOnlyList<RangeDescriptor>, IReadOnlyList<RangeDescriptor>> transform,
         CancellationToken cancellationToken = default)
@@ -124,62 +160,190 @@ internal sealed class RangeMapStore : IDisposable
 
         try
         {
-            IReadOnlyList<RangeDescriptor> next = transform(current.Descriptors);
-
-            RangeMap candidate = new(next);
-
-            if (!candidate.Validate(out string? error))
+            for (int attempt = 1; ; attempt++)
             {
-                logger.LogError("Rejecting range-map mutation (invariant G1): {Error}", error);
-                return false;
-            }
+                IReadOnlyList<RangeDescriptor> next = transform(current.Descriptors);
 
-            // Reservation contract: ranged data never lives on the meta partition (P0, shared with
-            // the system coordinator). Data partitions are >= FirstDataPartitionId (1).
-            foreach (RangeDescriptor descriptor in next)
-            {
-                if (descriptor.PartitionId < FirstDataPartitionId)
+                RangeMap candidate = new(next);
+
+                if (!candidate.Validate(out string? error))
                 {
-                    logger.LogError(
-                        "Rejecting range-map mutation: descriptor on reserved partition {Partition} ({Descriptor})",
-                        descriptor.PartitionId, descriptor);
+                    logger.LogError("Rejecting range-map mutation (invariant G1): {Error}", error);
+                    return false;
+                }
+
+                // Reservation contract: ranged data never lives on the meta partition (P0, shared with
+                // the system coordinator). Data partitions are >= FirstDataPartitionId (1).
+                foreach (RangeDescriptor descriptor in next)
+                {
+                    if (descriptor.PartitionId < FirstDataPartitionId)
+                    {
+                        logger.LogError(
+                            "Rejecting range-map mutation: descriptor on reserved partition {Partition} ({Descriptor})",
+                            descriptor.PartitionId, descriptor);
+
+                        return false;
+                    }
+                }
+
+                byte[] data = ReplicationSerializer.Serialize(ToMessage(next));
+
+                RaftReplicationResult result = await raft.ReplicateLogs(
+                    MetaPartitionId,
+                    ReplicationTypes.RangeMap,
+                    data,
+                    cancellationToken: cancellationToken
+                ).ConfigureAwait(false);
+
+                if (result.Success)
+                {
+                    current = candidate;
+                    Interlocked.Increment(ref mapVersion);
+
+                    // Durable snapshot first (so this entry survives meta-WAL compaction), then maybe
+                    // checkpoint to let Kommander trim the now-redundant log history.
+                    PersistToDisk(candidate);
+                    TriggerCheckpointIfDue();
+
+                    return true;
+                }
+
+                if (result.Status is not (RaftOperationStatus.ProposalOutcomeUnknown or RaftOperationStatus.ProposalTimeout))
+                {
+                    logger.LogWarning(
+                        "Failed to replicate range-map mutation Status={Status} Ticket={Ticket}",
+                        result.Status, result.TicketId);
 
                     return false;
                 }
-            }
 
-            byte[] data = ReplicationSerializer.Serialize(ToMessage(next));
+                // The entry was accepted into the log but leadership moved before a verdict. Its fate
+                // is sealed once the next leader's barrier commits, so read it from the committed map
+                // rather than guess.
+                IndeterminateOutcome outcome =
+                    await ResolveIndeterminateOutcomeAsync(data, cancellationToken).ConfigureAwait(false);
 
-            RaftReplicationResult result = await raft.ReplicateLogs(
-                MetaPartitionId,
-                ReplicationTypes.RangeMap,
-                data,
-                cancellationToken: cancellationToken
-            ).ConfigureAwait(false);
+                if (outcome == IndeterminateOutcome.Installed)
+                {
+                    // The apply path already installed and persisted the committed map on this node
+                    // (leader echo or follower apply); only the checkpoint cadence is still owed.
+                    logger.LogWarning(
+                        "Range-map mutation committed across a leadership change Status={Status}",
+                        result.Status);
 
-            if (!result.Success)
-            {
+                    TriggerCheckpointIfDue();
+
+                    return true;
+                }
+
+                if (outcome == IndeterminateOutcome.NotInstalled && attempt < MaxProposeAttempts)
+                {
+                    logger.LogWarning(
+                        "Range-map mutation did not land after a leadership change Status={Status}; re-proposing against the current map (attempt {Attempt} of {MaxAttempts})",
+                        result.Status, attempt + 1, MaxProposeAttempts);
+
+                    continue;
+                }
+
                 logger.LogWarning(
-                    "Failed to replicate range-map mutation Status={Status} Ticket={Ticket}",
-                    result.Status, result.TicketId);
+                    "Range-map mutation unconfirmed Status={Status} Outcome={Outcome} Attempts={Attempts}",
+                    result.Status, outcome, attempt);
 
                 return false;
             }
-
-            current = candidate;
-            Interlocked.Increment(ref mapVersion);
-
-            // Durable snapshot first (so this entry survives meta-WAL compaction), then maybe
-            // checkpoint to let Kommander trim the now-redundant log history.
-            PersistToDisk(candidate);
-            TriggerCheckpointIfDue();
-
-            return true;
         }
         finally
         {
             mutateGate.Release();
         }
+    }
+
+    /// <summary>How a proposal that ended without a verdict was settled by reading the committed map.</summary>
+    private enum IndeterminateOutcome
+    {
+        /// <summary>The committed map equals the proposed snapshot: the mutation is in effect.</summary>
+        Installed,
+
+        /// <summary>
+        /// The meta partition settled and the committed map is not the proposed snapshot: the entry
+        /// was dropped, or a later commit already superseded it. Either way the transform must be
+        /// applied to the fresh map again.
+        /// </summary>
+        NotInstalled,
+
+        /// <summary>No confirmed read of the meta partition succeeded within the settle budget.</summary>
+        Unresolved
+    }
+
+    /// <summary>
+    /// Settles a proposal without a verdict. Waits for the meta partition to elect a leader, then
+    /// runs a confirmed read (<see cref="IRaft.ConfirmLocalApplicationAsync"/>): after a true
+    /// answer every entry committed before the call — including this node's own inherited entry,
+    /// if the new leader's barrier committed it — is applied here, so <see cref="Current"/> carries
+    /// the verdict. A false answer is transient (no leader yet, barrier still armed, quorum round
+    /// failed) and is polled again until <see cref="indeterminateOutcomeBudget"/> runs out.
+    /// </summary>
+    /// <param name="proposed">The exact bytes that were proposed. The comparison decodes them the
+    /// way the apply path does, so codec details cannot split a landed entry from its proposal.</param>
+    private async Task<IndeterminateOutcome> ResolveIndeterminateOutcomeAsync(byte[] proposed, CancellationToken cancellationToken)
+    {
+        RangeMap expected = new(FromMessage(ReplicationSerializer.UnserializeRangeMapMessage(proposed)));
+
+        long deadline = Environment.TickCount64 + (long)indeterminateOutcomeBudget.TotalMilliseconds;
+
+        while (true)
+        {
+            bool confirmed = false;
+
+            try
+            {
+                // Bounded by Kommander's own election budget; a partition that cannot elect surfaces
+                // as a RaftException and is retried below until the settle budget runs out.
+                await raft.WaitForLeader(MetaPartitionId, cancellationToken).ConfigureAwait(false);
+
+                confirmed = await raft.ConfirmLocalApplicationAsync(MetaPartitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RaftException ex)
+            {
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug(ex, "Range-map settle wait: meta partition not ready ({Message})", ex.Message);
+            }
+
+            if (confirmed)
+                return SameDescriptors(current, expected) ? IndeterminateOutcome.Installed : IndeterminateOutcome.NotInstalled;
+
+            if (Environment.TickCount64 >= deadline)
+                return IndeterminateOutcome.Unresolved;
+
+            await Task.Delay(IndeterminateOutcomePollInterval, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Order-independent equality of two validated maps. Key-space order in <see cref="RangeMap.Descriptors"/>
+    /// follows first appearance in the source list, which the codec and the transform can order
+    /// differently, so the descriptors are compared as a set (records compare by value).
+    /// </summary>
+    private static bool SameDescriptors(RangeMap installed, RangeMap expected)
+    {
+        IReadOnlyList<RangeDescriptor> left = installed.Descriptors;
+        IReadOnlyList<RangeDescriptor> right = expected.Descriptors;
+
+        if (left.Count != right.Count)
+            return false;
+
+        HashSet<RangeDescriptor> set = new(left.Count);
+
+        for (int i = 0; i < left.Count; i++)
+            set.Add(left[i]);
+
+        for (int i = 0; i < right.Count; i++)
+        {
+            if (!set.Contains(right[i]))
+                return false;
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -285,7 +285,7 @@ public class TestRateLimitingScripts : BaseCluster
             for (int i = 0; i < 4; i++)
             {
                 if (i > 0)
-                    await Task.Delay(600);
+                    await Task.Delay(600, TestContext.Current.CancellationToken);
 
                 Assert.Equal(Allowed, await Admit(kahuna1, KeyValueDurability.Ephemeral, counterKey, 4, ttlMs));
             }
@@ -321,7 +321,7 @@ public class TestRateLimitingScripts : BaseCluster
             Assert.Equal(Allowed, await Admit(kahuna2, KeyValueDurability.Ephemeral, counterKey, 2, ttlMs));
             Assert.Equal(Refused, await Admit(kahuna3, KeyValueDurability.Ephemeral, counterKey, 2, ttlMs));
 
-            await Task.Delay(ttlMs + 500);
+            await Task.Delay(ttlMs + 500, TestContext.Current.CancellationToken);
 
             Assert.Equal(Allowed, await Admit(kahuna1, KeyValueDurability.Ephemeral, counterKey, 2, ttlMs));
         }

@@ -165,7 +165,7 @@ public sealed class TestDurableOrderedApply
         Task<DurableCompletionAnswer> completion = node.Completion.AwaitAppliedAsync(
             Partition, [IntentEntry(prepareX), RecordEntry(commitX)], [11, 12], CancellationToken.None);
 
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.False(completion.IsCompleted);
 
         // Nothing moved on the completion's account: P still holds the key, X's record is untouched.
@@ -289,7 +289,7 @@ public sealed class TestDurableOrderedApply
         Task<DurableCompletionAnswer> completion = node.Completion.AwaitAppliedAsync(
             Partition, [RecordEntry(initZ), IntentEntry(prepareZ), RecordEntry(commitZ)], [70, 71, 72], CancellationToken.None);
 
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.False(completion.IsCompleted);
 
         Assert.Equal(1, node.Ledger.NoteLeadershipLost(Partition));
@@ -306,7 +306,7 @@ public sealed class TestDurableOrderedApply
         // Leading again: completions park and the ordered apply answers them as usual.
         node.Ledger.NoteLeadershipRegained(Partition);
         Task<DurableCompletionAnswer> again = node.Completion.AwaitAppliedAsync(Partition, [IntentEntry(prepareZ)], [71], CancellationToken.None);
-        await Task.Delay(20);
+        await Task.Delay(20, TestContext.Current.CancellationToken);
         Assert.False(again.IsCompleted);
         Assert.True(node.ConsumerApplyIntents(71, prepareZ));
         Assert.Equal(DurableCompletionAnswer.Acknowledged, await again);
@@ -344,7 +344,7 @@ public sealed class TestDurableOrderedApply
             (_, _, _) => ordered.Task);
 
         submission.Complete([77]);
-        await Task.Delay(20);
+        await Task.Delay(20, TestContext.Current.CancellationToken);
         Assert.False(submission.Committed.IsCompleted);
         Assert.Equal(DurableCompletionAnswer.NotCommitted, submission.Answer);
 
