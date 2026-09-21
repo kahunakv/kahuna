@@ -98,10 +98,9 @@ internal sealed class ScriptTransactionContext : TransactionContext
     }
 
     /// <summary>
-    /// The statement-list subtree the current descent should execute as one batched
-    /// set-many/delete-many. Resolved by a single probe at the top of a statement-list spine
-    /// (instead of re-scanning the prefix at every recursion level) and consumed — nulled —
-    /// when the descent reaches it.
+    /// The statement-list subtree the executor should run as one batched set-many/delete-many.
+    /// Resolved by a single probe when a statement list is entered, and consumed — nulled — by
+    /// that same entry before the list's remaining statements run.
     /// </summary>
     internal NodeAst? BatchBoundary { get; set; }
 

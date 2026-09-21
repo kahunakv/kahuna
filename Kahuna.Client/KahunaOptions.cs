@@ -116,6 +116,16 @@ public class KahunaOptions
     public int BatchCoalescingDelayMs { get; set; } = 2;
 
     /// <summary>
+    /// Lets the gRPC batcher send the key-value requests it drained together as one stream message, and
+    /// read the node's answers the same way. A stream message has a fixed cost on both ends, and under
+    /// load that cost is most of what a small request costs, so this raises throughput without holding any
+    /// request back: only requests that are already waiting are sent together, and a request that is
+    /// alone goes out exactly as it did before. It takes effect only on a connection whose node announced
+    /// that it reads such messages, so it is safe to leave on against older nodes. Defaults to true.
+    /// </summary>
+    public bool GrpcRequestFrames { get; set; } = true;
+
+    /// <summary>
     /// When <see langword="true"/>, TLS server certificate validation is skipped entirely.
     /// Intended for development and local testing only — leaves connections open to MITM attacks.
     /// </summary>

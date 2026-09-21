@@ -70,20 +70,13 @@ public static class HashPlacement
 
     /// <summary>
     /// The bucket in <c>[0, poolSize)</c> that <paramref name="key"/>'s placement group hashes to.
-    /// Allocates only when the group is a proper prefix of the key (the digest takes a string);
-    /// a key that is its own group is hashed in place.
+    /// The group is hashed as a slice of the key, so nothing is allocated.
     /// </summary>
-    public static int BucketOfKey(string key, int poolSize)
-    {
-        ReadOnlySpan<char> group = GroupOf(KeySpaceOf(key));
-        return HashUtils.ConsistentHash(group.Length == key.Length ? key : group.ToString(), poolSize);
-    }
+    public static int BucketOfKey(string key, int poolSize) =>
+        HashUtils.ConsistentHash(GroupOf(KeySpaceOf(key)), poolSize);
 
     /// <summary>The bucket in <c>[0, poolSize)</c> that <paramref name="keySpace"/>'s placement group
     /// hashes to. Same allocation profile as <see cref="BucketOfKey"/>.</summary>
-    public static int BucketOfKeySpace(string keySpace, int poolSize)
-    {
-        ReadOnlySpan<char> group = GroupOf(keySpace.AsSpan());
-        return HashUtils.ConsistentHash(group.Length == keySpace.Length ? keySpace : group.ToString(), poolSize);
-    }
+    public static int BucketOfKeySpace(string keySpace, int poolSize) =>
+        HashUtils.ConsistentHash(GroupOf(keySpace.AsSpan()), poolSize);
 }

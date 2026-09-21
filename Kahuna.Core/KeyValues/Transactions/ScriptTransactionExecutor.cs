@@ -881,39 +881,55 @@ internal sealed class ScriptTransactionExecutor
     }
 
     /// <summary>
-    /// Recursively executes the script AST.
+    /// Executes a script AST node. A statement list runs as a flat loop over its statements.
+    ///
+    /// <para>The grammar builds a statement list as a left-leaning spine with one level per statement.
+    /// Descending that spine through recursive awaits put one suspended call per statement under the
+    /// first statement that went asynchronous, and every one of them boxed its state machine. The loop
+    /// keeps a whole list inside this one call, so a list costs one box however long it is. Only a
+    /// genuinely nested list (an IF or FOR body) is another call.</para>
     /// </summary>
-    /// <param name="spineProbed">
-    /// True when this call descends the left spine of a statement list whose batch probe already
-    /// ran at the top. The probe is O(statements) and the spine has one level per statement, so
-    /// re-probing every level would make batch detection quadratic in script length.
-    /// </param>
-    private async Task ExecuteTransactionInternal(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken, bool spineProbed = false)
+    private async Task ExecuteTransactionInternal(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
     {
+        NodeAst[]? statements = null;
+        int next = 0;
+
         if (ast.nodeType == NodeType.StmtList)
         {
-            if (!spineProbed && !context.TryRestoreBatchProbe(ast))
+            if (!context.TryRestoreBatchProbe(ast))
             {
                 ProbeBatchablePrefix(context, ast);
                 context.RecordBatchProbe(ast);
             }
 
-            // The probe stashed the largest batchable prefix subtree; the descent executes nothing
-            // until it reaches that exact node, so batching here is equivalent to the per-level
-            // detection it replaces.
-            if (ReferenceEquals(context.BatchBoundary, ast))
+            statements = GetStatements(ast);
+
+            // The probe stashed the subtree covering the largest batchable prefix. That prefix holds the
+            // first statements of the list, so it runs before anything else and the loop resumes after it.
+            NodeAst? boundary = context.BatchBoundary;
+
+            if (boundary is not null)
             {
                 context.BatchBoundary = null;
 
                 context.Result = context.BatchBoundaryIsSetMany
-                    ? await SetManyCommand.Execute(manager, context, ast, cancellationToken)
-                    : await DeleteManyCommand.Execute(manager, context, ast, cancellationToken);
-                return;
+                    ? await SetManyCommand.Execute(manager, context, boundary, cancellationToken)
+                    : await DeleteManyCommand.Execute(manager, context, boundary, cancellationToken);
+
+                next = IndexAfterBatch(statements, boundary);
             }
         }
 
         while (true)
         {
+            if (statements is not null)
+            {
+                if (next >= statements.Length)
+                    break;
+
+                ast = statements[next++];
+            }
+
             if (context.Status == KeyValueExecutionStatus.Stop)
                 break;
 
@@ -921,19 +937,10 @@ internal sealed class ScriptTransactionExecutor
 
             switch (ast.nodeType)
             {
+                // The grammar never puts a list in statement position; a tree built by hand can.
                 case NodeType.StmtList:
-                {
-                    if (ast.leftAst is not null)
-                        await ExecuteTransactionInternal(context, ast.leftAst, cancellationToken, spineProbed: true);
-
-                    if (ast.rightAst is not null)
-                    {
-                        ast = ast.rightAst!;
-                        continue;
-                    }
-
+                    await ExecuteTransactionInternal(context, ast, cancellationToken);
                     break;
-                }
 
                 case NodeType.If:
                     await ExecuteIf(context, ast, cancellationToken);
@@ -1092,8 +1099,75 @@ internal sealed class ScriptTransactionExecutor
                     throw new KahunaScriptException("Invalid statement: " + ast.nodeType, ast.yyline);
             }
 
-            break;
+            if (statements is null)
+                break;
         }
+    }
+
+    /// <summary>
+    /// The statements of a list in execution order: the deepest left leaf first, then the right
+    /// statement of each spine node from the bottom up.
+    ///
+    /// <para>Kept on the list's root node, because a parsed tree is cached and shared by every later
+    /// execution of the same script and its shape never changes. Two concurrent executions can both build
+    /// the array; both build the same one from the same tree, and the store is a single reference write,
+    /// so the race is harmless. Nothing writes to the array after it is published.</para>
+    /// </summary>
+    private static NodeAst[] GetStatements(NodeAst list)
+    {
+        NodeAst[]? statements = Volatile.Read(ref list.statementsMemo);
+
+        if (statements is not null)
+            return statements;
+
+        int count = 0;
+        NodeAst? node = list;
+
+        while (node is not null && node.nodeType == NodeType.StmtList)
+        {
+            if (node.rightAst is not null)
+                count++;
+
+            node = node.leftAst;
+        }
+
+        if (node is not null)
+            count++;
+
+        statements = new NodeAst[count];
+
+        int index = count;
+        node = list;
+
+        while (node is not null && node.nodeType == NodeType.StmtList)
+        {
+            if (node.rightAst is not null)
+                statements[--index] = node.rightAst;
+
+            node = node.leftAst;
+        }
+
+        if (node is not null)
+            statements[--index] = node;
+
+        Volatile.Write(ref list.statementsMemo, statements);
+
+        return statements;
+    }
+
+    /// <summary>
+    /// The index of the first statement after a batched prefix. The batch subtree is a spine node, and
+    /// its right statement is the last statement the batch covers.
+    /// </summary>
+    private static int IndexAfterBatch(NodeAst[] statements, NodeAst boundary)
+    {
+        for (int i = 0; i < statements.Length; i++)
+        {
+            if (ReferenceEquals(statements[i], boundary.rightAst))
+                return i + 1;
+        }
+
+        throw new KahunaScriptException("Batched statements are not part of the statement list", boundary.yyline);
     }
 
     private async Task ExecuteIf(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
@@ -1142,10 +1216,9 @@ internal sealed class ScriptTransactionExecutor
     /// subtree on the context. Statements execute in left-spine order, so the subtree covering
     /// statements [0..k-1] is the spine node at depth n-k; when the first k statements are
     /// homogeneous set/eset (or delete/edelete) commands over distinct keys, that node runs as a
-    /// single set-many/delete-many. Probing once at the spine's top replaces re-scanning the
-    /// prefix at every recursion level, which was quadratic in script length. The descent
-    /// executes nothing before reaching the boundary, so context state (variables, parameters)
-    /// at probe time matches what per-level detection observed.
+    /// single set-many/delete-many. The probe runs once when the list is entered, and the batch
+    /// runs before any other statement of the list, so context state (variables, parameters) at
+    /// probe time is the state the batched statements execute against.
     /// </summary>
     private static void ProbeBatchablePrefix(ScriptTransactionContext context, NodeAst ast)
     {

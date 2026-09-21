@@ -61,12 +61,62 @@ stays clean — see §7):
 | `set` | `SetKeyValue` with a random `--value-size` payload. |
 | `get` | `GetKeyValue`. A not-found read is counted as a **miss**, not a hit (see §5). |
 | `mixed` | Per request, `--read-pct`% reads, the rest writes. |
+| `delete` | `DeleteKeyValue`. A key that was not there is counted as a **miss**. |
+| `set-many` | One batched request writing `--batch-size` distinct keys (partition-batched write path). |
+| `delete-many` | One batched request deleting `--batch-size` distinct keys. |
+| `txn` | An interactive transaction that writes `--keys-per-txn` keys, then commits (full working-set 2PC). |
+| `bank` | Contended read-modify-write: move one unit between two accounts inside one transaction. |
 | `lock` | Acquire then release a lock (`GetOrCreateLock`) — one acquire+release per op. |
 | `sequence` | `NextSequenceValue` against a single shared sequence (sequencer hot path). |
 | `script` | Runs the transaction script at `--script <path>.4gl` once per op (transaction throughput). |
+| `rate-limit` | One admission decision against a per-subject request budget (see §3.1). |
 
 Keys are `bench:{n}` cycled across `--key-space`. A smaller key-space means more contention and more
 cache hits; a larger one spreads load and lowers the hit rate.
+
+### 3.1 The `rate-limit` workload
+
+Each request runs the counter that a rate limiter is built from: read the subject's counter, refuse
+the caller if it already reached its budget, otherwise write the counter back. The whole decision is
+one script transaction, which is the point of the pattern — a read followed by a separate write would
+let two callers observe the same count and both be admitted.
+
+`--key-space` is the number of subjects, and each subject gets `--rate-limit-budget` requests per
+`--rate-limit-window` milliseconds. Everything above that is refused, so the two flags together
+decide how much of the run takes the refusal path. Pick `--durability ephemeral`: a rate-limit
+counter is temporary state, and the persistent key space replicates and persists every write.
+
+Two modes:
+
+- `fixed` (the default) gives each subject a counter per quantised window, keyed
+  `bench:rate-limit/{subject}/{window-start}`. The budget resets on the window boundary, and the
+  counter of the window that just ended expires unread.
+- `sliding` keeps one counter per subject, keyed `bench:rate-limit/{subject}`, and pushes its expiry
+  out to the full window on every admitted request. This is stricter for a caller that never goes
+  quiet, because the counter keeps extending while requests keep arriving.
+
+Two things to know before reading the numbers:
+
+- A refused request is a **miss**, not an error, and misses are excluded from `req/s` and from the
+  latency percentiles (§5). In a heavily refused run `req/s` therefore reports the admitted rate,
+  which is the budget the flags asked for — add the miss count to get requests served per second.
+- Concentrating many workers on few subjects makes concurrent transactions collide on the same
+  counter. The loser is answered `Aborted`, which the report counts as an **error** because it is a
+  genuine conflict. Raise `--key-space` or lower `--concurrency` to reduce it.
+
+The warmup spends budget like any other traffic. A fixed window recovers on the next boundary, so
+this rarely matters; a sliding counter does not, so start the measurement of a sliding run with a
+window's worth of quiet or accept that the first requests are refused.
+
+```
+# 10 000 subjects, 100 requests each per second, mostly admitted
+kahuna-bench -c https://localhost:8082 --workload rate-limit --durability ephemeral \
+  --key-space 10000 --rate-limit-budget 100 --rate-limit-window 1000 --duration 60
+
+# 20 subjects and a budget of 5: almost every request takes the refusal path
+kahuna-bench -c https://localhost:8082 --workload rate-limit --durability ephemeral \
+  --key-space 20 --rate-limit-budget 5 --rate-limit-window 1000 --duration 30
+```
 
 ---
 
@@ -75,7 +125,7 @@ cache hits; a larger one spreads load and lowers the hit rate.
 | Flag | Default | Meaning |
 |---|---|---|
 | `-c, --connection-source` | (required) | Comma-separated endpoints, e.g. `https://h1:8082,https://h2:8084`. |
-| `--workload` | `mixed` | `set` \| `get` \| `mixed` \| `lock` \| `sequence` \| `script`. |
+| `--workload` | `mixed` | `set` \| `get` \| `mixed` \| `delete` \| `set-many` \| `delete-many` \| `txn` \| `bank` \| `lock` \| `sequence` \| `script` \| `rate-limit`. |
 | `--duration` | `30` | Measured window, seconds (excludes warmup). |
 | `--warmup` | `5` | Warmup seconds; samples discarded. |
 | `--concurrency` | `64` | Concurrent workers (closed-loop) / consumers (open-loop). |
@@ -85,10 +135,15 @@ cache hits; a larger one spreads load and lowers the hit rate.
 | `--read-pct` | `50` | For `mixed`: percent reads. |
 | `--durability` | `persistent` | `persistent` \| `ephemeral`. |
 | `--script` | — | Path to a `.4gl` script for `--workload script`. |
+| `--rate-limit-mode` | `fixed` | For `rate-limit`: `fixed` \| `sliding` (§3.1). |
+| `--rate-limit-budget` | `100` | For `rate-limit`: requests one subject may make per window. |
+| `--rate-limit-window` | `1000` | For `rate-limit`: window length, milliseconds. |
+| `--rate-limit-grace` | `100` | For `rate-limit`: milliseconds added to a fixed-window counter's expiry so it cannot lapse just before its window ends. Ignored in `sliding` mode. |
 | `--timeout` | `10` | Per-request timeout, seconds. Also sets the latency histogram ceiling (timeout × 1.5). |
 | `--format` | `console` | `console` \| `json` \| `csv` (§7). |
 | `--output` | stdout | File path for `json`/`csv`. |
 | `--insecure` | `false` | Skip TLS validation (auto-enabled for all-localhost endpoints). |
+| `--no-request-frames` | `false` | Send every key-value request as its own stream message. By default the client sends the requests that are waiting together as one message when the node announces that it reads such messages; this switch is for A/B runs of that behaviour. See the [gRPC request frames guide](grpc-request-frames-guide.md) for measured results. |
 | `--seed` | `0` | RNG seed for reproducible key/value selection (`0` = time-based). |
 
 ---
@@ -119,6 +174,10 @@ cache hits; a larger one spreads load and lowers the hit rate.
   - `lock` — an acquisition the server answered `Busy`, because another owner held the resource.
     The `lock` workload does not wait, so it gives up at once. This is contention, not a fault, so
     it is not an error. Lower the concurrency or raise the key-space to reduce it.
+  - `rate-limit` — a request the limiter refused, because the subject had already spent its budget.
+    This is the limiter working, not a fault, so it is not an error. In a run tuned to refuse most
+    traffic the miss count is far larger than the success count, and `req/s` then reports the
+    admitted rate rather than the rate the server served (§3.1).
 
   A miss is excluded from the latency percentiles, so the histogram describes successful
   operations only.

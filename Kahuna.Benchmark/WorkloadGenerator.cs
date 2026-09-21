@@ -143,6 +143,22 @@ internal static class WorkloadGenerator
             txScript = client.LoadTransactionScript(scriptText);
         }
 
+        RateLimitMode rateLimitMode = ParseRateLimitMode(opts.RateLimitMode);
+        int rateLimitWindowMs = opts.RateLimitWindow;
+        int rateLimitGraceMs = opts.RateLimitGrace;
+
+        KahunaTransactionScript? rateLimitScript = null;
+        List<KeyValueParameter>? rateLimitParameters = null;
+
+        // The counter script and its parameter list are built once per worker. The list is rewritten
+        // in place on every request, the same way this closure reuses its value buffer: a worker has
+        // one operation in flight at a time, so nothing else can read the list meanwhile.
+        if (workloadNorm == "rate-limit")
+        {
+            rateLimitScript = client.LoadTransactionScript(RateLimitWorkload.ScriptFor(kvDur));
+            rateLimitParameters = RateLimitWorkload.CreateParameters(opts.RateLimitBudget);
+        }
+
         return async (outerCt) =>
         {
             int keyIndex = (Interlocked.Increment(ref _keyCounter) & 0x7FFFFFFF) % keySpace;
@@ -167,6 +183,7 @@ internal static class WorkloadGenerator
                 "lock"        => OperationType.Lock,
                 "sequence"    => OperationType.Sequence,
                 "script"      => OperationType.Script,
+                "rate-limit"  => OperationType.RateLimit,
                 _             => OperationType.Get
             };
 
@@ -362,6 +379,47 @@ internal static class WorkloadGenerator
                     case "script":
                         await txScript!.Run(cancellationToken: ct);
                         break;
+
+                    case "rate-limit":
+                    {
+                        // One request of one subject against its budget. The whole admission decision
+                        // is a single script transaction, so no other caller can read the same count
+                        // and be admitted on it.
+                        long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        long windowStartMs = RateLimitWorkload.WindowStart(nowMs, rateLimitWindowMs);
+                        long expiresMs = RateLimitWorkload.ExpiresMs(
+                            rateLimitMode, nowMs, windowStartMs, rateLimitWindowMs, rateLimitGraceMs);
+
+                        RateLimitWorkload.FillParameters(
+                            rateLimitParameters!,
+                            RateLimitWorkload.CounterKey(rateLimitMode, keyPrefix, keyIndex, windowStartMs),
+                            expiresMs);
+
+                        KahunaKeyValueTransactionResult limitResult =
+                            await rateLimitScript!.Run(rateLimitParameters, ct);
+
+                        string? verdict = limitResult.FirstValueAsString;
+
+                        // A refusal is the limiter doing its job, so it counts beside a not-found
+                        // read rather than as a fault — the same rule the lock workload applies to a
+                        // resource another owner holds. An error count that stays at zero under a
+                        // heavily refused run keeps its meaning: something actually went wrong.
+                        if (verdict == RateLimitWorkload.Refused)
+                            return (opType, OpOutcome.Miss, ElapsedMicros(startTs));
+
+                        if (verdict != RateLimitWorkload.Allowed)
+                        {
+                            // A refused or aborted transaction reaches the catch below, because the
+                            // client throws for every response type it does not accept. Landing here
+                            // means the server answered with a type the client accepted but with no
+                            // verdict in it, which the script has no path to produce. Record the type
+                            // rather than silently counting the request as admitted.
+                            RecordErrorCategory($"RateLimit:no-verdict:{limitResult.Type}");
+                            return (opType, OpOutcome.Error, ElapsedMicros(startTs));
+                        }
+
+                        break;
+                    }
                 }
 
                 return (opType, OpOutcome.Success, ElapsedMicros(startTs));
@@ -426,6 +484,11 @@ internal static class WorkloadGenerator
         s.Equals("ephemeral", StringComparison.OrdinalIgnoreCase)
             ? LockDurability.Ephemeral
             : LockDurability.Persistent;
+
+    private static RateLimitMode ParseRateLimitMode(string s) =>
+        s.Equals("sliding", StringComparison.OrdinalIgnoreCase)
+            ? RateLimitMode.SlidingExpiration
+            : RateLimitMode.FixedWindow;
 
     private static KeyValueTransactionLocking ParseTxnLocking(string s) =>
         s.Equals("optimistic", StringComparison.OrdinalIgnoreCase)

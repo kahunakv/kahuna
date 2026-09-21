@@ -1104,7 +1104,14 @@ message GrpcBatchClientKeyValueRequest {
     GrpcCommitTransactionRequest CommitTransaction = 14;
     GrpcRollbackTransactionRequest RollbackTransaction = 15;
     GrpcTryDeleteManyKeyValueRequest TryDeleteManyKeyValue = 16;
+    GrpcBatchClientKeyValueRequestFrame Frame = 17;
   }
+}
+
+// Several independent requests in one stream message. Each item is a complete single request with
+// its own Type and RequestId. A frame cannot hold another frame.
+message GrpcBatchClientKeyValueRequestFrame {
+  repeated GrpcBatchClientKeyValueRequest Items = 1;
 }
 
 message GrpcBatchClientKeyValueResponse
@@ -1126,7 +1133,14 @@ message GrpcBatchClientKeyValueResponse
     GrpcCommitTransactionResponse CommitTransaction = 14;
     GrpcRollbackTransactionResponse RollbackTransaction = 15;
     GrpcTryDeleteManyKeyValueResponse TryDeleteManyKeyValue = 16;
+    GrpcBatchClientKeyValueResponseFrame Frame = 17;
   }
+}
+
+// Several independent responses in one stream message, each matched to its request by RequestId.
+// A node sends this form only on a stream on which it already received a request frame.
+message GrpcBatchClientKeyValueResponseFrame {
+  repeated GrpcBatchClientKeyValueResponse Items = 1;
 }
 
 message GrpcBatchServerKeyValueRequest {
@@ -1589,6 +1603,7 @@ enum GrpcClientBatchType {
   TRY_COMMIT_TRANSACTION = 12;
   TRY_ROLLBACK_TRANSACTION = 13;
   TRY_DELETE_MANY_KEY_VALUE = 14;
+  CLIENT_BATCH_FRAME = 15;
 }
 
 enum GrpcServerBatchType {

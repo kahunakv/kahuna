@@ -262,7 +262,10 @@ public sealed class TestBatchedHandlerFaultRefusal
         }
     }
 
-    /// <summary>Minimal context: the batchers read only the cancellation token.</summary>
+    /// <summary>
+    /// Minimal context: the batchers read the cancellation token, and the client key-value batcher also
+    /// announces its capabilities on the response headers when the stream opens.
+    /// </summary>
     private sealed class StubServerCallContext : ServerCallContext
     {
         protected override CancellationToken CancellationTokenCore => CancellationToken.None;
@@ -276,6 +279,6 @@ public sealed class TestBatchedHandlerFaultRefusal
         protected override WriteOptions? WriteOptionsCore { get; set; }
         protected override AuthContext AuthContextCore => throw new NotSupportedException();
         protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options) => throw new NotSupportedException();
-        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) => throw new NotSupportedException();
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) => Task.CompletedTask;
     }
 }

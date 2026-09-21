@@ -18,6 +18,8 @@ using Kahuna.Client.Routing;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Microsoft.Extensions.Logging;
+using Kahuna.Shared.Communication.Grpc;
+using Google.Protobuf.Collections;
 
 namespace Kahuna.Client.Communication;
 
@@ -162,6 +164,17 @@ internal sealed class GrpcBatcher
 
     private readonly int coalescingThreshold;
     private readonly int coalescingDelayMs;
+    private readonly bool requestFrames;
+
+    /// <summary>
+    /// The live key-value items of the batch being dispatched, the one frame envelope they are packed into,
+    /// and the items behind the envelope's entries, index for index. All three are refilled for every
+    /// frame and belong to the dispatch loop, of which at most one runs per batcher. The envelope is free
+    /// again as soon as the awaited write returns, because a write has serialized its message by then.
+    /// </summary>
+    private readonly List<GrpcBatcherItem> frameCandidates = [];
+    private readonly List<GrpcBatcherItem> frameItems = [];
+    private GrpcBatchClientKeyValueRequest? frameEnvelope;
 
     /// <summary>
     /// Represents a thread-safe queue used to temporarily store instances of <see cref="GrpcBatcherItem"/>
@@ -227,6 +240,7 @@ internal sealed class GrpcBatcher
         this.logger = logger;
         this.coalescingThreshold = securityOptions?.BatchCoalescingThreshold ?? 10;
         this.coalescingDelayMs = securityOptions?.BatchCoalescingDelayMs ?? 2;
+        this.requestFrames = securityOptions?.GrpcRequestFrames ?? true;
     }
 
     /// <summary>
@@ -669,12 +683,26 @@ internal sealed class GrpcBatcher
             {
                 GrpcSharedStreaming sharedStreaming = GetSharedStreaming();
 
+                // Read once per batch: the answer can turn true while this batch runs, and a batch that
+                // started in one mode finishes in it.
+                bool frames = requestFrames && requests.Count > 1 && sharedStreaming.SupportsKeyValueFrames;
+
+                frameCandidates.Clear();
+
                 foreach (GrpcBatcherItem request in requests)
                 {
                     // Skip items whose promise was completed between inbox drain and now
                     // (cancelled mid-flight or synchronously pre-cancelled).
                     if (request.Promise.Task.IsCompleted)
                         continue;
+
+                    // Key-value items wait for the rest of the batch so they can travel together. Lock
+                    // items have a stream of their own, which carries one request per message.
+                    if (frames && request.Type == GrpcBatcherItemType.KeyValues)
+                    {
+                        frameCandidates.Add(request);
+                        continue;
+                    }
 
                     requestRefs.TryAdd(request.RequestId, request);
                     requestStreamRefs[request.RequestId] = sharedStreaming.Id;
@@ -709,6 +737,9 @@ internal sealed class GrpcBatcher
                         request.Promise.TrySetCanceled(request.CancellationToken);
                     }
                 }
+
+                if (frameCandidates.Count > 0)
+                    await RunKeyValueFrames(sharedStreaming);
 
                 return;
             }
@@ -804,13 +835,168 @@ internal sealed class GrpcBatcher
     }
 
     /// <summary>
-    /// Processes a batch of key-value operations based on the request type and sends it through the shared streaming instance.
+    /// Sends the key-value items of the batch as frames: as many items per stream message as the item and
+    /// byte limits of a frame allow, and as many frames as the batch needs.
+    ///
+    /// <para>An item is measured before it joins a frame, so one that would break the byte budget starts
+    /// the next frame instead, and an item that is over the budget on its own travels as the plain single
+    /// message it would have been without frames. The budget is not a preference: a message over the
+    /// transport's own limit is rejected before the node can read it, and that tears down the stream
+    /// every other request shares.</para>
     /// </summary>
-    /// <param name="sharedStreaming">The shared streaming instance for sending the batched request.</param>
-    /// <param name="request">The batcher item containing the key-value request details to be processed.</param>
-    /// <returns>A task that represents the asynchronous operation of processing the key-value batch.</returns>
-    /// <exception cref="KahunaException">Thrown if the request type is unknown or invalid.</exception>
-    private static async Task RunKeyValueBatch(GrpcSharedStreaming sharedStreaming, GrpcBatcherItem request)
+    private async Task RunKeyValueFrames(GrpcSharedStreaming sharedStreaming)
+    {
+        frameEnvelope ??= new()
+        {
+            Type = GrpcClientBatchType.ClientBatchFrame,
+            Frame = new()
+        };
+
+        RepeatedField<GrpcBatchClientKeyValueRequest> envelopeItems = frameEnvelope.Frame.Items;
+
+        int next = 0;
+
+        try
+        {
+            while (next < frameCandidates.Count)
+            {
+                envelopeItems.Clear();
+                frameItems.Clear();
+
+                int bytes = 0;
+
+                while (next < frameCandidates.Count && frameItems.Count < ClientBatchFrames.MaxItems)
+                {
+                    GrpcBatcherItem item = frameCandidates[next];
+
+                    if (item.Promise.Task.IsCompleted)
+                    {
+                        next++;
+                        continue;
+                    }
+
+                    GrpcBatchClientKeyValueRequest itemRequest = BuildKeyValueRequest(item);
+
+                    int size = itemRequest.CalculateSize();
+
+                    if (frameItems.Count > 0 && bytes + size > ClientBatchFrames.MaxBytes)
+                        break;
+
+                    envelopeItems.Add(itemRequest);
+                    frameItems.Add(item);
+
+                    bytes += size;
+                    next++;
+
+                    if (bytes >= ClientBatchFrames.MaxBytes)
+                        break;
+                }
+
+                if (frameItems.Count == 0)
+                    break;
+
+                // Registered before the write, all of them: the node answers items independently, so the
+                // answer to the first can be on its way back while the message is still leaving.
+                foreach (GrpcBatcherItem item in frameItems)
+                {
+                    requestRefs.TryAdd(item.RequestId, item);
+                    requestStreamRefs[item.RequestId] = sharedStreaming.Id;
+                }
+
+                await WriteKeyValueFrame(sharedStreaming, frameEnvelope);
+            }
+        }
+        finally
+        {
+            // Nothing the envelope pointed at may outlive the batch: the items hold request payloads.
+            envelopeItems.Clear();
+            frameItems.Clear();
+            frameCandidates.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Writes the frame under the stream's write lock, without the items that were cancelled while it
+    /// waited for that lock.
+    ///
+    /// <para>The wait for the lock is bounded by the token of an item that is still live, as a lone
+    /// request's wait is bounded by its own. When that token fires the item is dropped and the wait starts
+    /// again behind the next live item, so a stream that stops accepting writes costs each caller its own
+    /// deadline and never parks the dispatch loop for good. A frame left with one item is sent as that
+    /// item's plain message, and a frame left with none is not sent.</para>
+    /// </summary>
+    private async Task WriteKeyValueFrame(GrpcSharedStreaming sharedStreaming, GrpcBatchClientKeyValueRequest envelope)
+    {
+        RepeatedField<GrpcBatchClientKeyValueRequest> envelopeItems = envelope.Frame.Items;
+
+        while (true)
+        {
+            int waiter = -1;
+
+            for (int i = 0; i < frameItems.Count; i++)
+            {
+                if (!frameItems[i].Promise.Task.IsCompleted)
+                {
+                    waiter = i;
+                    break;
+                }
+            }
+
+            if (waiter < 0)
+                return;
+
+            GrpcBatcherItem waiting = frameItems[waiter];
+
+            try
+            {
+                await sharedStreaming.Semaphore.WaitAsync(waiting.CancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // The registration made at admission has usually cancelled the promise already. A batch
+                // run without that registration has nothing else to complete it, so it is done here too.
+                requestRefs.TryRemove(waiting.RequestId, out _);
+                requestStreamRefs.TryRemove(waiting.RequestId, out _);
+                waiting.Promise.TrySetCanceled(waiting.CancellationToken);
+                continue;
+            }
+
+            try
+            {
+                for (int i = frameItems.Count - 1; i >= 0; i--)
+                {
+                    if (!frameItems[i].Promise.Task.IsCompleted)
+                        continue;
+
+                    frameItems.RemoveAt(i);
+                    envelopeItems.RemoveAt(i);
+                }
+
+                if (envelopeItems.Count == 1)
+                    await sharedStreaming.KeyValueStreaming.RequestStream.WriteAsync(envelopeItems[0]);
+                else if (envelopeItems.Count > 1)
+                    await sharedStreaming.KeyValueStreaming.RequestStream.WriteAsync(envelope);
+            }
+            finally
+            {
+                try
+                {
+                    sharedStreaming.Semaphore.Release();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+
+            return;
+        }
+    }
+
+    /// <summary>
+    /// The stream message for one key-value request. The same message is what a frame carries as an item,
+    /// so a request is built one way whether it travels alone or with others.
+    /// </summary>
+    private static GrpcBatchClientKeyValueRequest BuildKeyValueRequest(GrpcBatcherItem request)
     {
         GrpcBatchClientKeyValueRequest batchRequest = new()
         {
@@ -885,6 +1071,20 @@ internal sealed class GrpcBatcher
                 throw new KahunaException("Unknown request type", KeyValueResponseType.Errored);
         }
 
+        return batchRequest;
+    }
+
+    /// <summary>
+    /// Processes a batch of key-value operations based on the request type and sends it through the shared streaming instance.
+    /// </summary>
+    /// <param name="sharedStreaming">The shared streaming instance for sending the batched request.</param>
+    /// <param name="request">The batcher item containing the key-value request details to be processed.</param>
+    /// <returns>A task that represents the asynchronous operation of processing the key-value batch.</returns>
+    /// <exception cref="KahunaException">Thrown if the request type is unknown or invalid.</exception>
+    private static async Task RunKeyValueBatch(GrpcSharedStreaming sharedStreaming, GrpcBatcherItem request)
+    {
+        GrpcBatchClientKeyValueRequest batchRequest = BuildKeyValueRequest(request);
+
         bool lockTaken = false;
 
         try
@@ -910,6 +1110,110 @@ internal sealed class GrpcBatcher
     }
 
     /// <summary>
+    /// Routes one message of the key-value response stream. A frame carries the answers that were ready
+    /// together; each one is still the answer to one request, matched by its own id, exactly as if it had
+    /// arrived alone. A node sends frames only after this client sent it one, but nothing here depends on
+    /// that: both forms are accepted at any time.
+    /// </summary>
+    internal static void DispatchKeyValueResponse(GrpcBatchClientKeyValueResponse response)
+    {
+        if (response.Type != GrpcClientBatchType.ClientBatchFrame)
+        {
+            CompleteKeyValueResponse(response);
+            return;
+        }
+
+        if (response.Frame is null)
+            return;
+
+        foreach (GrpcBatchClientKeyValueResponse item in response.Frame.Items)
+        {
+            // A frame cannot hold a frame. One that does is dropped rather than followed, so a malformed
+            // message can never turn into unbounded recursion.
+            if (item.Type != GrpcClientBatchType.ClientBatchFrame)
+                CompleteKeyValueResponse(item);
+        }
+    }
+
+    /// <summary>
+    /// Hands one key-value answer to the request that is waiting for it. An answer nobody waits for — its
+    /// request was cancelled, or already failed with its stream — is dropped.
+    /// </summary>
+    private static void CompleteKeyValueResponse(GrpcBatchClientKeyValueResponse response)
+    {
+        // TryRemove wins the race against the cancellation callback's TryRemove; whoever
+        // removes the item first gets to complete the promise via TrySetResult/TrySetCanceled.
+        if (!requestRefs.TryRemove(response.RequestId, out GrpcBatcherItem item))
+            return;
+
+        requestStreamRefs.TryRemove(response.RequestId, out _);
+
+        switch (response.Type)
+        {
+            case GrpcClientBatchType.TrySetKeyValue:
+                item.Promise.TrySetResult(new(response.TrySetKeyValue));
+                break;
+
+            case GrpcClientBatchType.TrySetManyKeyValue:
+                item.Promise.TrySetResult(new(response.TrySetManyKeyValue));
+                break;
+
+            case GrpcClientBatchType.TryDeleteManyKeyValue:
+                item.Promise.TrySetResult(new(response.TryDeleteManyKeyValue));
+                break;
+
+            case GrpcClientBatchType.TryGetKeyValue:
+                item.Promise.TrySetResult(new(response.TryGetKeyValue));
+                break;
+
+            case GrpcClientBatchType.TryDeleteKeyValue:
+                item.Promise.TrySetResult(new(response.TryDeleteKeyValue));
+                break;
+
+            case GrpcClientBatchType.TryExtendKeyValue:
+                item.Promise.TrySetResult(new(response.TryExtendKeyValue));
+                break;
+
+            case GrpcClientBatchType.TryExistsKeyValue:
+                item.Promise.TrySetResult(new(response.TryExistsKeyValue));
+                break;
+
+            case GrpcClientBatchType.TryAcquireExclusiveLock:
+                item.Promise.TrySetResult(new(response.TryAcquireExclusiveLock));
+                break;
+
+            case GrpcClientBatchType.TryExecuteTransactionScript:
+                item.Promise.TrySetResult(new(response.TryExecuteTransactionScript));
+                break;
+
+            case GrpcClientBatchType.TryGetByBucket:
+                item.Promise.TrySetResult(new(response.GetByBucket));
+                break;
+
+            case GrpcClientBatchType.TryScanByPrefix:
+                item.Promise.TrySetResult(new(response.ScanByPrefix));
+                break;
+
+            case GrpcClientBatchType.TryStartTransaction:
+                item.Promise.TrySetResult(new(response.StartTransaction));
+                break;
+
+            case GrpcClientBatchType.TryCommitTransaction:
+                item.Promise.TrySetResult(new(response.CommitTransaction));
+                break;
+
+            case GrpcClientBatchType.TryRollbackTransaction:
+                item.Promise.TrySetResult(new(response.RollbackTransaction));
+                break;
+
+            case GrpcClientBatchType.TypeNone:
+            default:
+                item.Promise.TrySetException(new KahunaException("Unknown response type: " + response.Type, KeyValueResponseType.Errored));
+                break;
+        }
+    }
+
+    /// <summary>
     /// Reads key-value response messages from the provided streaming call and processes them asynchronously.
     /// </summary>
     /// <param name="streaming">The asynchronous duplex streaming call that delivers key-value request and response messages.</param>
@@ -920,76 +1224,7 @@ internal sealed class GrpcBatcher
         {
             await foreach (GrpcBatchClientKeyValueResponse response in streaming.ResponseStream.ReadAllAsync())
             {
-                // TryRemove wins the race against the cancellation callback's TryRemove; whoever
-                // removes the item first gets to complete the promise via TrySetResult/TrySetCanceled.
-                if (!requestRefs.TryRemove(response.RequestId, out GrpcBatcherItem item))
-                    continue;
-
-                requestStreamRefs.TryRemove(response.RequestId, out _);
-
-                switch (response.Type)
-                {
-                    case GrpcClientBatchType.TrySetKeyValue:
-                        item.Promise.TrySetResult(new(response.TrySetKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TrySetManyKeyValue:
-                        item.Promise.TrySetResult(new(response.TrySetManyKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TryDeleteManyKeyValue:
-                        item.Promise.TrySetResult(new(response.TryDeleteManyKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TryGetKeyValue:
-                        item.Promise.TrySetResult(new(response.TryGetKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TryDeleteKeyValue:
-                        item.Promise.TrySetResult(new(response.TryDeleteKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TryExtendKeyValue:
-                        item.Promise.TrySetResult(new(response.TryExtendKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TryExistsKeyValue:
-                        item.Promise.TrySetResult(new(response.TryExistsKeyValue));
-                        break;
-
-                    case GrpcClientBatchType.TryAcquireExclusiveLock:
-                        item.Promise.TrySetResult(new(response.TryAcquireExclusiveLock));
-                        break;
-
-                    case GrpcClientBatchType.TryExecuteTransactionScript:
-                        item.Promise.TrySetResult(new(response.TryExecuteTransactionScript));
-                        break;
-
-                    case GrpcClientBatchType.TryGetByBucket:
-                        item.Promise.TrySetResult(new(response.GetByBucket));
-                        break;
-
-                    case GrpcClientBatchType.TryScanByPrefix:
-                        item.Promise.TrySetResult(new(response.ScanByPrefix));
-                        break;
-
-                    case GrpcClientBatchType.TryStartTransaction:
-                        item.Promise.TrySetResult(new(response.StartTransaction));
-                        break;
-
-                    case GrpcClientBatchType.TryCommitTransaction:
-                        item.Promise.TrySetResult(new(response.CommitTransaction));
-                        break;
-
-                    case GrpcClientBatchType.TryRollbackTransaction:
-                        item.Promise.TrySetResult(new(response.RollbackTransaction));
-                        break;
-
-                    case GrpcClientBatchType.TypeNone:
-                    default:
-                        item.Promise.TrySetException(new KahunaException("Unknown response type: " + response.Type, KeyValueResponseType.Errored));
-                        break;
-                }
+                DispatchKeyValueResponse(response);
             }
 
             RpcException ex = new(new(StatusCode.Unavailable, "gRPC key-value stream closed."));

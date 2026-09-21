@@ -115,6 +115,34 @@ public sealed class TestHashPlacement : BaseCluster
     }
 
     /// <summary>
+    /// Placing a key allocates nothing, grouped or not. A transaction places each of its keys once per
+    /// phase, so a string built per placement is paid several times per key per transaction.
+    /// </summary>
+    [Fact]
+    public void PlacingAKey_DoesNotAllocate()
+    {
+        string[] keys = ["users/1", "t:r|i:pk/abc", "no-separator"];
+        const int iterations = 10_000;
+
+        // Warm up the JIT before measuring.
+        for (int i = 0; i < 100; i++)
+            foreach (string key in keys)
+                _ = HashPlacement.BucketOfKey(key, 8) + HashPlacement.BucketOfKeySpace(key, 8);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        long sink = 0;
+        for (int i = 0; i < iterations; i++)
+            foreach (string key in keys)
+                sink += HashPlacement.BucketOfKey(key, 8) + HashPlacement.BucketOfKeySpace(key, 8);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(sink >= 0); // keep the loop from being optimized away
+        Assert.True(allocated == 0, $"placement allocated {allocated} bytes over {iterations} rounds; expected 0.");
+    }
+
+    /// <summary>
     /// The shape that made the one-phase commit a coin flip: a table's row space and index space, both named
     /// from ids minted per run, hash apart for most ids. Naming the index space in the row space's group makes
     /// them hash together for every id.

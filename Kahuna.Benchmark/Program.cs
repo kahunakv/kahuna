@@ -29,7 +29,7 @@ if (endpoints.Length == 0)
     return 1;
 }
 
-string[] validWorkloads = ["set", "get", "mixed", "delete", "set-many", "delete-many", "txn", "bank", "lock", "sequence", "script"];
+string[] validWorkloads = ["set", "get", "mixed", "delete", "set-many", "delete-many", "txn", "bank", "lock", "sequence", "script", "rate-limit"];
 if (!validWorkloads.Contains(opts.Workload, StringComparer.OrdinalIgnoreCase))
 {
     AnsiConsole.MarkupLine($"[red]--workload must be one of: {string.Join(", ", validWorkloads)}[/]");
@@ -40,6 +40,33 @@ if (opts.Workload.Equals("script", StringComparison.OrdinalIgnoreCase) &&
     string.IsNullOrWhiteSpace(opts.Script))
 {
     AnsiConsole.MarkupLine("[red]--workload script requires --script <path>[/]");
+    return 1;
+}
+
+string[] validRateLimitModes = ["fixed", "sliding"];
+if (!validRateLimitModes.Contains(opts.RateLimitMode, StringComparer.OrdinalIgnoreCase))
+{
+    AnsiConsole.MarkupLine("[red]--rate-limit-mode must be fixed or sliding[/]");
+    return 1;
+}
+
+if (opts.RateLimitBudget <= 0)
+{
+    AnsiConsole.MarkupLine("[red]--rate-limit-budget must be > 0[/]");
+    return 1;
+}
+
+// A window of zero would divide by zero while quantising the window start, and a negative grace
+// could make a counter expire before the window it guards ends.
+if (opts.RateLimitWindow <= 0)
+{
+    AnsiConsole.MarkupLine("[red]--rate-limit-window must be > 0[/]");
+    return 1;
+}
+
+if (opts.RateLimitGrace < 0)
+{
+    AnsiConsole.MarkupLine("[red]--rate-limit-grace must be >= 0[/]");
     return 1;
 }
 
@@ -145,6 +172,7 @@ KahunaOptions kahunaOptions = new()
 {
     AllowInsecureCertificateValidation = insecure,
     GrpcChannelPoolSize = Math.Max(1, opts.GrpcChannels),
+    GrpcRequestFrames = !opts.NoRequestFrames,
     BatchCoalescingThreshold = Math.Max(1, opts.BatchCoalescingThreshold),
     BatchCoalescingDelayMs = Math.Max(0, opts.BatchCoalescingDelayMs),
     Routing = routingMode,
@@ -195,6 +223,12 @@ else
     diag.WriteLine(
         $"  key-space : {opts.KeySpace}   value-size : {opts.ValueSize}B   durability : {opts.Durability}");
 }
+
+// The budget decides how much of the run takes the refusal path, so a reader of the report needs it
+// beside the key-space that sets the number of subjects.
+if (opts.Workload.Equals("rate-limit", StringComparison.OrdinalIgnoreCase))
+    diag.WriteLine(
+        $"  limiter   : {opts.RateLimitMode} window   budget : {opts.RateLimitBudget} per {opts.RateLimitWindow}ms per subject");
 
 await BenchmarkRunner.RunAsync(client, opts, diag);
 

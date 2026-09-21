@@ -7,6 +7,7 @@
  */
 
 using Grpc.Core;
+using Kahuna.Shared.Communication.Grpc;
 
 namespace Kahuna.Client.Communication;
 
@@ -43,6 +44,47 @@ internal sealed class GrpcSharedStreaming : IDisposable
     /// </summary>
     public AsyncDuplexStreamingCall<GrpcBatchClientKeyValueRequest, GrpcBatchClientKeyValueResponse> KeyValueStreaming { get; }
     
+    // 0 = the node has not said yet, 1 = the node reads request frames, 2 = it does not.
+    private int keyValueFrames;
+
+    /// <summary>
+    /// Whether the node at the other end of the key-value stream announced that it reads request frames.
+    ///
+    /// <para>The node says so on the response headers of the stream, which arrive on their own time. This
+    /// never waits for them: until they are here the answer is no, and requests travel one per message as
+    /// they always did. A node built before frames sends no such header, and it would not answer a frame
+    /// at all, so silence must never be read as support. Once the headers have arrived the answer is
+    /// final for the life of the stream.</para>
+    /// </summary>
+    public bool SupportsKeyValueFrames
+    {
+        get
+        {
+            int known = Volatile.Read(ref keyValueFrames);
+
+            if (known != 0)
+                return known == 1;
+
+            Task<Metadata>? headers = KeyValueStreaming?.ResponseHeadersAsync;
+
+            if (headers is null || !headers.IsCompleted)
+                return false;
+
+            bool announced = false;
+
+            // A faulted or cancelled headers task belongs to a call that is going away; reading its
+            // exception here keeps it from surfacing later as an unobserved one.
+            if (headers.IsCompletedSuccessfully)
+                announced = headers.Result.GetValue(ClientBatchFrames.SupportHeader) is not null;
+            else
+                _ = headers.Exception;
+
+            Volatile.Write(ref keyValueFrames, announced ? 1 : 2);
+
+            return announced;
+        }
+    }
+
     /// <summary>
     /// Constructor
     /// </summary>

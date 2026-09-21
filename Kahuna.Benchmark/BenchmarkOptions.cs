@@ -17,7 +17,7 @@ internal sealed class BenchmarkOptions
     public string ConnectionSource { get; set; } = "";
 
     [Option("workload", Default = "mixed",
-        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | bank | lock | sequence | script")]
+        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | bank | lock | sequence | script | rate-limit")]
     public string Workload { get; set; } = "mixed";
 
     [Option("duration", Default = 30,
@@ -64,6 +64,22 @@ internal sealed class BenchmarkOptions
         HelpText = "For txn: pessimistic | optimistic locking strategy")]
     public string TxnLocking { get; set; } = "pessimistic";
 
+    [Option("rate-limit-mode", Default = "fixed",
+        HelpText = "For rate-limit: fixed | sliding. 'fixed' gives each subject a counter per quantised window, so the budget resets on the boundary; 'sliding' keeps one counter per subject and pushes its expiry out on every admitted request, which is stricter for a caller that never goes quiet")]
+    public string RateLimitMode { get; set; } = "fixed";
+
+    [Option("rate-limit-budget", Default = 100,
+        HelpText = "For rate-limit: requests one subject may make per window before the script refuses it. --key-space is the number of subjects, so a small key-space drives the refusal path")]
+    public int RateLimitBudget { get; set; } = 100;
+
+    [Option("rate-limit-window", Default = 1000,
+        HelpText = "For rate-limit: window length in milliseconds")]
+    public int RateLimitWindow { get; set; } = 1000;
+
+    [Option("rate-limit-grace", Default = 100,
+        HelpText = "For rate-limit: milliseconds added to a fixed-window counter's expiry so it cannot lapse just before its window ends. Ignored in sliding mode")]
+    public int RateLimitGrace { get; set; } = 100;
+
     [Option("durability", Default = "persistent",
         HelpText = "persistent | ephemeral")]
     public string Durability { get; set; } = "persistent";
@@ -91,6 +107,10 @@ internal sealed class BenchmarkOptions
     [Option("grpc-channels", Default = 2,
         HelpText = "HTTP/2 connections the client opens per endpoint. Each connection is one serialized duplex stream on both sides, so this is the client-side parallelism knob")]
     public int GrpcChannels { get; set; } = 2;
+
+    [Option("no-request-frames",
+        HelpText = "Send every key-value request as its own stream message, even to a node that reads multi-request frames. For A/B runs; frames are on by default")]
+    public bool NoRequestFrames { get; set; }
 
     [Option("batch-coalescing-threshold", Default = 10,
         HelpText = "Client batcher: batches at or above this size skip the coalescing delay (1 disables coalescing entirely)")]

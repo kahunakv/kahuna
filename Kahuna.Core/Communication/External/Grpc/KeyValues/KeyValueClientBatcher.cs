@@ -3,6 +3,7 @@ using System.Threading.Channels;
 
 using Grpc.Core;
 using Kahuna.Communication.External.Grpc.Logging;
+using Kahuna.Shared.Communication.Grpc;
 
 namespace Kahuna.Communication.External.Grpc.KeyValues;
 
@@ -44,6 +45,26 @@ internal sealed class KeyValueClientBatcher
         }
     }
 
+    /// <summary>
+    /// Whether the peer of one stream reads response frames. A client that sends a request frame proves it
+    /// can, and nothing else does, so the flag starts false and the first request frame sets it. Written by
+    /// the read loop and read by the writer loop; it only ever goes from false to true.
+    /// </summary>
+    private sealed class StreamFrames
+    {
+        private volatile bool responseFrames;
+
+        public bool ResponseFrames => responseFrames;
+
+        public void PeerSentFrame() => responseFrames = true;
+    }
+
+    /// <summary>Announces on the stream's response headers that this node reads request frames.</summary>
+    private static readonly Metadata FrameSupportHeaders = new()
+    {
+        { ClientBatchFrames.SupportHeader, ClientBatchFrames.SupportVersion }
+    };
+
     public async Task BatchClientKeyValueRequests(
         IAsyncStreamReader<GrpcBatchClientKeyValueRequest> requestStream,
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
@@ -51,6 +72,7 @@ internal sealed class KeyValueClientBatcher
     )
     {
         StreamDrain drain = new();
+        StreamFrames frames = new();
 
         // Handlers complete concurrently, but the HTTP/2 stream admits one writer. Funneling the
         // responses through a single-reader channel (instead of a per-response semaphore hand-off)
@@ -61,78 +83,25 @@ internal sealed class KeyValueClientBatcher
 
         ChannelWriter<GrpcBatchClientKeyValueResponse> writer = responses.Writer;
 
-        Task writerTask = WriteResponsesToStream(responses.Reader, responseStream, context);
+        Task writerTask = WriteResponsesToStream(responses.Reader, responseStream, context, frames);
 
         try
         {
+            // Sent before the first request is read, so the client knows it may send frames as early as
+            // its first batch. Nothing has been written to the stream yet, so the headers are still open.
+            await context.WriteResponseHeadersAsync(FrameSupportHeaders);
+
             await foreach (GrpcBatchClientKeyValueRequest request in requestStream.ReadAllAsync())
             {
-                drain.Enter();
-
-                switch (request.Type)
+                if (request.Type == GrpcClientBatchType.ClientBatchFrame)
                 {
-                    case GrpcClientBatchType.TrySetKeyValue:
-                        _ = TrySetKeyValueDelayed(request, writer, context, drain);
-                        break;
+                    frames.PeerSentFrame();
 
-                    case GrpcClientBatchType.TrySetManyKeyValue:
-                        _ = TrySetManyKeyValueDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryDeleteManyKeyValue:
-                        _ = TryDeleteManyKeyValueDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryGetKeyValue:
-                        _ = TryGetKeyValueDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryDeleteKeyValue:
-                        _ = TryDeleteKeyValueDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryExtendKeyValue:
-                        _ = TryExtendKeyValueDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryExistsKeyValue:
-                        _ = TryExistsKeyValueDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryExecuteTransactionScript:
-                        _ = TryExecuteTransactionScriptDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryAcquireExclusiveLock:
-                        _ = TryAcquireExclusiveLockDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryGetByBucket:
-                        _ = TryGetByBucketDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryScanByPrefix:
-                        _ = TryScanAllByPrefixDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryStartTransaction:
-                        _ = TryStartTransactionDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryCommitTransaction:
-                        _ = TryCommitTransactionDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TryRollbackTransaction:
-                        _ = TryRollbackTransactionDelayed(request, writer, context, drain);
-                        break;
-
-                    case GrpcClientBatchType.TypeNone:
-                    default:
-                        logger.LogError("Unknown batch client request type: {Type}", request.Type);
-                        drain.Exit();
-                        break;
+                    DispatchFrame(request.Frame, writer, context, drain);
+                    continue;
                 }
+
+                Dispatch(request, writer, context, drain);
             }
         }
         catch (IOException ex)
@@ -148,6 +117,126 @@ internal sealed class KeyValueClientBatcher
             // and exits, then wait for it so no write races the call teardown.
             writer.TryComplete();
             await writerTask;
+        }
+    }
+
+    /// <summary>
+    /// Starts every item of a request frame exactly as if it had arrived as a message of its own. The items
+    /// share nothing but the message that carried them: each one enters the drain, runs its own handler, and
+    /// is answered by its own RequestId, so an item that faults or is refused leaves its neighbours alone.
+    ///
+    /// <para>Items past <see cref="ClientBatchFrames.MaxItems"/> are refused rather than run, which bounds
+    /// the work one stream message can start. The refusal is a MustRetry, so a request caught by it is
+    /// resent by the client and nothing is lost.</para>
+    /// </summary>
+    private void DispatchFrame(
+        GrpcBatchClientKeyValueRequestFrame? frame,
+        ChannelWriter<GrpcBatchClientKeyValueResponse> writer,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        if (frame is null)
+            return;
+
+        Google.Protobuf.Collections.RepeatedField<GrpcBatchClientKeyValueRequest> items = frame.Items;
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            GrpcBatchClientKeyValueRequest item = items[i];
+
+            if (i >= ClientBatchFrames.MaxItems)
+            {
+                if (i == ClientBatchFrames.MaxItems)
+                    logger.LogError("Batch client frame carries {Count} items, over the limit of {Limit}; refusing the excess", items.Count, ClientBatchFrames.MaxItems);
+
+                writer.TryWrite(BatchRefusalResponses.ForClientKeyValue(item));
+                continue;
+            }
+
+            Dispatch(item, writer, context, drain);
+        }
+    }
+
+    /// <summary>
+    /// Starts the handler of one request. The handler runs detached and reports to the drain when it is
+    /// done, so the caller goes straight back to reading the stream.
+    /// </summary>
+    private void Dispatch(
+        GrpcBatchClientKeyValueRequest request,
+        ChannelWriter<GrpcBatchClientKeyValueResponse> writer,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        drain.Enter();
+
+        switch (request.Type)
+        {
+            case GrpcClientBatchType.TrySetKeyValue:
+                _ = TrySetKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TrySetManyKeyValue:
+                _ = TrySetManyKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryDeleteManyKeyValue:
+                _ = TryDeleteManyKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryGetKeyValue:
+                _ = TryGetKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryDeleteKeyValue:
+                _ = TryDeleteKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryExtendKeyValue:
+                _ = TryExtendKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryExistsKeyValue:
+                _ = TryExistsKeyValueDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryExecuteTransactionScript:
+                _ = TryExecuteTransactionScriptDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryAcquireExclusiveLock:
+                _ = TryAcquireExclusiveLockDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryGetByBucket:
+                _ = TryGetByBucketDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryScanByPrefix:
+                _ = TryScanAllByPrefixDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryStartTransaction:
+                _ = TryStartTransactionDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryCommitTransaction:
+                _ = TryCommitTransactionDelayed(request, writer, context, drain);
+                break;
+
+            case GrpcClientBatchType.TryRollbackTransaction:
+                _ = TryRollbackTransactionDelayed(request, writer, context, drain);
+                break;
+
+            // A frame reaches this switch only as an item of another frame, which the contract forbids:
+            // the read loop unpacks a top-level frame before it gets here.
+            case GrpcClientBatchType.ClientBatchFrame:
+            case GrpcClientBatchType.TypeNone:
+            default:
+                logger.LogError("Unknown batch client request type: {Type}", request.Type);
+                drain.Exit();
+                break;
         }
     }
 
@@ -190,19 +279,55 @@ internal sealed class KeyValueClientBatcher
     /// A pass of one response degenerates to exactly the old write-then-flush behavior. Exits when
     /// the channel completes or the call dies; in the latter case remaining responses are dropped,
     /// matching the old per-response writer, because there is nobody left to read them.
+    ///
+    /// <para>Once the peer has shown it reads response frames, the responses that are ready together also
+    /// travel together, as the items of one message. Only responses that are already waiting are packed:
+    /// the loop never holds a response back in the hope of company, so a lone response is written as the
+    /// plain single message it always was, and a quiet stream behaves exactly as it did without frames.</para>
     /// </summary>
     private async Task WriteResponsesToStream(
         ChannelReader<GrpcBatchClientKeyValueResponse> responses,
         IServerStreamWriter<GrpcBatchClientKeyValueResponse> responseStream,
-        ServerCallContext context
+        ServerCallContext context,
+        StreamFrames frames
     )
     {
+        // One envelope per stream, refilled for every frame. A write has serialized its message by the time
+        // it completes, and this loop is the stream's only writer, so the envelope is free again as soon as
+        // the awaited write returns. It is never handed to anything that outlives that write.
+        GrpcBatchClientKeyValueResponse? frameEnvelope = null;
+
         try
         {
             while (await responses.WaitToReadAsync(context.CancellationToken))
             {
                 while (responses.TryRead(out GrpcBatchClientKeyValueResponse? response))
                 {
+                    if (frames.ResponseFrames && responses.TryPeek(out _))
+                    {
+                        frameEnvelope ??= new()
+                        {
+                            Type = GrpcClientBatchType.ClientBatchFrame,
+                            Frame = new()
+                        };
+
+                        if (TryFillFrame(frameEnvelope.Frame.Items, response, responses))
+                        {
+                            responseStream.WriteOptions = responses.TryPeek(out _) ? BufferedWrite : FlushingWrite;
+
+                            try
+                            {
+                                await responseStream.WriteAsync(frameEnvelope);
+                            }
+                            finally
+                            {
+                                frameEnvelope.Frame.Items.Clear();
+                            }
+
+                            continue;
+                        }
+                    }
+
                     responseStream.WriteOptions = responses.TryPeek(out _) ? BufferedWrite : FlushingWrite;
 
                     await responseStream.WriteAsync(response);
@@ -214,6 +339,52 @@ internal sealed class KeyValueClientBatcher
             // The client went away or the call was cancelled mid-write.
             logger.LogCommunicationIoException(ex);
         }
+    }
+
+    /// <summary>
+    /// Packs <paramref name="first"/> and the responses already waiting behind it into
+    /// <paramref name="items"/>, up to the item and byte limits of a frame. Returns false, leaving
+    /// <paramref name="items"/> empty, when nothing could join <paramref name="first"/> — the next response
+    /// alone would break the byte budget — so the caller writes it as a single message instead of as a
+    /// frame of one.
+    ///
+    /// <para>A response is peeked, measured, and only then taken, so one that does not fit stays in the
+    /// channel for the next pass. The channel has a single reader, which is what makes the peeked response
+    /// and the one taken the same response.</para>
+    /// </summary>
+    private static bool TryFillFrame(
+        Google.Protobuf.Collections.RepeatedField<GrpcBatchClientKeyValueResponse> items,
+        GrpcBatchClientKeyValueResponse first,
+        ChannelReader<GrpcBatchClientKeyValueResponse> responses
+    )
+    {
+        int bytes = first.CalculateSize();
+
+        if (bytes >= ClientBatchFrames.MaxBytes)
+            return false;
+
+        items.Add(first);
+
+        while (items.Count < ClientBatchFrames.MaxItems && responses.TryPeek(out GrpcBatchClientKeyValueResponse? next))
+        {
+            int size = next.CalculateSize();
+
+            if (bytes + size > ClientBatchFrames.MaxBytes)
+                break;
+
+            if (!responses.TryRead(out next))
+                break;
+
+            items.Add(next);
+            bytes += size;
+        }
+
+        if (items.Count > 1)
+            return true;
+
+        items.Clear();
+
+        return false;
     }
 
     private async Task TrySetKeyValueDelayed(

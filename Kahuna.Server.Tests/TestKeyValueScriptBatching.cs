@@ -80,6 +80,79 @@ public class TestKeyValueScriptBatching : BaseCluster
         }
     }
 
+    /// <summary>
+    /// A statement list that opens with a batched run must then execute every remaining statement in
+    /// order, run a nested list (with its own batched run) to completion, and execute nothing after the
+    /// statement that stops the script.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestStatementsAfterBatchedRunExecuteInOrder([CombinatorialValues("memory")] string storage, [CombinatorialValues(1, 4)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            const string script = """
+            BEGIN
+                SET @a 'one'
+                SET @b 'two'
+                SET @c 'three'
+                LET spacer = 1
+                SET @a 'one-again'
+                IF spacer = 1 THEN
+                    SET @d 'four'
+                    SET @e 'five'
+                END
+                COMMIT
+                SET @f 'never'
+            END
+            """;
+
+            string prefix = GetRandomKey();
+
+            List<KeyValueParameter> parameters =
+            [
+                new() { Key = "@a", Value = prefix + "/a" },
+                new() { Key = "@b", Value = prefix + "/b" },
+                new() { Key = "@c", Value = prefix + "/c" },
+                new() { Key = "@d", Value = prefix + "/d" },
+                new() { Key = "@e", Value = prefix + "/e" },
+                new() { Key = "@f", Value = prefix + "/f" }
+            ];
+
+            KeyValueTransactionResult resp = await kahuna1.TryExecuteTransactionScript(Encoding.UTF8.GetBytes(script), null, parameters);
+
+            Assert.True(resp.Type == KeyValueResponseType.Set, "unexpected response " + resp.Type + " " + resp.Reason);
+
+            Assert.Equal("one-again", await ReadValue(kahuna1, prefix + "/a"));
+            Assert.Equal("two", await ReadValue(kahuna1, prefix + "/b"));
+            Assert.Equal("three", await ReadValue(kahuna1, prefix + "/c"));
+            Assert.Equal("four", await ReadValue(kahuna1, prefix + "/d"));
+            Assert.Equal("five", await ReadValue(kahuna1, prefix + "/e"));
+            Assert.Null(await ReadValue(kahuna1, prefix + "/f"));
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    private static async Task<string?> ReadValue(IKahuna kahuna, string key)
+    {
+        KeyValueTransactionResult read = await kahuna.TryExecuteTransactionScript(
+            Encoding.UTF8.GetBytes("GET @key"),
+            null,
+            [new() { Key = "@key", Value = key }]);
+
+        if (read.Type == KeyValueResponseType.DoesNotExist)
+            return null;
+
+        Assert.Equal(KeyValueResponseType.Get, read.Type);
+
+        return Encoding.UTF8.GetString(read.Value ?? []);
+    }
+
     private static async Task<(string Value, long Revision)> RunAndRead(IKahuna kahuna, string script)
     {
         string key = GetRandomKey();
