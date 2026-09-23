@@ -451,25 +451,25 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             logger.LogKahunaAbortedException(ex);
 
-            return new(KeyValueResponseType.Aborted, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey);
         }
         catch (TaskCanceledException ex)
         {
             logger.LogTaskCanceledException(ex);
 
-            return new(KeyValueResponseType.Aborted, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey);
         }
         catch (OperationCanceledException ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return new(KeyValueResponseType.Aborted, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey);
         }
         catch (Exception ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return new(KeyValueResponseType.Aborted, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey);
         }
         finally
         {
@@ -560,6 +560,62 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
+    /// The outcome a commit finalize reports when it threw. A throw decides nothing. While a durable attempt on
+    /// the session is unresolved — its decision proposal was submitted and never reached a record-backed
+    /// outcome — a definite Aborted would be fabricated: the proposal may already have committed on a quorum
+    /// (a coordinator cut off after quorum durability, before its reply arrived), and the fabricated answer
+    /// would be retained and replayed to every duplicate finalize, including a survivor probing this node for
+    /// the session it still owns. Such a session answers from the canonical record: a durable commit is
+    /// Committed, a durable abort is Aborted, and anything else is the retryable MustRetry, which keeps the
+    /// session and its working set for a retry, the reaper or a rollback to fence through the record CAS.
+    /// Without an unresolved durable attempt nothing durable is in flight, and the throw is the definite
+    /// Aborted it always was.
+    /// </summary>
+    private FinalizeOutcome ClassifyThrownCommit(TransactionContext context, string? recordAnchorKey)
+    {
+        if (context.UnresolvedDurableFinalize is not { } unresolved)
+            return new(KeyValueResponseType.Aborted, recordAnchorKey);
+
+        DurableFinalizeResult classified = ApplyDurableOutcome(context, ClassifyFromCanonicalRecord(unresolved));
+
+        return classified switch
+        {
+            DurableFinalizeResult.Committed => new(KeyValueResponseType.Committed, recordAnchorKey),
+            DurableFinalizeResult.Aborted => new(KeyValueResponseType.Aborted, recordAnchorKey),
+            _ => new(KeyValueResponseType.MustRetry, recordAnchorKey)
+        };
+    }
+
+    /// <summary>
+    /// Fences an unresolved durable finalize attempt through the record CAS and answers only what the canonical
+    /// record supports. The fence is replication work of its own: on a node that lost leadership and cannot
+    /// reach the anchor leader — a cut-off coordinator that still owns the session — resolving that leader
+    /// throws. Such a throw decides nothing: the proposal the fence meant to overrule may already be durable
+    /// (a bundled commit that applied on a quorum before this node was cut off), so it is classified from the
+    /// canonical record exactly as a throw inside the finalize is. <c>Fenced</c> reports whether the fence itself
+    /// ran to a record-backed outcome, so a caller that accounts for deadline-gate rejections does not count a
+    /// classified throw as one.
+    /// </summary>
+    private async Task<(DurableFinalizeOutcome Outcome, bool Fenced)> FenceUnresolvedDurableFinalize(
+        DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await DurableFinalizer.FenceAbandonedAsync(input, opId, cancellationToken).ConfigureAwait(false), true);
+        }
+        catch (Exception ex)
+        {
+            DurableFinalizeOutcome classified = ClassifyFromCanonicalRecord(input);
+
+            logger.LogWarning(ex,
+                "Fencing the unresolved durable finalize of transaction {TransactionId} threw; classified from the canonical record as {Outcome}",
+                input.TransactionId, classified.Result);
+
+            return (classified, false);
+        }
+    }
+
+    /// <summary>
     /// Runs the rollback finalize for the session that already owns the finalize slot: freezes the
     /// server-owned working set, marks the transaction for abort, and cleans up every confirmed effect.
     /// </summary>
@@ -578,7 +634,7 @@ internal sealed class TransactionCoordinator : IDisposable
         DurableFinalizeInput? unresolved = context.UnresolvedDurableFinalize;
         if (unresolved is not null)
         {
-            DurableFinalizeOutcome fenced = await DurableFinalizer.FenceAbandonedAsync(
+            (DurableFinalizeOutcome fenced, _) = await FenceUnresolvedDurableFinalize(
                 unresolved, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), CancellationToken.None);
 
             if (fenced.Result == DurableFinalizeResult.MustRetry)
@@ -1045,7 +1101,7 @@ internal sealed class TransactionCoordinator : IDisposable
             DurableFinalizeInput? unresolved = context.UnresolvedDurableFinalize;
             if (unresolved is not null)
             {
-                DurableFinalizeOutcome fenced = await DurableFinalizer.FenceAbandonedAsync(unresolved, now, CancellationToken.None);
+                (DurableFinalizeOutcome fenced, _) = await FenceUnresolvedDurableFinalize(unresolved, now, CancellationToken.None);
 
                 if (fenced.Result == DurableFinalizeResult.MustRetry)
                     // The fence itself could not be installed (replication unavailable): the outcome is still
@@ -1701,7 +1757,7 @@ internal sealed class TransactionCoordinator : IDisposable
         // and rollback use: a presumed abort that yields to a commit the ordered log applied first.
         if (context.UnresolvedDurableFinalize is not null && opId > input.DecisionDeadline)
         {
-            DurableFinalizeOutcome fenced = await DurableFinalizer.FenceAbandonedAsync(input, opId, cancellationToken).ConfigureAwait(false);
+            (DurableFinalizeOutcome fenced, bool fenceRan) = await FenceUnresolvedDurableFinalize(input, opId, cancellationToken).ConfigureAwait(false);
 
             DurableTransactionMetrics.RetryPastDeadlineConcluded(fenced.Result);
 
@@ -1709,7 +1765,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 "Durable commit retry of transaction {TransactionId} arrived past its frozen decision deadline {Deadline} (attempt {Attempt}); concluded through the record fence as {Outcome}",
                 input.TransactionId, input.DecisionDeadline, opId, fenced.Result);
 
-            return ApplyDurableOutcome(context, fenced with { LateCommitRejected = true });
+            // Only a fence that ran is a deadline-gate conclusion; a throw classified from the record is not.
+            return ApplyDurableOutcome(context, fenceRan ? fenced with { LateCommitRejected = true } : fenced);
         }
 
         // Admission gate 1 — resident prepared-intent count/bytes: refuse before preparing if this transaction's
@@ -1875,18 +1932,10 @@ internal sealed class TransactionCoordinator : IDisposable
         if (context.UnresolvedDurableFinalize is not { } unresolved)
             return;
 
-        DurableFinalizeOutcome fenced;
-
-        try
-        {
-            fenced = await DurableFinalizer.FenceAbandonedAsync(
-                unresolved, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Fencing the abandoned durable finalize of transaction {TransactionId} failed; recovery will resolve it", context.TransactionId);
-            return;
-        }
+        // A fence that throws is classified from the canonical record: a commit that already applied is reported
+        // as Committed even when the fence could not be installed, so the caller never re-runs a committed script.
+        (DurableFinalizeOutcome fenced, _) = await FenceUnresolvedDurableFinalize(
+            unresolved, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), CancellationToken.None);
 
         if (fenced.Result == DurableFinalizeResult.MustRetry)
             return;
@@ -1897,13 +1946,6 @@ internal sealed class TransactionCoordinator : IDisposable
             context.Result = new() { Type = KeyValueResponseType.Set, Reason = null };
     }
 
-    /// <summary>
-    /// Maps the canonical transaction record to a finalize outcome after a finalize threw. A durable Commit is
-    /// Committed and a durable Abort is Aborted (terminal whatever its class); an undecided record or no resident
-    /// record is the retryable MustRetry — never a fabricated abort. A remote anchor's record is read from this
-    /// node's local projection; a nonresident record stays MustRetry until recovery or the anchor-routed lookup
-    /// resolves it.
-    /// </summary>
     /// <summary>Reserves one outstanding-durable admission slot, or returns false if the node is at
     /// <c>DurableDecisionOutstandingMax</c>. A non-positive cap disables the gate (always admits). The CAS loop
     /// makes the reservation atomic under concurrent admissions, so the count can never exceed the cap.</summary>
@@ -1965,6 +2007,13 @@ internal sealed class TransactionCoordinator : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Maps the canonical transaction record to a finalize outcome after a finalize threw. A durable Commit is
+    /// Committed and a durable Abort is Aborted (terminal whatever its class); an undecided record or no resident
+    /// record is the retryable MustRetry — never a fabricated abort. A remote anchor's record is read from this
+    /// node's local projection; a nonresident record stays MustRetry until recovery or the anchor-routed lookup
+    /// resolves it.
+    /// </summary>
     private DurableFinalizeOutcome ClassifyFromCanonicalRecord(DurableFinalizeInput input)
     {
         TransactionRecord? record = manager.DurableTransactionRecordStore.Get(input.TransactionId, input.Epoch);
