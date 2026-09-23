@@ -332,6 +332,12 @@ internal sealed class BucketScanContinuation : ReadContinuation
             if (!entry.TryGetRevisionAtOrBefore(
                     readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
             {
+                // The persisted history cannot answer while a revision it would need is still queued
+                // for the background writer and missing from the archive: the projection would be an
+                // older row than the committed answer. Fail the page closed until the flush lands.
+                if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, entry.Revisions, entry.Revision - 1))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
                 // In-memory revision archive does not reach as far back as readTimestamp.
                 // Fall back to the stage-2 disk projection when available.
                 // Purely memory-only keys (never flushed to disk) have no projection and remain omitted.

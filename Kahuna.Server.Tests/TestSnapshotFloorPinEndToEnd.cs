@@ -78,6 +78,26 @@ public sealed class TestSnapshotFloorPinEndToEnd : RaftTrackingTest
 
     // ── node builder ─────────────────────────────────────────────────────────────
 
+    /// <summary>Polls the resident entry until its flush acknowledgement reaches <paramref name="revision"/>.</summary>
+    private static async Task WaitForFlushedRevision(KahunaManager kahuna, string key, long revision, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 15_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            foreach (IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef in kahuna.KeyValues.PersistentInstances)
+            {
+                if (((ActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>)actorRef).Runner.Actor is KeyValueActor actor
+                    && actor.GetContext().Store.TryGetValue(key, out KeyValueEntry? entry)
+                    && entry.FlushedRevision >= revision)
+                    return;
+            }
+
+            await Task.Delay(20, ct);
+        }
+
+        Assert.Fail($"revision {revision} of {key} was not flushed in time");
+    }
+
     private (RaftManager Raft, KahunaManager Kahuna, CountingBackend Backend) BuildSingleNode(int revisionRetention)
     {
         ActorSystem actorSystem = new(logger: raftLogger);
@@ -277,7 +297,7 @@ public sealed class TestSnapshotFloorPinEndToEnd : RaftTrackingTest
             Assert.NotEmpty(holdIdA);
 
             // ── rev 2 at T2 → hold B (above the floor) ────────────────────────────────
-            (KeyValueResponseType setType2, _, _) =
+            (KeyValueResponseType setType2, long revision2, _) =
                 await kahuna.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, key,
                     "value-at-T2"u8.ToArray(), null, -1,
@@ -299,6 +319,10 @@ public sealed class TestSnapshotFloorPinEndToEnd : RaftTrackingTest
             (_, HLCTimestamp floor, int live) = await kahuna.GetSnapshotFloor(ct);
             Assert.Equal(t1, floor);
             Assert.Equal(2, live);
+
+            // The archive never trims a revision the background writer has not confirmed, so wait
+            // for rev 2's flush acknowledgement before the writes that are meant to trim it.
+            await WaitForFlushedRevision(kahuna, key, revision2, ct);
 
             // ── revs 3-5: push revisions 1 and 2 below the retention window ───────────
             // With RevisionRetention=2 the trims pin rev 1 (floor boundary) and drop rev 2

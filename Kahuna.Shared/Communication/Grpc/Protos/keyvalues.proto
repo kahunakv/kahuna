@@ -909,6 +909,11 @@ message GrpcStagedMutationEffect
   int64 ExpiresMs = 4;
   bool NoRevision = 5;
   GrpcKeyValueState State = 6;
+  // The participant actor's clock stamp on the staged write; the durable commit timestamp is minted above it.
+  // All zero when the sender did not know it.
+  int32 StagedAtNode = 7;
+  int64 StagedAtPhysical = 8;
+  uint32 StagedAtCounter = 9;
 }
 
 message GrpcCommitTransactionResponse

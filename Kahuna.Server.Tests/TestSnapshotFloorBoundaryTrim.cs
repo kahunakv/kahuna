@@ -149,9 +149,10 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
     /// Builds a <see cref="KeyValueEntry"/> with <paramref name="count"/> archived revisions.
     /// Revision numbers run from 1 to <paramref name="count"/>; the LastModified of revision i is
     /// <c>new HLCTimestamp(1, (ulong)(i * 1000), 0)</c> so they are strictly ordered and easy
-    /// to reason about.
+    /// to reason about. Every revision is marked flushed unless <paramref name="flushedRevision"/> says
+    /// otherwise: the trim never drops a revision the background writer has not confirmed.
     /// </summary>
-    private static KeyValueEntry BuildEntry(int count)
+    private static KeyValueEntry BuildEntry(int count, long? flushedRevision = null)
     {
         KeyValueRevisionHistory revisions = new();
         for (int i = 1; i <= count; i++)
@@ -165,8 +166,9 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
         }
         return new KeyValueEntry
         {
-            Revisions   = revisions,
-            CachedBytes = 100_000   // large enough that accounting deltas stay non-negative
+            Revisions       = revisions,
+            FlushedRevision = flushedRevision ?? count,
+            CachedBytes     = 100_000   // large enough that accounting deltas stay non-negative
         };
     }
 
@@ -247,6 +249,33 @@ public sealed class TestSnapshotFloorBoundaryTrim : RaftTrackingTest
         Assert.True(entry.Revisions.ContainsKey(5),   "revision 5 must be kept");
         Assert.True(entry.Revisions.ContainsKey(6),   "revision 6 must be kept");
         Assert.Equal(retention, entry.Revisions.Count); // exactly RevisionRetention newest revisions, nothing more
+    }
+
+    /// <summary>
+    /// Revisions the background writer has not confirmed stay in the archive past the retention count: the
+    /// persisted history does not hold them yet, so a snapshot read that missed the archive could not find them.
+    /// Revisions at or below the flushed watermark trim by count as usual.
+    /// </summary>
+    [Fact]
+    public void UnflushedRevisions_AreNeverTrimmed()
+    {
+        const int count     = 6;
+        const int retention = 3;
+        const long refRevision = count;
+
+        RaftManager         raft   = BuildRaft();
+        KahunaConfiguration config = BuildConfig(retention);
+
+        KeyValueContext ctx    = BuildContext(raft, config);
+        TestableTrimHandler h  = new(ctx);
+        KeyValueEntry entry    = BuildEntry(count, flushedRevision: 1);
+
+        h.TrimRevisions(entry, refRevision);
+
+        Assert.NotNull(entry.Revisions);
+        Assert.False(entry.Revisions!.ContainsKey(1), "revision 1 is flushed and beyond retention");
+        for (long revision = 2; revision <= count; revision++)
+            Assert.True(entry.Revisions.ContainsKey(revision), $"unflushed revision {revision} must be kept");
     }
 
     /// <summary>

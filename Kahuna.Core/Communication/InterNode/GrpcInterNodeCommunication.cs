@@ -1923,7 +1923,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Revision = effect.Revision,
             ExpiresMs = effect.ExpiresMs,
             NoRevision = effect.NoRevision,
-            State = (GrpcKeyValueState)effect.State
+            State = (GrpcKeyValueState)effect.State,
+            StagedAtNode = effect.StagedAt.N,
+            StagedAtPhysical = effect.StagedAt.L,
+            StagedAtCounter = effect.StagedAt.C
         };
 
         if (effect.Value is not null)

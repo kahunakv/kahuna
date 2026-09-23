@@ -52,7 +52,7 @@ internal sealed class DeleteCommand : BaseCommand
         {
             case KeyValueResponseType.Deleted:
                 context.RecordModifiedKey((keyName, durability));
-                context.StageMutation(keyName, null, KeyValueState.Deleted, revision, 0, noRevision: false); // deletes have no TTL and retain history
+                context.StageMutation(keyName, null, KeyValueState.Deleted, revision, 0, noRevision: false, lastModified); // deletes have no TTL and retain history
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:

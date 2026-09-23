@@ -12,8 +12,11 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 /// nothing) and must stay distinct from a delete's null tombstone. The relative TTL is resolved to an absolute
 /// expiry HLC of <c>commitTimestamp + ExpiresMs</c> at freeze, so a TTL write's expiry is anchored to the one
 /// canonical commit timestamp rather than an actor-local wall clock. <c>NoRevision</c> is carried so a
-/// <c>SET NOREV</c> materializes revision-free on the durable path exactly as a direct write would.</summary>
-public readonly record struct StagedValue(byte[]? Value, KeyValueState State, long Revision, long ExpiresMs, bool NoRevision);
+/// <c>SET NOREV</c> materializes revision-free on the durable path exactly as a direct write would.
+/// <c>StagedAt</c> is the participant actor's clock stamp on the staged write (Zero when unknown); the durable
+/// commit timestamp is minted above it, so a commit never becomes visible below a snapshot read that the
+/// participant served before the write was staged.</summary>
+public readonly record struct StagedValue(byte[]? Value, KeyValueState State, long Revision, long ExpiresMs, bool NoRevision, HLCTimestamp StagedAt = default);
 
 /// <summary>
 /// Generic transaction context holding identity, policy, lifecycle state, and confirmed working-set
@@ -198,13 +201,19 @@ internal class TransactionContext
     /// the operation the caller issued (set or delete) — it decides how the mutation materializes, so it must never
     /// be inferred from value presence. The expiry is the write's <b>relative</b> TTL in milliseconds (0 = none);
     /// it is resolved to an absolute HLC at freeze. <paramref name="noRevision"/> carries whether the write
-    /// suppressed history retention so the materialized durable write matches a direct <c>SET NOREV</c>.</summary>
-    public void StageMutation(string key, byte[]? value, KeyValueState state, long revision, long expiresMs, bool noRevision)
+    /// suppressed history retention so the materialized durable write matches a direct <c>SET NOREV</c>.
+    /// <paramref name="stagedAt"/> is the participant's stamp on the write; restaging a key keeps the highest
+    /// stamp seen, since every write the key took in this transaction must sit below the commit timestamp.</summary>
+    public void StageMutation(string key, byte[]? value, KeyValueState state, long revision, long expiresMs, bool noRevision, HLCTimestamp stagedAt = default)
     {
         lock (registryLock)
         {
             StagedMutations ??= [];
-            StagedMutations[key] = new StagedValue(value, state, revision, expiresMs, noRevision);
+
+            if (StagedMutations.TryGetValue(key, out StagedValue previous) && previous.StagedAt > stagedAt)
+                stagedAt = previous.StagedAt;
+
+            StagedMutations[key] = new StagedValue(value, state, revision, expiresMs, noRevision, stagedAt);
         }
     }
 
@@ -473,7 +482,7 @@ internal class TransactionContext
         if (payload.StagedMutations is { } stagedMutations)
         {
             foreach (StagedMutationEffect staged in stagedMutations)
-                StageMutation(staged.Key, staged.Value, staged.State, staged.Revision, staged.ExpiresMs, staged.NoRevision);
+                StageMutation(staged.Key, staged.Value, staged.State, staged.Revision, staged.ExpiresMs, staged.NoRevision, staged.StagedAt);
         }
 
         if (!string.IsNullOrEmpty(payload.AcquiredPointLock))

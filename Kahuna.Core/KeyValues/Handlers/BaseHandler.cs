@@ -470,6 +470,17 @@ internal abstract class BaseHandler
         // anything strictly below the cutoff is trimmed unless the floor pins it as the boundary.
         long cutoff = refRevision - toBeKept + 1;
 
+        // Never trim a revision the background writer has not confirmed: until its flush lands the
+        // persisted history does not hold it, so a snapshot read that missed the archive would get an
+        // older row from disk now and this revision after the flush. Retention past the count is
+        // bounded by the flush lag times the key's write rate.
+        long unflushedFloor = entry.FlushedRevision + 1;
+        if (unflushedFloor < cutoff)
+        {
+            cutoff = unflushedFloor;
+            KeyValueSnapshotReadMetrics.RetainedUnflushed.Add(1);
+        }
+
         // Determine the floor-boundary revision: the highest revision that would normally
         // be trimmed (< cutoff) but whose timestamp is at-or-before the reclamation floor.
         // We protect exactly this one revision so snapshot reads at floor-timestamp still
@@ -816,6 +827,44 @@ internal abstract class BaseHandler
 
         entry.PendingCommittedHead = null;
         context.AdjustEstimatedEntryBytes(entry, -KeyValueStoreAccounting.PendingCommittedHeadBytes(parked.Value));
+    }
+
+    /// <summary>
+    /// Whether a snapshot read must skip the durable prepared-intent overlay and take the ordinary read path:
+    /// the resident head already carries a revision newer than the intent, so the intent was materialized here
+    /// (or superseded by a later committed write) and the head plus its archive answer for every snapshot. Serving
+    /// the lingering intent instead would answer with an older value than a committed revision at or below the
+    /// snapshot, and a later read — after the intent settles and leaves the store — would answer differently.
+    /// Strictly newer only: an extend reuses the base revision number, so an equal revision is not proof of
+    /// materialization.
+    /// </summary>
+    protected static bool ResidentHeadSupersedesIntent(KeyValueRequest message, KeyValueEntry? entry, PreparedIntent intent) =>
+        !message.ReadTimestamp.IsNull() && entry is not null && entry.Revision > intent.Revision;
+
+    /// <summary>
+    /// Whether a snapshot read that the durable prepared-intent overlay is about to answer must first wait for a
+    /// live write intent of a third transaction on the same key. The overlay answers from the covering intent's
+    /// committed value, but a different transaction may already have staged a newer write whose commit timestamp
+    /// can still land at or below the snapshot; answering now and serving that commit on the next ask breaks
+    /// repeatable snapshot reads. This is the same safe-time rule the ordinary path applies; only the reader's own
+    /// intent and the overlay intent's transaction (already decided) are exempt. An expired intent is cleared, as
+    /// the ordinary path does.
+    /// </summary>
+    protected bool SnapshotMustWaitBehindOverlay(KeyValueRequest message, KeyValueEntry? entry, PreparedIntent overlayIntent, HLCTimestamp currentTime)
+    {
+        if (message.ReadTimestamp.IsNull() || entry?.WriteIntent is not { } writeIntent)
+            return false;
+
+        if (writeIntent.TransactionId == message.TransactionId || writeIntent.TransactionId == overlayIntent.TransactionId)
+            return false;
+
+        if (!KeyValueWriteIntentLease.IsLive(context, message.Key, writeIntent, currentTime))
+        {
+            entry.WriteIntent = null;
+            return false;
+        }
+
+        return KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(writeIntent, message.ReadTimestamp);
     }
 
     /// <summary>

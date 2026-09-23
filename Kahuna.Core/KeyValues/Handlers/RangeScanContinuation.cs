@@ -598,6 +598,12 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 if (entry.SnapshotAtRiskFromUnflushedGap(snapshotTs))
                     return KeyValueStaticResponses.MustRetryResponse;
 
+                // The disk projection was read from the persisted history, which is missing any
+                // revision still queued for the background writer; if one of those is not in the
+                // archive either, the projection may be an older row than the committed answer.
+                if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, entry.Revisions, entry.Revision - 1))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
                 // In-memory revision archive does not reach as far back as snapshotTs.
                 // Fall back to the stage-2 disk projection carried in from the off-actor task.
                 // Purely memory-only keys (never flushed) have no disk projection and are omitted.

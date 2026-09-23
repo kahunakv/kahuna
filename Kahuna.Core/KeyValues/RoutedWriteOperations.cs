@@ -155,7 +155,7 @@ internal sealed class RoutedWriteOperations
         // Stage the confirmed value for a persistent write so the coordinator finalizes durably,
         // carrying the NoRevision flag so a registered SET NOREV materializes revision-free.
         payload.StagedMutations = applied && durability == KeyValueDurability.Persistent
-            ? [new StagedMutationEffect(key, value, KeyValueState.Set, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0)]
+            ? [new StagedMutationEffect(key, value, KeyValueState.Set, revision, expiresMs, (flags & KeyValueFlags.SetNoRevision) != 0, lastModified)]
             : null;
         payload.Durability = durability;
         payload.CachedType = type;
@@ -259,22 +259,22 @@ internal sealed class RoutedWriteOperations
         // would re-issue a SetIfNotExists for an already-set unique key and get a false NotSet. Instead the
         // confirmed keys fold now, the operation completes, and the caller retries the transient keys as a
         // fresh operation. A confirmed write is idempotent under participant-cache replay of the same id.
-        Dictionary<string, (KeyValueResponseType Type, long Revision)> byKey = new(responses.Count, StringComparer.Ordinal);
+        Dictionary<string, (KeyValueResponseType Type, long Revision, HLCTimestamp LastModified)> byKey = new(responses.Count, StringComparer.Ordinal);
         foreach (KahunaSetKeyValueResponseItem response in responses)
-            byKey[response.Key ?? ""] = (response.Type, response.Revision);
+            byKey[response.Key ?? ""] = (response.Type, response.Revision, response.LastModified);
 
         List<(string, KeyValueDurability)> modifiedKeys = [];
         List<StagedMutationEffect> stagedMutations = [];
         foreach (KahunaSetKeyValueRequestItem item in setManyItems)
         {
-            if (byKey.TryGetValue(item.Key ?? "", out (KeyValueResponseType Type, long Revision) result) && result.Type == KeyValueResponseType.Set)
+            if (byKey.TryGetValue(item.Key ?? "", out (KeyValueResponseType Type, long Revision, HLCTimestamp LastModified) result) && result.Type == KeyValueResponseType.Set)
             {
                 modifiedKeys.Add((item.Key ?? "", item.Durability));
 
                 // Stage the confirmed value + new revision for each persistent write so the coordinator finalizes
                 // the batch through the durable-intent path instead of the manual ticket path.
                 if (item.Durability == KeyValueDurability.Persistent)
-                    stagedMutations.Add(new StagedMutationEffect(item.Key ?? "", item.Value, KeyValueState.Set, result.Revision, item.ExpiresMs, (item.Flags & KeyValueFlags.SetNoRevision) != 0));
+                    stagedMutations.Add(new StagedMutationEffect(item.Key ?? "", item.Value, KeyValueState.Set, result.Revision, item.ExpiresMs, (item.Flags & KeyValueFlags.SetNoRevision) != 0, result.LastModified));
             }
         }
 
@@ -393,22 +393,22 @@ internal sealed class RoutedWriteOperations
         // folds nothing. The registration is NOT cancelled on a partial-transient batch: the caller (a mass
         // deleter) resends only the transient keys on retry as a fresh operation, so the confirmed keys must
         // fold now rather than be discarded for a full re-drive that never comes.
-        Dictionary<(string, KeyValueDurability), (KeyValueResponseType Type, long Revision)> byKey = new(responses.Count);
+        Dictionary<(string, KeyValueDurability), (KeyValueResponseType Type, long Revision, HLCTimestamp LastModified)> byKey = new(responses.Count);
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
-            byKey[(response.Key ?? "", response.Durability)] = (response.Type, response.Revision);
+            byKey[(response.Key ?? "", response.Durability)] = (response.Type, response.Revision, response.LastModified);
 
         List<(string, KeyValueDurability)> modifiedKeys = [];
         List<StagedMutationEffect> stagedMutations = [];
         foreach ((string Key, KeyValueDurability Durability) item in canonicalItems)
         {
-            if (byKey.TryGetValue(item, out (KeyValueResponseType Type, long Revision) result) && result.Type == KeyValueResponseType.Deleted)
+            if (byKey.TryGetValue(item, out (KeyValueResponseType Type, long Revision, HLCTimestamp LastModified) result) && result.Type == KeyValueResponseType.Deleted)
             {
                 modifiedKeys.Add(item);
 
                 // Stage the tombstone (null value) + new revision for each persistent delete so the coordinator
                 // finalizes the batch through the durable-intent path.
                 if (item.Durability == KeyValueDurability.Persistent)
-                    stagedMutations.Add(new StagedMutationEffect(item.Key, null, KeyValueState.Deleted, result.Revision, 0, NoRevision: false));
+                    stagedMutations.Add(new StagedMutationEffect(item.Key, null, KeyValueState.Deleted, result.Revision, 0, NoRevision: false, result.LastModified));
             }
         }
 
@@ -541,7 +541,7 @@ internal sealed class RoutedWriteOperations
         payload.AcquiredPointLock = applied ? key : null;
         // Stage the tombstone for a persistent delete so the coordinator finalizes durably.
         payload.StagedMutations = applied && durability == KeyValueDurability.Persistent
-            ? [new StagedMutationEffect(key, null, KeyValueState.Deleted, revision, 0, NoRevision: false)]
+            ? [new StagedMutationEffect(key, null, KeyValueState.Deleted, revision, 0, NoRevision: false, lastModified)]
             : null;
         payload.Durability = durability;
         payload.CachedType = type;
@@ -623,7 +623,7 @@ internal sealed class RoutedWriteOperations
             (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) =
                 await locator.LocateAndTryGetValue(transactionId, key, -1, HLCTimestamp.Zero, durability, cancellationToken);
             if (readType == KeyValueResponseType.Get && entry is not null)
-                stagedMutations = [new StagedMutationEffect(key, entry.Value, KeyValueState.Set, entry.Revision, expiresMs, NoRevision: false)];
+                stagedMutations = [new StagedMutationEffect(key, entry.Value, KeyValueState.Set, entry.Revision, expiresMs, NoRevision: false, lastModified)];
         }
 
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);

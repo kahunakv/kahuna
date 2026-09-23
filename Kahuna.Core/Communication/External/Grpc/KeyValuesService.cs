@@ -2266,7 +2266,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             g.State != GrpcKeyValueState.StateUndefined
                 ? (KeyValueState)g.State
                 : g.HasValue ? KeyValueState.Set : KeyValueState.Deleted,
-            g.Revision, g.ExpiresMs, g.NoRevision);
+            g.Revision, g.ExpiresMs, g.NoRevision,
+            new HLCTimestamp(g.StagedAtNode, g.StagedAtPhysical, g.StagedAtCounter));
 
     private static GrpcTransactionWorkingSet ToGrpcWorkingSet(TransactionWorkingSet ws)
     {

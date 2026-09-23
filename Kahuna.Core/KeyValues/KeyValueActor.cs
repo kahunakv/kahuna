@@ -1,6 +1,7 @@
 
 using Nixie;
 using Kommander;
+using Kommander.Time;
 using Kommander.WAL.IO;
 using System.Diagnostics;
 using Google.Protobuf;
@@ -381,6 +382,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// </summary>
     private async ValueTask<KeyValueResponse?> RunHandler(KeyValueRequest message)
     {
+        if (!message.ReadTimestamp.IsNull() && IsSnapshotRead(message.Type))
+            FenceClockAtSnapshot(message.ReadTimestamp);
+
     return message.Type switch
         {
             KeyValueRequestType.TrySet => await TrySet(message),
@@ -443,6 +447,54 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         }
 
         return KeyValueStaticResponses.DoesNotExistContextResponse;
+    }
+
+    /// <summary>
+    /// The request types whose <see cref="KeyValueRequest.ReadTimestamp"/> is a snapshot the answer is read at.
+    /// </summary>
+    private static bool IsSnapshotRead(KeyValueRequestType type) =>
+        type is KeyValueRequestType.TryGet
+            or KeyValueRequestType.TryExists
+            or KeyValueRequestType.GetByBucket
+            or KeyValueRequestType.GetByRange
+            or KeyValueRequestType.ScanByPrefix
+            or KeyValueRequestType.ScanByPrefixFromDisk;
+
+    /// <summary>
+    /// How far ahead of this node's clock a snapshot timestamp may be and still be folded into it. The timestamp
+    /// arrives from the caller; folding an arbitrary one would drag the node's clock — and every lease and expiry
+    /// derived from it — forward by the same amount. Legitimate snapshots come from cluster clocks that agree to
+    /// well within this bound.
+    /// </summary>
+    private const long MaxSnapshotClockLeadMs = 5_000;
+
+    /// <summary>
+    /// Advances this node's clock past a snapshot read's timestamp before the read is served. A read at T that
+    /// found no writer to wait for has promised that nothing else commits at or below T for what it read; every
+    /// write staged on this node afterwards is stamped from this clock, and a durable commit is minted above its
+    /// staged stamps, so the fence is what keeps a later commit from landing inside the snapshot — including when
+    /// T was minted on a node whose clock runs ahead of this one. A timestamp further ahead than
+    /// <see cref="MaxSnapshotClockLeadMs"/> is served without the fence and counted.
+    /// </summary>
+    private void FenceClockAtSnapshot(HLCTimestamp readTimestamp)
+    {
+        if (kvContext is null)
+            return;
+
+        HybridLogicalClock clock = kvContext.Raft.HybridLogicalClock;
+        int nodeId = kvContext.Raft.GetLocalNodeId();
+
+        HLCTimestamp now = clock.TrySendOrLocalEvent(nodeId);
+        if (readTimestamp.CompareTo(now) < 0)
+            return;
+
+        if (readTimestamp.L - now.L > MaxSnapshotClockLeadMs)
+        {
+            KeyValueSnapshotReadMetrics.SnapshotClockFenceSkipped.Add(1);
+            return;
+        }
+
+        clock.ReceiveEvent(nodeId, readTimestamp);
     }
 
     /// <summary>

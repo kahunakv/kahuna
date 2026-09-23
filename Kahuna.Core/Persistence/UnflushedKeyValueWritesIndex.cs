@@ -8,6 +8,9 @@ namespace Kahuna.Server.Persistence;
 /// <summary>
 /// A committed key-value write recorded at the moment it was queued for background persistence,
 /// held until the flush that contains it (or a newer head for the same key) is confirmed.
+/// <see cref="OldestRevision"/> is the lowest revision of the key still queued behind this head: the
+/// persisted revision history is complete only below it, so a history read that needs a revision at or
+/// above it may answer with an older row than the one committed.
 /// </summary>
 internal readonly record struct UnflushedKeyValueWrite(
     byte[]? Value,
@@ -16,7 +19,8 @@ internal readonly record struct UnflushedKeyValueWrite(
     HLCTimestamp LastUsed,
     HLCTimestamp LastModified,
     KeyValueState State,
-    bool NoRevision);
+    bool NoRevision,
+    long OldestRevision);
 
 /// <summary>
 /// Node-local overlay of committed key-value writes that have been queued for the background writer
@@ -54,31 +58,51 @@ internal sealed class UnflushedKeyValueWritesIndex
 
     /// <summary>
     /// Records a committed write queued for persistence. Keeps the newest head per key: same-revision
-    /// records (delete/extend legitimately reuse a revision number) are ordered by commit HLC.
+    /// records (delete/extend legitimately reuse a revision number) are ordered by commit HLC. The
+    /// oldest queued revision is kept across heads, so a newer head never hides that an older revision
+    /// is still waiting for its flush.
     /// </summary>
     public void Record(
         string key, byte[]? value, long revision,
         HLCTimestamp expires, HLCTimestamp lastUsed, HLCTimestamp lastModified,
         KeyValueState state, bool noRevision)
     {
-        UnflushedKeyValueWrite incoming = new(value, revision, expires, lastUsed, lastModified, state, noRevision);
+        UnflushedKeyValueWrite incoming = new(value, revision, expires, lastUsed, lastModified, state, noRevision, revision);
 
         entries.AddOrUpdate(
             key,
             incoming,
-            (_, existing) => IsNewer(existing, incoming.Revision, incoming.LastModified) ? existing : incoming);
+            (_, existing) =>
+            {
+                long oldest = Math.Min(existing.OldestRevision, incoming.Revision);
+                return IsNewer(existing, incoming.Revision, incoming.LastModified)
+                    ? existing with { OldestRevision = oldest }
+                    : incoming with { OldestRevision = oldest };
+            });
     }
 
     /// <summary>
     /// Removes the overlay entry for <paramref name="key"/> after a confirmed flush, unless a strictly
-    /// newer head was queued meanwhile — that newer head is still unflushed and must stay covered.
+    /// newer head was queued meanwhile — that newer head is still unflushed and must stay covered. In that
+    /// case the oldest queued revision advances past the flushed one: the writer persists a key's
+    /// revisions in queue order, so a confirmed revision proves every lower one is on disk too.
     /// </summary>
     public void RemoveFlushed(string key, long flushedRevision, HLCTimestamp flushedLastModified)
     {
         while (entries.TryGetValue(key, out UnflushedKeyValueWrite current))
         {
             if (IsNewer(current, flushedRevision, flushedLastModified))
-                return;
+            {
+                if (current.OldestRevision > flushedRevision)
+                    return;
+
+                // Conditional update: a concurrent Record lowers or replaces the entry, and the loop
+                // re-reads it rather than overwriting that newer state.
+                if (entries.TryUpdate(key, current with { OldestRevision = flushedRevision + 1 }, current))
+                    return;
+
+                continue;
+            }
 
             // Atomic conditional removal: only removes when the stored value is still `current`,
             // so a concurrent Record of a newer head is never lost.

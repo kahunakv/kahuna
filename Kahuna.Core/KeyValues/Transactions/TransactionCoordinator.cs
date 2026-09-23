@@ -1671,7 +1671,11 @@ internal sealed class TransactionCoordinator : IDisposable
 
         const long epoch = DurableFinalizeEpoch;
 
-        HLCTimestamp commitTimestamp = raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), txId);
+        // The commit timestamp is the revision stamp every participant materializes, so it must sit above each
+        // participant's own stamp on the staged write, not only above the transaction id: a participant that
+        // served a snapshot read at T before this write was staged fenced its clock past T, and minting from
+        // the transaction id alone on a coordinator whose clock lags could still land the commit at or below T.
+        HLCTimestamp commitTimestamp = MintDurableCommitTimestamp(raft.HybridLogicalClock, raft.GetLocalNodeId(), txId, staged);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(), commitTimestamp.C);
 
         // The builder reads the session's staged values and written-base observations in place: this freeze runs
@@ -2615,6 +2619,24 @@ internal sealed class TransactionCoordinator : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Mints a durable commit timestamp on the coordinator's clock that is strictly above the transaction id and
+    /// every staged write's participant stamp.
+    /// </summary>
+    internal static HLCTimestamp MintDurableCommitTimestamp(
+        HybridLogicalClock clock, int nodeId, HLCTimestamp transactionId, Dictionary<string, StagedValue> staged)
+    {
+        HLCTimestamp highest = transactionId;
+
+        foreach (StagedValue value in staged.Values)
+        {
+            if (value.StagedAt > highest)
+                highest = value.StagedAt;
+        }
+
+        return clock.ReceiveEvent(nodeId, highest);
     }
 
     /// <summary>

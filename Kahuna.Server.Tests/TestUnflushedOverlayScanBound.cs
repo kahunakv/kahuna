@@ -45,7 +45,7 @@ public sealed class TestUnflushedOverlayScanBound
         {
             Overlay.Record(key, value, revision, Ts(revision * 10), Ts(revision * 20), lastModified, state, noRevision);
 
-            UnflushedKeyValueWrite incoming = new(value, revision, Ts(revision * 10), Ts(revision * 20), lastModified, state, noRevision);
+            UnflushedKeyValueWrite incoming = new(value, revision, Ts(revision * 10), Ts(revision * 20), lastModified, state, noRevision, revision);
             if (!Mirror.TryGetValue(key, out UnflushedKeyValueWrite existing)
                 || !UnflushedKeyValueWritesIndex.IsNewer(existing, revision, lastModified))
                 Mirror[key] = incoming;

@@ -1,4 +1,5 @@
 using Google.Protobuf;
+using Kommander.Time;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.Communication.Internode;
@@ -31,6 +32,7 @@ public sealed class TestStagedMutationGrpcWire
         Assert.Equal(original.Revision, restored.Revision);
         Assert.Equal(original.ExpiresMs, restored.ExpiresMs);
         Assert.Equal(original.NoRevision, restored.NoRevision);
+        Assert.Equal(original.StagedAt, restored.StagedAt);
 
         if (original.Value is null)
             Assert.Null(restored.Value); // an absent value stays absent, never an empty one
@@ -44,6 +46,11 @@ public sealed class TestStagedMutationGrpcWire
     [Fact]
     public void StagedMutation_ValuePresent_RoundTrips()
         => AssertRoundTrips(new StagedMutationEffect("acct/1", "hello world"u8.ToArray(), KeyValueState.Set, Revision: 3, ExpiresMs: 60_000, NoRevision: true));
+
+    [Fact]
+    public void StagedMutation_ParticipantStamp_RoundTrips()
+        => AssertRoundTrips(new StagedMutationEffect("acct/5", "v"u8.ToArray(), KeyValueState.Set, Revision: 7, ExpiresMs: 0, NoRevision: false,
+            StagedAt: new HLCTimestamp(2, 1_790_000_000_123, 17)));
 
     [Fact]
     public void StagedMutation_Deletion_NullValue_StaysNull()

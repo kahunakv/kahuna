@@ -135,6 +135,11 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
         KeyValueHydration hydration = Hydration!;
         KeyValueEntry? entry;
 
+        // Set when the hydrated head still has revisions below it queued for the writer: the persisted
+        // history the hydration read is missing them, so its recent revisions are not a contiguous run
+        // below the head and must not become the archive, and no history answer may be served.
+        bool historyMayLag = false;
+
         // A write (or another read) may have installed a resident entry while this read was in
         // flight. Prefer the higher revision; never overwrite a resident entry with an older head.
         if (context.Store.TryGetValue(key, out KeyValueEntry? resident)
@@ -161,7 +166,10 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
             entry.FlushedRevision = entry.Revision;
             entry.LastUsed = currentTime;
             context.InsertStoreEntry(key, entry);
-            ArchiveRecentRevisions(context, entry, hydration.RecentRevisions);
+
+            historyMayLag = UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, archive: null, entry.Revision - 1);
+            if (!historyMayLag)
+                ArchiveRecentRevisions(context, entry, hydration.RecentRevisions);
         }
 
         // ── The inline snapshot rules, against the (now resident) entry ─────────────────────
@@ -171,6 +179,9 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
             return ToResponse(entry.Value, entry.Revision, entry.Expires, entry.LastUsed, entry.LastModified, entry.State, currentTime);
         }
 
+        if (historyMayLag)
+            return KeyValueStaticResponses.MustRetryResponse;
+
         if (entry.TryGetRevisionAtOrBefore(readTimestamp, out long snapRevision, out KeyValueRevisionEntry snapshot))
         {
             return ToResponse(snapshot.Value, snapRevision, snapshot.Expires, currentTime, snapshot.LastModified, snapshot.State, currentTime);
@@ -179,6 +190,13 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
         // A head jump skipped revisions whose flush requests may still be queued: the persisted
         // history cannot answer for the skipped window yet. Fail closed; the caller retries.
         if (entry.SnapshotAtRiskFromUnflushedGap(readTimestamp))
+        {
+            return KeyValueStaticResponses.MustRetryResponse;
+        }
+
+        // The archive missed and a revision below the head is still queued for the writer and not in
+        // the archive: the persisted history this read consulted may be missing the true answer.
+        if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, entry.Revisions, entry.Revision - 1))
         {
             return KeyValueStaticResponses.MustRetryResponse;
         }

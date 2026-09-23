@@ -48,7 +48,8 @@ internal sealed class TryExistsHandler : BaseHandler
 
         if (!readerHasOwnMvcc
             && context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
-            && foreignIntent.TransactionId != message.TransactionId)
+            && foreignIntent.TransactionId != message.TransactionId
+            && !ResidentHeadSupersedesIntent(message, entry, foreignIntent))
         {
             HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
             switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs, message.ForeignDecisionHint))
@@ -57,6 +58,12 @@ internal sealed class TryExistsHandler : BaseHandler
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
 
                 case ReadVisibilityAction.UseIntentValue:
+                    // The committed intent is visible to this snapshot, but a third transaction's staged write
+                    // may still commit at or below it: wait for that writer exactly as the ordinary path does,
+                    // instead of answering now and differently once it commits.
+                    if (SnapshotMustWaitBehindOverlay(message, entry, foreignIntent, currentTime))
+                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+
                     // A committed delete, or a committed value whose TTL has elapsed, reports as does-not-exist,
                     // matching the ordinary exists expiry filter rather than reporting a dead key as present.
                     return foreignIntent.State == KeyValueState.Deleted
@@ -194,6 +201,12 @@ internal sealed class TryExistsHandler : BaseHandler
                     // skipped window yet. Fail closed — MustRetry is safe to retry and the window
                     // closes when the queued flushes are acknowledged.
                     if (entry.SnapshotAtRiskFromUnflushedGap(message.ReadTimestamp))
+                        return KeyValueStaticResponses.MustRetryResponse;
+
+                    // A revision below the head that the archive no longer holds may still be queued for
+                    // the background writer, in which case the persisted history would answer with an
+                    // older row now and the committed one after the flush. Fail closed until it lands.
+                    if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, message.Key, entry.Revisions, entry.Revision - 1))
                         return KeyValueStaticResponses.MustRetryResponse;
 
                     return await DispatchSnapshotRead(message, KeyValueResponseType.Exists, currentTime, hydrate: false, asOfCeiling: entry.Revision - 1);

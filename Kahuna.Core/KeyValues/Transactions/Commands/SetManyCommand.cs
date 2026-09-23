@@ -50,7 +50,7 @@ internal sealed class SetManyCommand : BaseCommand
             // the single set. The freeze resolves it to an absolute expiry of commitTimestamp + expiresMs.
             if (response.Type == KeyValueResponseType.Set && response.Key is not null
                 && argumentsByKey.TryGetValue(response.Key, out KahunaSetKeyValueRequestItem? argument))
-                context.StageMutation(response.Key, argument.Value, KeyValueState.Set, response.Revision, argument.ExpiresMs, (argument.Flags & KeyValueFlags.SetNoRevision) != 0);
+                context.StageMutation(response.Key, argument.Value, KeyValueState.Set, response.Revision, argument.ExpiresMs, (argument.Flags & KeyValueFlags.SetNoRevision) != 0, response.LastModified);
         }
         
         // The last response is the one that survives: the prepare path raises the commit timestamp from

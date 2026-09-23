@@ -10,8 +10,10 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 /// the operation the caller issued — value presence cannot stand in for it, because a set may legitimately carry a
 /// null value (the key exists and holds nothing) and must not finalize as a deletion. The TTL is relative in ms
 /// (0 = none), resolved to an absolute expiry at freeze. <see cref="NoRevision"/> carries whether the write
-/// suppressed history retention so the durable materialization matches a direct <c>SET NOREV</c>.</summary>
-public readonly record struct StagedMutationEffect(string Key, byte[]? Value, KeyValueState State, long Revision, long ExpiresMs, bool NoRevision);
+/// suppressed history retention so the durable materialization matches a direct <c>SET NOREV</c>.
+/// <see cref="StagedAt"/> is the participant actor's clock stamp on the write (Zero when unknown), which the
+/// coordinator mints the durable commit timestamp above.</summary>
+public readonly record struct StagedMutationEffect(string Key, byte[]? Value, KeyValueState State, long Revision, long ExpiresMs, bool NoRevision, HLCTimestamp StagedAt = default);
 
 /// <summary>
 /// The confirmed outcome of a transaction-scoped operation, carried from the partition leader that

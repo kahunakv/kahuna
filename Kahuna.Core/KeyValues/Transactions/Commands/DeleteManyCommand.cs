@@ -40,7 +40,7 @@ internal sealed class DeleteManyCommand : BaseCommand
             if (response.Type == KeyValueResponseType.Deleted)
             {
                 context.RecordModifiedKey((response.Key ?? "", response.Durability));
-                context.StageMutation(response.Key ?? "", null, KeyValueState.Deleted, response.Revision, 0, noRevision: false); // deletes have no TTL and retain history
+                context.StageMutation(response.Key ?? "", null, KeyValueState.Deleted, response.Revision, 0, noRevision: false, response.LastModified); // deletes have no TTL and retain history
             }
 
         }

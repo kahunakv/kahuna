@@ -67,7 +67,7 @@ internal sealed class SetCommand : BaseCommand
                 // Stage the value for the durable-intent path, carrying the relative TTL (0 = none). The freeze
                 // resolves it to an absolute expiry of commitTimestamp + expiresMs, so a TTL set is durable-atomic
                 // rather than falling back to the ticket path.
-                context.StageMutation(keyName, valueBytes, KeyValueState.Set, revision, options.ExpiresMs, (options.Flags & KeyValueFlags.SetNoRevision) != 0);
+                context.StageMutation(keyName, valueBytes, KeyValueState.Set, revision, options.ExpiresMs, (options.Flags & KeyValueFlags.SetNoRevision) != 0, lastModified);
                 break;
             
             case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
