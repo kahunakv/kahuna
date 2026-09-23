@@ -87,6 +87,21 @@ public sealed class KeyValueResponse
         new(type) { HolderTransactionId = holder };
 
     /// <summary>
+    /// The covered keys a range-lock acquire could not take, when the actor knows them. Advisory, like
+    /// <see cref="HolderTransactionId"/>: the acquire loop uses them to resolve or settle the foreign
+    /// transaction that holds them, never to decide whether the lock was granted. Null when the answer
+    /// names no key (a replication intent in flight, or a non-range acquire).
+    /// </summary>
+    public List<string>? BlockingKeys { get; private set; }
+
+    /// <summary>
+    /// A denial or wait that names the holder and the covered keys it holds, so the caller can act on that
+    /// transaction (route its decision, or settle its already-decided intents) before it retries.
+    /// </summary>
+    public static KeyValueResponse Blocked(KeyValueResponseType type, HLCTimestamp holder, List<string> blockingKeys) =>
+        new(type) { HolderTransactionId = holder, BlockingKeys = blockingKeys };
+
+    /// <summary>
     /// Construtor
     /// </summary>
     /// <param name="type"></param>

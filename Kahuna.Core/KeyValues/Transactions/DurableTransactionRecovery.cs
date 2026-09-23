@@ -46,6 +46,12 @@ internal sealed class DurableTransactionRecovery
 
     private readonly DurableTransactionFinalizer.ApplyCommitLocally? applyCommitLocally;
 
+    // Clears an aborted transaction's in-memory write intent and staged MVCC on the owning actor before its
+    // durable intent is settled. Without it a recovered or helped abort leaves the key's intent slot held by a
+    // dead transaction until the lease lapses, which every lock acquire then reads as a live conflict. Null in
+    // bare protocol tests (no actor).
+    private readonly DurableTransactionFinalizer.ApplyRollbackLocally? applyRollbackLocally;
+
     // A locally visible terminal Abort is definitive (an abort never overwrites a commit, and terminal
     // records replicate only through the canonical log). Checked immediately before a commit-direction
     // materialization is proposed, so a settle racing a decision it read moments earlier can never push
@@ -100,8 +106,10 @@ internal sealed class DurableTransactionRecovery
         int maxMaterializationBatchItems = 512,
         long maxMaterializationBatchBytes = 4 * 1024 * 1024,
         SemaphoreSlim? localApplyGate = null,
-        Func<PreparedIntent, bool>? legMaterialized = null)
+        Func<PreparedIntent, bool>? legMaterialized = null,
+        DurableTransactionFinalizer.ApplyRollbackLocally? applyRollbackLocally = null)
     {
+        this.applyRollbackLocally = applyRollbackLocally;
         this.legMaterialized = legMaterialized;
         this.materializeByReference = materializeByReference;
         this.maxMaterializationBatchItems = Math.Max(1, maxMaterializationBatchItems);
@@ -161,11 +169,31 @@ internal sealed class DurableTransactionRecovery
     /// sweep's resolution path, so it is idempotent under races with the deferred-settlement task, the sweep, or
     /// another helper — whoever loses applies no-ops in Raft order.</para>
     /// </summary>
-    public async Task<int> TryResolveDecidedBlockersAsync(
+    public Task<int> TryResolveDecidedBlockersAsync(
         int partitionId,
         IReadOnlyList<PreparedIntent> blockedIntents,
         HLCTimestamp requestingTransactionId,
         long requestingEpoch,
+        CancellationToken cancellationToken)
+    {
+        string[] keys = new string[blockedIntents.Count];
+        for (int i = 0; i < keys.Length; i++)
+            keys[i] = blockedIntents[i].Key;
+
+        return TryResolveDecidedBlockersAsync(partitionId, keys, requestingTransactionId, requestingEpoch, cancellationToken);
+    }
+
+    /// <summary>
+    /// The keyed form of <see cref="TryResolveDecidedBlockersAsync(int, IReadOnlyList{PreparedIntent}, HLCTimestamp, long, CancellationToken)"/>,
+    /// for a caller that holds no prepared intents of its own yet — a range-lock acquire whose actor named the
+    /// covered keys held by decided-but-unsettled predecessors. A null <paramref name="requestingEpoch"/> excludes
+    /// every intent of the requesting transaction whatever its epoch; the acquire never settles its own.
+    /// </summary>
+    public async Task<int> TryResolveDecidedBlockersAsync(
+        int partitionId,
+        IReadOnlyList<string> blockedKeys,
+        HLCTimestamp requestingTransactionId,
+        long? requestingEpoch,
         CancellationToken cancellationToken)
     {
         // Group the live foreign holders of our keys by owning transaction, so one record lookup and one settle
@@ -173,13 +201,13 @@ internal sealed class DurableTransactionRecovery
         // foreign holds our keys this whole pass costs no I/O.
         Dictionary<(HLCTimestamp TransactionId, long Epoch), List<PreparedIntent>>? byBlocker = null;
 
-        foreach (PreparedIntent blocked in blockedIntents)
+        foreach (string blockedKey in blockedKeys)
         {
-            PreparedIntent? holder = intentStore.Get(blocked.Key);
+            PreparedIntent? holder = intentStore.Get(blockedKey);
             if (holder is null)
                 continue;
 
-            if (holder.TransactionId == requestingTransactionId && holder.Epoch == requestingEpoch)
+            if (holder.TransactionId == requestingTransactionId && (requestingEpoch is null || holder.Epoch == requestingEpoch.Value))
                 continue;
 
             byBlocker ??= [];
@@ -477,7 +505,26 @@ internal sealed class DurableTransactionRecovery
         }
         else
         {
-            settleable = group;
+            // Mirror the finalizer's own abort resolution: clear the aborted transaction's in-memory intent on the
+            // leader first, so the key's intent slot is free the moment the durable intent is gone, and settle
+            // only what was confirmed cleared. The apply is idempotent when no matching intent is resident, so a
+            // leg that lost its in-memory intent to a leader change still settles; only an actor that could not
+            // be reached (leadership lost mid-pass) leaves the intent for a later pass.
+            bool[] rolledBack = applyRollbackLocally is null
+                ? Enumerable.Repeat(true, group.Count).ToArray()
+                : await DurableTransactionFinalizer.ApplyLocallyAsync(
+                    partitionId, group, Enumerable.Repeat(true, group.Count).ToArray(),
+                    (p, intent) => applyRollbackLocally(p, intent), localApplyGate, cancellationToken).ConfigureAwait(false);
+
+            settleable = new(group.Count);
+            for (int i = 0; i < group.Count; i++)
+            {
+                if (rolledBack[i])
+                    settleable.Add(group[i]);
+            }
+
+            if (settleable.Count == 0)
+                return new ResolveGroupResult(0, ResolveFailureCause.ApplyFailed);
         }
 
         if (settleable.Count == 0)

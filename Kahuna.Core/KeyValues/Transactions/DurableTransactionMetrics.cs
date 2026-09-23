@@ -221,6 +221,37 @@ internal static class DurableTransactionMetrics
             description: "Range-lock acquires refused because a covered key carried another transaction's live write intent.");
 
     /// <summary>
+    /// Shared range-lock acquires granted over at least one covered key whose foreign write intent belongs to a
+    /// transaction that is already durably decided but not yet settled. The decided value is what every read
+    /// under the lock resolves, so the grant is safe; the count shows how often readers arrive inside the
+    /// decision-to-settlement window that deferred settlement leaves open after every commit.
+    /// </summary>
+    internal static readonly Counter<long> RangeLockSharedGrantsOverDecidedIntent =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.range_lock_shared_grants_over_decided_intent",
+            description: "Shared range-lock acquires granted over a decided-but-unsettled foreign write intent.");
+
+    /// <summary>
+    /// Exclusive range-lock acquires answered with a wait because a covered key's intent slot is still held by a
+    /// decided-but-unsettled predecessor. The acquire loop settles the named keys inline and retries, so each
+    /// count is one helping round rather than one backlog-length stall. A sustained rate means Exclusive
+    /// acquires keep landing inside the deferred-settlement window on the same keys.
+    /// </summary>
+    internal static readonly Counter<long> RangeLockExclusiveSettlementWaits =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.range_lock_exclusive_settlement_waits",
+            description: "Exclusive range-lock acquires that waited on a decided-but-unsettled predecessor's intent slot.");
+
+    /// <summary>
+    /// Decided-but-unsettled foreign intents settled inline by a range-lock acquire's helping pass, so the
+    /// acquire's wait ended with those intents' resolution instead of with the deferred-settlement backlog.
+    /// </summary>
+    internal static readonly Counter<long> RangeLockAcquireBlockersSettled =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.range_lock_acquire_blockers_settled",
+            description: "Decided-but-unsettled intents settled inline by a blocked range-lock acquire.");
+
+    /// <summary>
     /// Transactions aborted because a commit-conflict probe answered "staged base compare failed". The local
     /// coordinator no longer asks that check (the prepare-apply fence below owns it); a nonzero count means a
     /// mixed-version remote peer still probes the retired way, or the defensive branch caught an unexpected

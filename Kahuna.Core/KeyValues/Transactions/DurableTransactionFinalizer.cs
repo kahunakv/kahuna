@@ -334,6 +334,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// </summary>
     internal Func<CancellationToken, Task>? TestAfterReadSetValidationHook;
 
+    /// <summary>
+    /// Test-only interleaving hook, awaited on the deferred-settlement task after the decision was reported to
+    /// the caller and before the resolution (materialize, local apply, settle) starts. Lets a test hold the
+    /// decision→settlement window open — every written key still carries its write intent while the outcome is
+    /// already durable — for as long as it needs, which no external caller can time deterministically. Read
+    /// once at scheduling; null (zero-cost) in production.
+    /// </summary>
+    internal Func<CancellationToken, Task>? TestBeforeDeferredResolutionHook;
+
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
     /// true means no conflict. Only invoked when every prepare committed.</param>
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
@@ -811,7 +820,19 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
         else
         {
-            scheduleResolution(ct => ResolveAsync(input, knownCommit, ct));
+            Func<CancellationToken, Task>? beforeResolutionHook = TestBeforeDeferredResolutionHook;
+            if (beforeResolutionHook is null)
+            {
+                scheduleResolution(ct => ResolveAsync(input, knownCommit, ct));
+            }
+            else
+            {
+                scheduleResolution(async ct =>
+                {
+                    await beforeResolutionHook(ct).ConfigureAwait(false);
+                    await ResolveAsync(input, knownCommit, ct).ConfigureAwait(false);
+                });
+            }
         }
     }
 

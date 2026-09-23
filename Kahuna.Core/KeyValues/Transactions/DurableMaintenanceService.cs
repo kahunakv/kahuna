@@ -891,6 +891,23 @@ internal sealed class DurableMaintenanceService
         return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Range-lock acquire seam for the same helping pass: the actor answered an Exclusive acquire with a wait and
+    /// named the covered keys whose intent slots decided-but-unsettled predecessors still hold. Settles those
+    /// whose canonical record is terminal, so the acquire's wait ends with their resolution instead of with the
+    /// deferred-settlement backlog. Leadership-gated like the sweep; the acquire holds no intents of its own, so
+    /// every intent of its transaction is excluded whatever its epoch.
+    /// </summary>
+    internal async Task<int> TrySettleDecidedRangeLockBlockersAsync(
+        int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, CancellationToken cancellationToken)
+    {
+        if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            return 0;
+
+        DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+        return await recovery.TryResolveDecidedBlockersAsync(partitionId, keys, transactionId, requestingEpoch: null, cancellationToken).ConfigureAwait(false);
+    }
+
     // The drain below must leave the caller's 30-second quiesce window enough room for the catch-up
     // copy, the state handoff and the cutover that follow it, whatever the operator configured.
     private const long MovingIntentDrainMaxMs = 15_000;
@@ -1101,7 +1118,11 @@ internal sealed class DurableMaintenanceService
         // The durable artifact a record-less intent past the retention horizon is judged by: a completion receipt
         // for the leg proves its value materialized, so the reclaimed record was a commit.
         legMaterialized: intent => runtime.CompletionReceiptStore.Contains(
-            intent.TransactionId, intent.Key, KeyValueDurability.Persistent, intent.RecordAnchorKey));
+            intent.TransactionId, intent.Key, KeyValueDurability.Persistent, intent.RecordAnchorKey),
+        // Clear an aborted transaction's in-memory intent on the leader before its durable intent is settled, as
+        // the finalizer's own resolution does: a settled abort that left the intent behind would hold the key's
+        // slot as a dead but apparently live writer until the lease lapsed.
+        applyRollbackLocally: (partitionId, intent) => ApplyDurableRollback(partitionId, intent, CancellationToken.None));
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {

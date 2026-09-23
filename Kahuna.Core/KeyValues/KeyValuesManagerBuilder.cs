@@ -496,6 +496,10 @@ internal sealed class KeyValuesManagerBuilder
         localMutationTickets = new(runtime);
         localScans = new(runtime, localKeyValues);
         durableMaintenance = new(runtime, manager, txCoordinator, rangeStateTransfer, localLocks);
+        // A blocked Exclusive range acquire settles the decided-but-unsettled predecessors its actor named,
+        // through the same leadership-gated helping pass a blocked prepare uses. Bound late: the maintenance
+        // service is built after the lock operations it also depends on.
+        localLocks.SettleDecidedRangeLockBlockers = durableMaintenance.TrySettleDecidedRangeLockBlockersAsync;
 
         // The budget state the retention sweep logs at most once per ten minutes, as a continuous signal: 1 while
         // the last sweep found the resident-metadata budget exceeded. Same instance-owned meter as the resident

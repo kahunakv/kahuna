@@ -35,6 +35,13 @@ internal sealed class LocalLockOperations
 
     private readonly LocalKeyValueOperations localKeyValues;
 
+    /// <summary>
+    /// Settles the decided-but-unsettled foreign intents on the given keys of a partition this node leads,
+    /// returning how many were settled. Bound by the builder once the durable maintenance service exists; null
+    /// leaves a blocked Exclusive range acquire to the blind retry alone (bare wiring in tests).
+    /// </summary>
+    internal Func<int, IReadOnlyList<string>, HLCTimestamp, CancellationToken, Task<int>>? SettleDecidedRangeLockBlockers { get; set; }
+
     internal LocalLockOperations(KeyValuesRuntime runtime, LocalKeyValueOperations localKeyValues)
     {
         this.runtime = runtime;
@@ -444,34 +451,100 @@ internal sealed class LocalLockOperations
 
         try
         {
-            LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
-            for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
-            {
-                KeyValueResponse? response;
-
-                if (durability == KeyValueDurability.Ephemeral)
-                    response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
-                else
-                    response = await AskKeyValueActor(persistentKeyValuesRouter, request);
-
-                if (response is null)
-                    return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
-
-                if (response.Type == KeyValueResponseType.WaitingForReplication)
-                {
-                    Transactions.DurableTransactionMetrics.AddKvRetryWait("TryAcquireRangeLock_4686");
-                    if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
-                    continue;
-                }
-
-                return (response.Type, response.HolderTransactionId);
-            }
-
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+            return await AcquireRangeLockWithWait(request, transactionId, durability, Environment.TickCount64 + AcquireLockWaitMs);
         }
         finally
         {
             KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Issues a range-lock acquire and works through the conditions that hold covered keys without conflicting
+    /// with the caller. A wait that names no key (a replication intent in flight) is retried blind, a bounded
+    /// number of times. A wait or denial that names the holder's keys is acted on first: the holder's decision
+    /// is fetched from its anchor leader once per holder when this node does not hold the record, so a decided
+    /// holder is recognised as such on the re-issue; and the decided-but-unsettled intents an Exclusive acquire
+    /// waits behind are settled here, through the helping pass, so the acquire retries as soon as their
+    /// resolution lands instead of after the deferred-settlement backlog reaches them. Each helping round that
+    /// settles something earns an immediate retry; the whole acquire is bounded by <paramref name="deadline"/>.
+    /// Exhausting either budget yields <see cref="KeyValueResponseType.MustRetry"/>, never a decided outcome.
+    /// </summary>
+    private async Task<(KeyValueResponseType, HLCTimestamp)> AcquireRangeLockWithWait(
+        KeyValueRequest request, HLCTimestamp transactionId, KeyValueDurability durability, long deadline)
+    {
+        LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
+        HLCTimestamp routedHolder = HLCTimestamp.Zero;
+
+        while (true)
+        {
+            KeyValueResponse? response;
+
+            if (durability == KeyValueDurability.Ephemeral)
+                response = await AskKeyValueActor(ephemeralKeyValuesRouter, request);
+            else
+                response = await AskKeyValueActor(persistentKeyValuesRouter, request);
+
+            if (response is null)
+                return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
+
+            List<string>? blockingKeys = response.BlockingKeys;
+
+            // A holder whose canonical record lives on another partition cannot be classified by the actor, so it
+            // reads as still-undecided and the acquire is denied or held. Route the lookup to the anchor leader
+            // once per holder, off the mailbox, and re-issue with the terminal decision so a decided holder is
+            // stepped over (Shared) or settled below (Exclusive) instead of being reported as a live conflict.
+            if (response.Type is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.WaitingForReplication
+                && blockingKeys is { Count: > 0 }
+                && response.HolderTransactionId != HLCTimestamp.Zero
+                && response.HolderTransactionId != routedHolder
+                && await TryRouteForeignDecision(request, blockingKeys[0], transactionId, durability, alreadyAttempted: false))
+            {
+                routedHolder = response.HolderTransactionId;
+                if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                    continue;
+            }
+
+            if (response.Type != KeyValueResponseType.WaitingForReplication)
+                return (response.Type, response.HolderTransactionId);
+
+            // The actor named the keys it waits behind: settle their decided holders now. A round that settled
+            // nothing (the holder is genuinely undecided, or another helper got there first) falls through to
+            // the blind wait, so an undecided holder still costs at most the bounded retries.
+            if (blockingKeys is { Count: > 0 }
+                && durability == KeyValueDurability.Persistent
+                && SettleDecidedRangeLockBlockers is { } settleBlockers)
+            {
+                int partitionId = runtime.DurableReplication.LocateDurablePartition(blockingKeys[0]).PartitionId;
+
+                int settled;
+                try
+                {
+                    settled = await settleBlockers(partitionId, blockingKeys, transactionId, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    // Best-effort: the blind retry and the deferred settlement still finish the resolution.
+                    logger.LogWarning(ex, "Range-lock acquire could not settle decided blockers on partition {Partition}", partitionId);
+                    settled = 0;
+                }
+
+                if (settled > 0)
+                {
+                    Transactions.DurableTransactionMetrics.RangeLockAcquireBlockersSettled.Add(settled);
+
+                    if (Environment.TickCount64 < deadline)
+                        continue;
+
+                    return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+                }
+            }
+
+            Transactions.DurableTransactionMetrics.AddKvRetryWait("TryAcquireRangeLock_4686");
+            if (!retryDelays.TryNext(out TimeSpan delay) || Environment.TickCount64 >= deadline)
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
+            await Task.Delay(delay);
         }
     }
 

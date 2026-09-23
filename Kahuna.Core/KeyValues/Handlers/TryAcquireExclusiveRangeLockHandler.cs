@@ -24,9 +24,43 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// serial order explains. A WriteFence deliberately keeps stepping around intents: it exists to stop new
 /// writers during a split or merge without wedging on the in-flight ones, which the write-path refusal and
 /// the writer's commit-time probe drain.</para>
+///
+/// <para>"Live" means undecided. A foreign intent whose transaction is already durably decided is not about to
+/// change anything: its outcome is fixed, and every read path resolves such an intent inline to the committed
+/// value (or the pre-image on abort) without waiting for the background settlement that clears it. A Shared
+/// acquire is therefore granted over it. An Exclusive acquire still cannot place its own per-key intent while
+/// the predecessor's occupies the slot, so it answers a wait — but names the keys, so the acquire loop settles
+/// those decided intents itself instead of waiting for the deferred-settlement backlog to reach them.</para>
 /// </summary>
 internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 {
+    /// <summary>
+    /// Upper bound on the decided-but-unsettled keys one wait answer names. The acquire loop settles the named
+    /// keys and retries; a range with more of them is drained over successive answers, so the bound caps one
+    /// response and one helping pass, not the acquire.
+    /// </summary>
+    internal const int MaxReportedBlockingKeys = 4096;
+
+    /// <summary>What a covered resident entry holds against the acquiring transaction.</summary>
+    private enum ForeignWriter
+    {
+        /// <summary>No foreign write on the key; it is free for this transaction.</summary>
+        None,
+
+        /// <summary>A non-transactional write is still replicating: wait, as any write does.</summary>
+        ReplicationInFlight,
+
+        /// <summary>A foreign write intent whose transaction is durably decided but whose settlement has not run.</summary>
+        DecidedUnsettled,
+
+        /// <summary>A foreign write intent whose transaction is still undecided: a genuine concurrent writer.</summary>
+        Undecided,
+
+        /// <summary>A durable prepared intent of an undecided transaction whose in-memory intent is gone (a leader
+        /// change dropped it), or whose decision is not locally known: wait for the decision.</summary>
+        UndecidedDurable,
+    }
+
     public TryAcquireExclusiveRangeLockHandler(KeyValueContext context) : base(context)
     {
     }
@@ -127,10 +161,11 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
     private KeyValueResponse LockExistingKeysByRange(HLCTimestamp currentTime, KeyValueRequest message, string keySpace)
     {
         // Exclusive acquires place per-key write intents so existing keys are immediately locked, and are
-        // refused over a foreign live intent. Shared acquires place no intents but are refused over a foreign
-        // live intent all the same: the reader's lock must conflict with the writer's, or the reader holds a
-        // lock over a value that is about to change and the writer never learns of the reader (its
-        // commit-time probe ran before the lock existed). WriteFence acquires skip intents in both
+        // refused over a foreign undecided intent. Shared acquires place no intents but are refused over a
+        // foreign undecided intent all the same: the reader's lock must conflict with the writer's, or the
+        // reader holds a lock over a value that is about to change and the writer never learns of the reader
+        // (its commit-time probe ran before the lock existed). A decided intent changes nothing any more, so a
+        // Shared acquire is granted over it. WriteFence acquires skip intents in both
         // directions: the fence must block new writers (the write path refuses a mutation under any foreign
         // range lock) without waiting for the in-flight ones, and a per-key write intent would make every
         // snapshot scan of the range wait for the holder.
@@ -171,18 +206,42 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 
     /// <summary>
     /// The reader-side conflict check of a Shared acquire: the first covered key that carries another
-    /// transaction's in-flight write decides the answer. Inspects only; places nothing.
+    /// transaction's undecided write decides the answer. A decided-but-unsettled foreign intent is stepped over:
+    /// the value under it is fixed and every read under the lock resolves it inline, so the lock protects exactly
+    /// what those reads observe. Inspects only; places nothing.
     /// </summary>
     private KeyValueResponse? FindForeignWriter(HLCTimestamp currentTime, KeyValueRequest message, string keySpace)
     {
+        bool steppedOverDecided = false;
+
         foreach ((string key, KeyValueEntry entry) in CoveredResidentEntries(message, keySpace))
         {
-            KeyValueResponse? writer = ForeignWriterOn(key, entry, message, currentTime);
-            if (writer is not null)
-                return writer;
+            switch (ClassifyForeignWriter(key, entry, message, currentTime, out HLCTimestamp holder))
+            {
+                case ForeignWriter.ReplicationInFlight:
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                case ForeignWriter.DecidedUnsettled:
+                    steppedOverDecided = true;
+                    break;
+
+                case ForeignWriter.Undecided:
+                    DurableTransactionMetrics.RangeLockAcquireIntentConflicts.Add(1);
+                    return KeyValueResponse.Blocked(KeyValueResponseType.AlreadyLocked, holder, [key]);
+
+                case ForeignWriter.UndecidedDurable:
+                    return KeyValueResponse.Blocked(KeyValueResponseType.WaitingForReplication, holder, [key]);
+            }
         }
 
-        return DurableWriterOnPointLock(message);
+        KeyValueResponse? durable = DurableWriterOnPointLock(message);
+        if (durable is not null)
+            return durable;
+
+        if (steppedOverDecided)
+            DurableTransactionMetrics.RangeLockSharedGrantsOverDecidedIntent.Add(1);
+
+        return null;
     }
 
     private KeyValueResponse PlaceWriteIntents(HLCTimestamp currentTime, KeyValueRequest message, string keySpace)
@@ -194,21 +253,61 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         // record installed by the caller is what blocks the write path.
         List<(KeyValueEntry Entry, KeyValueWriteIntent? Prior)>? stamped = null;
 
+        // A decided-but-unsettled predecessor occupies the key's intent slot until its settlement clears it.
+        // From the first such key on, nothing more is stamped: the rest of the scan only gathers the keys those
+        // predecessors hold, so the acquire loop can settle all of them in one helping pass and retry once,
+        // instead of discovering them one wait at a time.
+        List<string>? decidedBlockers = null;
+        HLCTimestamp decidedHolder = HLCTimestamp.Zero;
+
         foreach ((string key, KeyValueEntry entry) in CoveredResidentEntries(message, keySpace))
         {
-            KeyValueResponse? writer = ForeignWriterOn(key, entry, message, currentTime);
-            if (writer is not null)
+            switch (ClassifyForeignWriter(key, entry, message, currentTime, out HLCTimestamp holder))
             {
-                if (stamped is not null)
-                    foreach ((KeyValueEntry rollback, KeyValueWriteIntent? prior) in stamped)
-                        rollback.WriteIntent = prior;
+                case ForeignWriter.ReplicationInFlight:
+                    if (decidedBlockers is not null)
+                        continue; // transient; the wait already being answered covers it
 
-                return writer;
+                    RollBack(stamped);
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                case ForeignWriter.Undecided:
+                    // A live writer is the stronger fact, whether or not decided predecessors were gathered
+                    // before it: the caller applies its own wait-or-abort ordering against that transaction,
+                    // and a caller that waits meets the gathered keys again on its retry.
+                    RollBack(stamped);
+                    DurableTransactionMetrics.RangeLockAcquireIntentConflicts.Add(1);
+                    return KeyValueResponse.Blocked(KeyValueResponseType.AlreadyLocked, holder, [key]);
+
+                case ForeignWriter.UndecidedDurable:
+                    if (decidedBlockers is not null)
+                        continue;
+
+                    RollBack(stamped);
+                    return KeyValueResponse.Blocked(KeyValueResponseType.WaitingForReplication, holder, [key]);
+
+                case ForeignWriter.DecidedUnsettled:
+                    if (decidedBlockers is null)
+                    {
+                        RollBack(stamped);
+                        stamped = null;
+                        decidedBlockers = [];
+                        decidedHolder = holder;
+                    }
+
+                    decidedBlockers.Add(key);
+                    if (decidedBlockers.Count >= MaxReportedBlockingKeys)
+                        return ExclusiveSettlementWait(decidedHolder, decidedBlockers);
+
+                    continue;
             }
+
+            if (decidedBlockers is not null)
+                continue; // gathering only
 
             if (entry.WriteIntent is not null)
             {
-                // Only this transaction's own intent survives ForeignWriterOn; refresh its lease.
+                // Only this transaction's own intent survives the classification; refresh its lease.
                 entry.WriteIntent.Expires = requestedExpiry;
                 continue;
             }
@@ -226,41 +325,61 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             context.Logger.LogAssignedWriteIntentRangeLock(key, message.TransactionId);
         }
 
+        if (decidedBlockers is not null)
+            return ExclusiveSettlementWait(decidedHolder, decidedBlockers);
+
         KeyValueResponse? durable = DurableWriterOnPointLock(message);
         if (durable is not null)
         {
-            if (stamped is not null)
-                foreach ((KeyValueEntry rollback, KeyValueWriteIntent? prior) in stamped)
-                    rollback.WriteIntent = prior;
-
+            RollBack(stamped);
             return durable;
         }
 
         return KeyValueStaticResponses.LockedResponse;
     }
 
+    private static void RollBack(List<(KeyValueEntry Entry, KeyValueWriteIntent? Prior)>? stamped)
+    {
+        if (stamped is null)
+            return;
+
+        foreach ((KeyValueEntry rollback, KeyValueWriteIntent? prior) in stamped)
+            rollback.WriteIntent = prior;
+    }
+
+    /// <summary>The Exclusive answer over decided-but-unsettled predecessors: a wait that names the keys they hold,
+    /// so the acquire loop settles them itself and retries, bounded by their resolution rather than by the
+    /// deferred-settlement backlog.</summary>
+    private static KeyValueResponse ExclusiveSettlementWait(HLCTimestamp holder, List<string> blockingKeys)
+    {
+        DurableTransactionMetrics.RangeLockExclusiveSettlementWaits.Add(1);
+        return KeyValueResponse.Blocked(KeyValueResponseType.WaitingForReplication, holder, blockingKeys);
+    }
+
     /// <summary>
-    /// Whether <paramref name="entry"/> carries another transaction's in-flight write, and what the acquire
-    /// must answer if so. Clears an intent whose lease lapsed, exactly as the read and write handlers do when
-    /// they meet one, so it never blocks a lock. Null means the key is free for this transaction; afterwards
-    /// <c>entry.WriteIntent</c> is either null or this transaction's own.
+    /// What <paramref name="entry"/> holds against the acquiring transaction. Clears an intent whose lease lapsed,
+    /// exactly as the read and write handlers do when they meet one, so it never blocks a lock. Afterwards
+    /// <c>entry.WriteIntent</c> is either null, this transaction's own, or the reported foreign holder's.
     /// <list type="bullet">
     /// <item>A live replication intent (a non-transactional write still in flight): wait, as any write does.</item>
-    /// <item>A live foreign write intent whose transaction is already decided but not yet settled: wait. Its
-    /// decision is durable and the resolution that clears the intent is on its way; refusing would abort a
-    /// caller that merely arrived inside that window.</item>
+    /// <item>A foreign write intent whose transaction is already decided but not yet settled: its decision is
+    /// durable and the resolution that clears the intent is on its way. A Shared acquire is granted over it; an
+    /// Exclusive acquire waits for the slot and reports the key so the wait ends with that resolution.</item>
     /// <item>Any other live foreign write intent: refused with the holder, so the caller can apply its own
     /// wait-or-abort ordering against that transaction.</item>
     /// <item>A durable prepared intent of another transaction that is still undecided while its in-memory
-    /// intent is gone (a leader change dropped it): wait for the decision.</item>
+    /// intent is gone (a leader change dropped it), or whose decision is not locally known: wait for the
+    /// decision. The key is reported so the acquire loop can fetch that decision from the anchor leader.</item>
     /// </list>
     /// </summary>
-    private KeyValueResponse? ForeignWriterOn(string key, KeyValueEntry entry, KeyValueRequest message, HLCTimestamp currentTime)
+    private ForeignWriter ClassifyForeignWriter(string key, KeyValueEntry entry, KeyValueRequest message, HLCTimestamp currentTime, out HLCTimestamp holder)
     {
+        holder = HLCTimestamp.Zero;
+
         if (entry.ReplicationIntent is not null)
         {
             if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                return ForeignWriter.ReplicationInFlight;
 
             entry.ReplicationIntent = null;
         }
@@ -271,18 +390,22 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             {
                 entry.WriteIntent = null;
             }
-            else if (IsAwaitingSettlement(key, intent.TransactionId, message.ForeignDecisionHint))
-            {
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
-            }
             else
             {
-                DurableTransactionMetrics.RangeLockAcquireIntentConflicts.Add(1);
-                return KeyValueResponse.Denied(KeyValueResponseType.AlreadyLocked, intent.TransactionId);
+                holder = intent.TransactionId;
+                return IsAwaitingSettlement(key, intent.TransactionId, message.ForeignDecisionHint)
+                    ? ForeignWriter.DecidedUnsettled
+                    : ForeignWriter.Undecided;
             }
         }
 
-        return UndecidedDurableWriter(key, message);
+        if (UndecidedDurableWriter(key, message) is { } durable)
+        {
+            holder = durable.TransactionId;
+            return ForeignWriter.UndecidedDurable;
+        }
+
+        return ForeignWriter.None;
     }
 
     /// <summary>
@@ -300,15 +423,20 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             || context.Store.TryGetValue(message.StartKey, out _))
             return null;
 
-        return UndecidedDurableWriter(message.StartKey, message);
+        return UndecidedDurableWriter(message.StartKey, message) is { } durable
+            ? KeyValueResponse.Blocked(KeyValueResponseType.WaitingForReplication, durable.TransactionId, [message.StartKey])
+            : null;
     }
 
-    private KeyValueResponse? UndecidedDurableWriter(string key, KeyValueRequest message)
+    /// <summary>The durable prepared intent of another transaction on <paramref name="key"/> whose decision is not
+    /// known here (still undecided, or anchored on a partition whose record this node does not hold and no routed
+    /// hint names it); null when the key carries none.</summary>
+    private PreparedIntent? UndecidedDurableWriter(string key, KeyValueRequest message)
     {
         if (context.PreparedIntentStore?.Get(key) is { } durable
             && durable.TransactionId != message.TransactionId
             && DurableReadVisibility.IsUndecidedWriter(context, durable, message.ForeignDecisionHint))
-            return KeyValueStaticResponses.WaitingForReplicationResponse;
+            return durable;
 
         return null;
     }
