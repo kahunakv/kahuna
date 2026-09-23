@@ -2414,10 +2414,11 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <item>a concurrent writer on any key in the <b>read set</b> — the write-skew guard, which only optimistic
     /// (or explicitly read-validating) transactions need, since exclusive key locks already serialize the rest;</item>
     /// <item>a foreign range lock covering any key in the <b>write set</b> — the fence against a range lock
-    /// acquired after the write was staged. The write-time fence cannot see it (no lock existed then) and the
-    /// acquire deliberately does not conflict with an existing write intent, deferring to exactly this check.
-    /// It is ungated by locking mode: a range lock steps around a held key lock just as it does a write intent,
-    /// so a pessimistic transaction is no less exposed.</item>
+    /// acquired after the write was staged. The write-time fence cannot see it (no lock existed then). A Shared
+    /// or Exclusive acquire is refused over a live foreign write intent, so this check is their backstop; a
+    /// WriteFence steps around intents by design (a quiesce must not wait for in-flight writers) and relies on
+    /// exactly this check. It is ungated by locking mode: a fence steps around a held key lock just as it does
+    /// a write intent, so a pessimistic transaction is no less exposed.</item>
     /// </list>
     ///
     /// The two sets are disjoint — a read key that was also written is validated as a write — so a flagged

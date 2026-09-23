@@ -220,9 +220,12 @@ public sealed class TestFusedEphemeralFinalize : BaseCluster
     }
 
     /// <summary>
-    /// A range lock taken by another transaction after the write was staged, and before the finalize, aborts
-    /// the transaction with the fence's own reason on either path — and the aborted write leaves nothing
-    /// behind: once the lock is gone the key takes a new write at revision zero.
+    /// A write-fence lock taken by another transaction after the write was staged, and before the finalize,
+    /// aborts the transaction with the fence's own reason on either path — and the aborted write leaves
+    /// nothing behind: once the lock is gone the key takes a new write at revision zero. The write fence is
+    /// the one lock mode that steps around a staged write's intent; a Shared or Exclusive lock attempted in
+    /// the same window is refused with the writer as holder, on the ephemeral path exactly as on the durable
+    /// one, since the staged write's intent is what it conflicts with.
     /// </summary>
     [Theory]
     [InlineData(true)]
@@ -244,9 +247,19 @@ public sealed class TestFusedEphemeralFinalize : BaseCluster
 
         await Task.Delay(200, ct);
 
+        foreach (RangeLockMode refusedMode in new[] { RangeLockMode.Exclusive, RangeLockMode.Shared })
+        {
+            (KeyValueResponseType refused, HLCTimestamp holder) = await node.Kahuna.LocateAndTryAcquireRangeLock(
+                foreign, prefix, prefix + "/10", true, prefix + "/50", false, 30_000,
+                KeyValueDurability.Ephemeral, refusedMode, ct);
+
+            Assert.Equal(KeyValueResponseType.AlreadyLocked, refused);
+            Assert.NotEqual(HLCTimestamp.Zero, holder);
+        }
+
         (KeyValueResponseType locked, _) = await node.Kahuna.LocateAndTryAcquireRangeLock(
             foreign, prefix, prefix + "/10", true, prefix + "/50", false, 30_000,
-            KeyValueDurability.Ephemeral, RangeLockMode.Exclusive, ct);
+            KeyValueDurability.Ephemeral, RangeLockMode.WriteFence, ct);
 
         Assert.Equal(KeyValueResponseType.Locked, locked);
 

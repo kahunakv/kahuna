@@ -325,6 +325,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// </summary>
     internal Func<CancellationToken, Task>? TestAfterPreValidationHook;
 
+    /// <summary>
+    /// Test-only interleaving hook, awaited after the read-set validation passed — the step that runs the
+    /// commit-time range-lock probe — and before the commit is decided. On the 2PC path that is after every
+    /// prepare is durable; on the one-phase path it is before the bundle is proposed. Lets a test take a
+    /// foreign range lock inside the probe→decision window, which no external caller can time
+    /// deterministically. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<CancellationToken, Task>? TestAfterReadSetValidationHook;
+
     /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
     /// true means no conflict. Only invoked when every prepare committed.</param>
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
@@ -354,6 +363,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // Test-only interleaving point; see TestAfterPreValidationHook. Read once so a concurrent
         // clear cannot fault the invocation below.
         Func<CancellationToken, Task>? afterPreValidationHook = TestAfterPreValidationHook;
+        Func<CancellationToken, Task>? afterReadSetValidationHook = TestAfterReadSetValidationHook;
 
         // ── Staged-base compare-and-set, before anything durable is proposed ──
         // Each frozen intent carries the committed base it was validated against; if that base moved — the
@@ -741,6 +751,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         // ── Decision barrier: a commit only when every prepare is durable and validation passed; otherwise a
         // conflict abort (validation failed) or a retryable abort (a prepare did not commit). ──
+        // Test-only: runs a competing action after the commit-time probe passed and before the decision.
+        if (allPrepared && validated && afterReadSetValidationHook is not null)
+            await afterReadSetValidationHook(cancellationToken).ConfigureAwait(false);
+
         long decisionStart = Stopwatch.GetTimestamp();
         DurableFinalizeOutcome outcome;
         if (allPrepared && validated)
@@ -849,8 +863,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
 
         // Validation runs BEFORE anything durable — unlike 2PC's post-prepare validation. Safe for the same
-        // reason as the pre-flight: conflicting writers are excluded by the in-memory write intents, so the
-        // validated snapshot cannot be invalidated between here and the batch's ordered apply. A failed
+        // reason as the pre-flight: conflicting writers are excluded by the in-memory write intents, and so are
+        // range-locking readers (a Shared or Exclusive range lock is refused over a covered key that carries a
+        // live foreign intent), so the validated snapshot cannot be invalidated between here and the batch's
+        // ordered apply, and no lock can land on a written key after the range-lock probe ran. A failed
         // validation falls back to the standard flow, which re-validates and drives the durable conflict
         // abort with its usual semantics.
         long validateStart = Stopwatch.GetTimestamp();
@@ -861,6 +877,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
             return (null, OnePhaseFallbackReason.ValidationFailed);
         }
+
+        // Test-only: runs a competing action after the commit-time probe passed and before the bundle is
+        // proposed. See TestAfterReadSetValidationHook.
+        if (TestAfterReadSetValidationHook is { } afterReadSetValidationHook)
+            await afterReadSetValidationHook(cancellationToken).ConfigureAwait(false);
 
         // Late staged-base re-validation, as close to the propose as the bundle allows. The bundle decides in
         // the same atomic batch as its prepare, so the prepare-apply staged-base fence cannot withhold its

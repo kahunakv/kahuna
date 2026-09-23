@@ -91,11 +91,19 @@ public sealed class TestDurableRangeLockWriteFence
     private static async Task AcquireRangeLock(
         EmbeddedKahunaNode node, HLCTimestamp owner, RangeLockMode mode, CancellationToken ct)
     {
-        (KeyValueResponseType type, _) = await ((KahunaManager)node.Kahuna).LocateAndTryAcquireRangeLock(
-            owner, KeySpace, StartKey, true, EndKey, false, LockExpiresMs,
-            KeyValueDurability.Persistent, mode, ct);
+        (KeyValueResponseType type, _) = await TryAcquireRangeLock(node, owner, mode, ct);
 
         Assert.Equal(KeyValueResponseType.Locked, type);
+    }
+
+    /// <summary>Attempts a range lock over [StartKey, EndKey) on behalf of <paramref name="owner"/> and returns
+    /// the answer with the holder a refusal names.</summary>
+    private static Task<(KeyValueResponseType, HLCTimestamp)> TryAcquireRangeLock(
+        EmbeddedKahunaNode node, HLCTimestamp owner, RangeLockMode mode, CancellationToken ct)
+    {
+        return ((KahunaManager)node.Kahuna).LocateAndTryAcquireRangeLock(
+            owner, KeySpace, StartKey, true, EndKey, false, LockExpiresMs,
+            KeyValueDurability.Persistent, mode, ct);
     }
 
     /// <summary>A transaction id that belongs to no session — the foreign range-lock holder.</summary>
@@ -122,25 +130,26 @@ public sealed class TestDurableRangeLockWriteFence
     // ── The fence ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Write, then a foreign exclusive range lock lands, then commit — the commit must not land the write.
-    /// Run for both locking modes: a pessimistic transaction skips read-set validation entirely, so the fence
-    /// has to be independent of it, and the range-lock acquire steps around a held key lock exactly as it does
-    /// an optimistic write intent.
+    /// Write, then a foreign write-fence lock lands, then commit — the commit must not land the write. A
+    /// write fence (a split's quiesce) steps around write intents by design, so it is the one lock mode that
+    /// can land over a staged write and reach the writer's commit-time probe. Run for both locking modes: a
+    /// pessimistic transaction skips read-set validation entirely, so the fence has to be independent of it,
+    /// and the fence steps around a held key lock exactly as it does an optimistic write intent.
     /// </summary>
     [Theory]
     [InlineData(KeyValueTransactionLocking.Optimistic)]
     [InlineData(KeyValueTransactionLocking.Pessimistic)]
-    public async Task ExclusiveRangeLockAcquiredAfterTheWrite_AbortsTheCommit(KeyValueTransactionLocking locking)
+    public async Task WriteFenceAcquiredAfterTheWrite_AbortsTheCommit(KeyValueTransactionLocking locking)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
 
-        TransactionHandle writer = await StartSession(node, $"{KeySpace}-tx/excl-{locking}", locking, ct);
+        TransactionHandle writer = await StartSession(node, $"{KeySpace}-tx/fence-{locking}", locking, ct);
 
         await WriteInSession(node, writer, InsideKey, "staged", ct);
 
         // Only now does the lock arrive: at write time there was nothing for the write-time fence to see.
-        await AcquireRangeLock(node, ForeignHolder(node), RangeLockMode.Exclusive, ct);
+        await AcquireRangeLock(node, ForeignHolder(node), RangeLockMode.WriteFence, ct);
 
         (KeyValueResponseType commit, _) = await node.Kahuna.LocateAndCommitTransaction(writer, ct);
 
@@ -149,24 +158,45 @@ public sealed class TestDurableRangeLockWriteFence
     }
 
     /// <summary>
-    /// A shared range lock blocks the write too: the write needs exclusive on [K,K], which is incompatible with
-    /// S as well as X. A fence that only looked at exclusive locks would let this one through.
+    /// Write, then a foreign Shared or Exclusive range lock is attempted, then commit. The lock must be refused
+    /// while the staged write is in flight, naming the writer as the holder, and the write then commits. A
+    /// lock granted here would hold a value that is about to change without the writer ever learning of the
+    /// lock (its commit-time probe runs once, and a lock that lands after it is never checked again) — the
+    /// interleaving behind write-skew cycles between range-locking readers and in-flight writers. Once the
+    /// writer is decided the same lock is granted, and a read under it sees the committed value: the refusal
+    /// is a conflict with the in-flight write, not a permanent block. Run for both locking modes and both
+    /// lock modes: a pessimistic writer holds a key lock rather than a staged intent, and a Shared acquire
+    /// places no intents of its own, so each combination is its own path through the acquire.
     /// </summary>
-    [Fact]
-    public async Task SharedRangeLockAcquiredAfterTheWrite_AbortsTheCommit()
+    [Theory]
+    [InlineData(KeyValueTransactionLocking.Optimistic, RangeLockMode.Exclusive)]
+    [InlineData(KeyValueTransactionLocking.Pessimistic, RangeLockMode.Exclusive)]
+    [InlineData(KeyValueTransactionLocking.Optimistic, RangeLockMode.Shared)]
+    [InlineData(KeyValueTransactionLocking.Pessimistic, RangeLockMode.Shared)]
+    public async Task RangeLockAttemptedAfterTheWrite_IsRefusedNamingTheWriter_AndTheWriteCommits(
+        KeyValueTransactionLocking locking, RangeLockMode mode)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
 
-        TransactionHandle writer = await StartSession(node, $"{KeySpace}-tx/shared", KeyValueTransactionLocking.Optimistic, ct);
+        TransactionHandle writer = await StartSession(node, $"{KeySpace}-tx/{mode}-{locking}", locking, ct);
 
         await WriteInSession(node, writer, InsideKey, "staged", ct);
-        await AcquireRangeLock(node, ForeignHolder(node), RangeLockMode.Shared, ct);
+
+        HLCTimestamp reader = ForeignHolder(node);
+        (KeyValueResponseType refused, HLCTimestamp holder) = await TryAcquireRangeLock(node, reader, mode, ct);
+
+        Assert.Equal(KeyValueResponseType.AlreadyLocked, refused);
+        Assert.Equal(writer.TransactionId, holder);
 
         (KeyValueResponseType commit, _) = await node.Kahuna.LocateAndCommitTransaction(writer, ct);
 
-        Assert.Equal(KeyValueResponseType.Aborted, commit);
-        await AssertAbsent(node, InsideKey, ct);
+        Assert.Equal(KeyValueResponseType.Committed, commit);
+        await AssertPresent(node, InsideKey, "staged", ct);
+
+        // The writer is decided: the same lock is granted now, and the value under it is the committed one.
+        await AcquireRangeLock(node, reader, mode, ct);
+        await AssertPresent(node, InsideKey, "staged", ct);
     }
 
     /// <summary>

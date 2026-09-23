@@ -80,7 +80,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
                 // background after the commit was reported. Reporting AlreadyLocked there would abort a caller
                 // that merely arrived inside that window, so the transient wait is surfaced instead and the
                 // acquire loop re-issues until the resolution lands.
-                if (IsAwaitingSettlement(message, entry.WriteIntent.TransactionId))
+                if (IsAwaitingSettlement(message.Key, entry.WriteIntent.TransactionId, message.ForeignDecisionHint))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
 
                 if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
@@ -117,19 +117,5 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         context.Logger.LogAssignedWriteIntent(message.Key, message.TransactionId);
 
         return KeyValueStaticResponses.LockedResponse;
-    }
-
-    /// <summary>
-    /// Whether the live write intent held by <paramref name="holder"/> only survives because its transaction's
-    /// resolution has not run yet. True when the holder owns a durable prepared intent on this key whose canonical
-    /// outcome is already terminal — locally recorded, routed from the anchor leader, or flipped on the intent
-    /// itself. An intent whose transaction is still undecided is a genuine concurrent writer and is not covered.
-    /// </summary>
-    private bool IsAwaitingSettlement(KeyValueRequest message, HLCTimestamp holder)
-    {
-        if (context.PreparedIntentStore?.Get(message.Key) is not { } intent || intent.TransactionId != holder)
-            return false;
-
-        return !DurableReadVisibility.IsUndecidedWriter(context, intent, message.ForeignDecisionHint);
     }
 }

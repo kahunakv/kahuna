@@ -169,7 +169,9 @@ Before read validation, the coordinator makes a batched conflict probe. It asks 
 1. undecided foreign writers on read-only keys; and
 2. foreign range or prefix locks covering keys this transaction writes.
 
-Probing active writers first avoids two transactions each waiting for the other's read validation. A missing probe response fails closed. The post-prepare range-lock check is important because a scan can acquire a predicate lock after a writer stages its value but before that writer decides.
+Probing active writers first avoids two transactions each waiting for the other's read validation. A missing probe response fails closed. The post-prepare range-lock check catches a write-fence lock (a split's or merge's quiesce) that landed after the writer staged its value, because that lock mode steps around write intents by design.
+
+A Shared or Exclusive range lock does not step around them. Its acquire is refused, with the holder's transaction id, while any covered key carries a live write intent of another transaction; when that transaction is already decided but not yet settled, the acquire waits instead. This is the reader-side half of strict two-phase locking. Without it a reader whose lock landed between the writer's probe and its decision read the value from before the write while the writer committed anyway, and a reader that then wrote a key the writer had read produced a write-skew cycle that no serial order explains. The write-path refusal (a mutation under a foreign range lock) is the other half, so a lock and a write that overlap on a key can never both succeed, whichever arrives first.
 
 Range locks are leader-local, in-memory leases. The coordinator renews them and reacquires them after a participant leader change when the live session can continue. If the coordinator itself is lost, its session and lock list disappear and the leases eventually expire. The durable validation and decision machinery remains the backstop; range locks should not be mistaken for a globally replicated predicate-lock manager.
 

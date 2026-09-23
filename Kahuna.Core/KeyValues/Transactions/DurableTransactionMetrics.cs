@@ -209,6 +209,18 @@ internal static class DurableTransactionMetrics
             description: "Transactions aborted because a foreign range lock covered one of their written keys.");
 
     /// <summary>
+    /// Range-lock acquires (Shared or Exclusive) refused because a covered key carried a live write intent of
+    /// another transaction. This is the reader-side half of strict two-phase locking: a lock that lands over
+    /// an in-flight write would read the value from before that write while the writer commits anyway, and
+    /// nothing after the writer's commit-time probe would ever see the lock. A sustained rate means readers
+    /// contend with in-flight writers on the same keys, not a defect.
+    /// </summary>
+    internal static readonly Counter<long> RangeLockAcquireIntentConflicts =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.range_lock_acquire_intent_conflicts",
+            description: "Range-lock acquires refused because a covered key carried another transaction's live write intent.");
+
+    /// <summary>
     /// Transactions aborted because a commit-conflict probe answered "staged base compare failed". The local
     /// coordinator no longer asks that check (the prepare-apply fence below owns it); a nonzero count means a
     /// mixed-version remote peer still probes the retired way, or the defensive branch caught an unexpected

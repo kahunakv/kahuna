@@ -23,7 +23,9 @@ public enum KeyValueConflictChecks
     /// A foreign range lock covering the key, exclusive or shared — a write needs exclusive on
     /// <c>[K,K]</c>, which is incompatible with both modes. This is the decide-time fence applied to a
     /// transaction's write set, catching a range lock acquired after the write was staged and therefore
-    /// invisible to the write-time fence.
+    /// invisible to the write-time fence. A Shared or Exclusive acquire is refused over a key that carries a
+    /// live foreign write intent, so this fence is reached by a write-fence lock (a split's quiesce), which
+    /// steps around intents by design, and otherwise only as a backstop.
     /// </summary>
     ForeignRangeLock = 1 << 1,
 

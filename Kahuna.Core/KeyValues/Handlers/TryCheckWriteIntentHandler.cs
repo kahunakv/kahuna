@@ -11,7 +11,10 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// batched probe can ask different questions of different keys: a transaction's read set asks about concurrent
 /// write intents (the write-skew guard below), while its write set asks whether a foreign range lock covers the
 /// key — the fence that catches a range lock acquired after the write was staged, which the write-time fence in
-/// TrySetHandler/TryDeleteHandler cannot see.
+/// TrySetHandler/TryDeleteHandler cannot see. A Shared or Exclusive acquire is itself refused over a key that
+/// carries a live foreign write intent, so for those modes this fence is a backstop; a WriteFence (a split's or
+/// merge's quiesce) steps around intents by design, and this probe is what makes the fence bite on a writer
+/// that staged before it landed.
 ///
 /// Checks whether a key carries a live write intent from a transaction other than the caller.
 /// A positive result indicates that a concurrent transaction is preparing or has prepared a

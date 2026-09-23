@@ -4,6 +4,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -549,6 +550,22 @@ internal abstract class BaseHandler
             context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
             revisionsToRemove.Clear();
         }
+    }
+
+    /// <summary>
+    /// Whether the live write intent held by <paramref name="holder"/> on <paramref name="key"/> only survives
+    /// because its transaction's resolution has not run yet. True when the holder owns a durable prepared intent
+    /// on the key whose canonical outcome is already terminal — locally recorded, routed from the anchor leader,
+    /// or flipped on the intent itself. An intent whose transaction is still undecided is a genuine concurrent
+    /// writer and is not covered. Under deferred settlement the decision is reported before the intent is
+    /// resolved, so a lock request that arrives inside that window is told to wait rather than refused.
+    /// </summary>
+    protected bool IsAwaitingSettlement(string key, HLCTimestamp holder, ForeignDecisionHint hint)
+    {
+        if (context.PreparedIntentStore?.Get(key) is not { } intent || intent.TransactionId != holder)
+            return false;
+
+        return !DurableReadVisibility.IsUndecidedWriter(context, intent, hint);
     }
 
     /// <summary>
