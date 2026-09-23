@@ -21,10 +21,16 @@ public sealed class TestEmbeddedKahunaCluster
 
     private readonly ILoggerFactory loggerFactory;
 
+    private readonly ITestOutputHelper output;
+
     public TestEmbeddedKahunaCluster(ITestOutputHelper outputHelper)
     {
+        output = outputHelper;
         loggerFactory = TestLogFactory.Create(outputHelper, quietKommander: true);
     }
+
+    /// <summary>Marks a phase of a run in the test output, so a run that hits its deadline names the phase it was in.</summary>
+    private void Phase(string name) => output.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] {name}");
 
     internal static EmbeddedKahunaOptions ClusterOptions() => new()
     {
@@ -71,8 +77,10 @@ public sealed class TestEmbeddedKahunaCluster
         {
             using CancellationTokenSource cts = new(RunDeadline);
 
+            Phase("create cluster");
             await using EmbeddedKahunaCluster cluster = await EmbeddedKahunaCluster.CreateInMemoryAsync(3, ClusterOptions(), loggerFactory, cts.Token);
 
+            Phase("write failover/before");
             await CommitWriteAsync(cluster.GetNode(0), "failover/before", "before", cts.Token);
 
             int stopped = await cluster.GetLeaderIndexAsync(0, cts.Token);
@@ -81,15 +89,19 @@ public sealed class TestEmbeddedKahunaCluster
             // data-partition failover too, not only a meta-partition one.
             string key = await PickKeyLedByAsync(cluster, stopped, cts.Token);
 
+            Phase($"stop node {stopped} (meta leader); key {key}");
             await cluster.StopNodeAsync(stopped);
             Assert.False(cluster.IsRunning(stopped));
 
+            Phase("wait for the new meta leader");
             int newLeader = await cluster.GetLeaderIndexAsync(0, cts.Token);
             Assert.NotEqual(stopped, newLeader);
 
             int writer = (stopped + 1) % cluster.NodeCount;
+            Phase($"write {key} through node {writer}");
             await CommitWriteAsync(cluster.GetNode(writer), key, "after", cts.Token);
 
+            Phase($"restart node {stopped}");
             await cluster.RestartNodeAsync(stopped, cts.Token);
             Assert.True(cluster.IsRunning(stopped));
 
@@ -97,13 +109,18 @@ public sealed class TestEmbeddedKahunaCluster
 
             // The restarted node started with an empty log: the values below reach it only through
             // replication from the other members.
+            Phase("read through the restarted node");
             Assert.Equal("after", await ReadAsync(restarted, key, cts.Token));
             Assert.Equal("before", await ReadAsync(restarted, "failover/before", cts.Token));
+            Phase("wait for the restarted node's local replica");
             await WaitForLocalReplicaAsync(restarted, key, "after", cts.Token);
 
             // The restarted node takes writes again.
+            Phase("write through the restarted node");
             await CommitWriteAsync(restarted, "failover/after-restart", "again", cts.Token);
+            Phase("read the restarted node's write through the writer");
             Assert.Equal("again", await ReadAsync(cluster.GetNode(writer), "failover/after-restart", cts.Token));
+            Phase("done");
         }, RunDeadline + TimeSpan.FromSeconds(30));
     }
 
