@@ -11,7 +11,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>Kahuna.Shared</PackageId>
-        <Version>1.9.6</Version>
+        <Version>1.9.7</Version>
         <Description>Shared libraries for Kahuna: Distributed locks and reliable key-value store </Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Andres Gutierrez</Company>

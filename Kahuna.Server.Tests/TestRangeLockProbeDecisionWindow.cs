@@ -114,22 +114,65 @@ public sealed class TestRangeLockProbeDecisionWindow
         string bucket = $"rlw-{runId}-a";
         string key = bucket + "/k";
 
-        // Keys route by their parent bucket, so the candidates vary the bucket, not the leaf.
+        await RunWindowScenario(node, bucket, key, CompanionOnAnotherPartition(node, runId, key), ct);
+    }
+
+    /// <summary>
+    /// The absent-key form of the cycle, on the one-phase path: neither key exists. T1 reads <c>b</c> and finds it
+    /// absent, then creates the key; inside T1's window T2 reads the key, then creates <c>b</c>. If both commit, each
+    /// missed the other's insert. This is the shape Elle reported in Caraxes <c>append-rw-contended</c>: T1 appended
+    /// to list 549 and read list 548 as absent, T2 created 548 and read 549 as absent, and both committed.
+    ///
+    /// <para>A read of an absent key takes the same Shared point lock, but the key has no resident entry until a
+    /// writer plants one, so this is the case where the acquire must find the writer's intent on the key it is
+    /// creating.</para>
+    /// </summary>
+    [Fact]
+    public async Task SharedLockInsideProbeDecisionWindow_OnePhase_AbsentKeys_IsNotGrantedOverAnInsertThatCommits()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        string runId = Guid.NewGuid().ToString("N")[..8];
+        string bucket = $"rlw-{runId}-a";
+        string key = bucket + "/k";
+
+        await RunWindowScenario(node, bucket, key, companion: null, ct, absentKeys: true);
+    }
+
+    /// <summary>The absent-key form of the cycle on the 2PC path. See the one-phase form.</summary>
+    [Fact]
+    public async Task SharedLockInsideProbeDecisionWindow_TwoPhase_AbsentKeys_IsNotGrantedOverAnInsertThatCommits()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        string runId = Guid.NewGuid().ToString("N")[..8];
+        string bucket = $"rlw-{runId}-a";
+        string key = bucket + "/k";
+
+        await RunWindowScenario(node, bucket, key, CompanionOnAnotherPartition(node, runId, key), ct, absentKeys: true);
+    }
+
+    /// <summary>A read value for a failure message: quoted when present, <c>absent</c> when the key did not exist.</summary>
+    private static string Shown(string? value) => value is null ? "absent" : $"'{value}'";
+
+    /// <summary>
+    /// A second key on a different partition from <paramref name="key"/>. Written by T1, it keeps the transaction off
+    /// the one-phase bundle. Keys route by their parent bucket, so the candidates vary the bucket, not the leaf.
+    /// </summary>
+    private static string CompanionOnAnotherPartition(EmbeddedKahunaNode node, string runId, string key)
+    {
         int keyPartition = node.Raft.GetPartitionKey(key);
-        string? companion = null;
         for (int i = 0; i < 256; i++)
         {
             string candidate = $"rlw-{runId}-b{i}/k";
             if (node.Raft.GetPartitionKey(candidate) != keyPartition)
-            {
-                companion = candidate;
-                break;
-            }
+                return candidate;
         }
 
-        Assert.NotNull(companion);
-
-        await RunWindowScenario(node, bucket, key, companion, ct);
+        Assert.Fail($"no key on a partition other than {keyPartition} among 256 candidates");
+        return "";
     }
 
     /// <summary>
@@ -165,18 +208,24 @@ public sealed class TestRangeLockProbeDecisionWindow
     /// Correct outcomes: T2 is refused or blocked in the window, or reads T1's value, or one of the two aborts.
     /// The defect: both commit, T2 read <paramref name="key"/> from before T1, and T1 read <c>b</c> from before T2
     /// — a G2 cycle no serial order explains.
+    ///
+    /// <para>With <paramref name="absentKeys"/>, <paramref name="key"/> and <c>b</c> are not seeded: "from before"
+    /// then means "absent", and each write creates its key.</para>
     /// </summary>
     private static async Task RunWindowScenario(
         EmbeddedKahunaNode node, string bucket, string key, string? companion, CancellationToken ct,
-        bool readInsideWindow = true)
+        bool readInsideWindow = true, bool absentKeys = false)
     {
         IKahuna kahuna = node.Kahuna;
 
         // Same bucket as the key, so it adds no partition to the write sets.
         string other = bucket + "/b";
 
-        await Seed(kahuna, key, "1", ct);
-        await Seed(kahuna, other, "1", ct);
+        if (!absentKeys)
+        {
+            await Seed(kahuna, key, "1", ct);
+            await Seed(kahuna, other, "1", ct);
+        }
         if (companion is not null)
             await Seed(kahuna, companion, "1", ct);
 
@@ -198,8 +247,8 @@ public sealed class TestRangeLockProbeDecisionWindow
         (KeyValueResponseType t1ReadType, ReadOnlyKeyValueEntry? t1ReadEntry) = await kahuna.LocateAndTryGetValue(
             t1.TransactionId, other, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
             coordinatorKey: t1.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-        Assert.Equal(KeyValueResponseType.Get, t1ReadType);
-        string t1SawOther = Encoding.UTF8.GetString(t1ReadEntry!.Value!);
+        Assert.Equal(absentKeys ? KeyValueResponseType.DoesNotExist : KeyValueResponseType.Get, t1ReadType);
+        string? t1SawOther = t1ReadEntry?.Value is null ? null : Encoding.UTF8.GetString(t1ReadEntry.Value);
 
         foreach (string written in companion is null ? [key] : new[] { key, companion })
         {
@@ -298,7 +347,8 @@ public sealed class TestRangeLockProbeDecisionWindow
         // T2 continues only if it is still alive and read something; T1 is decided, so its locks are gone.
         KeyValueResponseType? t2WriteType = null;
         KeyValueResponseType? t2CommitType = null;
-        if (reader.LockType == KeyValueResponseType.Locked && reader.ReadType == KeyValueResponseType.Get)
+        if (reader.LockType == KeyValueResponseType.Locked
+            && reader.ReadType is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist)
         {
             (KeyValueResponseType t2LockB, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 t2.TransactionId, other, 0, KeyValueDurability.Persistent, ct,
@@ -330,11 +380,16 @@ public sealed class TestRangeLockProbeDecisionWindow
         TestContext.Current.TestOutputHelper?.WriteLine(
             $"partitions key={node.Raft.GetPartitionKey(key)} anchor={node.Raft.GetPartitionKey(t1.CoordinatorKey)} " +
             $"companion={(companion is null ? "-" : node.Raft.GetPartitionKey(companion).ToString())}; " +
-            $"window={readInsideWindow} hookRan={hookRan} reader: {reader}; T1: {commitType}; " +
+            $"window={readInsideWindow} absent={absentKeys} hookRan={hookRan} reader: {reader}; T1: {commitType}; " +
             $"T2 write: {t2WriteType?.ToString() ?? "-"}, commit: {t2CommitType?.ToString() ?? "-"}");
 
-        Assert.False(t1Committed && t2Committed && reader.ReadValue == "1" && t1SawOther == "1",
-            $"write skew: T1 read {other}='{t1SawOther}' and wrote {key}; T2 read {key}='{reader.ReadValue}' inside " +
+        // "Missed the other's write": the seeded value, or no value at all when the keys started absent.
+        string? before = absentKeys ? null : "1";
+        bool t2MissedT1 = reader.ReadType is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist
+                          && reader.ReadValue == before;
+
+        Assert.False(t1Committed && t2Committed && t2MissedT1 && t1SawOther == before,
+            $"write skew: T1 read {other}={Shown(t1SawOther)} and wrote {key}; T2 read {key}={Shown(reader.ReadValue)} inside " +
             $"T1's probe→decision window and wrote {other}; both committed. Reader: {reader}. " +
             $"T1: {commitType}. T2 write: {t2WriteType?.ToString() ?? "-"}, commit: {t2CommitType?.ToString() ?? "-"}.");
     }
