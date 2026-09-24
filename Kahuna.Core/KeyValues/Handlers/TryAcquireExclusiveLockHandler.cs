@@ -69,7 +69,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             if (entry.WriteIntent.TransactionId == message.TransactionId)
             {
                 entry.WriteIntent.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
-                return KeyValueStaticResponses.LockedResponse;
+                return new(KeyValueResponseType.Locked, PointLockBase.Observe(entry, currentTime));
             }
 
             // Check if the lease is still active
@@ -124,6 +124,12 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             entry = resolvedEntry!;
         }
 
+        // Converge a head parked behind an in-flight operation before the base is observed: a lock that
+        // reported a stale resident head as its base would be refused at commit against the committed history
+        // the parked head carries, even though nothing wrote over it.
+        if (entry.PendingCommittedHead is not null)
+            TryDrainPendingCommittedHead(message.Key, entry, currentTime);
+
         entry.WriteIntent = new()
         {
             TransactionId = message.TransactionId,
@@ -134,6 +140,9 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         
         context.Logger.LogAssignedWriteIntent(message.Key, message.TransactionId);
 
-        return KeyValueStaticResponses.LockedResponse;
+        // The grant answers the committed base it protects, so the coordinator can fold the lock into the
+        // transaction's read set and refuse a later write of the key if the exclusion was lost to a leader
+        // change and another transaction committed over that base.
+        return new(KeyValueResponseType.Locked, PointLockBase.Observe(entry, currentTime));
     }
 }

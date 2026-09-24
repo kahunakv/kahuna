@@ -907,7 +907,7 @@ internal sealed class ScriptTransactionExecutor
             {
                 if (ephemeralLocksToAcquire.Count > 0)
                 {
-                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) = await manager.LocateAndTryAcquireExclusiveLock(
+                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _, long baseRevision) = await manager.LocateAndTryAcquireExclusiveLockObserved(
                         context.TransactionId,
                         OnlyKey(ephemeralLocksToAcquire),
                         timeout + ExtraLockingDelay,
@@ -919,18 +919,20 @@ internal sealed class ScriptTransactionExecutor
                         throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
 
                     context.LocksAcquired.Add((keyName, durability));
+                    RecordLockBase(context, keyName, durability, baseRevision);
                     return;
                 }
 
                 if (persistentLocksToAcquire.Count > 0)
                 {
-                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _) =
-                        await manager.LocateAndTryAcquireExclusiveLock(context.TransactionId, OnlyKey(persistentLocksToAcquire), timeout + ExtraLockingDelay, KeyValueDurability.Persistent, ctsToken);
+                    (KeyValueResponseType acquireResponse, string keyName, KeyValueDurability durability, _, long baseRevision) =
+                        await manager.LocateAndTryAcquireExclusiveLockObserved(context.TransactionId, OnlyKey(persistentLocksToAcquire), timeout + ExtraLockingDelay, KeyValueDurability.Persistent, ctsToken);
 
                     if (acquireResponse != KeyValueResponseType.Locked)
                         throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
 
                     context.LocksAcquired.Add((keyName, durability));
+                    RecordLockBase(context, keyName, durability, baseRevision);
                     return;
                 }
             }
@@ -953,20 +955,40 @@ internal sealed class ScriptTransactionExecutor
                 return byKey != 0 ? byKey : left.Durability.CompareTo(right.Durability);
             });
 
-            List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocks(context.TransactionId, keysToLock, ctsToken);
+            List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> lockResponses = await manager.LocateAndTryAcquireManyExclusiveLocksObserved(context.TransactionId, keysToLock, ctsToken);
 
-            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability, _) in lockResponses)
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability, _, long baseRevision) in lockResponses)
             {
-                if (response == KeyValueResponseType.Locked)
-                    context.LocksAcquired.Add((keyName, durability));
+                if (response != KeyValueResponseType.Locked)
+                    continue;
+
+                context.LocksAcquired.Add((keyName, durability));
+                RecordLockBase(context, keyName, durability, baseRevision);
             }
 
-            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability, _) in lockResponses)
+            foreach ((KeyValueResponseType response, string keyName, KeyValueDurability durability, _, _) in lockResponses)
             {
                 if (response != KeyValueResponseType.Locked)
                     throw new KahunaAbortedException("Failed to acquire lock: " + keyName + " " + durability);
             }
         }
+    }
+
+    /// <summary>
+    /// Records the committed base a granted point lock protects as a read observation of the key, so a later
+    /// write of the key inside the script carries it as its validated base. A pessimistic script never records
+    /// its reads (its locks stand in for read validation), so without this a lock-then-write is blind, and a
+    /// lock lost to a leader change lets the write commit a value computed from a base another transaction
+    /// already moved. The first observation of a key is kept.
+    /// </summary>
+    private static void RecordLockBase(ScriptTransactionContext context, string key, KeyValueDurability durability, long baseRevision)
+    {
+        KeyValueTransactionReadKey? observation = PointLockBase.ToObservation(key, durability, baseRevision);
+        if (observation is null)
+            return;
+
+        context.ReadKeys ??= [];
+        context.ReadKeys.TryAdd((key, durability), observation);
     }
 
     /// <summary>

@@ -217,6 +217,30 @@ public sealed partial class KahunaManager
         return keyValues.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken, coordinatorKey, operationId);
     }
 
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> LocateAndTryAcquireExclusiveLockObserved(
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        return keyValues.LocateAndTryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+    }
+
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> LocateAndTryAcquireManyExclusiveLocksObserved(
+        HLCTimestamp transactionId,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        return keyValues.LocateAndTryAcquireManyExclusiveLocksObserved(transactionId, keys, cancellationToken, coordinatorKey, operationId);
+    }
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryReleaseExclusiveLock request.
     /// </summary>

@@ -206,7 +206,7 @@ public sealed class TestInterNodeTransportMustRetry
     [Fact]
     public async Task TryAcquireExclusiveLock_LeaderUnreachable_ReturnsMustRetryWithTheKey()
     {
-        (KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder) =
+        (KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision) =
             await BuildTransport().TryAcquireExclusiveLock(
                 UnreachableNode, TransactionId, "key", 1000, KeyValueDurability.Persistent, TestContext.Current.CancellationToken);
 
@@ -214,6 +214,7 @@ public sealed class TestInterNodeTransportMustRetry
         Assert.Equal("key", key);
         Assert.Equal(KeyValueDurability.Persistent, durability);
         Assert.Equal(HLCTimestamp.Zero, holder);
+        Assert.Equal(PointLockBase.None, baseRevision);
     }
 
     [Fact]
@@ -225,7 +226,7 @@ public sealed class TestInterNodeTransportMustRetry
             ("b", 1000, KeyValueDurability.Ephemeral)
         ];
 
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses = [];
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> responses = [];
 
         await BuildTransport().TryAcquireNodeExclusiveLocks(
             UnreachableNode, TransactionId, keys, new Lock(), responses, TestContext.Current.CancellationToken);
@@ -237,6 +238,7 @@ public sealed class TestInterNodeTransportMustRetry
             Assert.Equal(KeyValueResponseType.MustRetry, responses[i].type);
             Assert.Equal(keys[i].key, responses[i].key);
             Assert.Equal(keys[i].durability, responses[i].durability);
+            Assert.Equal(PointLockBase.None, responses[i].baseRevision);
         }
     }
 

@@ -69,7 +69,7 @@ internal sealed class RoutedLockOperations
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> LocateAndTryAcquireExclusiveLock(
         HLCTimestamp transactionId,
         string key,
         int expiresMs,
@@ -80,13 +80,13 @@ internal sealed class RoutedLockOperations
     )
     {
         if (ReservedKeys.IsReserved(key))
-            return Task.FromResult((KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero));
+            return Task.FromResult((KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero, PointLockBase.None));
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken);
         if (routing is RegistrationRouting.Malformed)
-            return Task.FromResult((KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero));
+            return Task.FromResult((KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero, PointLockBase.None));
 
         return RegisterAndAcquireExclusiveLock(transactionId, coordinatorKey, operationId, key, expiresMs, durability, cancelationToken);
     }
@@ -94,9 +94,11 @@ internal sealed class RoutedLockOperations
     /// <summary>
     /// Register-remote wrapper for a transaction-scoped exclusive point-lock acquire: registers the
     /// operation and, on a confirmed lock, records the held point lock into the coordinator-owned lock
-    /// set. A retry under the same operation id reports the lock as already held by this transaction.
+    /// set together with the committed base the grant protects, which folds into the read set as the
+    /// observation a later write of the key is validated against. A retry under the same operation id
+    /// reports the lock as already held by this transaction.
     /// </summary>
-    private async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RegisterAndAcquireExclusiveLock(
+    private async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> RegisterAndAcquireExclusiveLock(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
@@ -109,32 +111,34 @@ internal sealed class RoutedLockOperations
                 // Replay the exact cached outcome: a first attempt that failed (e.g. AlreadyLocked/Aborted)
                 // must not resurface as a successful acquire. The holder is only meaningful on a self-held
                 // lock, so it is the transaction id on success and unknown (Zero) on a cached failure.
+                // The base was folded by the first completion, so the replay carries none.
                 participantOperationCache.Remove(transactionId, operationId);
-                return (cachedType, key, durability, cachedType == KeyValueResponseType.Locked ? transactionId : HLCTimestamp.Zero);
+                return (cachedType, key, durability, cachedType == KeyValueResponseType.Locked ? transactionId : HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
-                    return ((KeyValueResponseType, string, KeyValueDurability, HLCTimestamp))recovered;
-                return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+                    return ((KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long))recovered;
+                return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedCapacity:
-                return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+                return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedSessionBudget:
-                return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero);
+                return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedSessionClosed:
-                return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero);
+                return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedDuplicate:
-                return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero);
+                return (KeyValueResponseType.Errored, key, durability, HLCTimestamp.Zero, PointLockBase.None);
         }
 
         KeyValueResponseType type;
         string resultKey;
         KeyValueDurability resultDurability;
         HLCTimestamp holder;
+        long baseRevision;
 
         // This frame is the registration's only completer, so a throw from the work must release it.
         try
         {
             using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-                (type, resultKey, resultDurability, holder) =
+                (type, resultKey, resultDurability, holder, baseRevision) =
                     await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
         }
         catch
@@ -145,15 +149,19 @@ internal sealed class RoutedLockOperations
 
         bool acquired = type == KeyValueResponseType.Locked;
 
-        (KeyValueResponseType, string, KeyValueDurability, HLCTimestamp) response = (type, resultKey, resultDurability, holder);
+        (KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long) response = (type, resultKey, resultDurability, holder, baseRevision);
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPointLock = acquired ? key : null;
+        // The grant's committed base folds into the read set: once this transaction writes the key it becomes
+        // the write's validated base, so a commit over a base another transaction moved (possible only when the
+        // lock was lost to a leader change) is refused instead of silently replacing that commit.
+        payload.Read = acquired ? PointLockBase.ToObservation(key, durability, baseRevision) : null;
         payload.Durability = durability;
         payload.CachedType = type;
 
         if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload))
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
         return response;
     }
@@ -263,7 +271,7 @@ internal sealed class RoutedLockOperations
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> LocateAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken cancelationToken,
@@ -279,12 +287,12 @@ internal sealed class RoutedLockOperations
         if (routing is RegistrationRouting.Legacy)
             return locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken);
         if (routing is RegistrationRouting.Malformed)
-            return Task.FromResult(keys.Select(k => (KeyValueResponseType.InvalidInput, k.key, k.durability, HLCTimestamp.Zero)).ToList());
+            return Task.FromResult(keys.Select(k => (KeyValueResponseType.InvalidInput, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList());
 
         return RegisterAndTryAcquireManyExclusiveLocks(transactionId, coordinatorKey, operationId, keys, cancelationToken);
     }
 
-    private async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> RegisterAndTryAcquireManyExclusiveLocks(
+    private async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> RegisterAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
     {
@@ -295,19 +303,19 @@ internal sealed class RoutedLockOperations
         {
             case OperationRegistrationOutcome.AlreadyPending:
                 if (await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId) is { } recovered)
-                    return (List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>)recovered;
-                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+                    return (List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)>)recovered;
+                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedCapacity:
-                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedSessionBudget:
-                return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+                return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedSessionClosed:
-                return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+                return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedDuplicate:
-                return keys.Select(k => (KeyValueResponseType.Errored, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+                return keys.Select(k => (KeyValueResponseType.Errored, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
         }
 
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> responses;
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> responses;
 
         // This frame is the registration's only completer, so a throw from the work must release it.
         try
@@ -322,17 +330,27 @@ internal sealed class RoutedLockOperations
             throw;
         }
 
-        // Fold every confirmed Locked key as a held point lock so commit/rollback release it. A transient
-        // (MustRetry) key folds nothing; the caller resends only the transient subset as a fresh operation.
+        // Fold every confirmed Locked key as a held point lock so commit/rollback release it, together with
+        // the committed base each grant protects (the read-set observation a later write of the key is
+        // validated against). A transient (MustRetry) key folds nothing; the caller resends only the
+        // transient subset as a fresh operation.
         List<(string, KeyValueDurability)> acquired = [];
-        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp _) in responses)
+        List<KeyValueTransactionReadKey>? observations = null;
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp _, long baseRevision) in responses)
         {
-            if (type == KeyValueResponseType.Locked)
-                acquired.Add((key, durability));
+            if (type != KeyValueResponseType.Locked)
+                continue;
+
+            acquired.Add((key, durability));
+
+            KeyValueTransactionReadKey? observation = PointLockBase.ToObservation(key, durability, baseRevision);
+            if (observation is not null)
+                (observations ??= new(responses.Count)).Add(observation);
         }
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPointLocks = acquired.Count > 0 ? acquired : null;
+        payload.ReadObservations = observations;
         // A batch that acquired at least one lock completes terminally so its held locks fold. A
         // batch that acquired nothing must NOT be cached as a terminal success — that would let a
         // same-id retry replay the false success forever instead of re-registering. Mark it
@@ -340,7 +358,7 @@ internal sealed class RoutedLockOperations
         payload.CachedType = acquired.Count > 0 ? KeyValueResponseType.Locked : KeyValueResponseType.MustRetry;
 
         if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, responses, payload))
-            return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+            return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
 
         return responses;
     }

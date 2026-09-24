@@ -1191,22 +1191,24 @@ internal sealed class KeyValueLocator
     /// <param name="durability"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
+    /// <summary>Acquires a point lock on the key's leader; the fifth element is the committed base the granted
+    /// lock protects (<see cref="PointLockBase"/>), or <see cref="PointLockBase.None"/> when it was not granted.</summary>
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancelationToken)
     {
         if (string.IsNullOrEmpty(key))
-            return (KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero);
+            return (KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
         int partitionId = RouteKey(key);
 
         if (!raft.Joined)
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
         if (await ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
-            return await manager.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
+            return await manager.TryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability);
 
         string? leader = await TryWaitForLeader(partitionId, cancelationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
         logger.LogAcquireLockKeyValueRedirected(key, partitionId, leader);
 
@@ -1266,7 +1268,7 @@ internal sealed class KeyValueLocator
     /// <param name="keys"></param>
     /// <param name="cancelationToken"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> LocateAndTryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken cancelationToken
@@ -1281,12 +1283,12 @@ internal sealed class KeyValueLocator
         foreach ((string key, int expiresMs, KeyValueDurability durability) key in keys)
         {
             if (string.IsNullOrEmpty(key.key))
-                return [(KeyValueResponseType.InvalidInput, key.key, key.durability, HLCTimestamp.Zero)];
+                return [(KeyValueResponseType.InvalidInput, key.key, key.durability, HLCTimestamp.Zero, PointLockBase.None)];
 
             int partitionId = RouteKey(key.key);
             string? leader = await TryWaitForLeader(partitionId, leaderByPartition, cancelationToken);
             if (leader is null)
-                return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero))];
+                return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None))];
 
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, int expiresMs, KeyValueDurability durability)>? list))
                 list.Add(key);
@@ -1296,7 +1298,7 @@ internal sealed class KeyValueLocator
 
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(keys.Count);
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses = new(keys.Count);
 
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys) in acquisitionPlan)
@@ -1314,7 +1316,7 @@ internal sealed class KeyValueLocator
         Dictionary<int, string> leaderByPartition,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> responses,
         CancellationToken cancellationToken
     )
     {
@@ -1327,18 +1329,18 @@ internal sealed class KeyValueLocator
                 lock (lockSync)
                 {
                     foreach ((string key, int _, KeyValueDurability durability) in xkeys)
-                        responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero));
+                        responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None));
                 }
 
                 return;
             }
 
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> acquireResponses = await manager.TryAcquireManyExclusiveLocks(transactionId, xkeys);
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> acquireResponses = await manager.TryAcquireManyExclusiveLocksObserved(transactionId, xkeys);
 
             lock (lockSync)
             {
-                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder) item in acquireResponses)
-                    responses.Add((item.type, item.key, item.durability, item.holder));
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision) item in acquireResponses)
+                    responses.Add((item.type, item.key, item.durability, item.holder, item.baseRevision));
             }
 
             return;

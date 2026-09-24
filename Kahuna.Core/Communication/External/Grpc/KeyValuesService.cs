@@ -961,7 +961,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         using YieldingIntentPolicyScope.Scope lockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        (KeyValueResponseType type, _, _, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireExclusiveLock(
+        (KeyValueResponseType type, _, _, HLCTimestamp holder, long baseRevision) = await keyValues.LocateAndTryAcquireExclusiveLockObserved(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
             request.ExpiresMs,
@@ -971,12 +971,16 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
+        bool baseObserved = baseRevision != PointLockBase.None;
+
         return new()
         {
             Type = (GrpcKeyValueResponseType)type,
             HolderTransactionIdNode     = holder.N,
             HolderTransactionIdPhysical = holder.L,
-            HolderTransactionIdCounter  = holder.C
+            HolderTransactionIdCounter  = holder.C,
+            BaseObserved = baseObserved,
+            BaseRevision = baseObserved ? baseRevision : 0
         };
     }
     
@@ -1044,7 +1048,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksCore(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
         using YieldingIntentPolicyScope.Scope manyLockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocks(
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocksObserved(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetRequestLocksItems(request.Items),
             context.CancellationToken
@@ -1083,12 +1087,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>An enumerable collection of gRPC response items corresponding to the provided key-value responses.</returns>
     private static void AddResponseLocksItems(
         RepeatedField<GrpcTryAcquireManyExclusiveLocksResponseItem> target,
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses
     )
     {
         ReserveItemCapacity(target, responses.Count);
 
-        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability, HLCTimestamp holder) in responses)
+        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision) in responses)
+        {
+            bool baseObserved = baseRevision != PointLockBase.None;
+
             target.Add(new GrpcTryAcquireManyExclusiveLocksResponseItem
             {
                 Type = (GrpcKeyValueResponseType)response,
@@ -1096,8 +1103,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Durability = (GrpcKeyValueDurability)durability,
                 HolderTransactionIdNode     = holder.N,
                 HolderTransactionIdPhysical = holder.L,
-                HolderTransactionIdCounter  = holder.C
+                HolderTransactionIdCounter  = holder.C,
+                BaseObserved = baseObserved,
+                BaseRevision = baseObserved ? baseRevision : 0
             });
+        }
     }
 
     /// <summary>

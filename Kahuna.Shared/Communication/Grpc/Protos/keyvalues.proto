@@ -415,6 +415,10 @@ message GrpcTryAcquireExclusiveLockResponse {
   int32  HolderTransactionIdNode          = 3;
   int64  HolderTransactionIdPhysical      = 4;
   uint32 HolderTransactionIdCounter       = 5;
+  // The committed base the granted lock protects: set only on a Locked answer that observed the key.
+  bool   BaseObserved                     = 6;
+  // The key's committed revision at the grant, or -1 when the key was absent.
+  int64  BaseRevision                     = 7;
 }
 
 message GrpcTryCheckWriteIntentRequest {
@@ -511,6 +515,10 @@ message GrpcTryAcquireManyExclusiveLocksResponseItem {
   int32  HolderTransactionIdNode          = 4;
   int64  HolderTransactionIdPhysical      = 5;
   uint32 HolderTransactionIdCounter       = 6;
+  // The committed base the granted lock protects: set only on a Locked item that observed the key.
+  bool   BaseObserved                     = 7;
+  // The key's committed revision at the grant, or -1 when the key was absent.
+  int64  BaseRevision                     = 8;
 }
 
 message GrpcTryReleaseManyExclusiveLocksRequest {

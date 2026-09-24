@@ -147,7 +147,25 @@ internal sealed partial class KeyValuesManager
 
 
 
-    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(
+        HLCTimestamp transactionId,
+        string key,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancelationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        (KeyValueResponseType type, string resultKey, KeyValueDurability resultDurability, HLCTimestamp holder, _) =
+            await routedLocks.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancelationToken, coordinatorKey, operationId);
+
+        return (type, resultKey, resultDurability, holder);
+    }
+
+    /// <summary><see cref="LocateAndTryAcquireExclusiveLock"/> that also answers the committed base the granted
+    /// lock protects (<see cref="PointLockBase"/>).</summary>
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> LocateAndTryAcquireExclusiveLockObserved(
         HLCTimestamp transactionId,
         string key,
         int expiresMs,
@@ -169,7 +187,27 @@ internal sealed partial class KeyValuesManager
     ) =>
         routedLocks.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
 
-    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys,
+        CancellationToken cancelationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> observed =
+            await routedLocks.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancelationToken, coordinatorKey, operationId);
+
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(observed.Count);
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, _) in observed)
+            responses.Add((type, key, durability, holder));
+
+        return responses;
+    }
+
+    /// <summary><see cref="LocateAndTryAcquireManyExclusiveLocks"/> that also answers, per key, the committed base
+    /// the granted lock protects (<see cref="PointLockBase"/>).</summary>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> LocateAndTryAcquireManyExclusiveLocksObserved(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken cancelationToken,

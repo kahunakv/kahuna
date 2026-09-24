@@ -879,7 +879,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     /// <param name="durability">The desired durability level of the lock, either ephemeral or persistent.</param>
     /// <param name="cancellationToken">A token to observe cancellation requests for the operation.</param>
     /// <returns>A tuple containing the type of the response, the key, and the lock's durability level.</returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> TryAcquireExclusiveLock(
         string node,
         HLCTimestamp transactionId,
         string key,
@@ -903,13 +903,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireExclusiveLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero);
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
 
-
         HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
-        return ((KeyValueResponseType)remoteResponse.Type, key, durability, holder);
+        long baseRevision = remoteResponse.BaseObserved ? remoteResponse.BaseRevision : PointLockBase.None;
+        return ((KeyValueResponseType)remoteResponse.Type, key, durability, holder, baseRevision);
     }
 
     /// <summary>
@@ -969,7 +969,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> responses,
         CancellationToken cancellationToken
     )
     {
@@ -991,7 +991,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             lock (lockSync)
             {
                 foreach ((string key, _, KeyValueDurability durability) in xkeys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero));
+                    responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None));
             }
 
             return;
@@ -1004,7 +1004,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             foreach (GrpcTryAcquireManyExclusiveLocksResponseItem item in remoteResponse.Items)
             {
                 HLCTimestamp holder = new(item.HolderTransactionIdNode, item.HolderTransactionIdPhysical, item.HolderTransactionIdCounter);
-                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability, holder));
+                long baseRevision = item.BaseObserved ? item.BaseRevision : PointLockBase.None;
+                responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability, holder, baseRevision));
             }
         }
     }

@@ -79,7 +79,9 @@ internal sealed class LocalLockOperations
     /// <param name="expiresMs"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
+    /// <summary>Acquires a point lock; the fifth element is the committed base the granted lock protects
+    /// (<see cref="PointLockBase"/>), or <see cref="PointLockBase.None"/> when it was not granted.</summary>
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryAcquireExclusiveLock, 
@@ -102,10 +104,10 @@ internal sealed class LocalLockOperations
 
         try
         {
-            (KeyValueResponseType type, HLCTimestamp holder) = await AcquireExclusiveLockWithWait(
+            (KeyValueResponseType type, HLCTimestamp holder, long baseRevision) = await AcquireExclusiveLockWithWait(
                 request, key, transactionId, durability, Environment.TickCount64 + AcquireLockWaitMs);
 
-            return (type, key, durability, holder);
+            return (type, key, durability, holder, baseRevision);
         }
         finally
         {
@@ -124,7 +126,7 @@ internal sealed class LocalLockOperations
     /// outcome. The deadline is supplied by the caller so a multi-key acquire spends one budget across all its keys
     /// rather than one per key.
     /// </summary>
-    private async Task<(KeyValueResponseType, HLCTimestamp)> AcquireExclusiveLockWithWait(
+    private async Task<(KeyValueResponseType, HLCTimestamp, long BaseRevision)> AcquireExclusiveLockWithWait(
         KeyValueRequest request, string key, HLCTimestamp transactionId, KeyValueDurability durability, long deadline)
     {
         int backoffMs = 1;
@@ -140,7 +142,7 @@ internal sealed class LocalLockOperations
                 response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
             if (response is null)
-                return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
+                return (KeyValueResponseType.Errored, HLCTimestamp.Zero, PointLockBase.None);
 
             // A holder whose canonical record lives on another partition cannot be classified by the actor, so it
             // reads as still-undecided and the acquire is denied. Route the lookup to the anchor leader once, off
@@ -154,10 +156,10 @@ internal sealed class LocalLockOperations
             }
 
             if (response.Type != KeyValueResponseType.WaitingForReplication)
-                return (response.Type, response.HolderTransactionId);
+                return (response.Type, response.HolderTransactionId, response.Type == KeyValueResponseType.Locked ? response.Revision : PointLockBase.None);
 
             if (Environment.TickCount64 >= deadline)
-                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, PointLockBase.None);
 
             Transactions.DurableTransactionMetrics.AddKvRetryWait("AcquireExclusiveLockWithWait_4389");
             await Task.Delay(backoffMs);
@@ -236,12 +238,12 @@ internal sealed class LocalLockOperations
     /// <param name="transactionId"></param>
     /// <param name="keys"></param>
     /// <returns></returns>
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> TryAcquireManyExclusiveLocks(
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> TryAcquireManyExclusiveLocks(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys
     )
     {
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(keys.Count);
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses = new(keys.Count);
 
         // One wait budget for the whole batch: a key that has to wait out a resolution must not let a long key list
         // multiply the caller's worst case.
@@ -272,10 +274,10 @@ internal sealed class LocalLockOperations
             {
                 // Shares the single-key wait: a transient holder must not be reported as a failed acquire here
                 // either, or a multi-key transaction aborts for merely overlapping a resolution window.
-                (KeyValueResponseType type, HLCTimestamp holder) =
+                (KeyValueResponseType type, HLCTimestamp holder, long baseRevision) =
                     await AcquireExclusiveLockWithWait(request, key.key, transactionId, key.durability, deadline);
 
-                responses.Add((type, key.key, key.durability, holder));
+                responses.Add((type, key.key, key.durability, holder, baseRevision));
 
                 if (type != KeyValueResponseType.Locked)
                     break;

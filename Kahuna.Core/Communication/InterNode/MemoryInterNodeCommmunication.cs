@@ -812,7 +812,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
     /// <exception cref="KahunaServerException"></exception>
-    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> TryAcquireExclusiveLock(
         string node,
         HLCTimestamp transactionId,
         string key,
@@ -825,7 +825,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+            return await kahunaNode.LocateAndTryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability, cancellationToken);
         }
 
         throw Unreachable(node);
@@ -875,7 +875,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> xkeys,
         Lock lockSync,
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> responses,
         CancellationToken cancellationToken
     )
     {
@@ -888,14 +888,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             // leave a transaction holding locks past the one it was already refused, so two transactions over
             // the same keys could each end up holding part of the overlap and both abort with nothing done.
             // Order is preserved for the same reason: the caller reports the first refusal it finds.
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> acquired = new(xkeys.Count);
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> acquired = new(xkeys.Count);
 
             foreach ((string key, int expiresMs, KeyValueDurability durability) in xkeys)
             {
-                (KeyValueResponseType type, string keyName, KeyValueDurability keyDurability, HLCTimestamp holder) =
-                    await kahunaNode.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+                (KeyValueResponseType type, string keyName, KeyValueDurability keyDurability, HLCTimestamp holder, long baseRevision) =
+                    await kahunaNode.LocateAndTryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability, cancellationToken);
 
-                acquired.Add((type, keyName, keyDurability, holder));
+                acquired.Add((type, keyName, keyDurability, holder, baseRevision));
 
                 if (type != KeyValueResponseType.Locked)
                     break;

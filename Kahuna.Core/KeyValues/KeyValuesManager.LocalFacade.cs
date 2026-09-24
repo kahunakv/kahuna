@@ -104,7 +104,17 @@ internal sealed partial class KeyValuesManager
         localKeyValueReads.TryCheckWriteIntentValue(transactionId, key, durability, checks);
 
 
-    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability) =>
+    public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
+    {
+        (KeyValueResponseType type, string resultKey, KeyValueDurability resultDurability, HLCTimestamp holder, _) =
+            await localLocks.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
+
+        return (type, resultKey, resultDurability, holder);
+    }
+
+    /// <summary><see cref="TryAcquireExclusiveLock"/> that also answers the committed base the granted lock
+    /// protects (<see cref="PointLockBase"/>).</summary>
+    public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> TryAcquireExclusiveLockObserved(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability) =>
         localLocks.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
 
     public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(
@@ -115,7 +125,24 @@ internal sealed partial class KeyValuesManager
     ) =>
         localLocks.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
 
-    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> TryAcquireManyExclusiveLocks(
+    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> TryAcquireManyExclusiveLocks(
+        HLCTimestamp transactionId,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys
+    )
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> observed =
+            await localLocks.TryAcquireManyExclusiveLocks(transactionId, keys);
+
+        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> responses = new(observed.Count);
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, _) in observed)
+            responses.Add((type, key, durability, holder));
+
+        return responses;
+    }
+
+    /// <summary><see cref="TryAcquireManyExclusiveLocks"/> that also answers, per key, the committed base the
+    /// granted lock protects (<see cref="PointLockBase"/>).</summary>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)>> TryAcquireManyExclusiveLocksObserved(
         HLCTimestamp transactionId,
         List<(string key, int expiresMs, KeyValueDurability durability)> keys
     ) =>
