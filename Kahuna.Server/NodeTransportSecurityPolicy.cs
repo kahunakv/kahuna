@@ -15,11 +15,14 @@ namespace Kahuna.Server;
 /// </summary>
 public static class NodeTransportSecurityPolicy
 {
-    public const int DefaultHttpPort = 2070;
+    // These three ports are the standalone port set. scripts/run-standalone.sh, the standalone
+    // container image and the kahuna-cli default endpoint all use the same numbers, so a reader who
+    // starts a node one way and follows an example written for another way reaches the same node.
+    public const int DefaultHttpPort = 8081;
 
-    public const int DefaultHttpsPort = 2071;
+    public const int DefaultHttpsPort = 8082;
 
-    public const int DefaultStandaloneCleartextGrpcPort = 2072;
+    public const int DefaultStandaloneCleartextGrpcPort = 8083;
 
     /// <summary>
     /// Maps the flags onto the options object that Kommander and Kahuna's inter-node transport share.

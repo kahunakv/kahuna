@@ -172,13 +172,13 @@ public sealed class TestNodeTransportSecurityPolicy
             case "no-thumbprint": opts.TrustedClientCertThumbprints = []; break;
             case "separator-only-thumbprint": opts.TrustedClientCertThumbprints = [":::", " "]; break;
             case "raft-port-not-https": opts.RaftPort = 9999; break;
-            case "raft-port-not-default-https": opts.HttpsPorts = []; opts.RaftPort = 8082; break;
+            case "raft-port-not-default-https": opts.HttpsPorts = []; opts.RaftPort = 9443; break;
             case "cleartext-grpc-scheme": opts.RaftGrpcScheme = "http://"; break;
             case "cleartext-http-scheme": opts.RaftHttpScheme = "http://"; break;
             case "hints-without-advertised-endpoint": opts.AdvertisedClientEndpoint = ""; break;
             case "hints-advertising-peers": opts.DisablePeerEndpointAdvertisement = false; break;
-            case "http-ports-without-opt-in": opts.HttpPorts = ["2070"]; break;
-            case "cleartext-grpc-ports-without-opt-in": opts.GrpcCleartextPorts = ["2072"]; break;
+            case "http-ports-without-opt-in": opts.HttpPorts = ["8081"]; break;
+            case "cleartext-grpc-ports-without-opt-in": opts.GrpcCleartextPorts = ["8083"]; break;
             default: throw new ArgumentOutOfRangeException(nameof(violation));
         }
 
@@ -193,8 +193,8 @@ public sealed class TestNodeTransportSecurityPolicy
     {
         using TempPfx pfx = TempPfx.Create("pass");
         KahunaCommandLineOptions opts = ValidMutualTls(pfx);
-        opts.HttpPorts = ["2070"];
-        opts.GrpcCleartextPorts = ["2072"];
+        opts.HttpPorts = ["8081"];
+        opts.GrpcCleartextPorts = ["8083"];
         opts.AllowPlaintextListener = true;
 
         NodeTransportSecurityPolicy.Validate(opts, NodeTransportSecurityPolicy.Build(opts));
@@ -237,7 +237,7 @@ public sealed class TestNodeTransportSecurityPolicy
     [Fact]
     public void DisabledModeNeedsNothing()
     {
-        KahunaCommandLineOptions opts = Parse("--http-ports", "2070", "--grpc-cleartext-ports", "2072", "--raft-grpc-scheme", "http://");
+        KahunaCommandLineOptions opts = Parse("--http-ports", "8081", "--grpc-cleartext-ports", "8083", "--raft-grpc-scheme", "http://");
 
         NodeTransportSecurityPolicy.Validate(opts, NodeTransportSecurityPolicy.Build(opts));
     }
@@ -255,7 +255,7 @@ public sealed class TestNodeTransportSecurityPolicy
     [Fact]
     public void RaftPortOnAnUnboundCleartextListenerIsRefused()
     {
-        KahunaCommandLineOptions opts = Parse("--https-certificate", "/certs/server.pfx", "--https-ports", "2071", "--raft-port", "2070");
+        KahunaCommandLineOptions opts = Parse("--https-certificate", "/certs/server.pfx", "--https-ports", "8082", "--raft-port", "8081");
 
         KahunaServerException ex = Assert.Throws<KahunaServerException>(() =>
             NodeTransportSecurityPolicy.ValidateRaftPortListener(opts, httpsConfigured: true));
@@ -272,11 +272,11 @@ public sealed class TestNodeTransportSecurityPolicy
 
         // On the cleartext listener, which the opt-in keeps bound.
         NodeTransportSecurityPolicy.ValidateRaftPortListener(
-            Parse("--https-certificate", "/certs/server.pfx", "--allow-plaintext-listener", "--raft-port", "2070"), httpsConfigured: true);
+            Parse("--https-certificate", "/certs/server.pfx", "--allow-plaintext-listener", "--raft-port", "8081"), httpsConfigured: true);
 
         // On no local listener: an external (NAT) port is not judged.
         NodeTransportSecurityPolicy.ValidateRaftPortListener(
-            Parse("--https-certificate", "/certs/server.pfx", "--https-ports", "2071", "--raft-port", "9000"), httpsConfigured: true);
+            Parse("--https-certificate", "/certs/server.pfx", "--https-ports", "8082", "--raft-port", "9000"), httpsConfigured: true);
     }
 
     [Fact]
