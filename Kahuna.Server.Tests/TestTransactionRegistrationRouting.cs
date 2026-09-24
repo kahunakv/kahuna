@@ -727,7 +727,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // The effect folded exactly once at the coordinator: wk1 is recorded and anchors the record.
             TransactionWorkingSet? ws =
-                await coordinatorLeader!.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                await coordinatorLeader.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
             Assert.NotNull(ws);
             Assert.Equal("wk1", ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "wk1");
@@ -2233,47 +2233,8 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
         try
         {
             // Locate a remote-entry node (its completion hops the transport) and the coordinator leader.
-            TransactionHandle handle = default;
-            Node? coordinatorLeader = null;
-            Node? remoteEntry = null;
-            byte[] probe = [9, 9, 9];
-
-            for (int attempt = 1; ; attempt++)
-            {
-                (_, handle) =
-                    await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
-
-                coordinatorLeader = null;
-                remoteEntry = null;
-                bool sessionLost = false;
-
-                foreach (Node node in nodes)
-                {
-                    int before = interNode.BeginOperationCallCount;
-                    (OperationRegistrationOutcome probeOutcome, _, _, _, _, _) =
-                        await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, probe, ct);
-
-                    if (probeOutcome == OperationRegistrationOutcome.RejectedSessionClosed)
-                    {
-                        sessionLost = true;
-                        break;
-                    }
-
-                    Assert.Equal(OperationRegistrationOutcome.New, probeOutcome);
-                    if (interNode.BeginOperationCallCount == before)
-                        coordinatorLeader = node;
-                    else
-                        remoteEntry = node;
-                }
-
-                if (!sessionLost && coordinatorLeader is not null && remoteEntry is not null)
-                    break;
-
-                Assert.True(attempt < 8, "coordinator-partition leadership did not stabilise in time to classify nodes");
-            }
-
-            Assert.NotNull(coordinatorLeader);
-            Assert.NotNull(remoteEntry);
+            (TransactionHandle handle, Node coordinatorLeader, Node remoteEntry) =
+                await StartSessionWithRemoteEntry(nodes, interNode, KeyValueTransactionLocking.Pessimistic, ct);
 
             // Fail the first completion with a non-throwing MustRetry (not an exception) — the path
             // that previously returned a silent false-ack and dropped the cache entry prematurely.
@@ -2294,7 +2255,7 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             // The write applies, its first completion is non-throwingly not delivered; the retry must
             // recover the confirmed response from the participant cache without re-running the actor.
             (KeyValueResponseType type, long revision, _) =
-                await SetWithRetry(remoteEntry!, handle, writeOp, [2, 2, 2], ct);
+                await SetWithRetry(remoteEntry, handle, writeOp, [2, 2, 2], ct);
 
             Assert.True(redirected, "the injected redirect fault should have fired");
             Assert.Equal(KeyValueResponseType.Set, type);
@@ -2305,10 +2266,144 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
 
             // Effect folded exactly once: wk1 is in the working set with the correct anchor.
             TransactionWorkingSet? ws =
-                await coordinatorLeader!.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                await coordinatorLeader.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
             Assert.NotNull(ws);
             Assert.Equal("wk1", ws!.RecordAnchorKey);
             Assert.Contains(ws.ModifiedKeys, m => m.Key == "wk1");
+        }
+        finally
+        {
+            await LeaveAll(nodes);
+        }
+    }
+
+    /// <summary>
+    /// Starts a session and classifies the cluster around it: the node whose registrations stay local leads the
+    /// coordinator partition, and a node whose registrations hop the transport is a remote entry — its
+    /// completions are forwarded. Starts over when the session closes under a leadership move mid-probe.
+    /// </summary>
+    private static async Task<(TransactionHandle handle, Node coordinatorLeader, Node remoteEntry)> StartSessionWithRemoteEntry(
+        Node[] nodes, MemoryInterNodeCommmunication interNode, KeyValueTransactionLocking locking, CancellationToken ct)
+    {
+        byte[] probe = [9, 9, 9];
+
+        for (int attempt = 1; ; attempt++)
+        {
+            (_, TransactionHandle handle) =
+                await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = locking }, ct);
+
+            Node? coordinatorLeader = null;
+            Node? remoteEntry = null;
+            bool sessionLost = false;
+
+            foreach (Node node in nodes)
+            {
+                TransactionOperationId probeOp = TransactionOperationId.NewRandom();
+                int before = interNode.BeginOperationCallCount;
+                (OperationRegistrationOutcome probeOutcome, _, _, _, _, _) =
+                    await node.Kahuna.LocateAndBeginOperation(handle.CoordinatorKey, handle.TransactionId, probeOp, OperationKind.Set, probe, ct);
+
+                if (probeOutcome == OperationRegistrationOutcome.RejectedSessionClosed)
+                {
+                    sessionLost = true;
+                    break;
+                }
+
+                Assert.Equal(OperationRegistrationOutcome.New, probeOutcome);
+                if (interNode.BeginOperationCallCount == before)
+                    coordinatorLeader = node;
+                else
+                    remoteEntry = node;
+
+                // Release the probe so it leaves nothing pending: a transient completion cancels the record.
+                (KeyValueResponseType released, _) = await node.Kahuna.LocateAndCompleteOperation(
+                    handle.CoordinatorKey, handle.TransactionId, probeOp,
+                    new OperationCompletionPayload { CachedType = KeyValueResponseType.MustRetry }, ct);
+                Assert.Equal(KeyValueResponseType.Set, released);
+            }
+
+            if (!sessionLost && coordinatorLeader is not null && remoteEntry is not null)
+                return (handle, coordinatorLeader, remoteEntry);
+
+            Assert.True(attempt < 8, "coordinator-partition leadership did not stabilise in time to classify nodes");
+        }
+    }
+
+    /// <summary>
+    /// The cluster shape of a read completion that is not acknowledged: a registered bucket scan enters on a
+    /// node that does not lead the coordinator partition, so its completion is forwarded, and the receiving
+    /// side answers <c>MustRetry</c> — what it answers when it lost the coordinator partition between the
+    /// sender's routing decision and the landing. The scan must answer <c>MustRetry</c>, not its items, and
+    /// fold nothing. The same-id retry must re-drive the forwarded completion, fold the observations exactly
+    /// once, and leave nothing pending, so one rollback finalizes without waiting out the drain deadline.
+    /// </summary>
+    [Fact]
+    public async Task ForwardedScanCompletionNotDelivered_AnswersMustRetry_SameIdRetryRecovers_RollbackFinalizes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (Node[] nodes, MemoryInterNodeCommmunication interNode) = await AssembleWithTransport();
+        try
+        {
+            const string bucket = "fwdscan";
+            string k1 = bucket + "/one";
+            string k2 = bucket + "/two";
+
+            (KeyValueResponseType s1, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, k1, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            (KeyValueResponseType s2, _, _) = await nodes[0].Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, k2, "v2"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, s1);
+            Assert.Equal(KeyValueResponseType.Set, s2);
+
+            (TransactionHandle handle, Node coordinatorLeader, Node remoteEntry) =
+                await StartSessionWithRemoteEntry(nodes, interNode, KeyValueTransactionLocking.Optimistic, ct);
+
+            TransactionOperationId scanOp = TransactionOperationId.NewRandom();
+            bool refused = false;
+            interNode.CompleteOperationRedirectFault = (_, opId) =>
+            {
+                if (opId != scanOp || refused)
+                    return false;
+
+                refused = true;
+                return true;
+            };
+
+            int completesBefore = interNode.CompleteOperationCallCount;
+
+            KeyValueGetByBucketResult first = await remoteEntry.Kahuna.LocateAndGetByBucket(
+                handle.TransactionId, bucket, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, scanOp);
+
+            Assert.True(refused, "the injected redirect fault should have fired");
+            Assert.Equal(KeyValueResponseType.MustRetry, first.Type);
+            Assert.Empty(first.Items);
+
+            TransactionWorkingSet? pending =
+                await coordinatorLeader.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(pending);
+            Assert.Equal(1, pending!.PendingOperationCount);
+            Assert.Empty(pending.ReadKeys);
+
+            KeyValueGetByBucketResult recovered = await remoteEntry.Kahuna.LocateAndGetByBucket(
+                handle.TransactionId, bucket, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, scanOp);
+
+            Assert.Equal(KeyValueResponseType.Get, recovered.Type);
+            Assert.Equal(2, recovered.Items.Count);
+
+            // At least two forwarded completions: the refused one plus the recovery that landed.
+            Assert.True(interNode.CompleteOperationCallCount - completesBefore >= 2);
+
+            TransactionWorkingSet? drained =
+                await coordinatorLeader.Kahuna.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(drained);
+            Assert.Equal(0, drained!.PendingOperationCount);
+            Assert.Equal(2, drained.ReadKeys.Count);
+            Assert.Contains(drained.ReadKeys, r => r.Key == k1);
+            Assert.Contains(drained.ReadKeys, r => r.Key == k2);
+
+            // With the record drained one rollback finalizes; a stranded record would wait the whole
+            // transaction timeout (5 s by default) and answer MustRetry.
+            long started = Environment.TickCount64;
+            Assert.Equal(KeyValueResponseType.RolledBack, await remoteEntry.Kahuna.LocateAndRollbackTransaction(handle, ct));
+            Assert.True(Environment.TickCount64 - started < 4_000, "rollback waited on the finalize drain");
         }
         finally
         {

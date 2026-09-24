@@ -16,6 +16,11 @@ namespace Kahuna.Server.KeyValues;
 /// <see cref="LocateAndScanRange"/> streams: it yields each page as it arrives rather than accumulating the
 /// range, so a large range does not have to fit in memory. The <c>WithHooks</c> variant is the seam tests use
 /// to interleave a split into a scan.
+///
+/// A registered scan completes under the same contract as a lock or a write: a completion that does not land
+/// answers <c>MustRetry</c> instead of the page, keeps the page's observations in the participant retry cache,
+/// and a same-id retry recovers it — never a page handed back over a record left pending, which would stall
+/// every finalize of the transaction on the drain.
 /// </summary>
 internal sealed class RoutedScanOperations
 {
@@ -73,8 +78,8 @@ internal sealed class RoutedScanOperations
         TResponse response, OperationCompletionPayload payload) where TResponse : notnull =>
         registrar.CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload);
 
-    private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
-        registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
+    private Task<bool> TryRecoverRegisteredRead(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        registrar.TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId);
 
     private Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
@@ -82,10 +87,6 @@ internal sealed class RoutedScanOperations
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
-
-    private ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(
-        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
-        registrar.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
 
     /// <summary>
     /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks requests
@@ -232,7 +233,8 @@ internal sealed class RoutedScanOperations
     /// Register-remote wrapper for a transaction-scoped bucket scan: registers the operation so it is
     /// fenced against finalize, then records every returned item as a read observation with point-read-set
     /// semantics. The scan asserts only that these exact items were observed at these revisions — not that
-    /// no other key matches the bucket predicate.
+    /// no other key matches the bucket predicate. A completion that does not land answers <c>MustRetry</c>,
+    /// and the same-id retry recovers it before re-scanning.
     /// </summary>
     private async Task<KeyValueGetByBucketResult> RegisterAndGetByBucket(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefixedKey,
@@ -242,16 +244,24 @@ internal sealed class RoutedScanOperations
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
                 OperationDigest.ForScan(prefixedKey, readTimestamp, durability), cancellationToken);
 
+        // Pending means an earlier attempt scanned but its completion did not land: re-drive it from the retry
+        // cache, then re-scan below as under an already-completed id.
+        if (outcome == OperationRegistrationOutcome.AlreadyPending)
+        {
+            if (!await TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId))
+                return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
+
+            outcome = OperationRegistrationOutcome.AlreadyCompleted;
+        }
+
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
-            case OperationRegistrationOutcome.AlreadyPending:
-            case OperationRegistrationOutcome.RejectedCapacity:
-                // A pending or already-completed scan re-executes the read without re-folding observations:
-                // the first-recorded observations are authoritative for commit validation even if this
+                // An already-completed scan re-executes the read without re-folding observations: the
+                // first-recorded observations are authoritative for commit validation even if this
                 // re-execution returns a newer value.
-                if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
-                    return await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+                return await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+            case OperationRegistrationOutcome.RejectedCapacity:
                 return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return new KeyValueGetByBucketResult(KeyValueResponseType.Aborted, []);
@@ -295,20 +305,10 @@ internal sealed class RoutedScanOperations
         payload.Durability = durability;
         payload.CachedType = result.Type;
 
-        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
-        try
-        {
-            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
-        }
-        catch
-        {
-            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
-            throw;
-        }
-
-        // No retry cache is involved on this path, so this frame still holds the sole reference: the
-        // fold copied the observations it kept and the shell can be recycled.
-        OperationCompletionPayloadPool.Return(payload);
+        // Owns the shell from here: recycled on an acknowledged fold, retained in the retry cache otherwise.
+        // A completion that did not land must not hand the items back over a still-pending record.
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, result.Type, payload))
+            return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
 
         return result;
     }
@@ -338,7 +338,8 @@ internal sealed class RoutedScanOperations
     /// <paramref name="recordObservations"/> is decoupled from <paramref name="readTimestamp"/>: a streaming
     /// latest scan latches a consistent snapshot on its first page and reads pages 1+ <em>as of</em> that pinned
     /// timestamp, but still folds every page's rows as read dependencies. A genuine snapshot scan (the caller
-    /// pinned the read timestamp) owns no live transactional MVCC and folds nothing.
+    /// pinned the read timestamp) owns no live transactional MVCC and folds nothing. A completion that does not
+    /// land answers <c>MustRetry</c>, and the same-id retry recovers it before re-scanning.
     /// </summary>
     private async Task<KeyValueGetByRangeResult> RegisterAndGetByRange(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
@@ -350,16 +351,24 @@ internal sealed class RoutedScanOperations
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
                 OperationDigest.ForRangeScan(prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability), cancellationToken);
 
+        // Pending means an earlier attempt scanned but its completion did not land: re-drive it from the retry
+        // cache, then re-scan below as under an already-completed id.
+        if (outcome == OperationRegistrationOutcome.AlreadyPending)
+        {
+            if (!await TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId))
+                return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
+
+            outcome = OperationRegistrationOutcome.AlreadyCompleted;
+        }
+
         switch (outcome)
         {
             case OperationRegistrationOutcome.AlreadyCompleted:
-            case OperationRegistrationOutcome.AlreadyPending:
-            case OperationRegistrationOutcome.RejectedCapacity:
-                // A pending or already-completed scan re-executes the read without re-folding observations:
-                // the first-recorded observations are authoritative for commit validation even if this
+                // An already-completed scan re-executes the read without re-folding observations: the
+                // first-recorded observations are authoritative for commit validation even if this
                 // re-execution returns a newer value.
-                if (outcome == OperationRegistrationOutcome.AlreadyCompleted)
-                    return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+                return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+            case OperationRegistrationOutcome.RejectedCapacity:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
@@ -401,20 +410,10 @@ internal sealed class RoutedScanOperations
         payload.Durability = durability;
         payload.CachedType = result.Type;
 
-        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
-        try
-        {
-            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
-        }
-        catch
-        {
-            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
-            throw;
-        }
-
-        // No retry cache is involved on this path, so this frame still holds the sole reference: the
-        // fold copied the observations it kept and the shell can be recycled.
-        OperationCompletionPayloadPool.Return(payload);
+        // Owns the shell from here: recycled on an acknowledged fold, retained in the retry cache otherwise.
+        // A completion that did not land must not hand the page back over a still-pending record.
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, result.Type, payload))
+            return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
 
         return result;
     }

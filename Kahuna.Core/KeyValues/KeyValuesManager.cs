@@ -279,6 +279,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Test-only access to the transaction coordinator for driving renewal and reap directly.</summary>
     internal TransactionCoordinator Coordinator => txCoordinator;
 
+    /// <summary>Test-only access to the operation registrar, for refusing a completion on demand.</summary>
+    internal OperationRegistrar Registrar => operationRegistrar;
+
     /// <summary>Test-only access to the routed scan operations, for overriding the per-page retry budget.</summary>
     internal RoutedScanOperations RoutedScans => routedScans;
 

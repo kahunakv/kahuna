@@ -12,8 +12,11 @@ namespace Kahuna.Server.KeyValues;
 ///
 /// A read that is part of an interactive transaction still registers on the coordinator, because the read
 /// observation it produces belongs in the transaction's working set and is what a later validation checks.
-/// The unconfirmed variant deliberately skips the leadership confirmation and is only for callers that can
-/// tolerate a stale answer.
+/// Its completion follows the same contract as a lock or a write: a completion that does not land answers
+/// <c>MustRetry</c> instead of the value, keeps the observation in the participant retry cache, and a same-id
+/// retry recovers it — never a value handed back over a record left pending, which would stall every finalize
+/// of the transaction on the drain. The unconfirmed variant deliberately skips the leadership confirmation and
+/// is only for callers that can tolerate a stale answer.
 /// </summary>
 internal sealed class RoutedReadOperations
 {
@@ -45,8 +48,8 @@ internal sealed class RoutedReadOperations
         TResponse response, OperationCompletionPayload payload) where TResponse : notnull =>
         registrar.CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, response, payload);
 
-    private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
-        registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
+    private Task<bool> TryRecoverRegisteredRead(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        registrar.TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId);
 
     private Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
@@ -54,10 +57,6 @@ internal sealed class RoutedReadOperations
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
-
-    private ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(
-        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
-        registrar.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
 
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
@@ -95,7 +94,8 @@ internal sealed class RoutedReadOperations
     /// Register-remote wrapper for a transaction-scoped read: registers the read for finalize fencing
     /// and records its <c>{exists, revision}</c> observation into the coordinator-owned read set. On a
     /// duplicate operation id the read is re-executed without re-folding: the first-recorded observation
-    /// is authoritative for commit validation even if this re-execution returns a newer value.
+    /// is authoritative for commit validation even if this re-execution returns a newer value. A completion
+    /// that does not land answers <c>MustRetry</c>, and the same-id retry recovers it before re-reading.
     /// </summary>
     private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RegisterAndTryReadValue(
         OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
@@ -106,9 +106,18 @@ internal sealed class RoutedReadOperations
         (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
 
+        // Pending means an earlier attempt read but its completion did not land: re-drive it from the retry
+        // cache, then re-read below as under an already-completed id.
+        if (outcome == OperationRegistrationOutcome.AlreadyPending)
+        {
+            if (!await TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId))
+                return (KeyValueResponseType.MustRetry, null);
+
+            outcome = OperationRegistrationOutcome.AlreadyCompleted;
+        }
+
         switch (outcome)
         {
-            case OperationRegistrationOutcome.AlreadyPending:
             case OperationRegistrationOutcome.RejectedCapacity:
                 return (KeyValueResponseType.MustRetry, null);
             case OperationRegistrationOutcome.RejectedSessionBudget:
@@ -158,20 +167,10 @@ internal sealed class RoutedReadOperations
         payload.CachedRevision = exists ? entry!.Revision : 0;
         payload.CachedTimestamp = exists ? entry!.LastModified : HLCTimestamp.Zero;
 
-        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
-        try
-        {
-            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
-        }
-        catch
-        {
-            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
-            throw;
-        }
-
-        // No retry cache is involved on this path, so this frame still holds the sole reference: the
-        // fold retains the read-key object, not the shell, so the shell can be recycled.
-        OperationCompletionPayloadPool.Return(payload);
+        // Owns the shell from here: recycled on an acknowledged fold, retained in the retry cache otherwise.
+        // A completion that did not land must not hand the value back over a still-pending record.
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, type, payload))
+            return (KeyValueResponseType.MustRetry, null);
 
         return (type, entry);
     }
@@ -282,7 +281,8 @@ internal sealed class RoutedReadOperations
     /// any changed after the read. Mirrors <see cref="RegisterAndTryReadValue"/> but folds one observation per
     /// returned key into <see cref="OperationCompletionPayload.ReadObservations"/>. A snapshot read (pinned read
     /// timestamp) owns no live transactional MVCC and so records no observations, but still registers for
-    /// finalize fencing and idempotent replay.
+    /// finalize fencing and idempotent replay. A completion that does not land answers <c>MustRetry</c> for
+    /// every key, and the same-id retry recovers it before re-reading.
     /// </summary>
     private async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> RegisterAndTryReadManyValues(
         OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
@@ -296,9 +296,18 @@ internal sealed class RoutedReadOperations
         (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
 
+        // Pending means an earlier attempt read but its completion did not land: re-drive it from the retry
+        // cache, then re-read below as under an already-completed id.
+        if (outcome == OperationRegistrationOutcome.AlreadyPending)
+        {
+            if (!await TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId))
+                return BuildManyReadRejection(keys, KeyValueResponseType.MustRetry);
+
+            outcome = OperationRegistrationOutcome.AlreadyCompleted;
+        }
+
         switch (outcome)
         {
-            case OperationRegistrationOutcome.AlreadyPending:
             case OperationRegistrationOutcome.RejectedCapacity:
                 return BuildManyReadRejection(keys, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
@@ -379,20 +388,10 @@ internal sealed class RoutedReadOperations
         payload.Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent;
         payload.CachedType = batchCachedType;
 
-        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
-        try
-        {
-            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
-        }
-        catch
-        {
-            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
-            throw;
-        }
-
-        // No retry cache is involved on this path, so this frame still holds the sole reference: the
-        // fold copied the observations it kept and the shell can be recycled.
-        OperationCompletionPayloadPool.Return(payload);
+        // Owns the shell from here: recycled on an acknowledged fold, retained in the retry cache otherwise.
+        // A completion that did not land must not hand the values back over a still-pending record.
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, batchCachedType, payload))
+            return BuildManyReadRejection(keys, KeyValueResponseType.MustRetry);
 
         return result;
     }

@@ -79,12 +79,12 @@ internal sealed class OperationRegistrar
     }
 
     /// <summary>
-    /// Drives the coordinator completion for an operation whose actor just executed. On acknowledgement
-    /// nothing was shared, so this frame recycles the rented payload shell. When the completion does not
-    /// land, the confirmed response and payload are cached on this participant so a same-id retry
-    /// recovers the result through <see cref="TryRecoverRegisteredOperation"/> without reapplying the
-    /// operation — the cache then owns the payload for good (recovery can hand its reference to
-    /// concurrent retries, so it is never recycled). Takes ownership of <paramref name="payload"/>:
+    /// Drives the coordinator completion for an operation whose participant work just executed — a lock, a
+    /// write, or a read. On acknowledgement nothing was shared, so this frame recycles the rented payload
+    /// shell. When the completion does not land, the confirmed response and payload are cached on this
+    /// participant so a same-id retry recovers the result through <see cref="TryRecoverRegisteredOperation"/>
+    /// without reapplying the operation — the cache then owns the payload for good (recovery can hand its
+    /// reference to concurrent retries, so it is never recycled). Takes ownership of <paramref name="payload"/>:
     /// the caller must not touch it after this call. The completion runs detached from the caller's
     /// cancellation token: once the actor has mutated, abandoning the completion because the caller
     /// went away would strand the effect with the coordinator record stuck pending. Returns true when
@@ -92,6 +92,11 @@ internal sealed class OperationRegistrar
     /// <see cref="KeyValueResponseType.MustRetry"/>. Generic in the response type so an acknowledged
     /// value-type response (the common case) is never boxed; boxing happens only when the response
     /// enters the retry cache on a lost completion.
+    ///
+    /// <para>A read passes only its response type, never the values it returned: its observations (keys and
+    /// revisions) travel in the payload and are what must fold exactly once, while the values are re-read on
+    /// recovery. That keeps a cached scan page to its key list, so the cache's entry cap bounds it in memory
+    /// too. See <see cref="TryRecoverRegisteredRead"/>.</para>
     /// </summary>
     internal async Task<bool> CompleteRegisteredOperation<TResponse>(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId,
@@ -165,6 +170,25 @@ internal sealed class OperationRegistrar
     }
 
     /// <summary>
+    /// The read-side recovery for an <see cref="OperationRegistrationOutcome.AlreadyPending"/> outcome: an
+    /// earlier attempt executed the read but its completion did not land, so the record on the coordinator is
+    /// pending and its observations are only in this participant's retry cache. Re-drives that completion.
+    /// Returns true when the coordinator now holds the read as completed, so the caller may re-execute the
+    /// read and return fresh values without folding again — the first-recorded observations stay authoritative
+    /// for commit validation, exactly as for any re-read under an already-completed id. Returns false when
+    /// the caller must surface <see cref="KeyValueResponseType.MustRetry"/>: no local record, the completion
+    /// is still unreachable, or the recovered completion carried a transient read that the coordinator turns
+    /// into a cancel — the record is then gone, and the next same-id retry registers afresh and folds.
+    /// </summary>
+    internal async Task<bool> TryRecoverRegisteredRead(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId)
+    {
+        object? recovered = await TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
+
+        return recovered is KeyValueResponseType type
+            && type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
+    }
+
+    /// <summary>
     /// Releases a freshly registered operation whose participant work threw before this frame could complete
     /// it. The frame that registered an operation is its only completer, so without this the record stays
     /// pending for the life of the session and every commit or rollback waits out the full finalize drain
@@ -214,9 +238,23 @@ internal sealed class OperationRegistrar
         return locator.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
     }
 
+    /// <summary>
+    /// Test-only seam: when set and it answers true for an operation, the routing of that operation's completion
+    /// answers <c>(MustRetry, null)</c> without delivering it — the same answer the routing gives when the
+    /// coordinator partition has no reachable leader, or when the node it forwarded to lost the partition before
+    /// the completion landed. A healthy embedded node cannot be asked to produce that state on demand, so this is
+    /// how a test drives the not-acknowledged completion path deterministically. It is consulted on every
+    /// completion routed through this registrar, a retry's recovery included, so the delegate decides how often
+    /// it fires. Null (the default) is a no-op; never wired in production.
+    /// </summary>
+    internal Func<HLCTimestamp, TransactionOperationId, bool>? TestCompletionRefusal { private get; set; }
+
     /// <summary>Routes an operation completion to the coordinator node identified by <paramref name="coordinatorKey"/>. Returns Set+anchor on acknowledgement, MustRetry when routing did not deliver.</summary>
     public ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
+        if (TestCompletionRefusal is not null && TestCompletionRefusal(transactionId, operationId))
+            return ValueTask.FromResult<(KeyValueResponseType outcome, string? anchor)>((KeyValueResponseType.MustRetry, null));
+
         return locator.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
     }
 
