@@ -157,8 +157,8 @@ internal sealed class TransactionRecordStore
 
     /// <summary>Judges a one-phase bundled commit at its apply position on a partition's log: whether this
     /// transaction's live intent holds every bundled key, and — when the command asks for apply-time
-    /// validation — whether every co-bundled validated base and carried read dependency still holds against the
-    /// partition's committed-head ledger. Wired to <see cref="PreparedIntentStore.JudgeBundledCommit"/>.</summary>
+    /// validation — whether every co-bundled validated base, staged revision and carried read dependency still
+    /// holds against the partition's committed-head ledger. Wired to <see cref="PreparedIntentStore.JudgeBundledCommit"/>.</summary>
     internal delegate BundledCommitJudgement BundledCommitJudge(int partitionId, CommitTransactionCommand commit);
 
     // Consulted by the bundled commit gate below. Reading the intent store here is deterministic: both stores

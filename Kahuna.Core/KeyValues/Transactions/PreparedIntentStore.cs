@@ -666,12 +666,21 @@ internal sealed class PreparedIntentStore
             }
 
             // ── Staged-base fence, evaluated at the prepare's own apply position ──
-            // A freshly installed validated-base prepare is checked against the committed-head memory. The
-            // pre-propose validation cannot see a competitor that commits the same base between its probe and
-            // this prepare landing (the competitor's intent settled and was removed, so single-live-intent sees
-            // nothing) — the interleaving that silently discards the competitor's write (a lost update). Here
-            // that competitor is always visible: either its intent is still live (the state machine already
-            // rejected this prepare), or its settlement applied earlier on this key and left its head above.
+            // A freshly installed prepare is checked against the committed-head memory. The pre-propose
+            // validation cannot see a competitor that commits the same base between its probe and this prepare
+            // landing (the competitor's intent settled and was removed, so single-live-intent sees nothing) —
+            // the interleaving that silently discards the competitor's write (a lost update). Here that
+            // competitor is always visible: either its intent is still live (the state machine already rejected
+            // this prepare), or its settlement applied earlier on this key and left its head above.
+            //
+            // Two rules judge it. A validated base (read-then-write) must not have been moved past. And every
+            // revision-carrying prepare — blind writes included — must stage a revision above the head: a
+            // revision identifies one mutation, and a head already at it means another transaction committed
+            // that revision. The producer of that shape is a writer whose in-memory exclusion was lost at a
+            // leader change: it staged base+1 on the deposed leader, the new leader granted the key again, and
+            // the second writer staged and committed the same base+1 first. Committing the first writer then
+            // puts two records at one revision in the log, and the later one silently replaces the earlier,
+            // acknowledged one.
             //
             // The verdict does NOT change the replicated transition — the intent installs identically on every
             // node, so replicas and replay never diverge. It only flags the result; the local producer's
@@ -686,11 +695,12 @@ internal sealed class PreparedIntentStore
             // exhausts into the truthful abort. A RESOLVED existing intent is left alone — that is a decision
             // replay, owned by the record, with no acknowledgement left to protect. A foreign holder is the state
             // machine's rejection to report.
-            bool freshValidatedInstall = existing is null && result.Outcome == TransactionApplyOutcome.Applied;
+            bool freshInstall = existing is null && result.Outcome == TransactionApplyOutcome.Applied;
             bool pendingSameIdentityReprepare = existing is { IsPending: true } && result.Outcome == TransactionApplyOutcome.IdempotentNoop;
 
-            if ((freshValidatedInstall || pendingSameIdentityReprepare)
-                && command is PrepareIntentCommand { Intent.HasValidatedBase: true } fencedPrepare)
+            if ((freshInstall || pendingSameIdentityReprepare)
+                && command is PrepareIntentCommand fencedPrepare
+                && IsFenceJudged(fencedPrepare.Intent))
             {
                 if (!judgeFence)
                 {
@@ -701,15 +711,20 @@ internal sealed class PreparedIntentStore
                 }
                 else
                 {
-                    string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent);
+                    string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent, out bool revisionCollision);
                     if (fenceConflict is not null)
                     {
                         DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
-                        wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent, out wedgeHeadRevision);
-                        wedgeBaseRevision = fencedPrepare.Intent.BaseRevision;
+                        if (revisionCollision)
+                            DurableTransactionMetrics.StagedRevisionCollisions.Add(1);
+
+                        // The revision the refused write was built on: its validated base, or — for a revision
+                        // collision — the entry it staged over, one below its staged revision.
+                        wedgeBaseRevision = revisionCollision ? fencedPrepare.Intent.Revision - 1 : fencedPrepare.Intent.BaseRevision;
+                        wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent.Key, wedgeBaseRevision, out wedgeHeadRevision);
 
                         logger?.LogWarning(
-                            "Staged base for {Key} moved before the prepare of transaction {TransactionId} applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
+                            "Committed head for {Key} moved past the prepare of transaction {TransactionId} before it applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
                             fencedPrepare.Intent.Key, fencedPrepare.Intent.TransactionId, fenceConflict);
 
                         result = result with { StaleBase = true };
@@ -768,80 +783,122 @@ internal sealed class PreparedIntentStore
     private const int FenceRefusalTrackerMaxKeys = 4_096;
 
     /// <summary>Records one fence refusal for the watchdog: escalates to the error log when the same key
-    /// refuses repeatedly at an unchanged (validated base, committed head) pair, and returns whether the
-    /// convergence repair hook is due for this refusal (rate-limited by the streak).
-    /// <paramref name="headRevision"/> reports the remembered committed head the refusal was judged against.
-    /// Caller holds <see cref="applyGate"/>.</summary>
-    private bool TrackFenceRefusal(PreparedIntent intent, out long headRevision)
+    /// refuses repeatedly at an unchanged (base, committed head) pair, and returns whether the convergence
+    /// repair hook is due for this refusal (rate-limited by the streak). <paramref name="baseRevision"/> is the
+    /// revision the refused write was built on: its validated base, or the entry a colliding revision was
+    /// staged over. <paramref name="headRevision"/> reports the remembered committed head the refusal was
+    /// judged against. Caller holds <see cref="applyGate"/>.</summary>
+    private bool TrackFenceRefusal(string key, long baseRevision, out long headRevision)
     {
-        TryFindHead(intent.Key, out CommittedHead head);
+        TryFindHead(key, out CommittedHead head);
         headRevision = head.Revision;
 
-        if (!fenceRefusalStreaks.TryGetValue(intent.Key, out FenceRefusalStreak streak)
-            || streak.BaseRevision != intent.BaseRevision
+        if (!fenceRefusalStreaks.TryGetValue(key, out FenceRefusalStreak streak)
+            || streak.BaseRevision != baseRevision
             || streak.HeadRevision != head.Revision)
         {
-            if (fenceRefusalStreaks.Count >= FenceRefusalTrackerMaxKeys && !fenceRefusalStreaks.ContainsKey(intent.Key))
+            if (fenceRefusalStreaks.Count >= FenceRefusalTrackerMaxKeys && !fenceRefusalStreaks.ContainsKey(key))
                 return false;
 
-            fenceRefusalStreaks[intent.Key] = new(intent.BaseRevision, head.Revision, 1);
+            fenceRefusalStreaks[key] = new(baseRevision, head.Revision, 1);
             return false;
         }
 
         long count = streak.Count + 1;
-        fenceRefusalStreaks[intent.Key] = streak with { Count = count };
+        fenceRefusalStreaks[key] = streak with { Count = count };
 
         if (count == FenceWedgeAlarmThreshold || (count > FenceWedgeAlarmThreshold && count % FenceWedgeReAlarmEvery == 0))
         {
             DurableTransactionMetrics.StagedBaseFenceWedgedKeys.Add(1);
 
             logger?.LogError(
-                "Key {Key} refused {Count} consecutive validated-base prepares at a frozen pair (validated revision {BaseRevision}, committed head {HeadRevision}): the node's visible entry has stopped converging with its committed head and the key is effectively read-only until it reconciles",
-                intent.Key, count, intent.BaseRevision, head.Revision);
+                "Key {Key} refused {Count} consecutive prepares at a frozen pair (base revision {BaseRevision}, committed head {HeadRevision}): the node's visible entry has stopped converging with its committed head and the key is effectively read-only until it reconciles",
+                key, count, baseRevision, head.Revision);
         }
 
         return count == FenceWedgeRepairThreshold
             || (count > FenceWedgeRepairThreshold && count % FenceWedgeRepairRepeatEvery == 0);
     }
 
+    /// <summary>Whether the staged-base fence judges a prepare at all: a write with a validated base, or any
+    /// write that carries a revision. Only a validated-free revision-free write (<c>SET NOREV</c>, blind) has
+    /// nothing the committed-head memory can check.</summary>
+    private static bool IsFenceJudged(PreparedIntent intent) => intent.HasValidatedBase || !intent.NoRevision;
+
     /// <summary>
-    /// Decides whether a freshly installed validated-base prepare deserves its acknowledgement, against the
-    /// committed-head memory. Returns null to acknowledge, or the conflict reason. Caller holds
+    /// Decides whether a freshly installed prepare deserves its acknowledgement, against the committed-head
+    /// memory. Returns null to acknowledge, or the conflict reason; <paramref name="revisionCollision"/> tells
+    /// the staged-revision rule refused it rather than the validated-base rule. Caller holds
     /// <see cref="applyGate"/>.
     /// </summary>
-    private string? EvaluateStagedBaseFence(PreparedIntent intent) =>
-        JudgeStagedBase(intent, countAbsentHeadAdmission: true, out _);
+    private string? EvaluateStagedBaseFence(PreparedIntent intent, out bool revisionCollision) =>
+        JudgeStagedBase(intent, countAbsentHeadAdmission: true, out _, out revisionCollision);
 
     /// <summary>The ADVISORY fence decision, shared by the apply-path acknowledgement and the replica verdict
     /// read (<see cref="EvaluateReplicaFenceVerdicts"/>). Judges by key across every ledger slice this node
     /// holds — the two-phase acknowledgement is per-node advice, so the widest memory is the most useful —
     /// against the node-wide watermark. Returns null to admit, or the conflict reason.
     /// <paramref name="headRevision"/> reports the remembered head the verdict was judged against (-1 when the
-    /// memory held nothing). Only the apply path counts the absent-head admission; a verdict read must not
-    /// inflate that counter. Caller holds <see cref="applyGate"/>.</summary>
-    private string? JudgeStagedBase(PreparedIntent intent, bool countAbsentHeadAdmission, out long headRevision)
+    /// memory held nothing); <paramref name="revisionCollision"/> tells the staged-revision rule refused it.
+    /// Only the apply path counts the absent-head admission; a verdict read must not inflate that counter.
+    /// Caller holds <see cref="applyGate"/>.</summary>
+    private string? JudgeStagedBase(PreparedIntent intent, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision)
     {
         headRevision = -1;
+        revisionCollision = false;
 
         // Staleness gate, the partner of retention pruning: a pruned head cannot be distinguished from "no
         // commit happened", so a prepare from a transaction that BEGAN before the retention horizon (its reads,
         // and therefore its base, may predate every retained head) must not be acknowledged on absence of
         // evidence. The transaction id is the begin HLC, so it lower-bounds every read the base came from.
-        // Measured against the head watermark — an HLC from replicated commits — never a local clock.
-        if (IsOlderThanRetention(intent.TransactionId, ledgerWatermark))
+        // Measured against the head watermark — an HLC from replicated commits — never a local clock. A blind
+        // write has no base to verify, so the gate does not apply to it.
+        if (intent.HasValidatedBase && IsOlderThanRetention(intent.TransactionId, ledgerWatermark))
             return $"transaction began before the staged-base fence retention horizon; its validated base for key {intent.Key} cannot be verified";
 
         if (!TryFindHead(intent.Key, out CommittedHead head))
         {
             // The only silent path around the fence: nothing to check is indistinguishable from "no commit
             // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
-            if (countAbsentHeadAdmission)
+            if (countAbsentHeadAdmission && intent.HasValidatedBase)
                 DurableTransactionMetrics.FenceAdmissionsAbsentHead.Add(1);
             return null;
         }
 
         headRevision = head.Revision;
-        return JudgeBaseAgainstHead(intent.Key, intent.BaseRevision, intent.BaseState, head);
+
+        if (intent.HasValidatedBase)
+        {
+            string? baseConflict = JudgeBaseAgainstHead(intent.Key, intent.BaseRevision, intent.BaseState, head);
+            if (baseConflict is not null)
+                return baseConflict;
+        }
+
+        string? revisionConflict = JudgeRevisionAgainstHead(intent, head);
+        revisionCollision = revisionConflict is not null;
+        return revisionConflict;
+    }
+
+    /// <summary>
+    /// The staged-revision rule shared by the advisory fence and the deterministic bundled commit gate: a
+    /// revision-carrying write must stage a revision strictly above the key's committed head. Returns null to
+    /// admit, or the conflict reason.
+    ///
+    /// <para>A revision identifies one committed mutation of a key, and every staging site allocates the next
+    /// one from the entry it holds exclusively (a set and a delete both stage base+1), so a key's revisions
+    /// only move forward and a head at or above the staged revision means another transaction already
+    /// committed it. That is only reachable when the writer's exclusion was lost between staging and commit —
+    /// its point lock and write intent lived in a deposed leader's memory — and committing it would put two
+    /// records at one revision, the later silently replacing the earlier. A head below the staged revision is
+    /// the ordinary case (non-transactional writes never feed the memory, so the head may lag the key).
+    /// Revision-free writes allocate nothing and are not judged.</para>
+    /// </summary>
+    private static string? JudgeRevisionAgainstHead(PreparedIntent intent, CommittedHead head)
+    {
+        if (intent.NoRevision || head.Revision < intent.Revision)
+            return null;
+
+        return $"staged revision {intent.Revision} for key {intent.Key} is already committed: committed head is revision {head.Revision}";
     }
 
     /// <summary>The base-versus-head rule shared by the advisory fence and the deterministic bundled commit
@@ -907,10 +964,10 @@ internal sealed class PreparedIntentStore
     /// <paramref name="partitionId"/>'s log, consumed by the transaction-record store's bundled commit gate.
     /// Every bundled key must be held by this transaction's live intent (the prepare applied earlier in the
     /// same atomic batch). When the command asks for apply-time validation, each co-bundled intent's validated
-    /// base and each carried read-only dependency are additionally judged against the partition's ledger slice:
-    /// a foreign undecided or committed intent on a read key, a head above the validated base or the observed
-    /// revision, a value where absence was validated, or a transaction older than the slice's retention
-    /// horizon rejects. Only replicated state is consulted — the intent map, the slice's heads and its
+    /// base and staged revision and each carried read-only dependency are additionally judged against the
+    /// partition's ledger slice: a foreign undecided or committed intent on a read key, a head above the
+    /// validated base or the observed revision, a head at or above the staged revision, a value where absence
+    /// was validated, or a transaction older than the slice's retention horizon rejects. Only replicated state is consulted — the intent map, the slice's heads and its
     /// watermark — so every replica of the partition reaches the same verdict for the same log entry.
     /// Evaluated under the apply gate so the (intents, heads, watermark) read is one consistent state.
     /// </summary>
@@ -930,10 +987,10 @@ internal sealed class PreparedIntentStore
                         || intent.Epoch != commit.Epoch)
                         return new(BundledCommitVerdict.PrepareMissing, $"bundled prepare for key {bundledKey} is not held by transaction {commit.TransactionId}");
 
-                    if (!commit.ApplyTimeValidation || !intent.HasValidatedBase)
+                    if (!commit.ApplyTimeValidation || !IsFenceJudged(intent))
                         continue;
 
-                    if (IsOlderThanRetention(commit.TransactionId, watermark))
+                    if (intent.HasValidatedBase && IsOlderThanRetention(commit.TransactionId, watermark))
                         return new(BundledCommitVerdict.StaleBase, $"transaction began before the ledger retention horizon; its validated base for key {bundledKey} cannot be verified");
 
                     if (ledger is null
@@ -941,9 +998,23 @@ internal sealed class PreparedIntentStore
                         || !IsWithinRetention(head, watermark))
                         continue;
 
-                    string? conflict = JudgeBaseAgainstHead(bundledKey, intent.BaseRevision, intent.BaseState, head);
-                    if (conflict is not null)
-                        return new(BundledCommitVerdict.StaleBase, conflict);
+                    if (intent.HasValidatedBase)
+                    {
+                        string? conflict = JudgeBaseAgainstHead(bundledKey, intent.BaseRevision, intent.BaseState, head);
+                        if (conflict is not null)
+                            return new(BundledCommitVerdict.StaleBase, conflict);
+                    }
+
+                    // A blind write has no base, but its staged revision must still be new: a head already at it
+                    // is another transaction's commit of that revision, and committing this bundle would put a
+                    // second record at it that silently replaces the first. Final like a moved base — heads only
+                    // advance — so it is reported as one and drives the same truthful conflict abort.
+                    string? revisionConflict = JudgeRevisionAgainstHead(intent, head);
+                    if (revisionConflict is not null)
+                    {
+                        DurableTransactionMetrics.StagedRevisionCollisions.Add(1);
+                        return new(BundledCommitVerdict.StaleBase, revisionConflict);
+                    }
                 }
             }
 
@@ -1112,8 +1183,8 @@ internal sealed class PreparedIntentStore
     /// live, the single-live-intent rule freezes the key's committed head, so the answer equals the verdict at
     /// the prepare's own apply position. A key without that intent answers
     /// <see cref="KeyValueStagedBaseVerdict.NotApplied"/> (this node cannot attest), and a resolved intent or
-    /// a blind write answers <see cref="KeyValueStagedBaseVerdict.Clear"/> (nothing left for the fence to
-    /// judge). Evaluated under the apply gate so the (intent, head, watermark) read is consistent.
+    /// a blind revision-free write answers <see cref="KeyValueStagedBaseVerdict.Clear"/> (nothing left for the
+    /// fence to judge). Evaluated under the apply gate so the (intent, head, watermark) read is consistent.
     /// </summary>
     internal KeyValueStagedBaseVerdictEntry[] EvaluateReplicaFenceVerdicts(
         HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys)
@@ -1134,13 +1205,13 @@ internal sealed class PreparedIntentStore
                     continue;
                 }
 
-                if (!intent.IsPending || !intent.HasValidatedBase)
+                if (!intent.IsPending || !IsFenceJudged(intent))
                 {
                     verdicts[i] = new(KeyValueStagedBaseVerdict.Clear, -1);
                     continue;
                 }
 
-                string? conflict = JudgeStagedBase(intent, countAbsentHeadAdmission: false, out long headRevision);
+                string? conflict = JudgeStagedBase(intent, countAbsentHeadAdmission: false, out long headRevision, out _);
                 verdicts[i] = new(
                     conflict is null ? KeyValueStagedBaseVerdict.Clear : KeyValueStagedBaseVerdict.StaleBase,
                     headRevision);

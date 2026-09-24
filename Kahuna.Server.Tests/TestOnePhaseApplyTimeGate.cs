@@ -125,6 +125,68 @@ public sealed class TestOnePhaseApplyTimeGate
         Assert.NotNull(intents.Get("g/moved"));
     }
 
+    // ── staged revision against the ledger ─────────────────────────────────────
+
+    [Fact]
+    public void BlindWriteAtACommittedRevision_Rejects_RecordStaysUndecided()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = Stores();
+
+        // The winner committed revision 6 on the new leader; the loser staged the same revision 6 blind on the
+        // deposed leader, whose lock and write intent the leader change took away.
+        CommitThroughStore(intents, MakeIntent("g/collide", Ts(1_000), revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        HLCTimestamp txId = Ts(900);
+        HLCTimestamp opId = Ts(1_200);
+        Assert.Equal(TransactionApplyOutcome.Rejected,
+            ApplyBundle(records, intents, txId, MakeIntent("g/collide", txId, revision: 6,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined), opId));
+
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+        Assert.True(records.TryTakeGatedRejectionVerdict(txId, 1, opId, out BundledCommitVerdict verdict));
+        Assert.Equal(BundledCommitVerdict.StaleBase, verdict);
+    }
+
+    [Fact]
+    public void BlindWriteAboveTheHead_Admits()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = Stores();
+        CommitThroughStore(intents, MakeIntent("g/next", Ts(1_000), revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        HLCTimestamp txId = Ts(1_100);
+        Assert.Equal(TransactionApplyOutcome.Applied,
+            ApplyBundle(records, intents, txId, MakeIntent("g/next", txId, revision: 7,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined), Ts(1_200)));
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+    }
+
+    [Fact]
+    public void ValidatedWriteAtACommittedRevision_Rejects_EvenWithABaseAtTheHead()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = Stores();
+        CommitThroughStore(intents, MakeIntent("g/same", Ts(1_000), revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        HLCTimestamp txId = Ts(1_100);
+        Assert.Equal(TransactionApplyOutcome.Rejected,
+            ApplyBundle(records, intents, txId, MakeIntent("g/same", txId, revision: 6, baseRevision: 6, KeyValueState.Set), Ts(1_200)));
+    }
+
+    [Fact]
+    public void BlindWriteAtACommittedRevision_WithoutApplyTimeValidation_IsNotJudged()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = Stores();
+        CommitThroughStore(intents, MakeIntent("g/unjudged", Ts(1_000), revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        // The check is a property of the replicated command: a bundle that does not ask for apply-time
+        // validation is judged exactly as a node without the check would judge it, so a group that has not
+        // agreed to the check never forks on it. The producer's pre-propose check covers this bundle instead.
+        HLCTimestamp txId = Ts(1_100);
+        Assert.Equal(TransactionApplyOutcome.Applied,
+            ApplyBundle(records, intents, txId, MakeIntent("g/unjudged", txId, revision: 6,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined), Ts(1_200),
+                applyTimeValidation: false));
+    }
+
     [Fact]
     public void HeadBehindTheBase_Admits()
     {
@@ -149,10 +211,11 @@ public sealed class TestOnePhaseApplyTimeGate
             ApplyBundle(records, intents, stale, MakeIntent("g/appeared", stale, revision: 0, baseRevision: -1, KeyValueState.Undefined), Ts(1_200)));
         Assert.Equal(TransactionDecision.Undecided, records.Get(stale, 1)!.Decision);
 
+        // The tombstone is a revision of its own, so the insert over it stages the next one.
         CommitThroughStore(intents, MakeIntent("g/deleted", Ts(1_000), revision: 4, baseRevision: 3, KeyValueState.Set, state: KeyValueState.Deleted));
         HLCTimestamp clean = Ts(1_150);
         Assert.Equal(TransactionApplyOutcome.Applied,
-            ApplyBundle(records, intents, clean, MakeIntent("g/deleted", clean, revision: 0, baseRevision: -1, KeyValueState.Undefined), Ts(1_250)));
+            ApplyBundle(records, intents, clean, MakeIntent("g/deleted", clean, revision: 5, baseRevision: -1, KeyValueState.Undefined), Ts(1_250)));
         Assert.Equal(TransactionDecision.Commit, records.Get(clean, 1)!.Decision);
     }
 

@@ -8,9 +8,10 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Store-level coverage of the prepare-apply staged-base fence: the advisory verdict the intent store attaches
-/// to a freshly installed validated-base prepare when the key's last transactionally committed head no longer
-/// matches the base the write was validated against. The fence never changes the replicated transition — the
-/// intent installs either way — so every test asserts both the flag and the installed intent.
+/// to a freshly installed prepare when the key's last transactionally committed head no longer matches the base
+/// the write was validated against, or already holds the revision the write staged. The fence never changes the
+/// replicated transition — the intent installs either way — so the tests assert both the flag and the installed
+/// intent.
 /// </summary>
 public sealed class TestPreparedIntentStagedBaseFence
 {
@@ -98,12 +99,13 @@ public sealed class TestPreparedIntentStagedBaseFence
 
         Assert.True(conflicting.StaleBase, "a validated-absent base must conflict once the key exists");
 
-        // A committed transactional DELETE keeps the key absent, so a validated-absent insert stays clean.
+        // A committed transactional DELETE keeps the key absent, so a validated-absent insert stays clean. The
+        // tombstone is a revision of its own, so the insert over it stages the next one.
         CommitThroughStore(store, MakeIntent("k/deleted", txPhysical: 1_000, revision: 4,
             baseRevision: 3, KeyValueState.Set, state: KeyValueState.Deleted));
 
         PreparedIntentApplyResult clean = store.Apply(new PrepareIntentCommand(
-            MakeIntent("k/deleted", txPhysical: 1_100, revision: 0, baseRevision: -1, KeyValueState.Undefined)));
+            MakeIntent("k/deleted", txPhysical: 1_100, revision: 5, baseRevision: -1, KeyValueState.Undefined)));
 
         Assert.Equal(TransactionApplyOutcome.Applied, clean.Outcome);
         Assert.False(clean.StaleBase);
@@ -173,5 +175,83 @@ public sealed class TestPreparedIntentStagedBaseFence
 
         Assert.Equal(TransactionApplyOutcome.IdempotentNoop, replay.Outcome);
         Assert.False(replay.StaleBase);
+    }
+
+    [Fact]
+    public void BlindWrite_AtAnAlreadyCommittedRevision_IsFlaggedStale_ButStillInstalls()
+    {
+        PreparedIntentStore store = new();
+
+        // The winner committed revision 6 on the new leader after the loser's exclusion was lost with the old one.
+        CommitThroughStore(store, MakeIntent("k/collide", txPhysical: 1_000, revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        // The loser staged the same revision 6 blind on the deposed leader. It has no base to judge, but its
+        // revision is already committed: acknowledging it would put a second record at revision 6.
+        PreparedIntentApplyResult result = store.Apply(new PrepareIntentCommand(
+            MakeIntent("k/collide", txPhysical: 900, revision: 6,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined)));
+
+        Assert.Equal(TransactionApplyOutcome.Applied, result.Outcome);
+        Assert.True(result.StaleBase, "a staged revision the key already committed must refuse the acknowledgement");
+        Assert.NotNull(store.Get("k/collide"));
+    }
+
+    [Fact]
+    public void BlindWrite_BelowTheCommittedHead_IsFlaggedStale()
+    {
+        PreparedIntentStore store = new();
+
+        CommitThroughStore(store, MakeIntent("k/behind", txPhysical: 1_000, revision: 8, baseRevision: 7, KeyValueState.Set));
+
+        PreparedIntentApplyResult result = store.Apply(new PrepareIntentCommand(
+            MakeIntent("k/behind", txPhysical: 1_100, revision: 6,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined)));
+
+        Assert.True(result.StaleBase);
+    }
+
+    [Fact]
+    public void ValidatedWrite_WithACurrentBase_ButACommittedRevision_IsFlaggedStale()
+    {
+        PreparedIntentStore store = new();
+
+        CommitThroughStore(store, MakeIntent("k/both", txPhysical: 1_000, revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        // The base rule admits a base at the head; the staged revision must still be new.
+        PreparedIntentApplyResult result = store.Apply(new PrepareIntentCommand(
+            MakeIntent("k/both", txPhysical: 1_100, revision: 6, baseRevision: 6, KeyValueState.Set)));
+
+        Assert.True(result.StaleBase);
+    }
+
+    [Fact]
+    public void Write_AtTheRevisionOfACommittedDelete_IsFlaggedStale()
+    {
+        PreparedIntentStore store = new();
+
+        CommitThroughStore(store, MakeIntent("k/tombstone", txPhysical: 1_000, revision: 4,
+            baseRevision: 3, KeyValueState.Set, state: KeyValueState.Deleted));
+
+        PreparedIntentApplyResult result = store.Apply(new PrepareIntentCommand(
+            MakeIntent("k/tombstone", txPhysical: 1_100, revision: 4,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined)));
+
+        Assert.True(result.StaleBase, "a set at the tombstone's revision would resurrect the key over a committed delete");
+    }
+
+    [Fact]
+    public void BlindRevisionFreeWrite_IsNeverJudged()
+    {
+        PreparedIntentStore store = new();
+
+        CommitThroughStore(store, MakeIntent("k/norev", txPhysical: 1_000, revision: 6, baseRevision: 5, KeyValueState.Set));
+
+        // A revision-free write allocates no revision, so there is nothing for the revision rule to judge.
+        PreparedIntentApplyResult result = store.Apply(new PrepareIntentCommand(
+            MakeIntent("k/norev", txPhysical: 1_100, revision: 6,
+                baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined) with { NoRevision = true }));
+
+        Assert.Equal(TransactionApplyOutcome.Applied, result.Outcome);
+        Assert.False(result.StaleBase);
     }
 }

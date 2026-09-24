@@ -2326,7 +2326,10 @@ internal sealed class TransactionCoordinator : IDisposable
     /// frozen intent's validated base revision against the key's current committed state, so a
     /// base that moved after staging — the in-memory write-intent lease lapsed mid-finalize and another
     /// transaction committed the same base first — aborts truthfully instead of silently discarding that
-    /// writer's commit. Each key resolves in three tiers:
+    /// writer's commit. Before any of that, every revision-carrying intent (blind writes included) is checked
+    /// against this node's committed-head memory: a head at or above its staged revision means another
+    /// transaction already committed that revision, which is a conflict with no I/O needed to prove it. Each
+    /// validated-base key then resolves in three tiers:
     /// <list type="bullet">
     /// <item>A live durable intent owned by this transaction (a retry of a prepared-but-undecided attempt):
     /// the base is frozen beneath that intent by the single-live-intent rule, so it is valid by construction —
@@ -2348,6 +2351,24 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             foreach (PreparedIntent staged in partition.Intents)
             {
+                // Every revision-carrying write — blind ones included — must stage a revision above the key's
+                // committed head. A head already at it is another transaction's commit of that revision: this
+                // writer staged it under an exclusion a leader change took away (its point lock and write intent
+                // lived in the deposed leader's memory), and committing would put a second record at that
+                // revision. The local committed-head memory answers without I/O; it is a replica's view, so
+                // this is the early half only — the prepare fence and the bundled commit gate judge the same
+                // rule at the apply position.
+                if (!staged.NoRevision
+                    && manager.DurablePreparedIntentStore.TryGetCommittedHead(staged.Key, out long headRevision, out _)
+                    && headRevision >= staged.Revision)
+                {
+                    DurableTransactionMetrics.StagedRevisionCollisions.Add(1);
+                    logger.LogWarning(
+                        "Staged revision {Revision} for {Key} is already committed (committed head is revision {HeadRevision}); the write was staged under an exclusion a leader change took away",
+                        staged.Revision, staged.Key, headRevision);
+                    return StagedBaseValidation.Conflict;
+                }
+
                 // A blind write carries no validated base: it is last-writer-wins by design, and a foreign
                 // holder on its key is the prepare apply's conflict to resolve, not this check's.
                 if (!staged.HasValidatedBase)

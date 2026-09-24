@@ -663,6 +663,19 @@ internal static class DurableTransactionMetrics
             "kahuna.kv.same_revision_divergent_applies",
             description: "Replicated key/value applies whose revision equals the newest recorded write but whose value differs.");
 
+    /// <summary>
+    /// Durable-transaction writes refused because their staged revision is not above the key's committed head:
+    /// another transaction already committed that revision. The producer is a writer whose in-memory exclusion
+    /// (point lock, write intent) was lost at a leader change — the new leader granted the key again, and the
+    /// second writer staged and committed the same next revision first. Counted wherever the refusal is judged:
+    /// the pre-propose check, the prepare fence and the one-phase bundled commit gate. Each count is a
+    /// same-revision overwrite that did not happen.
+    /// </summary>
+    internal static readonly Counter<long> StagedRevisionCollisions =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.staged_revision_collisions",
+            description: "Durable-transaction writes refused because another transaction already committed their staged revision.");
+
     internal static readonly Counter<long> RecordlessIntentHolds =
         Meter.CreateCounter<long>(
             "kahuna.transactions.recordless_intent_holds",
