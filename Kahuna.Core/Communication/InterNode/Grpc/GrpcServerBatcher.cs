@@ -1094,6 +1094,27 @@ internal sealed class GrpcServerBatcher
         }
     }
 
+    /// <summary>
+    /// True when the peer refused the shared stream at its gate: this node's certificate is not one the
+    /// peer trusts, or the peer requires one this node did not present. The refusal lands before the
+    /// peer reads a single request, so nothing written to the stream was served.
+    /// </summary>
+    private static bool IsPeerRefusal(RpcException ex) =>
+        ex.StatusCode is StatusCode.Unauthenticated or StatusCode.PermissionDenied;
+
+    /// <summary>
+    /// The exception a stream-level failure settles its pending requests with. A stream the peer refused
+    /// at its gate served none of the requests written to it, so to each of them it is exactly a stream
+    /// that could not be opened: they fail as unavailable — which every forward answers as the operation's
+    /// own typed MustRetry — with the refusal kept as the cause for the log line. Only the shared streams
+    /// translate the refusal: a unary call answered Unauthenticated keeps it, because there the status is
+    /// the call's own answer. Every other status settles unchanged.
+    /// </summary>
+    private static RpcException AsStreamFailure(RpcException ex) =>
+        IsPeerRefusal(ex)
+            ? new RpcException(new(StatusCode.Unavailable, $"gRPC inter-node stream refused by the peer: {ex.Status.Detail}", ex))
+            : ex;
+
     private static void FailPendingRequests(long sharedStreamingId, Exception ex)
     {
         // Enumerate the concurrent dictionary directly: its enumerator is weakly consistent and safe
@@ -1136,8 +1157,9 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
-            RpcException failure = ex as RpcException ?? new RpcException(new(
-                StatusCode.Unavailable, $"gRPC inter-node stream write failed or timed out: {ex.GetType().Name}."));
+            RpcException failure = ex is RpcException rpc
+                ? AsStreamFailure(rpc)
+                : new RpcException(new(StatusCode.Unavailable, $"gRPC inter-node stream write failed or timed out: {ex.GetType().Name}."));
             InvalidateStreamingsForUrl(url, logger, $"write failed or timed out ({ex.GetType().Name})", sharedStreaming.Id);
             FailPendingRequests(sharedStreaming.Id, failure);
             throw failure;
@@ -1531,6 +1553,12 @@ internal sealed class GrpcServerBatcher
             InvalidateStreamingsForUrl(streamUrl, logger, "lock stream closed", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
+        catch (RpcException ex) when (IsPeerRefusal(ex))
+        {
+            logger.LogWarning("GrpcServerBatcher lock stream refused by the peer before any request was served: {Status}", ex.Status);
+            InvalidateStreamingsForUrl(streamUrl, logger, "lock stream refused by the peer", sharedStreamingId);
+            FailPendingRequests(sharedStreamingId, AsStreamFailure(ex));
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadLockMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
@@ -1565,6 +1593,12 @@ internal sealed class GrpcServerBatcher
             logger.LogWarning("GrpcServerBatcher key-value stream closed: {Status}", ex.Status);
             InvalidateStreamingsForUrl(streamUrl, logger, "key-value stream closed", sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
+        }
+        catch (RpcException ex) when (IsPeerRefusal(ex))
+        {
+            logger.LogWarning("GrpcServerBatcher key-value stream refused by the peer before any request was served: {Status}", ex.Status);
+            InvalidateStreamingsForUrl(streamUrl, logger, "key-value stream refused by the peer", sharedStreamingId);
+            FailPendingRequests(sharedStreamingId, AsStreamFailure(ex));
         }
         catch (Exception ex)
         {

@@ -9,8 +9,10 @@ using Kahuna.Communication.External.Grpc;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.Routing;
 using Kahuna.Shared.Communication.Grpc;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
 using Kommander;
@@ -136,6 +138,13 @@ public sealed class TestInterNodeMutualTls : IDisposable
         (LockResponseType lockType, _) = await intruder.TryLock(node.ClusterEndpoint, "resource", [1], 1000, LockDurability.Ephemeral, ct);
 
         Assert.Equal(LockResponseType.MustRetry, lockType);
+
+        // The batched key-value stream is refused the same way, and answered the same way.
+        (KeyValueResponseType readType, ReadOnlyKeyValueEntry? readEntry) = await intruder.TryGetValue(
+            node.ClusterEndpoint, HLCTimestamp.Zero, "key", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, readType);
+        Assert.Null(readEntry);
         Assert.Empty(node.Kahuna.Calls);
     }
 

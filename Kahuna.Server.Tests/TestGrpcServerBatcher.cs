@@ -136,6 +136,70 @@ public sealed class TestGrpcServerBatcher
     }
 
     /// <summary>
+    /// A peer that refuses the shared lock stream at its gate (Unauthenticated: this node's certificate is
+    /// not one it trusts) served none of the requests written to the stream. Each pending request must fail
+    /// as unavailable — the status every forward answers as the operation's own MustRetry — with the gate's
+    /// refusal preserved as the cause, and be dropped from the tracking dictionaries.
+    /// </summary>
+    [Fact]
+    public async Task ReadLockMessages_OnPeerRefusal_FailsPendingAsUnavailableWithTheRefusalAsCause()
+    {
+        const long streamId = 9_200_101;
+        const int requestId = 9_300_101;
+
+        TaskCompletionSource<GrpcServerBatcherResponse> pending = SeedPending(requestId, streamId);
+
+        RpcException refusal = new(new Status(StatusCode.Unauthenticated, "CertificateUntrusted"));
+
+        AsyncDuplexStreamingCall<GrpcBatchServerLockRequest, GrpcBatchServerLockResponse> call = new(
+            new NoopClientStreamWriter<GrpcBatchServerLockRequest>(),
+            new ThrowingAsyncStreamReader<GrpcBatchServerLockResponse>(refusal),
+            Task.FromResult(new Metadata()),
+            static () => Status.DefaultSuccess,
+            static () => [],
+            static () => { });
+
+        await InvokeReadLockMessages(streamId, call, NullLogger.Instance);
+
+        Assert.True(pending.Task.IsFaulted);
+        RpcException settled = Assert.IsType<RpcException>(pending.Task.Exception!.InnerException);
+        Assert.Equal(StatusCode.Unavailable, settled.StatusCode);
+        Assert.Contains("CertificateUntrusted", settled.Status.Detail);
+        Assert.Same(refusal, settled.Status.DebugException);
+        Assert.False(RequestRefs().ContainsKey(requestId));
+        Assert.False(RequestStreamRefs().ContainsKey(requestId));
+    }
+
+    /// <summary>The key-value stream translates a gate refusal the same way the lock stream does.</summary>
+    [Fact]
+    public async Task ReadKeyValueMessages_OnPeerRefusal_FailsPendingAsUnavailableWithTheRefusalAsCause()
+    {
+        const long streamId = 9_200_102;
+        const int requestId = 9_300_102;
+
+        TaskCompletionSource<GrpcServerBatcherResponse> pending = SeedPending(requestId, streamId);
+
+        RpcException refusal = new(new Status(StatusCode.PermissionDenied, "CertificateUntrusted"));
+
+        AsyncDuplexStreamingCall<GrpcBatchServerKeyValueRequest, GrpcBatchServerKeyValueResponse> call = new(
+            new NoopClientStreamWriter<GrpcBatchServerKeyValueRequest>(),
+            new ThrowingAsyncStreamReader<GrpcBatchServerKeyValueResponse>(refusal),
+            Task.FromResult(new Metadata()),
+            static () => Status.DefaultSuccess,
+            static () => [],
+            static () => { });
+
+        await InvokeReadKeyValueMessages(streamId, call, NullLogger.Instance);
+
+        Assert.True(pending.Task.IsFaulted);
+        RpcException settled = Assert.IsType<RpcException>(pending.Task.Exception!.InnerException);
+        Assert.Equal(StatusCode.Unavailable, settled.StatusCode);
+        Assert.Same(refusal, settled.Status.DebugException);
+        Assert.False(RequestRefs().ContainsKey(requestId));
+        Assert.False(RequestStreamRefs().ContainsKey(requestId));
+    }
+
+    /// <summary>
     /// A peer that could not answer a request whose payload has no outcome field refuses it with the
     /// envelope's None type rather than fabricating a Found=false. The reader must turn that into a
     /// retryable failure for that request alone: anything else either hangs the caller or reports a
@@ -213,6 +277,14 @@ public sealed class TestGrpcServerBatcher
         public T Current => default!;
 
         public Task<bool> MoveNext(CancellationToken cancellationToken) => Task.FromResult(false);
+    }
+
+    /// <summary>A response stream whose first read fails the way a call the peer refused does.</summary>
+    private sealed class ThrowingAsyncStreamReader<T>(Exception failure) : IAsyncStreamReader<T>
+    {
+        public T Current => default!;
+
+        public Task<bool> MoveNext(CancellationToken cancellationToken) => Task.FromException<bool>(failure);
     }
 
     private sealed class NoopClientStreamWriter<T> : IClientStreamWriter<T>
