@@ -30,4 +30,14 @@ public sealed class KahunaSetKeyValueResponseItem
     /// </summary>
     [JsonPropertyName("routeIndex")]
     public int RouteIndex { get; set; }
+
+    /// <summary>
+    /// Transaction that holds the write intent, prefix lock, range lock, or undecided durable intent this
+    /// item's write ran into, when <see cref="Type"/> is <see cref="KeyValueResponseType.MustRetry"/> because
+    /// of one. Advisory: it lets a caller apply wait-die (abort at once when it is the younger transaction)
+    /// instead of retrying until its deadline. <see cref="HLCTimestamp.Zero"/> when the answer names no
+    /// holder (a success, an infrastructure MustRetry, or a consumer older than this field).
+    /// </summary>
+    [JsonPropertyName("holderTransactionId")]
+    public HLCTimestamp HolderTransactionId { get; set; }
 }

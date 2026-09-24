@@ -315,7 +315,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 LastModifiedPhysical = response.LastModified.L,
                 LastModifiedCounter = response.LastModified.C,
                 Durability = (GrpcKeyValueDurability)response.Durability,
-                RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? "")
+                RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? ""),
+                HolderTransactionIdNode = response.HolderTransactionId.N,
+                HolderTransactionIdPhysical = response.HolderTransactionId.L,
+                HolderTransactionIdCounter = response.HolderTransactionId.C
             });
         }
     }

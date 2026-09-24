@@ -26,7 +26,23 @@ internal static class RangeLockChecks
         string? bucket,
         HLCTimestamp txId,
         HLCTimestamp currentTime)
+        => KeyCoveredByForeignRangeLock(context, key, bucket, txId, currentTime, out _);
+
+    /// <summary>
+    /// Same as <see cref="KeyCoveredByForeignRangeLock(KeyValueContext, string, string?, HLCTimestamp, HLCTimestamp)"/>,
+    /// and also names the covering lock's owner in <paramref name="holder"/> so the caller can report who
+    /// it is waiting behind. Zero when no foreign range lock covers the key.
+    /// </summary>
+    internal static bool KeyCoveredByForeignRangeLock(
+        KeyValueContext context,
+        string key,
+        string? bucket,
+        HLCTimestamp txId,
+        HLCTimestamp currentTime,
+        out HLCTimestamp holder)
     {
+        holder = HLCTimestamp.Zero;
+
         // Count guard first: range locks are rare, and an empty table answers false without
         // hashing the bucket. Runs on every write, so the common workload skips the probe.
         if (context.LocksByRange.Count == 0 || bucket is null
@@ -42,7 +58,10 @@ internal static class RangeLockChecks
                 continue; // expired — will be cleaned up on release or by the collector sweep
 
             if (KeyInRange(key, rangeLock))
+            {
+                holder = rangeLock.TransactionId;
                 return true;
+            }
         }
 
         return false;

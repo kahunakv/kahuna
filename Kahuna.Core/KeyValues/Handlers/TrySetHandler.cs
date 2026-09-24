@@ -160,11 +160,16 @@ internal sealed class TrySetHandler : BaseHandler
         // proceeds — materialize a committed value into the entry (so the new revision and conditional flags are
         // based on it), treat an undecided intent as a live conflict, and ignore an aborted one. No-op off the
         // durable-intent path (null store).
+        //
+        // Every conflict answer below is MustRetry and names the transaction the writer is waiting behind. The
+        // answer type stays MustRetry so an existing caller keeps its retry loop; a caller that reads the holder
+        // can apply wait-die instead of waiting out its whole deadline against a writer that will not yield.
         KeyValueEntry? resolvedEntry = entry;
         if (ForeignIntentWriteResolver.Resolve(
-                context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead, message.ForeignDecisionHint)
+                context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead,
+                out HLCTimestamp blockingIntentOwner, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
-            return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, blockingIntentOwner), entry, exists);
 
         entry = resolvedEntry!;
         exists = entry.State is not (KeyValueState.Deleted or KeyValueState.Undefined);
@@ -208,11 +213,11 @@ internal sealed class TrySetHandler : BaseHandler
                         if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
                             TakeOverYieldingIntent(message, message.Key, entry, currentTime);
                         else
-                            return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+                            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists);
                     }
                     else
                     {
-                        return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+                        return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists);
                     }
                 }
                 else
@@ -229,15 +234,15 @@ internal sealed class TrySetHandler : BaseHandler
             if (intent.TransactionId != message.TransactionId)
             {
                 if (KeyValueWriteIntentLease.IsLive(context, entry.Bucket, intent, currentTime))
-                    return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+                    return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, intent.TransactionId), entry, exists);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
             }
         }
 
         // Validate if the key falls within any active range lock from another transaction
-        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime))
-            return (new(KeyValueResponseType.MustRetry, 0), entry, exists);
+        if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime, out HLCTimestamp rangeLockHolder))
+            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, rangeLockHolder), entry, exists);
 
         return (null, entry, exists);
     }

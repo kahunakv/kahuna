@@ -57,7 +57,8 @@ public class ScanPageBenchmark
         {
             string key = $"k/{i:D8}";
             overlay.Record(key, value, 1, default, default, ts, KeyValueState.Set, false);
-            mirror[key] = new UnflushedKeyValueWrite(value, 1, default, default, ts, KeyValueState.Set, false);
+            // A first write for a key is also the oldest one still queued, which is what Record stores.
+            mirror[key] = new UnflushedKeyValueWrite(value, 1, default, default, ts, KeyValueState.Set, false, OldestRevision: 1);
 
             PreparedIntent intent = new(new HLCTimestamp(0, 500, 0), 1, key, 0, key, new HLCTimestamp(0, 1000, 0),
                 KeyValueState.Set, [9], null, 5, default, false, 0, KeyValueState.Set, new HLCTimestamp(0, 9000, 0),
