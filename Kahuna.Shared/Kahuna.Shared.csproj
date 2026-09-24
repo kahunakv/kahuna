@@ -11,7 +11,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>Kahuna.Shared</PackageId>
-        <Version>1.9.7</Version>
+        <Version>1.9.9</Version>
         <Description>Shared libraries for Kahuna: Distributed locks and reliable key-value store </Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Andres Gutierrez</Company>
@@ -25,7 +25,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-	<PackageReference Include="Kommander" Version="1.7.9" />
+	<PackageReference Include="Kommander" Version="1.8.0" />
         <PackageReference Include="Grpc.Tools" Version="2.68.1">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>

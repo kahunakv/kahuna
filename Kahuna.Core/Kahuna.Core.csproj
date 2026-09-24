@@ -8,7 +8,7 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <IsPackable>true</IsPackable>
     <PackageId>Kahuna.Core</PackageId>
-    <Version>1.9.7</Version>
+    <Version>1.9.9</Version>
     <Description>.NET embeddable core for Kahuna: Distributed locks, reliable key-value store and idempotent sequencer</Description>
     <Authors>Andres Gutierrez</Authors>
     <Company>Andres Gutierrez</Company>
