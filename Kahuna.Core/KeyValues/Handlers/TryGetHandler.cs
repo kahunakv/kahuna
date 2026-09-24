@@ -78,6 +78,11 @@ internal sealed class TryGetHandler : BaseHandler
             }
         }
 
+        // A reader holding its own MVCC view skipped the overlay above; its pin must still not outlive a committed
+        // head that is waiting for settlement (see PinIsBehindUnsettledCommit).
+        if (readerHasOwnMvcc && PinIsBehindUnsettledCommit(message, entry))
+            return KeyValueStaticResponses.AbortedResponse;
+
         // Validate active replication intent — client must retry until the entry is
         // fully replicated before reading it.
         if (entry?.ReplicationIntent is not null)

@@ -106,6 +106,24 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             }
         }
 
+        // Under deferred settlement a committed transaction releases its write intent as soon as its decision is
+        // durable, while its value may still sit only in the durable prepared-intent store. A lock granted over
+        // that state would hold a key whose committed head the holder cannot see: the holder's pinned read would
+        // still answer the pre-commit value, and the settlement applied later would land under its lock. So the
+        // acquire resolves the durable intent the way a write does before it grants: a committed value is
+        // materialized into the entry, and an undecided one is waited out (the acquire loop retries this answer
+        // and routes the holder's decision when it is not local).
+        if (message.Durability == KeyValueDurability.Persistent)
+        {
+            KeyValueEntry? resolvedEntry = entry;
+            if (ForeignIntentWriteResolver.Resolve(
+                    context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead, message.ForeignDecisionHint)
+                == ForeignIntentWriteDecision.MustRetry)
+                return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+            entry = resolvedEntry!;
+        }
+
         entry.WriteIntent = new()
         {
             TransactionId = message.TransactionId,

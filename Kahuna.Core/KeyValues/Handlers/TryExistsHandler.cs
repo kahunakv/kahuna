@@ -79,6 +79,11 @@ internal sealed class TryExistsHandler : BaseHandler
             }
         }
 
+        // A reader holding its own MVCC view skipped the overlay above; its pin must still not outlive a committed
+        // head that is waiting for settlement (see PinIsBehindUnsettledCommit).
+        if (readerHasOwnMvcc && PinIsBehindUnsettledCommit(message, entry))
+            return KeyValueStaticResponses.AbortedResponse;
+
         if (entry?.ReplicationIntent is not null)
         {
             if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)

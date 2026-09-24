@@ -842,6 +842,47 @@ internal abstract class BaseHandler
         !message.ReadTimestamp.IsNull() && entry is not null && entry.Revision > intent.Revision;
 
     /// <summary>
+    /// Whether a transactional latest read whose transaction already holds an MVCC entry (a pin, or its own staged
+    /// write) on the key is behind a committed head that has not reached the resident entry yet: another
+    /// transaction's durable intent on the key is committed and newer than the entry. Such a reader skips the
+    /// durable-intent overlay (its own MVCC view is authoritative for it), so without this check it would answer
+    /// the pinned pre-commit value. The MVCC path answers <c>Aborted</c> once the entry itself has advanced past
+    /// the pin; this is the same rule for the deferred-settlement window before the committed value materializes.
+    /// The comparison is against the reader's own MVCC entry, not the resident entry: a scan that read through
+    /// the overlay pinned the intent's own value and revision, so that reader already observed the commit and is
+    /// not behind it. An undecided intent is not a committed head, so the reader keeps its pinned view. A reader
+    /// that staged its own write based it on a resolved head (writes materialize a committed intent first), so its
+    /// MVCC revision is beyond the intent's and this never fires for it.
+    /// </summary>
+    protected bool PinIsBehindUnsettledCommit(KeyValueRequest message, KeyValueEntry? entry)
+    {
+        if (message.TransactionId == HLCTimestamp.Zero || !message.ReadTimestamp.IsNull())
+            return false;
+
+        if (entry?.MvccEntries is null || !entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? pin))
+            return false;
+
+        if (context.PreparedIntentStore?.Get(message.Key) is not { } foreignIntent
+            || foreignIntent.TransactionId == message.TransactionId)
+            return false;
+
+        // The reader's own view already includes this commit. A committed delete keeps the revision of the value
+        // it deletes, so an equal revision counts as included only when the state matches too.
+        if (pin.Revision > foreignIntent.Revision
+            || (pin.Revision == foreignIntent.Revision && pin.State == foreignIntent.State))
+            return false;
+
+        // Already materialized: the MVCC path's own revision check decides. Same test as the write-side resolver.
+        if (entry is not null
+            && (entry.Revision > foreignIntent.Revision
+                || (entry.Revision == foreignIntent.Revision && entry.State == foreignIntent.State)))
+            return false;
+
+        return DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero, message.ForeignDecisionHint)
+               == ReadVisibilityAction.UseIntentValue;
+    }
+
+    /// <summary>
     /// Whether a snapshot read that the durable prepared-intent overlay is about to answer must first wait for a
     /// live write intent of a third transaction on the same key. The overlay answers from the covering intent's
     /// committed value, but a different transaction may already have staged a newer write whose commit timestamp
@@ -929,7 +970,12 @@ internal abstract class BaseHandler
     /// the durable write, records the completion receipt, and — for the anchor key of a Durable
     /// transaction — installs the initial coordinator decision atomically. Shared by the inline commit
     /// path and the off-mailbox completion so both apply identically. The caller is responsible for the
-    /// idempotency guards (write intent present and owned by <paramref name="txId"/>) before calling.
+    /// idempotency guards before calling.
+    /// <para>Only a write intent owned by <paramref name="txId"/> is cleared. The durable-intent apply reaches
+    /// here after the committing transaction already released its intent (deferred settlement), and the key may
+    /// by then be locked by another transaction. That lock, and that transaction's MVCC entry, are kept: the
+    /// holder's next read or write of the key sees the entry past its pin and aborts, instead of losing its lock
+    /// and writing over this commit.</para>
     /// </summary>
     protected void ApplyConfirmedCommit(
         KeyValueEntry entry,
@@ -941,7 +987,9 @@ internal abstract class BaseHandler
     {
         RemoveMvccEntry(entry, txId);
         TrimExpiredMvccEntries(entry, currentTime);
-        entry.WriteIntent = null;
+
+        if (entry.WriteIntent is not null && entry.WriteIntent.TransactionId == txId)
+            entry.WriteIntent = null;
 
         ApplyCommittedHead(entry, proposal, txId);
 

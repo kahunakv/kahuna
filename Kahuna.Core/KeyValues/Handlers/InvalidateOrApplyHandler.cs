@@ -99,9 +99,7 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, now))
                 {
                     // A committed head strictly above the resident entry proves the durable history
-                    // moved past whatever base this intent's owner staged against, so the owner can
-                    // never commit here — its prepare is refused by the staged-base fence and its
-                    // force-resident apply degrades to the idempotent no-op guards. Clearing the
+                    // moved past whatever base this intent's owner read or staged against. Clearing the
                     // intent and applying is exactly what the streak-triggered coherence reconcile
                     // does later from the durable row; doing it at delivery time closes the window
                     // where a quorum-confirmed read serves the superseded revision. A notification
@@ -110,7 +108,13 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
                     if (IsStrictlyNewer(entry, data) || HeadMatches(entry, data))
                         return null;
 
-                    RemoveMvccEntry(entry, entry.WriteIntent.TransactionId);
+                    // The owner's MVCC entry is deliberately kept. It records the base the owner read or
+                    // staged against, and it is the only thing that makes the owner fail now: its next
+                    // read or write of the key sees the entry past that base and answers Aborted, and a
+                    // staged write is refused by the staged-base fence at prepare. Deleting it would let
+                    // an owner that has read but not yet written re-pin at the new head and write a value
+                    // computed from the superseded one over this commit, with every check passing. The
+                    // entry is removed when the owner commits or rolls back, or trimmed when it expires.
                 }
                 entry.WriteIntent = null;
             }

@@ -366,7 +366,16 @@ intent with resolution `Pending`**. Anything touching that key in the window mus
 | Point read / exists | `DurableReadVisibility` → `PreparedIntentVisibility`. Committed intent → serve the intent's value (a committed *delete* or an expired value reads as does-not-exist); aborted → ignore; **undecided → wait**. |
 | Range / bucket scan | The scan overlays the intent window and resolves the whole set at once via `TryRouteForeignScanDecisions` + `DurableReadVisibility.ScanDecision`. |
 | Write (set/delete/extend) | `ForeignIntentWriteResolver` materializes a committed intent into the entry *before* the write derives its next revision, flags and existence checks. Undecided → retryable. |
+| Point lock acquire | Resolved exactly like a write before the lock is granted: a committed intent is materialized into the entry, so the new holder never holds a key whose committed head it cannot see; undecided → `WaitingForReplication`, which the acquire loop waits out (routing the holder's decision when it is not local). |
+| Transactional read that already holds its own MVCC entry on the key | Skips the overlay (its own view is authoritative), but if a committed intent is newer than the resident entry, the pin is behind the committed head and the read answers `Aborted` — the same answer it gives once the entry has advanced. It never returns the pinned pre-commit value. |
 | A new transaction's prepare | Blocked (one live intent per key) until the predecessor settles — absorbed by the bounded prepare retry in §6.3. |
+
+**Settlement never erases another transaction's lock state.** A commit that settles after it released its own
+intent can land on a key that another transaction has since locked and read. The apply advances the entry,
+but it keeps that transaction's MVCC entry (and, on the leader's durable apply, its lock): the entry records
+the base the transaction read, and it is what makes that transaction's next read or write of the key answer
+`Aborted`. Deleting it would let the transaction re-pin at the new head and write a value computed from the
+superseded one over the commit — a lost update that every later check would accept.
 
 **Cross-node.** The decision record lives on the anchor partition, which may be led by another node. When
 the decision is not resolvable locally, the read routes a lookup to the anchor leader

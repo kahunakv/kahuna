@@ -217,11 +217,12 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
 
     /// <summary>
     /// A committed head strictly above the resident entry, arriving while a LIVE foreign intent holds
-    /// the key, must apply and clear the intent — not defer. The committed history moving past the
-    /// staged base proves the intent's owner can never commit here (the streak-triggered coherence
-    /// reconcile makes exactly this call from the durable row), and the notification is single-shot:
-    /// deferring it left the resident entry behind the node's own applied committed state, which a
-    /// read gated by a quorum-confirmed leadership check then served as a stale snapshot.
+    /// the key, must apply and clear the intent — not defer. The notification is single-shot: deferring
+    /// it left the resident entry behind the node's own applied committed state, which a read gated by a
+    /// quorum-confirmed leadership check then served as a stale snapshot (the streak-triggered coherence
+    /// reconcile makes exactly this call from the durable row). The intent owner's MVCC entry is kept: it
+    /// records the base the owner read or staged against, and it is what makes the owner's next read or
+    /// write of the key abort instead of re-pinning at the new head.
     /// </summary>
     [Fact]
     public void ForeignLiveIntentNotification_StrictlyNewerAppliesAndClearsTheIntent()
@@ -238,7 +239,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         Assert.Equal(6, entry.Revision);
         Assert.Equal("v6"u8.ToArray(), entry.Value);
         Assert.Null(entry.WriteIntent);
-        Assert.True(entry.MvccEntries is null || !entry.MvccEntries.ContainsKey(holder));
+        Assert.True(entry.MvccEntries?.ContainsKey(holder), "the notice deleted the intent owner's MVCC entry");
 
         // The superseded revision was archived, so snapshot readers can still resolve it.
         Assert.NotNull(entry.Revisions);
