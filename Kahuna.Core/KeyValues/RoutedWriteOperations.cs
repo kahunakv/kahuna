@@ -51,6 +51,9 @@ internal sealed class RoutedWriteOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
+    private Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
@@ -138,9 +141,19 @@ internal sealed class RoutedWriteOperations
         KeyValueResponseType type;
         long revision;
         HLCTimestamp lastModified;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            (type, revision, lastModified) =
-                await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                (type, revision, lastModified) =
+                    await locator.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // Only a confirmed set records a modified key + its implicit point lock into the working set.
         bool applied = type == KeyValueResponseType.Set;
@@ -246,8 +259,18 @@ internal sealed class RoutedWriteOperations
             item.ConflictPolicy = sessionPolicy;
 
         List<KahunaSetKeyValueResponseItem> responses;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            responses = await locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                responses = await locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // Fold the confirmed writes in canonical request order (fan-out returns them unordered), so the first
         // persistent key deterministically anchors the transaction record. Only a genuine Set is a confirmed
@@ -385,8 +408,18 @@ internal sealed class RoutedWriteOperations
             item.ConflictPolicy = sessionPolicy;
 
         List<KahunaDeleteKeyValueResponseItem> responses;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            responses = await locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                responses = await locator.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // Fold the confirmed deletes in canonical request order (fan-out returns them unordered), so the
         // first persistent key deterministically anchors the transaction record. A transient (MustRetry) item
@@ -528,9 +561,19 @@ internal sealed class RoutedWriteOperations
         KeyValueResponseType type;
         long revision;
         HLCTimestamp lastModified;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            (type, revision, lastModified) =
-                await locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                (type, revision, lastModified) =
+                    await locator.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool applied = type == KeyValueResponseType.Deleted;
 
@@ -606,9 +649,19 @@ internal sealed class RoutedWriteOperations
         KeyValueResponseType type;
         long revision;
         HLCTimestamp lastModified;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            (type, revision, lastModified) =
-                await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                (type, revision, lastModified) =
+                    await locator.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool applied = type == KeyValueResponseType.Extended;
 
@@ -620,10 +673,20 @@ internal sealed class RoutedWriteOperations
         IReadOnlyList<StagedMutationEffect>? stagedMutations = null;
         if (applied && durability == KeyValueDurability.Persistent)
         {
-            (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) =
-                await locator.LocateAndTryGetValue(transactionId, key, -1, HLCTimestamp.Zero, durability, cancellationToken);
-            if (readType == KeyValueResponseType.Get && entry is not null)
-                stagedMutations = [new StagedMutationEffect(key, entry.Value, KeyValueState.Set, entry.Revision, expiresMs, NoRevision: false, lastModified)];
+            // The extend has already applied, so a read-back that throws (the caller cancelling, a routing fault)
+            // takes the same no-staging fallback as one that finds nothing: releasing the registration here would
+            // leave the applied extend out of the working set.
+            try
+            {
+                (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) =
+                    await locator.LocateAndTryGetValue(transactionId, key, -1, HLCTimestamp.Zero, durability, cancellationToken);
+                if (readType == KeyValueResponseType.Get && entry is not null)
+                    stagedMutations = [new StagedMutationEffect(key, entry.Value, KeyValueState.Set, entry.Revision, expiresMs, NoRevision: false, lastModified)];
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Read-back after extend of {Key} failed; completing the extend without a staged mutation", key);
+            }
         }
 
         (KeyValueResponseType, long, HLCTimestamp) response = (type, revision, lastModified);

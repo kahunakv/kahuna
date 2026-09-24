@@ -48,6 +48,9 @@ internal sealed class RoutedReadOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
+    private Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
@@ -116,9 +119,23 @@ internal sealed class RoutedReadOperations
                 return (KeyValueResponseType.Errored, null);
         }
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = kind == OperationKind.Exists
-            ? await locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken)
-            : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        KeyValueResponseType type;
+        ReadOnlyKeyValueEntry? entry;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            (type, entry) = kind == OperationKind.Exists
+                ? await locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken)
+                : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        }
+        catch
+        {
+            // A re-read under an already-completed id holds no pending registration; only a fresh one does.
+            if (outcome == OperationRegistrationOutcome.New)
+                await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // A re-read under an already-completed id re-executes without re-folding:
         // the first-recorded observation is authoritative for commit validation.
@@ -141,7 +158,16 @@ internal sealed class RoutedReadOperations
         payload.CachedRevision = exists ? entry!.Revision : 0;
         payload.CachedTimestamp = exists ? entry!.LastModified : HLCTimestamp.Zero;
 
-        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
+        try
+        {
+            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // No retry cache is involved on this path, so this frame still holds the sole reference: the
         // fold retains the read-key object, not the shell, so the shell can be recycled.
@@ -283,9 +309,22 @@ internal sealed class RoutedReadOperations
                 return BuildManyReadRejection(keys, KeyValueResponseType.Errored);
         }
 
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> result = kind == OperationKind.ExistsMany
-            ? await locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken)
-            : await locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> result;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            result = kind == OperationKind.ExistsMany
+                ? await locator.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken)
+                : await locator.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
+        }
+        catch
+        {
+            // A re-read under an already-completed id holds no pending registration; only a fresh one does.
+            if (outcome == OperationRegistrationOutcome.New)
+                await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // A re-read under an already-completed id re-executes without re-folding:
         // the first-recorded observations are authoritative for commit validation.
@@ -340,7 +379,16 @@ internal sealed class RoutedReadOperations
         payload.Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent;
         payload.CachedType = batchCachedType;
 
-        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
+        try
+        {
+            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // No retry cache is involved on this path, so this frame still holds the sole reference: the
         // fold copied the observations it kept and the shell can be recycled.

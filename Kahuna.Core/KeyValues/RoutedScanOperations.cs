@@ -76,6 +76,9 @@ internal sealed class RoutedScanOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
+    private Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
@@ -258,8 +261,18 @@ internal sealed class RoutedScanOperations
                 return new KeyValueGetByBucketResult(KeyValueResponseType.Errored, []);
         }
 
-        KeyValueGetByBucketResult result =
-            await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+        KeyValueGetByBucketResult result;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            result = await locator.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // A snapshot scan is pinned to a past timestamp and owns no live transactional MVCC, so its items
         // contribute no read dependencies; it still completes for finalize fencing and idempotent replay.
@@ -282,7 +295,16 @@ internal sealed class RoutedScanOperations
         payload.Durability = durability;
         payload.CachedType = result.Type;
 
-        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
+        try
+        {
+            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // No retry cache is involved on this path, so this frame still holds the sole reference: the
         // fold copied the observations it kept and the shell can be recycled.
@@ -347,8 +369,18 @@ internal sealed class RoutedScanOperations
                 return new KeyValueGetByRangeResult(KeyValueResponseType.Errored, [], null, false);
         }
 
-        KeyValueGetByRangeResult result =
-            await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+        KeyValueGetByRangeResult result;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            result = await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         List<KeyValueTransactionReadKey>? observations = null;
         if (recordObservations && result.Type == KeyValueResponseType.Get && result.Items.Count > 0)
@@ -369,7 +401,16 @@ internal sealed class RoutedScanOperations
         payload.Durability = durability;
         payload.CachedType = result.Type;
 
-        await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+        // Completed off the caller's token: a cancel between the read and this call must not strand the registration.
+        try
+        {
+            await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // No retry cache is involved on this path, so this frame still holds the sole reference: the
         // fold copied the observations it kept and the shell can be recycled.

@@ -49,6 +49,9 @@ internal sealed class RoutedLockOperations
     private Task<object?> TryRecoverRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
         registrar.TryRecoverRegisteredOperation(coordinatorKey, transactionId, operationId);
 
+    private Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
         registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
@@ -126,9 +129,19 @@ internal sealed class RoutedLockOperations
         string resultKey;
         KeyValueDurability resultDurability;
         HLCTimestamp holder;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            (type, resultKey, resultDurability, holder) =
-                await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                (type, resultKey, resultDurability, holder) =
+                    await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool acquired = type == KeyValueResponseType.Locked;
 
@@ -217,8 +230,18 @@ internal sealed class RoutedLockOperations
             return KeyValueResponseType.Errored;
         }
 
-        KeyValueResponseType type =
-            await locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        KeyValueResponseType type;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            type = await locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool acquired = type == KeyValueResponseType.Locked;
 
@@ -285,9 +308,19 @@ internal sealed class RoutedLockOperations
         }
 
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> responses;
-        using (YieldingIntentPolicyScope.Enter(sessionPolicy))
-            responses =
-                await locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+                responses =
+                    await locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         // Fold every confirmed Locked key as a held point lock so commit/rollback release it. A transient
         // (MustRetry) key folds nothing; the caller resends only the transient subset as a fresh operation.
@@ -364,8 +397,19 @@ internal sealed class RoutedLockOperations
                 return (KeyValueResponseType.Errored, key);
         }
 
-        (KeyValueResponseType type, string resultKey) =
-            await locator.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
+        KeyValueResponseType type;
+        string resultKey;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            (type, resultKey) = await locator.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool released = type == KeyValueResponseType.Unlocked;
 
@@ -441,8 +485,18 @@ internal sealed class RoutedLockOperations
                 return KeyValueResponseType.Errored;
         }
 
-        KeyValueResponseType type =
-            await locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+        KeyValueResponseType type;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            type = await locator.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool released = type == KeyValueResponseType.Unlocked;
 
@@ -526,8 +580,19 @@ internal sealed class RoutedLockOperations
             return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
         }
 
-        (KeyValueResponseType type, HLCTimestamp holder) =
-            await locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, afterSnapshot, cancellationToken);
+        KeyValueResponseType type;
+        HLCTimestamp holder;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            (type, holder) = await locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, afterSnapshot, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool acquired = type == KeyValueResponseType.Locked;
         RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);
@@ -630,8 +695,18 @@ internal sealed class RoutedLockOperations
                 return KeyValueResponseType.Errored;
         }
 
-        KeyValueResponseType type =
-            await locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        KeyValueResponseType type;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            type = await locator.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+        }
+        catch
+        {
+            await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
 
         bool released = type == KeyValueResponseType.Unlocked;
         RangeLockKey range = new(prefix, startKey, startInclusive, endKey, endInclusive, durability);

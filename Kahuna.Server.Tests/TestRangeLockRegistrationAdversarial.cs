@@ -294,6 +294,68 @@ public sealed class TestRangeLockRegistrationAdversarial : BaseCluster
         }
     }
 
+    // ── Acquire that throws after registering ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// An acquire whose work throws after the operation registered — here the caller's cancellation surfacing
+    /// inside the locator, which in production comes from a leadership confirmation or a forward observing the
+    /// token — must release the registration on the way out. Left pending, the record is completed by nobody,
+    /// and every commit or rollback of the transaction waits out the whole finalize drain deadline and then
+    /// answers <c>MustRetry</c>, again and again.
+    ///
+    /// <para>Asserts the three observable consequences of the release: nothing stays pending, the same
+    /// operation id registers afresh and acquires, and a single rollback finalizes the transaction and frees
+    /// the range for another one.</para>
+    /// </summary>
+    [Fact]
+    public async Task AcquireThatThrowsAfterRegistering_ReleasesTheOperation_SoRollbackFinalizes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (IRaft, KahunaManager)[] nodes = await Assemble();
+        try
+        {
+            await SeedSingle(nodes, ct);
+            KahunaManager node = nodes[0].Item2;
+
+            TransactionHandle handle = await StartTx(node, ct);
+            TransactionOperationId acquireOp = TransactionOperationId.NewRandom();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => node.RegisterAndAcquireRangeLockWithHook(
+                handle.TransactionId, handle.CoordinatorKey, acquireOp, Space, null, true, null, false,
+                30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive,
+                afterSnapshot: () => Task.FromException(new OperationCanceledException()),
+                cancellationToken: ct));
+
+            TransactionWorkingSet? afterThrow = await node.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterThrow);
+            Assert.Equal(0, afterThrow!.PendingOperationCount);
+            Assert.Empty(afterThrow.AcquiredRangeLocks);
+
+            // The release removed the record, so the same id is new again: a retry acquires and folds the range
+            // instead of answering MustRetry against a record nobody will complete.
+            KeyValueResponseType retried = await RangeAcquireWithRetry(() =>
+                node.LocateAndTryAcquireRangeLock(handle.TransactionId, Space, null, true, null, false, 30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, handle.CoordinatorKey, acquireOp), ct);
+            Assert.Equal(KeyValueResponseType.Locked, retried);
+
+            TransactionWorkingSet? afterRetry = await node.LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(afterRetry);
+            Assert.Single(afterRetry!.AcquiredRangeLocks);
+
+            // One rollback call finalizes: with the record stranded it would drain for the whole transaction
+            // timeout and answer MustRetry.
+            Assert.Equal(KeyValueResponseType.RolledBack, await node.LocateAndRollbackTransaction(handle, ct));
+
+            TransactionHandle second = await StartTx(node, ct);
+            KeyValueResponseType reacquired = await RangeAcquireWithRetry(() =>
+                node.LocateAndTryAcquireRangeLock(second.TransactionId, Space, null, true, null, false, 30_000, KeyValueDurability.Persistent, RangeLockMode.Exclusive, ct, second.CoordinatorKey, TransactionOperationId.NewRandom()), ct);
+            Assert.Equal(KeyValueResponseType.Locked, reacquired);
+        }
+        finally
+        {
+            await LeaveAll(nodes, ct);
+        }
+    }
+
     // ── Finalize releases confirmed range locks from server effects ─────────────────────────────
 
     /// <summary>

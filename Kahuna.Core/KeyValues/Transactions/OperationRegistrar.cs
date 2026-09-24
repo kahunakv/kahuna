@@ -164,6 +164,50 @@ internal sealed class OperationRegistrar
         }
     }
 
+    /// <summary>
+    /// Releases a freshly registered operation whose participant work threw before this frame could complete
+    /// it. The frame that registered an operation is its only completer, so without this the record stays
+    /// pending for the life of the session and every commit or rollback waits out the full finalize drain
+    /// deadline on it. The most common trigger is the caller's cancellation token firing inside the work (a
+    /// leadership confirmation, a forward, an actor wait) after the registration itself succeeded.
+    ///
+    /// <para>The release is a completion with a transient outcome and no effect, which the coordinator turns
+    /// into a cancel: the record is removed, the pending count drops, and a same-id retry registers as new and
+    /// re-drives the operation. Nothing is folded into the working set. If the work did take effect on the
+    /// participant before it threw, that effect stays unfolded — exactly as it would have with the record left
+    /// pending — so it is bounded by its own lease and the session liveness ceiling, and a later commit never
+    /// materializes it.</para>
+    ///
+    /// <para>Runs detached from the caller's token, for the same reason <see cref="CompleteRegisteredOperation"/>
+    /// does: the caller going away is what got us here. Never throws — the caller is already propagating the
+    /// original exception, and a release that does not land only leaves the record pending, which is the state
+    /// before this call.</para>
+    /// </summary>
+    internal async Task AbandonRegisteredOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId)
+    {
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.CachedType = KeyValueResponseType.MustRetry;
+
+        try
+        {
+            (KeyValueResponseType outcome, _) = await LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, CancellationToken.None);
+
+            // Recycle only on an acknowledged release: a failed remote completion may not have finished with the
+            // shell, and a shell that misses its return is simply reclaimed by the GC.
+            if (outcome == KeyValueResponseType.Set)
+            {
+                OperationCompletionPayloadPool.Return(payload);
+                return;
+            }
+
+            logger.LogWarning("Release of failed transaction operation {OperationId} was not acknowledged by coordinator; the operation stays pending", operationId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Release of failed transaction operation {OperationId} was not acknowledged; the operation stays pending", operationId);
+        }
+    }
+
     /// <summary>Routes an operation registration to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
     public ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
     {
