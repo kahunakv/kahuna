@@ -329,6 +329,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
                     Revision = item.Revision, 
                     LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                     Durability = (KeyValueDurability)item.Durability,
+                    HolderTransactionId = new(item.HolderTransactionIdNode, item.HolderTransactionIdPhysical, item.HolderTransactionIdCounter),
                 });
         }
     }

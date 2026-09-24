@@ -209,7 +209,9 @@ internal sealed class LocalKeyValueOperations
                     Type = response.Type,
                     Revision = response.Revision,
                     LastModified = response.Ticket,
-                    Durability = item.Durability
+                    Durability = item.Durability,
+                    // A MustRetry over a live foreign writer names that writer so the caller can apply wait-die.
+                    HolderTransactionId = response.HolderTransactionId
                 };
             }
             finally

@@ -47,7 +47,25 @@ internal static class ForeignIntentWriteResolver
         ref KeyValueEntry? entry,
         Action<KeyValueEntry, KeyValueProposal, HLCTimestamp> applyCommittedHead,
         Transactions.Data.ForeignDecisionHint hint = default)
+        => Resolve(context, key, transactionId, ref entry, applyCommittedHead, out _, hint);
+
+    /// <summary>
+    /// Same as <see cref="Resolve(KeyValueContext, string, HLCTimestamp, ref KeyValueEntry?, Action{KeyValueEntry, KeyValueProposal, HLCTimestamp}, Transactions.Data.ForeignDecisionHint)"/>,
+    /// and also names the undecided intent's owner in <paramref name="blockingTransactionId"/> when the
+    /// answer is <see cref="ForeignIntentWriteDecision.MustRetry"/>, so the caller can report who it is
+    /// waiting behind. Zero for every other answer.
+    /// </summary>
+    public static ForeignIntentWriteDecision Resolve(
+        KeyValueContext context,
+        string key,
+        HLCTimestamp transactionId,
+        ref KeyValueEntry? entry,
+        Action<KeyValueEntry, KeyValueProposal, HLCTimestamp> applyCommittedHead,
+        out HLCTimestamp blockingTransactionId,
+        Transactions.Data.ForeignDecisionHint hint = default)
     {
+        blockingTransactionId = HLCTimestamp.Zero;
+
         if (context.PreparedIntentStore?.Get(key) is not { } foreignIntent
             || foreignIntent.TransactionId == transactionId)
             return ForeignIntentWriteDecision.Proceed;
@@ -55,6 +73,7 @@ internal static class ForeignIntentWriteResolver
         switch (DurableReadVisibility.Resolve(context, foreignIntent, HLCTimestamp.Zero, hint))
         {
             case ReadVisibilityAction.Retry:
+                blockingTransactionId = foreignIntent.TransactionId;
                 return ForeignIntentWriteDecision.MustRetry;
 
             case ReadVisibilityAction.UseIntentValue:

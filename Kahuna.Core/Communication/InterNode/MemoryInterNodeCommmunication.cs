@@ -483,59 +483,20 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            ConcurrentBag<KahunaSetKeyValueResponseItem> bag = [];
+            // Hand the receiver the whole batch, as the gRPC transport does: the receiver's batched path
+            // keeps every per-item field the single-key tuple cannot carry (the conflict holder, the item's
+            // conflict policy) and applies the same group leadership gate the production hop applies.
+            List<KahunaSetKeyValueResponseItem> remote = await kahunaNode.LocateAndTrySetManyKeyValue(items, cancellationToken);
 
-            foreach (KahunaSetKeyValueRequestItem item in items)
-            {
-                (KeyValueResponseType, long, HLCTimestamp) resp = await kahunaNode.LocateAndTrySetKeyValue(
-                    item.TransactionId,
-                    item.Key ?? "",
-                    item.Value,
-                    item.CompareValue,
-                    item.CompareRevision,
-                    item.Flags,
-                    item.ExpiresMs,
-                    item.Durability,
-                    cancellationToken,
-                    item.RoutedGeneration
-                );
-                
-                bag.Add(new()
-                {
-                    Key = item.Key,
-                    Type = resp.Item1,
-                    Revision = resp.Item2,
-                    LastModified = resp.Item3,
-                    Durability = item.Durability
-                });
-            }
+            lock (lockSync)
+                responses.AddRange(remote);
 
-            SetKeyValueLockResponses(bag, lockSync, responses);
             return;
         }
         
         throw Unreachable(node);
     }
     
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="bag"></param>
-    /// <param name="lockSync"></param>
-    /// <param name="responses"></param>
-    private static void SetKeyValueLockResponses(
-        ConcurrentBag<KahunaSetKeyValueResponseItem> bag, 
-        Lock lockSync, 
-        List<KahunaSetKeyValueResponseItem> responses
-    )
-    {
-        foreach (KahunaSetKeyValueResponseItem reponseBag in bag)
-        {
-            lock (lockSync)
-                responses.Add(reponseBag);
-        }
-    }
-
     public async Task TryDeleteManyNodeKeyValue(
         string node,
         List<KahunaDeleteKeyValueRequestItem> items,

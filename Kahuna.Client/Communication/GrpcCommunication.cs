@@ -872,9 +872,11 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             responseItems.Add(new()
             {
                 Key = item.Key,
+                Type = (KeyValueResponseType)item.Type,
                 Revision = item.Revision,
                 LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-                Durability = (KeyValueDurability)item.Durability
+                Durability = (KeyValueDurability)item.Durability,
+                HolderTransactionId = new(item.HolderTransactionIdNode, item.HolderTransactionIdPhysical, item.HolderTransactionIdCounter)
             });
         }
 
