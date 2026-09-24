@@ -19,7 +19,7 @@ public sealed class KahunaCommandLineOptions
     [Option("https-ports", Required = false, HelpText = "Ports to bind incoming HTTPs connections to")]
     public IEnumerable<string>? HttpsPorts { get; set; }
 
-    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead. A standalone node defaults to 2072; a node joining a cluster binds nothing unless this option is given. Not bound when an HTTPs certificate is configured, unless --allow-plaintext-listener is given")]
+    [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead. A standalone node defaults to 8083; a node joining a cluster binds nothing unless this option is given. Not bound when an HTTPs certificate is configured, unless --allow-plaintext-listener is given")]
     public IEnumerable<string>? GrpcCleartextPorts { get; set; }
     
     [Option("https-certificate", Required = false, HelpText = "Path to the HTTPs certificate")]
@@ -119,8 +119,11 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-host", Required = false, HelpText = "Host to listen for Raft consensus and replication requests", Default = "localhost")]
     public string RaftHost { get; set; } = "localhost";
 
-    [Option("raft-port", Required = false, HelpText = "Port to bind incoming Raft consensus and replication requests", Default = 2070)]
-    public int RaftPort { get; set; } = 2070;
+    // Defaults to the default HTTP port, so the Raft endpoint of a node that was given no ports at all
+    // is a listener that is actually bound. A node whose Raft port has no listener still starts, because
+    // the port can be an external one, but clients that follow a routing hint derived from it reach nothing.
+    [Option("raft-port", Required = false, HelpText = "Port to bind incoming Raft consensus and replication requests", Default = 8081)]
+    public int RaftPort { get; set; } = 8081;
     
     [Option("locks-workers", Required = false, HelpText = "Number of lock ephemeral/consistent workers (0 = auto-size: max(32, CPU cores x 4))", Default = 0)]
     public int LocksWorkers { get; set; }

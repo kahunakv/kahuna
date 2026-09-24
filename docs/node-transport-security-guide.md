@@ -48,6 +48,9 @@ kahuna-server \
   --disable-peer-endpoint-advertisement
 ```
 
+In this example, port 8082 is the cluster listener and port 2071 is the application listener. Mutual
+TLS needs the two on separate ports, so the application port here is not the standalone default (8082).
+
 `docker/local-mtls.yml` is a complete three-node example with per-node development certificates.
 
 ---
@@ -98,8 +101,8 @@ certificate.
 
 ### Cleartext listeners changed for everyone
 
-When an HTTPS certificate is configured, Kahuna no longer binds `--http-ports` (default 2070) or the
-standalone h2c default (2072), in any mode. Pass `--allow-plaintext-listener` to keep them. A clustered
+When an HTTPS certificate is configured, Kahuna no longer binds `--http-ports` (default 8081) or the
+standalone h2c default (8083), in any mode. Pass `--allow-plaintext-listener` to keep them. A clustered
 node that still puts `--raft-port` on a cleartext listener refuses to start and names that flag.
 
 ---

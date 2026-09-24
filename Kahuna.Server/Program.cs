@@ -227,7 +227,7 @@ builder.WebHost.ConfigureKestrel(options =>
         // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
         // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
         //
-        // A standalone node with no explicit ports binds 2072, so a gRPC client can reach it out of
+        // A standalone node with no explicit ports binds 8083, so a gRPC client can reach it out of
         // the box: HTTPS needs a certificate the node does not have by default, and the plain HTTP
         // listener negotiates HTTP/1.1 without ALPN. A node joining a cluster keeps the listener off
         // unless it is asked for — the port carries no TLS and no authentication.
