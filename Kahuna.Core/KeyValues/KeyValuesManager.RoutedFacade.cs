@@ -136,6 +136,13 @@ internal sealed partial class KeyValuesManager
     ) =>
         routedReads.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken);
 
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntentsUnconfirmed(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        CancellationToken cancellationToken
+    ) =>
+        routedReads.LocateAndTryCheckManyWriteIntentsUnconfirmed(transactionId, keys, cancellationToken);
+
     public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(
         HLCTimestamp transactionId,
         string key,

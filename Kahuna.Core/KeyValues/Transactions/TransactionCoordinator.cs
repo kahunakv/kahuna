@@ -2339,12 +2339,14 @@ internal sealed class TransactionCoordinator : IDisposable
     /// MVCC (the ordinary read paths cannot answer this: they either overlay that intent behind a wait, or
     /// serve this transaction's own staged view). An aborted holder never materializes and falls through to
     /// the committed read; an undecided one is a retryable unknown.</item>
-    /// <item>No intent: the plain committed read compares revision and existence directly.</item>
+    /// <item>No intent: the key's actor compares the committed head's revision and existence against the base
+    /// through the staged-base conflict probe — a check the transaction's own prefix lock over the key's bucket
+    /// does not refuse, unlike an ordinary non-transactional read.</item>
     /// </list>
     /// </summary>
     private async Task<StagedBaseValidation> ValidateStagedBasesAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
     {
-        List<(string key, long revision, KeyValueDurability durability)> probes = [];
+        List<KeyValueConflictProbe> probes = [];
         List<PreparedIntent> toProbe = [];
 
         foreach (DurablePartitionPrepare partition in input.Partitions)
@@ -2425,7 +2427,11 @@ internal sealed class TransactionCoordinator : IDisposable
                     // Aborted holder: its value never materializes; the committed state beneath it decides.
                 }
 
-                probes.Add((staged.Key, -1, KeyValueDurability.Persistent));
+                // The frozen base is the transaction's own pre-write observation — existence and revision are
+                // both exact. The probe carries the revision when the base existed, or -1 when it was validated
+                // against "key does not exist"; the actor compares it against the committed head it holds.
+                probes.Add(new(staged.Key, KeyValueDurability.Persistent, KeyValueConflictChecks.StagedBase,
+                    staged.BaseState == KeyValueState.Set ? staged.BaseRevision : -1));
                 toProbe.Add(staged);
             }
         }
@@ -2433,48 +2439,46 @@ internal sealed class TransactionCoordinator : IDisposable
         if (probes.Count == 0)
             return StagedBaseValidation.Valid;
 
-        // The unconfirmed variant reads locally-led keys without a read-index round: this check only
+        // The compare is served in the key's actor as a conflict check, not as a read: an ordinary
+        // non-transactional read is refused by a live prefix lock over the key's bucket, and a pessimistic
+        // transaction that scanned a bucket and then writes a member holds exactly that lock itself — its own
+        // finalize would spin on MustRetry until the transaction timed out. A transactional read is no
+        // alternative either: it serves this transaction's own staged view, not the committed base.
+        //
+        // The unconfirmed variant probes locally-led keys without a read-index round: this check only
         // decides whether to drive the durable decision proposal, and that proposal's own
         // replication fences a deposed leader — a stale answer here can produce a failed proposal
         // or a conservative abort, never a durably wrong outcome. See the variant's contract before
         // pointing any other caller at it.
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
-            await manager.LocateAndTryExistsManyValuesUnconfirmed(HLCTimestamp.Zero, HLCTimestamp.Zero, probes, cancellationToken);
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
+            await manager.LocateAndTryCheckManyWriteIntentsUnconfirmed(input.TransactionId, probes, cancellationToken);
 
-        Dictionary<string, (KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> byKey = new(results.Count);
-        foreach ((KeyValueResponseType type, string key, KeyValueDurability _, ReadOnlyKeyValueEntry? entry) in results)
-            byKey[key] = (type, entry);
+        Dictionary<string, KeyValueResponseType> byKey = new(results.Count);
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability _) in results)
+            byKey[key] = type;
 
         foreach (PreparedIntent staged in toProbe)
         {
-            if (!byKey.TryGetValue(staged.Key, out (KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry) current))
+            if (!byKey.TryGetValue(staged.Key, out KeyValueResponseType current))
                 return StagedBaseValidation.Unknown;
 
-            if (current.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.Errored
-                or KeyValueResponseType.Aborted or KeyValueResponseType.WaitingForReplication)
-                return StagedBaseValidation.Unknown;
-
-            // The frozen base is the transaction's own pre-write read observation — existence and revision are
-            // both exact. Existence must match; and when the key exists on both sides, so must the revision.
-            // (A DoesNotExist probe carries a default revision for a never-written key, so only a positive
-            // existence answer's counter is compared.)
-            bool baseExisted = staged.BaseState == KeyValueState.Set;
-            bool existsNow = current.Type == KeyValueResponseType.Exists && current.Entry is not null;
-
-            if (baseExisted != existsNow)
+            switch (current)
             {
-                logger.LogWarning(
-                    "Staged base changed for {Key}: observed exists={BaseExisted} rev={BaseRevision}, exists now={ExistsNow}",
-                    staged.Key, baseExisted, staged.BaseRevision, existsNow);
-                return StagedBaseValidation.Conflict;
-            }
+                // The actor's compare passed: the key still exists (or is still absent) exactly as the base
+                // recorded, at the base's revision.
+                case KeyValueResponseType.DoesNotExist:
+                    continue;
 
-            if (existsNow && current.Entry!.Revision != staged.BaseRevision)
-            {
-                logger.LogWarning(
-                    "Staged base revision changed for {Key}: validated against {BaseRevision}, committed is now {CurrentRevision}",
-                    staged.Key, staged.BaseRevision, current.Entry.Revision);
-                return StagedBaseValidation.Conflict;
+                // "The compare failed": existence flipped, or the committed head moved off the base revision.
+                case KeyValueResponseType.NotSet:
+                    logger.LogWarning(
+                        "Staged base changed for {Key}: validated against exists={BaseExisted} rev={BaseRevision}, the committed state no longer matches",
+                        staged.Key, staged.BaseState == KeyValueState.Set, staged.BaseRevision);
+                    return StagedBaseValidation.Conflict;
+
+                // A refused, gated, redirected or failed probe decides nothing.
+                default:
+                    return StagedBaseValidation.Unknown;
             }
         }
 

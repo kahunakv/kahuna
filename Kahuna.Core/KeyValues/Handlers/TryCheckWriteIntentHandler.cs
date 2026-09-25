@@ -65,20 +65,39 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
         if ((message.ConflictChecks & (KeyValueConflictChecks.WriteIntent | KeyValueConflictChecks.StagedBase)) == 0)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
+        bool resident = context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
 
-        // Staged-base fence for a read-modify-write key, asked by the finalizer AFTER the caller's own durable
-        // prepared intents are live on every written key. The pre-propose staged-base compare-and-set leaves a
-        // window between its probe and the prepare landing; a competitor that commits the same base inside that
-        // window (its intent already settled and garbage-collected, or settled by the prepare-retry helping pass)
-        // is invisible to the prepare's single-live-intent check — the observed lost update. Here the
-        // committed head is compared directly: the caller's live intent excludes any later competing commit, so
-        // a matching head cannot move again before the decision. MVCC stagings and intents never touch
-        // entry.Revision (only materialization advances it), so the committed head is exactly what a validated
-        // base was recorded against. Answered with NotSet — "the compare failed" — so the caller can attribute
-        // the abort to a moved base rather than to the range-lock fence.
+        if (!resident)
+        {
+            entry = await GetKeyValueEntry(message.Key, message.Durability, populateCache: false, currentTime: currentTime);
+
+            // Same stale-base refusal as the transactional reads: a persistent row hydrated from below this
+            // node's committed-head memory would compare a validated base against history this node lost, and
+            // report a moved base (or a matching one) that the committed state does not support. Refuse and let
+            // the convergence repair land first.
+            if ((message.ConflictChecks & KeyValueConflictChecks.StagedBase) != 0 && HydratedRowProvablyStale(message.Key, entry))
+                return KeyValueStaticResponses.MustRetryResponse;
+
+            if (entry is not null)
+                context.InsertStoreEntry(message.Key, entry);
+        }
+
+        // Staged-base compare for a read-modify-write key: the finalizer's write-side compare-and-set, run before
+        // anything durable is proposed and, for the one-phase bundle, again immediately before its propose. It is
+        // served here as a conflict check and not as a read so the caller's own locks never refuse it: a
+        // pessimistic transaction that scanned a bucket holds that bucket's prefix lock, and an ordinary
+        // non-transactional read of a member under it answers MustRetry, which would spin the finalize until the
+        // transaction times out. MVCC stagings and intents never touch entry.Revision (only materialization
+        // advances it), so the committed head is exactly what a validated base was recorded against; a head
+        // parked behind an in-flight operation is converged first, as the grant that observed the base did.
+        // Answered with NotSet — "the compare failed" — so the caller can attribute the abort to a moved base
+        // rather than to the range-lock fence. The authoritative half of the compare runs at the prepare's own
+        // apply position (the intent store's staged-base fence) and at the bundled commit gate.
         if ((message.ConflictChecks & KeyValueConflictChecks.StagedBase) != 0)
         {
+            if (entry?.PendingCommittedHead is not null)
+                TryDrainPendingCommittedHead(message.Key, entry, currentTime);
+
             bool existsNow = entry is not null
                 && entry.State == KeyValueState.Set
                 && (entry.Expires == HLCTimestamp.Zero || entry.Expires - currentTime > TimeSpan.Zero);

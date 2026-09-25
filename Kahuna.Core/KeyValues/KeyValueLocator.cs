@@ -1174,6 +1174,57 @@ internal sealed class KeyValueLocator
         return responses;
     }
 
+    /// <summary>
+    /// Staged-base variant of <see cref="LocateAndTryCheckManyWriteIntents"/> for the finalizer's pre-propose
+    /// write-side compare-and-set: probes keys this node believes it leads <b>without</b> a read-index
+    /// confirmation round or a per-key leader wait; keys it does not believe it leads fall back to the
+    /// ordinary confirmed path. The leadership contract that makes the unconfirmed local answer safe for this
+    /// caller and no other is the one on <see cref="LocateAndTryExistsManyValuesUnconfirmed"/>: the answer only
+    /// decides whether the finalizer drives its durable decision proposal, and a deposed leader's stale answer
+    /// becomes a failed proposal or a conservative abort, never a durably wrong outcome.
+    ///
+    /// <para>The probe is served in the key's actor as a conflict check rather than as a read, so the caller's
+    /// own prefix lock over the key's bucket — a pessimistic bucket scan that then writes a member — does not
+    /// refuse it the way it refuses an ordinary non-transactional read.</para>
+    /// </summary>
+    public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntentsUnconfirmed(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        if (keys.Count == 0)
+            return [];
+
+        List<KeyValueConflictProbe>? localKeys = null;
+        List<KeyValueConflictProbe>? fallbackKeys = null;
+
+        foreach (KeyValueConflictProbe item in keys)
+        {
+            if (string.IsNullOrEmpty(item.Key))
+                return BuildManyWriteIntentRejection(keys, KeyValueResponseType.InvalidInput);
+
+            // Belief check only (no ack round): its fast path is a field comparison. A false
+            // negative just routes the key through the confirmed path, which is always correct.
+            if (await AmILeaderQuickIfHosted(RouteKey(item.Key)))
+                (localKeys ??= new(keys.Count)).Add(item);
+            else
+                (fallbackKeys ??= []).Add(item);
+        }
+
+        if (fallbackKeys is null)
+            return await manager.TryCheckManyWriteIntentValues(transactionId, localKeys!);
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(keys.Count);
+
+        if (localKeys is not null)
+            responses.AddRange(await manager.TryCheckManyWriteIntentValues(transactionId, localKeys));
+
+        responses.AddRange(await LocateAndTryCheckManyWriteIntents(transactionId, fallbackKeys, cancellationToken));
+
+        return responses;
+    }
+
     private async Task TryCheckManyWriteIntentsOnNode(
         HLCTimestamp transactionId,
         string leader,

@@ -242,6 +242,22 @@ internal sealed class RoutedReadOperations
         return locator.LocateAndTryExistsManyValuesUnconfirmed(transactionId, readTimestamp, keys, cancellationToken);
     }
 
+    /// <summary>
+    /// Staged-base variant of <see cref="LocateAndTryCheckManyWriteIntents"/> — see
+    /// <see cref="KeyValueLocator.LocateAndTryCheckManyWriteIntentsUnconfirmed"/> for the leadership
+    /// contract that makes the unconfirmed local probe safe for the commit-time write-side
+    /// compare-and-set and for no other caller. Never registers anything: the probe is a commit
+    /// guard, not part of any transaction's read set.
+    /// </summary>
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntentsUnconfirmed(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.LocateAndTryCheckManyWriteIntentsUnconfirmed(transactionId, keys, cancellationToken);
+    }
+
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
