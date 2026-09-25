@@ -46,6 +46,8 @@ public abstract class BaseCluster
             // swallow every timer-driven round. Its 100 ms default sits far above these fast timers.
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             // Deterministic election timers (Kommander 0.10.16): each node uses a DISTINCT seed so
@@ -126,6 +128,8 @@ public abstract class BaseCluster
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 2, // distinct per node (see GetNode1)
@@ -202,6 +206,8 @@ public abstract class BaseCluster
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + 3, // distinct per node (see GetNode1)
@@ -393,6 +399,8 @@ public abstract class BaseCluster
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
@@ -566,6 +574,8 @@ public abstract class BaseCluster
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
@@ -672,6 +682,8 @@ public abstract class BaseCluster
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
@@ -775,6 +787,8 @@ public abstract class BaseCluster
             HeartbeatInterval = TimeSpan.FromMilliseconds((int)(10 * TimingScale)),
             RecentHeartbeat = TimeSpan.FromMilliseconds(10 * TimingScale / 4),
             CheckLeaderInterval = TimeSpan.FromMilliseconds((int)(25 * TimingScale)),
+            // No 2.5 s startup grace before the first check-leader tick: it only delays the first election.
+            TimerInitialDelay = TimeSpan.FromMilliseconds((int)(50 * TimingScale)),
             StartElectionTimeout = (int)(150 * TimingScale),
             EndElectionTimeout = (int)(400 * TimingScale),
             ElectionTimeoutSeed = ElectionTimeoutSeedBase + nodeId,
@@ -836,11 +850,13 @@ public abstract class BaseCluster
     }
 
     /// <summary>
-    /// Tears down a single node cleanly, for use in leave / eviction tests.
+    /// Gracefully leaves the cluster with this node (committing its removal from the roster) and tears it
+    /// down. For leave / eviction / drain tests, where the departure itself is the subject. End-of-test
+    /// teardown uses <see cref="LeaveCluster(IRaft)"/> instead, which skips the membership change.
     /// </summary>
     protected static async Task LeaveClusterSingle(IRaft raft)
     {
-        try { await TestClusterNodeRegistry.DisposeAsync(raft); }
+        try { await TestClusterNodeRegistry.LeaveAndDisposeAsync(raft); }
         catch (ObjectDisposedException) { }
     }
     
@@ -1029,6 +1045,13 @@ public abstract class BaseCluster
         throw new TimeoutException($"Timed out after {timeoutMs * TimingScale} ms waiting for condition.");
     }
 
+    /// <summary>
+    /// End-of-test teardown of a whole cluster: every node is drained and disposed locally, without a
+    /// graceful membership leave. Leaving all voters at once can never commit (each peer chases a leader
+    /// that is itself shutting down until Kommander's fixed 10 s leave deadline), so the graceful path
+    /// only ever added that deadline to every test. Tests about a node leaving a live cluster use
+    /// <see cref="LeaveClusterSingle"/>.
+    /// </summary>
     protected static async Task LeaveCluster(IRaft raft1, IRaft raft2, IRaft raft3)
     {
         await Task.WhenAll(
@@ -1038,6 +1061,10 @@ public abstract class BaseCluster
         );
     }
 
+    /// <summary>
+    /// End-of-test teardown of one node: drained and disposed locally, no graceful membership leave.
+    /// See <see cref="LeaveCluster(IRaft, IRaft, IRaft)"/>.
+    /// </summary>
     protected static async Task LeaveCluster(IRaft raft)
     {
         try

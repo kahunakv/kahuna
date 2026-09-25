@@ -628,6 +628,84 @@ public sealed class TestDurableTransactionRecovery
         Assert.Equal(intent.TransactionId, transactionId);
     }
 
+    /// <summary>
+    /// A record-less hold whose peers prove it stale — a majority of the replica set settled the intent at or past
+    /// this node's applied id — is still held (the outcome is never presumed locally: the settled value lives on the
+    /// peers) but is reported for containment, with the peer that proved it, and counted as a stale detection.
+    /// </summary>
+    [Fact]
+    public async Task RecordlessIntentPastHorizon_SettledOnAQuorumOfPeers_IsHeldAndReportedStale()
+    {
+        PreparedIntent intent = PendingIntent("acct/1", recoveryDeadline: Ts(2000));
+        PreparedIntentStore store = StoreWith(intent);
+        Seam seam = new() { Store = store };
+
+        using MetricCapture metrics = new("partition", "kahuna.transactions.recordless_intents_stale_detected");
+        double staleBefore = metrics.Total("kahuna.transactions.recordless_intents_stale_detected");
+
+        int checks = 0;
+        DurableTransactionRecovery recovery = new(
+            store, seam.Replicate,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(null),
+            (_, _, _) => Task.FromResult<TransactionRecord?>(null),
+            recordRetentionTtl: TimeSpan.FromMilliseconds(1),
+            legMaterialized: _ => false,
+            crossCheckRecordlessHold: (partition, checkedIntent, _) =>
+            {
+                checks++;
+                Assert.Equal(PartitionId, partition);
+                Assert.Equal(intent.TransactionId, checkedIntent.TransactionId);
+                return Task.FromResult(new RecordlessIntentPeerVerdict(
+                    RecordlessIntentVerdict.Stale, NotHolding: 2, Consulted: 2, "n2:settled@77, n3:settled@77", LocalAppliedLogId: 77, FullerPeer: "n2"));
+            });
+
+        int settled = await recovery.SweepAsync(PartitionId, Ts(50_000), CancellationToken.None);
+
+        Assert.Equal(0, settled);
+        Assert.Equal(1, checks);
+        Assert.NotNull(store.Get("acct/1")); // still held: nothing is presumed locally
+        Assert.Equal(1, recovery.HeldRecordlessIntents);
+        (int partitionId, (string fullerPeer, string evidence)) = Assert.Single(recovery.StaleRecordlessHolds);
+        Assert.Equal(PartitionId, partitionId);
+        Assert.Equal("n2", fullerPeer);
+        Assert.Contains("acct/1", evidence);
+        Assert.Equal(staleBefore + 1, metrics.Total("kahuna.transactions.recordless_intents_stale_detected"));
+    }
+
+    /// <summary>
+    /// The ordinary case is unchanged: peers that still hold the intent, or too few answering at or past this node's
+    /// applied id, leave the hold exactly as it was — held, counted, and never reported as a divergence.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RecordlessIntentPastHorizon_NotProvenStaleByPeers_IsHeldAsBefore(bool stillHeldOnAPeer)
+    {
+        RecordlessIntentVerdict verdict = stillHeldOnAPeer ? RecordlessIntentVerdict.StillHeld : RecordlessIntentVerdict.Unknown;
+
+        PreparedIntent intent = PendingIntent("acct/1", recoveryDeadline: Ts(2000));
+        PreparedIntentStore store = StoreWith(intent);
+        Seam seam = new() { Store = store };
+
+        bool abortDriven = false;
+        DurableTransactionRecovery recovery = new(
+            store, seam.Replicate,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(null),
+            (_, _, _) => { abortDriven = true; return Task.FromResult<TransactionRecord?>(null); },
+            recordRetentionTtl: TimeSpan.FromMilliseconds(1),
+            legMaterialized: _ => false,
+            crossCheckRecordlessHold: (_, _, _) => Task.FromResult(new RecordlessIntentPeerVerdict(
+                verdict, NotHolding: 1, Consulted: 2, "n2:held@77, n3:settled@77", LocalAppliedLogId: 77, FullerPeer: null)));
+
+        int settled = await recovery.SweepAsync(PartitionId, Ts(50_000), CancellationToken.None);
+
+        Assert.Equal(0, settled);
+        Assert.False(abortDriven);
+        Assert.NotNull(store.Get("acct/1"));
+        Assert.Equal(1, recovery.HeldRecordlessIntents);
+        Assert.Empty(recovery.StaleRecordlessHolds);
+    }
+
     [Fact]
     public async Task RecordlessIntentInsideHorizon_IsStillPresumedAborted()
     {

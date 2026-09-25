@@ -113,6 +113,7 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
             raft,
             interNodeCommunication: null!,
             keySpaceRegistry: null!,
+            new PartitionDivergenceContainment(raft, NullLogger<IKahuna>.Instance),
             NullLogger<IKahuna>.Instance);
 
     /// <summary>
@@ -239,6 +240,15 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
         public Task<RaftOperationStatus> StepDownAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
         public Task<RaftOperationStatus> TransferLeadershipAsync(int partitionId, string targetEndpoint, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+
+
+        public Task<RaftOperationStatus> RequestReseedAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+
+
+        public RaftOperationStatus SetCandidacyWithheld(int partitionId, bool withheld) => throw new NotImplementedException();
+
+
+        public bool IsCandidacyWithheld(int partitionId) => throw new NotImplementedException();
 
         public Task<RaftOperationStatus> SuspendHeartbeatsAsync(int partitionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
 

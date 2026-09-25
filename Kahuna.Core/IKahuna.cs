@@ -679,4 +679,14 @@ public interface IKahuna
     /// </summary>
     public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
         GetPartitionApplyFingerprint(int partitionId, CancellationToken ct);
+
+    /// <summary>
+    /// Whether this node still holds a prepared intent for exactly this transaction attempt on
+    /// <paramref name="key"/>, with its applied kv log id for <paramref name="partitionId"/> so the asker
+    /// can tell "settled in a range I missed" from "settled in a range I have not applied yet". Type is
+    /// <see cref="KeyValueResponseType.Get"/> when the node hosts the partition and
+    /// <see cref="KeyValueResponseType.DoesNotExist"/> otherwise. Answered from local state by any replica.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
+        GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct);
 }

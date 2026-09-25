@@ -35,19 +35,63 @@ internal sealed class KeyValueReplicationDispatcher
 
     private readonly KeyValueReplicator replicator;
 
-    // Highest log id this node's key-value subsystem applied per partition, across restore and the committed
-    // apply path. Log ids are shared across subsystems, so gaps here prove nothing — but the value itself,
-    // logged in the leadership-change fingerprint below, makes a node whose apply stream stalled (frozen id
-    // while peers advance) visible from the node logs alone, which a silent per-partition stall otherwise
-    // never is. One dictionary write per applied entry.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> lastAppliedByPartition = new();
+    // Per-partition apply progress: the highest log id this node's key-value subsystem applied, across restore
+    // and the committed apply path, plus a version that is odd while an apply is in progress. Log ids are
+    // shared across subsystems, so gaps prove nothing — but the value itself, logged in the leadership-change
+    // fingerprint below, makes a node whose apply stream stalled (frozen id while peers advance) visible from
+    // the node logs alone. The version lets the fingerprint read the applied id and the store counts as one
+    // consistent snapshot without a lock on the apply path: applies are serialized per partition by Kommander,
+    // so a reader that sees the same even version before and after its reads saw no apply in between.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, ApplyProgress> applyProgressByPartition = new();
 
-    // Partitions whose promotion-time fingerprint comparison is in flight, so a burst of leadership changes
-    // on one partition runs one comparison at a time instead of a pile of them.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> promotionComparisonsInFlight = new();
+    private sealed class ApplyProgress
+    {
+        public long Version;
 
-    /// <summary>Bound on the whole promotion-time comparison, peers included.</summary>
-    private const int PromotionComparisonTimeoutMs = 5_000;
+        public long LastApplied;
+    }
+
+    private ApplyProgress ProgressOf(int partitionId) =>
+        applyProgressByPartition.GetOrAdd(partitionId, static _ => new ApplyProgress());
+
+    /// <summary>Marks an apply in progress (odd version). Applies are serialized per partition, so no two overlap.</summary>
+    private ApplyProgress BeginApply(int partitionId)
+    {
+        ApplyProgress progress = ProgressOf(partitionId);
+        Interlocked.Increment(ref progress.Version);
+        return progress;
+    }
+
+    /// <summary>Records the applied id (monotonic) and marks the apply complete (even version).</summary>
+    private static void EndApply(ApplyProgress progress, long logId)
+    {
+        if (logId > Volatile.Read(ref progress.LastApplied))
+            Volatile.Write(ref progress.LastApplied, logId);
+
+        Interlocked.Increment(ref progress.Version);
+    }
+
+    // Partitions whose leader-change fingerprint comparison is in flight, so a burst of leadership changes
+    // on one partition runs one comparison at a time instead of a pile of them. A change that lands while
+    // one runs bumps the partition's generation, and the running comparison re-runs once for it.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> leaderChangeComparisonsInFlight = new();
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> leaderChangeGeneration = new();
+
+    /// <summary>Bound on one comparison attempt, peers included.</summary>
+    private const int ComparisonAttemptTimeoutMs = 5_000;
+
+    /// <summary>
+    /// How long a leader-change comparison keeps retrying while it cannot compare every peer — a peer that
+    /// did not answer, or answered at another applied kv log id. Replicas of a partition whose leader just
+    /// changed converge on the same applied id within a few hundred milliseconds once the tail is applied,
+    /// and an indeterminate or partial comparison is not a pass: the divergences the fault soaks found were
+    /// all caught at an exactly equal applied id, which a single attempt only sees by luck of timing.
+    /// </summary>
+    internal const int ComparisonRetryWindowMs = 10_000;
+
+    /// <summary>Delay between comparison attempts inside the retry window.</summary>
+    private const int ComparisonRetryDelayMs = 250;
 
     internal KeyValueReplicationDispatcher(KeyValuesRuntime runtime, KeyValueRestorer restorer, KeyValueReplicator replicator)
     {
@@ -61,29 +105,69 @@ internal sealed class KeyValueReplicationDispatcher
     /// <summary>Compares this partition's apply fingerprint across replicas; shared with the split path.</summary>
     internal PartitionApplyFingerprintProbe ApplyFingerprintProbe { get; }
 
+    /// <summary>Gates and relinquishes a partition whose local projection is proven incomplete.</summary>
+    private PartitionDivergenceContainment containment => runtime.DivergenceContainment;
+
     /// <summary>
     /// This node's apply fingerprint for <paramref name="partitionId"/>, or null when the node does not host
     /// it. The applied log id is the subsystem's own high-water mark (0 before the first apply); the committed
-    /// heads are the partition's ledger slice; the live-intent count is node-wide, because prepared intents
-    /// are not attributed to a partition in memory.
+    /// heads are the partition's ledger slice; the live intents are the prepared intents whose keys route to
+    /// the partition. Both counts apply from the log alone, so replicas at the same applied id must agree.
     /// </summary>
     internal KeyValueApplyFingerprint? GetApplyFingerprint(int partitionId)
     {
         KeyValueApplyFingerprint? real = null;
 
         if (runtime.Raft.HostsPartition(partitionId))
-        {
-            lastAppliedByPartition.TryGetValue(partitionId, out long lastApplied);
-
-            real = new KeyValueApplyFingerprint(
-                lastApplied,
-                runtime.PreparedIntentStore.CommittedHeadCountForPartition(partitionId),
-                runtime.PreparedIntentStore.LiveIntentCount);
-        }
+            real = ReadConsistentFingerprint(partitionId);
 
         Func<int, KeyValueApplyFingerprint?, KeyValueApplyFingerprint?>? overrideForTesting = ApplyFingerprintOverrideForTesting;
         return overrideForTesting is null ? real : overrideForTesting(partitionId, real);
     }
+
+    /// <summary>Attempts at a consistent fingerprint read before answering "could not read" under a continuous apply stream.</summary>
+    private const int FingerprintReadAttempts = 16;
+
+    /// <summary>
+    /// Reads the applied id and the two store counts as one snapshot: an apply that lands between the reads
+    /// would pair one entry's counts with the previous entry's id and fake a divergence between replicas
+    /// that agree. Null when every attempt raced an apply; the caller treats that as unknown, not as a count.
+    /// </summary>
+    private KeyValueApplyFingerprint? ReadConsistentFingerprint(int partitionId)
+    {
+        ApplyProgress progress = ProgressOf(partitionId);
+        SpinWait spin = new();
+
+        for (int attempt = 0; attempt < FingerprintReadAttempts; attempt++)
+        {
+            long before = Volatile.Read(ref progress.Version);
+            if ((before & 1) != 0)
+            {
+                spin.SpinOnce();
+                continue;
+            }
+
+            long lastApplied = Volatile.Read(ref progress.LastApplied);
+            int heads = runtime.PreparedIntentStore.CommittedHeadCountForPartition(partitionId);
+            int intents = runtime.PreparedIntentStore.LiveIntentCountForPartition(partitionId);
+
+            if (Volatile.Read(ref progress.Version) == before)
+                return new KeyValueApplyFingerprint(lastApplied, heads, intents);
+
+            spin.SpinOnce();
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Test-only injection point that drops committed entries before they reach the stores while still
+    /// recording them as applied — the shape of a snapshot install that raised the apply cursor without
+    /// delivering the entries below it. Receives (partition, entry) and answers whether to drop it. The
+    /// entry is acknowledged to Kommander as applied, exactly as the defective install did. Never wired in
+    /// production paths.
+    /// </summary>
+    internal Func<int, RaftLog, bool>? ApplySkipForTesting { get; set; }
 
     /// <summary>
     /// Test-only injection point: receives (partition, real fingerprint or null when not hosted) and answers
@@ -96,9 +180,9 @@ internal sealed class KeyValueReplicationDispatcher
     /// <summary>Per-partition applied log ids for the gauge.</summary>
     internal IReadOnlyList<(int PartitionId, long AppliedLogId)> SnapshotAppliedLogIds()
     {
-        List<(int, long)> applied = new(lastAppliedByPartition.Count);
-        foreach (KeyValuePair<int, long> entry in lastAppliedByPartition)
-            applied.Add((entry.Key, entry.Value));
+        List<(int, long)> applied = new(applyProgressByPartition.Count);
+        foreach (KeyValuePair<int, ApplyProgress> entry in applyProgressByPartition)
+            applied.Add((entry.Key, Volatile.Read(ref entry.Value.LastApplied)));
         return applied;
     }
 
@@ -152,8 +236,20 @@ internal sealed class KeyValueReplicationDispatcher
     /// <returns></returns>
     public Task<bool> OnLogRestored(int partitionId, RaftLog log)
     {
-        TrackApplied(partitionId, log.Id);
+        ApplyProgress progress = BeginApply(partitionId);
 
+        try
+        {
+            return RestoreCore(partitionId, log);
+        }
+        finally
+        {
+            EndApply(progress, log.Id);
+        }
+    }
+
+    private Task<bool> RestoreCore(int partitionId, RaftLog log)
+    {
         if (log.LogType == ReplicationTypes.RangeMap)
         {
             RegisterSynchronousApply(partitionId, log.Id);
@@ -224,7 +320,23 @@ internal sealed class KeyValueReplicationDispatcher
     /// <returns></returns>
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
-        TrackApplied(partitionId, log.Id);
+        ApplyProgress progress = BeginApply(partitionId);
+
+        try
+        {
+            return ReplicateCore(partitionId, log);
+        }
+        finally
+        {
+            EndApply(progress, log.Id);
+        }
+    }
+
+    private Task<bool> ReplicateCore(int partitionId, RaftLog log)
+    {
+        Func<int, RaftLog, bool>? skipForTesting = ApplySkipForTesting;
+        if (skipForTesting is not null && skipForTesting(partitionId, log))
+            return TrueTask;
 
         if (log.LogType == ReplicationTypes.RangeMap)
         {
@@ -344,11 +456,11 @@ internal sealed class KeyValueReplicationDispatcher
         // committed-head memory without any metric scrape. One line per node per leadership change.
         if (logger.IsEnabled(LogLevel.Information))
         {
-            lastAppliedByPartition.TryGetValue(partitionId, out long lastApplied);
+            long lastApplied = Volatile.Read(ref ProgressOf(partitionId).LastApplied);
             logger.LogInformation(
                 "KeyValues: leader for partition {PartitionId} is now {Node} (local applied kv log id {LastApplied}, committed heads {CommittedHeads}, live intents {LiveIntents})",
                 partitionId, node, lastApplied,
-                runtime.PreparedIntentStore.CommittedHeadCount, runtime.PreparedIntentStore.LiveIntentCount);
+                runtime.PreparedIntentStore.CommittedHeadCountForPartition(partitionId), runtime.PreparedIntentStore.LiveIntentCountForPartition(partitionId));
         }
 
         bool leadingNow = node == runtime.Raft.GetLocalEndpoint();
@@ -363,15 +475,45 @@ internal sealed class KeyValueReplicationDispatcher
         else
             ReleaseParkedCompletions(partitionId, "leader changed");
 
-        // Promotion is the moment a divergent apply projection starts to serve as authoritative, and the
-        // moment every replica can still be asked: compare this node's fingerprint with its peers' off the
-        // notification path. The comparison cannot veto the promotion — Kommander already elected — so its
-        // output is the error-level signal and the divergence counter, which is what makes a replica that
-        // silently dropped part of its apply stream visible in the cluster's own signals.
-        if (leadingNow && promotionComparisonsInFlight.TryAdd(partitionId, 0))
-            _ = ReportDivergenceAtPromotionAsync(partitionId);
+        // A leader change is the moment a divergent apply projection starts to serve as authoritative, and
+        // the moment every replica can still be asked: every replica compares its fingerprint with its
+        // peers' off the notification path. The comparison cannot veto the election — Kommander already
+        // elected — so a short leader relinquishes right after it, and a short follower gates itself so a
+        // later election of it is relinquished on the spot. The report and the counter stay the
+        // error-level signal that makes a replica that silently dropped part of its apply stream visible.
+        leaderChangeGeneration.AddOrUpdate(partitionId, 1, static (_, generation) => generation + 1);
+
+        if (leaderChangeComparisonsInFlight.TryAdd(partitionId, 0))
+            _ = RunLeaderChangeComparisonsAsync(partitionId);
 
         return Task.FromResult(true);
+    }
+
+    /// <summary>
+    /// Runs the leader-change comparison for the partition, and again for every leader change that landed
+    /// while it ran: the comparison takes seconds under retry, and the change it would have missed is
+    /// typically the one that promoted this node.
+    /// </summary>
+    private async Task RunLeaderChangeComparisonsAsync(int partitionId)
+    {
+        while (true)
+        {
+            leaderChangeGeneration.TryGetValue(partitionId, out long seen);
+
+            await CompareAtLeaderChangeAsync(partitionId).ConfigureAwait(false);
+
+            leaderChangeGeneration.TryGetValue(partitionId, out long now);
+            if (now != seen)
+                continue;
+
+            leaderChangeComparisonsInFlight.TryRemove(partitionId, out _);
+
+            // A change that landed between the check and the removal found the slot taken and did not start
+            // a run of its own: take the slot back for it, or leave it to the run that did.
+            leaderChangeGeneration.TryGetValue(partitionId, out now);
+            if (now == seen || !leaderChangeComparisonsInFlight.TryAdd(partitionId, 0))
+                return;
+        }
     }
 
     /// <summary>Marks the partition as no longer led here and releases every durable completion parked on its
@@ -384,35 +526,113 @@ internal sealed class KeyValueReplicationDispatcher
             logger.LogDurableCompletionsReleasedOnLeadershipLoss(released, partitionId, reason);
     }
 
-    private async Task ReportDivergenceAtPromotionAsync(int partitionId)
+    private async Task CompareAtLeaderChangeAsync(int partitionId)
     {
+        const string moment = "leader change";
+
         try
         {
-            using CancellationTokenSource timeout = new(PromotionComparisonTimeoutMs);
+            // A node already gated by earlier evidence does not need the probe to know it must not lead.
+            if (await containment.OnPromotedAsync(partitionId).ConfigureAwait(false))
+                return;
 
-            ApplyFingerprintComparison comparison = await ApplyFingerprintProbe
-                .CompareWithReplicasAsync(partitionId, timeout.Token).ConfigureAwait(false);
+            string local = raft.GetLocalEndpoint();
 
-            // An indeterminate comparison at promotion is routine at startup (the cluster is still
-            // initializing) and is not evidence of anything: keep it out of the warning stream.
-            if (comparison.IsDeterminate)
-                ReportDivergence(comparison, "promotion");
-            else if (logger.IsEnabled(LogLevel.Debug))
-                logger.LogDebug("KeyValues: apply fingerprint comparison at promotion of partition {PartitionId} is indeterminate", partitionId);
+            ApplyFingerprintComparison? comparison = await CompareUntilConclusiveAsync(partitionId, moment).ConfigureAwait(false);
+            if (comparison is null || !comparison.HasDivergence)
+                return;
+
+            // Whether this node reports is decided by the comparison's own view of who leads, not by the
+            // notification that started it: leadership can move again while the comparison retries.
+            bool leadingNow = comparison.Leader == local;
+
+            // Each replica's fingerprint is one consistent snapshot, but the leader's and a peer's are taken
+            // moments apart, and containment moves leadership, which is not free: a divergence that indicts
+            // this node is acted on only when a second, independent pass still indicts it.
+            if (comparison.IsBehind(local))
+            {
+                ApplyFingerprintComparison? confirmation = await CompareUntilConclusiveAsync(partitionId, moment).ConfigureAwait(false);
+
+                if (confirmation is null || !confirmation.IsBehind(local))
+                {
+                    logger.LogInformation(
+                        "KeyValues: apply divergence indicting {Node} on partition {PartitionId} was not confirmed by a second comparison; no containment",
+                        local, partitionId);
+
+                    if (confirmation is { HasDivergence: true } && confirmation.Leader == local)
+                        ReportDivergence(confirmation, moment);
+
+                    return;
+                }
+
+                comparison = confirmation;
+                leadingNow = comparison.Leader == local;
+            }
+
+            // One report per detection, from the leader: every replica compares, and the leader's report is
+            // the one that names each peer once.
+            if (leadingNow)
+                ReportDivergence(comparison, moment);
+
+            await ContainIfLocalBehindAsync(comparison, moment).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "KeyValues: apply fingerprint comparison at promotion of partition {PartitionId} did not complete", partitionId);
-        }
-        finally
-        {
-            promotionComparisonsInFlight.TryRemove(partitionId, out _);
+            logger.LogWarning(ex, "KeyValues: apply fingerprint comparison at leader change of partition {PartitionId} did not complete", partitionId);
         }
     }
 
     /// <summary>
-    /// Logs every divergent peer of a determinate comparison at error level and counts it. Shared by the
-    /// promotion report and the split's pre-copy check so both moments produce the same evidence.
+    /// Runs the comparison until it is conclusive (every peer compared at the leader's applied kv log id), a
+    /// divergence is found, or the retry window closes. Returns the last determinate comparison — which may
+    /// be partial, and is then logged and counted as inconclusive — or null when no attempt was determinate
+    /// (routine at startup, when the cluster is still initializing).
+    /// </summary>
+    private async Task<ApplyFingerprintComparison?> CompareUntilConclusiveAsync(int partitionId, string moment)
+    {
+        long deadline = Environment.TickCount64 + ComparisonRetryWindowMs;
+        ApplyFingerprintComparison? last = null;
+
+        while (true)
+        {
+            using CancellationTokenSource timeout = new(ComparisonAttemptTimeoutMs);
+
+            ApplyFingerprintComparison comparison = await ApplyFingerprintProbe
+                .CompareWithReplicasAsync(partitionId, timeout.Token).ConfigureAwait(false);
+
+            if (comparison.IsDeterminate)
+            {
+                last = comparison;
+
+                if (comparison.IsConclusive || comparison.HasDivergence)
+                    return comparison;
+            }
+
+            if (Environment.TickCount64 >= deadline)
+                break;
+
+            await Task.Delay(ComparisonRetryDelayMs).ConfigureAwait(false);
+        }
+
+        if (last is null)
+        {
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("KeyValues: apply fingerprint comparison at {Moment} of partition {PartitionId} was indeterminate for the whole retry window", moment, partitionId);
+        }
+        else
+        {
+            KeyValueApplyMetrics.InconclusiveComparisons.Add(1);
+            logger.LogApplyFingerprintInconclusive(
+                partitionId, moment, raft.GetLocalEndpoint(), ComparisonRetryWindowMs, last.PeersCompared, last.PeersAsked, last.PeersAnswered);
+        }
+
+        return last;
+    }
+
+    /// <summary>
+    /// Logs every divergent peer of a determinate comparison at error level, naming the replica the
+    /// evidence indicts, and counts it. Shared by the leader-change report and the split's pre-copy check
+    /// so both moments produce the same evidence.
     /// </summary>
     internal void ReportDivergence(ApplyFingerprintComparison comparison, string moment)
     {
@@ -427,20 +647,80 @@ internal sealed class KeyValueReplicationDispatcher
         if (!comparison.HasDivergence)
             return;
 
-        foreach ((string peer, KeyValueApplyFingerprint fingerprint) in comparison.Divergent)
+        foreach (ApplyDivergentPeer divergent in comparison.Divergent)
         {
             KeyValueApplyMetrics.DivergenceDetected.Add(1);
             logger.LogApplyFingerprintDivergence(
-                comparison.PartitionId, moment, comparison.Leader!, comparison.LeaderFingerprint.CommittedHeads,
-                peer, fingerprint.CommittedHeads, comparison.LeaderFingerprint.AppliedLogId);
+                comparison.PartitionId, moment, comparison.Leader!,
+                comparison.LeaderFingerprint.CommittedHeads, comparison.LeaderFingerprint.LiveIntents,
+                divergent.Peer, divergent.Fingerprint.CommittedHeads, divergent.Fingerprint.LiveIntents,
+                comparison.LeaderFingerprint.AppliedLogId, divergent.DescribeSide(comparison.Leader!));
         }
     }
 
-    /// <summary>Records the highest applied log id per partition for the leadership-change fingerprint.
-    /// Monotonic; re-deliveries below the recorded id are ignored.</summary>
-    private void TrackApplied(int partitionId, long logId)
+    /// <summary>
+    /// Hands a comparison that indicts this node to containment: gate the partition here and, when this
+    /// node leads it, relinquish leadership to the fullest peer. A comparison that indicts only other
+    /// replicas changes nothing here — each of them runs the same comparison at the same leader change and
+    /// gates itself.
+    /// </summary>
+    internal async Task ContainIfLocalBehindAsync(ApplyFingerprintComparison comparison, string moment)
     {
-        lastAppliedByPartition.AddOrUpdate(
-            partitionId, logId, (_, current) => logId > current ? logId : current);
+        if (!comparison.IsDeterminate || comparison.Leader is null)
+            return;
+
+        string local = raft.GetLocalEndpoint();
+
+        if (!comparison.IsBehind(local))
+            return;
+
+        string fuller;
+        string evidence;
+
+        if (local == comparison.Leader)
+        {
+            fuller = comparison.FullerPeerThanLeader()!;
+            ApplyDivergentPeer witness = default;
+            foreach (ApplyDivergentPeer divergent in comparison.Divergent)
+            {
+                if (divergent.Peer == fuller)
+                {
+                    witness = divergent;
+                    break;
+                }
+            }
+
+            evidence = $"as leader it holds {comparison.LeaderFingerprint.CommittedHeads} committed heads and {comparison.LeaderFingerprint.LiveIntents} live intents while replica {fuller} holds {witness.Fingerprint.CommittedHeads} heads and {witness.Fingerprint.LiveIntents} intents at the same applied kv log id {comparison.LeaderFingerprint.AppliedLogId}";
+        }
+        else
+        {
+            fuller = comparison.Leader;
+            ApplyDivergentPeer self = default;
+            foreach (ApplyDivergentPeer divergent in comparison.Divergent)
+            {
+                if (divergent.Peer == local)
+                {
+                    self = divergent;
+                    break;
+                }
+            }
+
+            evidence = $"as a follower it holds {self.Fingerprint.CommittedHeads} committed heads and {self.Fingerprint.LiveIntents} live intents while leader {fuller} holds {comparison.LeaderFingerprint.CommittedHeads} heads and {comparison.LeaderFingerprint.LiveIntents} intents at the same applied kv log id {comparison.LeaderFingerprint.AppliedLogId}";
+        }
+
+        await containment.ContainAsync(comparison.PartitionId, fuller, evidence, moment).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A whole-partition install replaced this node's projection with one that reflects every entry at or
+    /// below <paramref name="upToIndex"/>: the applied high-water mark moves there, since those entries never
+    /// arrive through the apply path on this node. Wired as the transfer's installed-boundary observer.
+    /// </summary>
+    internal void NoteInstalledThrough(int partitionId, long upToIndex)
+    {
+        // The install ran on the partition's executor, where applies are serialized, so it overlaps no apply;
+        // bracketing it like one keeps a concurrent fingerprint read from pairing the old id with the new counts.
+        ApplyProgress progress = BeginApply(partitionId);
+        EndApply(progress, upToIndex);
     }
 }

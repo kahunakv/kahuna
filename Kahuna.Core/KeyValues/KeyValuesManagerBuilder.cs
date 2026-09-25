@@ -62,6 +62,8 @@ internal sealed class KeyValuesManagerBuilder
     internal TransactionRecordStore transactionRecordStore = null!;
     internal PreparedIntentStore preparedIntentStore = null!;
     internal PartitionStateTransfer partitionStateTransfer = null!;
+
+    internal PartitionDivergenceContainment divergenceContainment = null!;
     internal Writes.PartitionWriteAggregator writeAggregator = null!;
     internal KeyValueActorRouters routers = null!;
     internal SnapshotHoldService snapshotHolds = null!;
@@ -220,6 +222,12 @@ internal sealed class KeyValuesManagerBuilder
         // registered by the composition root, which owns both managers.)
         partitionStateTransfer.AddResidentStateInvalidationHook(manager.EvictPartitionEntriesAsync);
 
+        // A partition proven incomplete on this node is gated (served with MustRetry, leadership
+        // relinquished) until a whole-partition install replaces its projection, which is why the
+        // clearing of the gate rides the same install hook as the resident-state eviction.
+        divergenceContainment = new(raft, logger);
+        partitionStateTransfer.AddResidentStateInvalidationHook(divergenceContainment.ClearAsync);
+
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
 
         writeAggregator = new Writes.PartitionWriteAggregator(
@@ -272,6 +280,7 @@ internal sealed class KeyValuesManagerBuilder
             RangeMapStore = rangeMapStore,
             PartitionDataEnumerator = partitionDataEnumerator,
             PartitionStateTransfer = partitionStateTransfer,
+            DivergenceContainment = divergenceContainment,
             SnapshotFloorStore = snapshotFloorStore,
             CompletionReceiptStore = completionReceiptStore,
             TransactionRecordStore = transactionRecordStore,
@@ -346,7 +355,7 @@ internal sealed class KeyValuesManagerBuilder
             logger
         );
 
-        locator = new(manager, configuration, raft, interNodeCommunication, keySpaceRegistry, logger);
+        locator = new(manager, configuration, raft, interNodeCommunication, keySpaceRegistry, divergenceContainment, logger);
         runtime.Locator = locator;
 
         // Now that the locator exists, wire the anchor/key → data-partition resolvers the durable-intent stores
@@ -484,6 +493,10 @@ internal sealed class KeyValuesManagerBuilder
             }
         });
         replicationDispatcher = new(runtime, restorer, replicator);
+
+        // An install certifies the projection through its boundary; the apply high-water mark the fingerprint
+        // reports must say so, or a freshly seeded replica would compare as behind its peers until the next apply.
+        partitionStateTransfer.AddInstalledThroughObserver(replicationDispatcher.NoteInstalledThrough);
         // The applied-log-id gauge, per partition, on its own instance-owned meter so a disposed node's
         // dispatcher is not kept reachable through the callback.
         applyGaugeMeter = KeyValueApplyMetrics.RegisterGauges(replicationDispatcher.SnapshotAppliedLogIds);

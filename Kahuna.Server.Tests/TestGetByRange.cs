@@ -734,6 +734,7 @@ public sealed class TestGetByRange
         const int retention = 2;
         EmbeddedKahunaOptions opts = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
@@ -802,6 +803,7 @@ public sealed class TestGetByRange
         const int retention = 2;
         EmbeddedKahunaOptions opts = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,

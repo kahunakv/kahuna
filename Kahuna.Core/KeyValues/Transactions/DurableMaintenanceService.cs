@@ -308,6 +308,12 @@ internal sealed class DurableMaintenanceService
                 "Recovery is holding {Count} prepared intent(s) whose canonical record is absent past the retention horizon and whose leg carries no completion receipt (e.g. {Samples}); their keys stay read-only until the outcome can be proven — see kahuna.transactions.recordless_intents_held",
                 recovery.HeldRecordlessIntents,
                 string.Join(", ", recovery.HeldRecordlessSamples.Select(s => $"{s.Key}@{s.TransactionId}")));
+
+        // A hold the peers proved stale is this replica's divergence, not the transaction's ambiguity: gate the
+        // partition here and hand leadership to a replica that settled the intent. The hold itself stays until
+        // an install replaces the projection.
+        foreach ((int partitionId, (string fullerPeer, string evidence)) in recovery.StaleRecordlessHolds)
+            await runtime.DivergenceContainment.ContainAsync(partitionId, fullerPeer, evidence, "recovery").ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1122,7 +1128,16 @@ internal sealed class DurableMaintenanceService
         // Clear an aborted transaction's in-memory intent on the leader before its durable intent is settled, as
         // the finalizer's own resolution does: a settled abort that left the intent behind would hold the key's
         // slot as a dead but apparently live writer until the lease lapsed.
-        applyRollbackLocally: (partitionId, intent) => ApplyDurableRollback(partitionId, intent, CancellationToken.None));
+        applyRollbackLocally: (partitionId, intent) => ApplyDurableRollback(partitionId, intent, CancellationToken.None),
+        // Before a record-less intent is held forever, the partition's other replicas are asked whether they still
+        // hold it: a majority that settled it at or past this node's applied id proves this replica missed the
+        // settlement, which routes to divergence containment instead of a permanent read-only key.
+        crossCheckRecordlessHold: recordlessIntentPeerCheck.CheckAsync);
+
+    private RecordlessIntentPeerCheck recordlessIntentPeerCheck => recordlessIntentPeerCheckInstance ??= new(
+        raft, interNodeCommunication, manager.ReplicationDispatcher.ApplyFingerprintProbe, manager.ReplicationDispatcher.GetApplyFingerprint);
+
+    private RecordlessIntentPeerCheck? recordlessIntentPeerCheckInstance;
 
     private async Task<TransactionRecord?> DriveDurableAbortAsync(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken)
     {

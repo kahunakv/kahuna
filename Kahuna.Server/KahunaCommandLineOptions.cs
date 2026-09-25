@@ -376,6 +376,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-snapshot-transfer-step-timeout", Required = false, HelpText = "Upper bound on one awaited step of an outbound snapshot transfer (an export call, one stream read, or one chunk send), in milliseconds. A step that makes progress resets the clock; only a step that stalls trips the timeout.", Default = 120000)]
     public int RaftSnapshotTransferStepTimeout { get; set; } = 120000;
 
+    [Option("raft-reseed-request-timeout", Required = false, HelpText = "How long a replica that asked its leader to re-seed it with a whole-partition snapshot keeps its committed applies held while it waits, and how long the leader keeps the request pending while it takes the checkpoint, in milliseconds. On expiry the replica resumes applying and the application may ask again. Must be positive.", Default = 180000)]
+    public int RaftReseedRequestTimeout { get; set; } = 180000;
+
     [Option("raft-snapshot-chunk-ack-timeout", Required = false, HelpText = "Upper bound on the acknowledgement of one snapshot chunk, in milliseconds. A receiver whose install path is stuck fails the transfer after this bound instead of holding it open for the whole transfer step timeout. The effective bound is the smaller of the two options. Must be positive.", Default = 15000)]
     public int RaftSnapshotChunkAckTimeout { get; set; } = 15000;
 

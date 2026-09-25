@@ -229,4 +229,13 @@ public interface IInterNodeCommunication
     /// when the node does not host the partition, <see cref="KeyValueResponseType.MustRetry"/> on a transport failure.
     /// </summary>
     public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks <paramref name="node"/> whether it still holds a prepared intent for one transaction attempt on a
+    /// key, with its applied kv log id for the partition. Answered from that node's memory, leader or not;
+    /// Type is <see cref="KeyValueResponseType.Get"/> on an answer, <see cref="KeyValueResponseType.DoesNotExist"/>
+    /// when the node does not host the partition, <see cref="KeyValueResponseType.MustRetry"/> on a transport failure.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(
+        string node, int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken cancellationToken);
 }

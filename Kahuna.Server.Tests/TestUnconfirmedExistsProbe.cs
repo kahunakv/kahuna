@@ -36,6 +36,7 @@ public sealed class TestUnconfirmedExistsProbe
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
@@ -106,6 +107,7 @@ public sealed class TestUnconfirmedExistsProbe
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1

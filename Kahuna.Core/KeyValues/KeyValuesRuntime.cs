@@ -67,6 +67,9 @@ internal sealed class KeyValuesRuntime
     /// <summary>Whole-partition state transfer, used to drop resident entries of an installed partition.</summary>
     internal required PartitionStateTransfer PartitionStateTransfer { get; init; }
 
+    /// <summary>Gates and relinquishes a partition whose local apply projection is proven incomplete.</summary>
+    internal required PartitionDivergenceContainment DivergenceContainment { get; init; }
+
     internal required SnapshotFloorStore SnapshotFloorStore { get; init; }
 
     internal required CompletionReceiptStore CompletionReceiptStore { get; init; }

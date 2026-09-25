@@ -278,6 +278,21 @@ per recovery pass naming a few of the keys; a non-zero gauge is an operator sign
 GC on the anchor leader never reclaims a terminal record while a prepared intent of that transaction is still
 resident on the same node, so the hold can only arise for a leg resident elsewhere.
 
+Before holding, the sweep asks the partition's other replicas whether they still hold the intent
+(inter-node read `GetPreparedIntentPresence`, 2 s per peer, at most eight intents per partition per pass).
+The intent stores apply from the log alone, so a **majority of the replica set** (counted with this node as a
+holder) that no longer holds the intent, each at or past this node's applied kv log id, proves the settlement
+is in the log below what this node marked applied: the hold is this replica's divergence, not the
+transaction's ambiguity. A peer behind this node's applied id is unknown (its "not held" may be "not prepared
+yet"), and with two replicas no majority is possible. The intent stays held either way — nothing is presumed
+locally; the settled value lives on the peers — but a stale hold is logged at error level
+(`Recovery: prepared intent for key … is held record-less past the retention horizon, but 2 of 2 consulted replicas (…) … no longer hold it`),
+counted in `kahuna.transactions.recordless_intents_stale_detected`, and the partition is handed to divergence
+containment (leadership fencing guide, *Containment*): gated on this node, leadership transferred to a
+replica that settled the intent, keys served from there. Containment then has the replica re-seeded
+(a requested whole-partition install from the leader), which replaces its intent slice with the peers'
+settled state: the holds drop to zero when the gate lifts.
+
 ### 6.5 The pre-decision replica fence and its lag breaker
 
 Before proposing the commit of a read-modify-write, the finalizer asks every replica of each participant

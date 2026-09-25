@@ -2811,6 +2811,27 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
+    public override Task<GrpcGetPreparedIntentPresenceResponse> GetPreparedIntentPresence(GrpcGetPreparedIntentPresenceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.GetPreparedIntentPresenceCore(r, c), static _ => KeyValueMustRetry.GetPreparedIntentPresence());
+
+    private async Task<GrpcGetPreparedIntentPresenceResponse> GetPreparedIntentPresenceCore(
+        GrpcGetPreparedIntentPresenceRequest request, ServerCallContext context)
+    {
+        (KeyValueResponseType type, bool held, long appliedLogId) = await keyValues.GetPreparedIntentPresence(
+            request.PartitionId,
+            new HLCTimestamp(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Epoch,
+            request.Key,
+            context.CancellationToken).ConfigureAwait(false);
+
+        return new()
+        {
+            Type         = (GrpcKeyValueResponseType)type,
+            Held         = held,
+            AppliedLogId = appliedLogId
+        };
+    }
+
     // ── Retryable-failure guards ────────────────────────────────────────────────────────────────
     //
     // A retry loop must always receive a classifiable answer. Any escape that means "no definitive

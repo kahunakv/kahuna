@@ -1161,6 +1161,49 @@ internal sealed class PreparedIntentStore
     internal int LiveIntentCount => intents.Count;
 
     /// <summary>
+    /// Number of live prepared intents whose key routes to <paramref name="partitionId"/>. Feeds the per-partition
+    /// apply fingerprint, where two replicas at the same applied log id must report the same count: prepares and
+    /// settlements both apply from the log. Without a resolver every intent counts (a single-partition store).
+    /// </summary>
+    /// <remarks>
+    /// A key the resolver cannot route (its key range is not in the map on this node yet) is left out rather
+    /// than failing the count: the fingerprint is a diagnostic read, and an unroutable key belongs to no
+    /// partition this node compares.
+    /// </remarks>
+    internal int LiveIntentCountForPartition(int partitionId)
+    {
+        Func<string, int>? resolver = resolvePartition;
+        if (resolver is null)
+            return intents.Count;
+
+        int count = 0;
+
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+        {
+            int owner;
+
+            try
+            {
+                owner = resolver(kv.Key);
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            if (owner == partitionId)
+                count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>Whether this node still holds an intent for exactly this transaction attempt on <paramref name="key"/>,
+    /// pending or resolved-but-not-yet-removed. The presence answer of the record-less hold cross-check.</summary>
+    internal bool HoldsIntent(HLCTimestamp transactionId, long epoch, string key) =>
+        GetByIdentity(transactionId, epoch, key) is not null;
+
+    /// <summary>
     /// Requests the convergence repair for a key whose locally visible durable row was observed strictly below
     /// the committed-head memory — the same wiring the fence-wedge watchdog drives (re-drive the parked head
     /// mutation, then reconcile from local revision history). A no-op when the memory does not actually exceed

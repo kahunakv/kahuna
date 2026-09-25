@@ -75,6 +75,7 @@ public sealed class TestOnePhaseFallbackCommitAnswer
         ParkingExecutor? parking = null;
         EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReadIOThreads = 2,
             WriteIOThreads = 2,
             PartitionExecutorPoolSize = 4,

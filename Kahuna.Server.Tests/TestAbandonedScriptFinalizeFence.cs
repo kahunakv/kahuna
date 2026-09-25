@@ -87,6 +87,7 @@ public sealed class TestAbandonedScriptFinalizeFence
 
         EmbeddedKahunaOptions options = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             InitialPartitions = 1,
             DurableDeferredSettlement = true,
             // Recovery must not be what frees the key: the fence is.

@@ -595,6 +595,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     {
         raft.OnRestoreFinished -= OnPartitionRestoreFinished;
 
+        // A gated partition's re-seed renewal loop must not outlive the node.
+        runtime.DivergenceContainment.Shutdown();
+
         // Reject new writes and release any queued-but-not-dispatched ones retryably before tearing down.
         writeAggregator.Stop();
         txCoordinator.Dispose();

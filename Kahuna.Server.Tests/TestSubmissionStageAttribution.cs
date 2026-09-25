@@ -72,6 +72,7 @@ public sealed class TestSubmissionStageAttribution
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 2,

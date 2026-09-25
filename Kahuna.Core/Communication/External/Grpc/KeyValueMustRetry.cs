@@ -75,6 +75,8 @@ internal static class KeyValueMustRetry
 
     public static GrpcGetPartitionApplyFingerprintResponse GetPartitionApplyFingerprint() => new() { Type = Type };
 
+    public static GrpcGetPreparedIntentPresenceResponse GetPreparedIntentPresence() => new() { Type = Type };
+
     public static GrpcTrySetManyKeyValueResponse TrySetManyKeyValue(GrpcTrySetManyKeyValueRequest request)
     {
         GrpcTrySetManyKeyValueResponse response = new();

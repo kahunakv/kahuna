@@ -22,7 +22,33 @@ internal static class KeyValueApplyMetrics
     internal static readonly Counter<long> DivergenceDetected =
         Meter.CreateCounter<long>(
             "kahuna.keyvalues.apply_divergence_detected",
-            description: "Replicas whose committed-head count differed from the leader's at the same applied kv log id.");
+            description: "Replicas whose committed-head or live-intent count differed from the leader's at the same applied kv log id.");
+
+    /// <summary>
+    /// Containment actions taken on this node for a partition whose local projection was proven
+    /// incomplete, tagged by <c>action</c>: <c>gated</c> (serving refused until a whole-partition
+    /// install), <c>transferred</c> (leadership handed to the fuller peer), <c>stepped_down</c>
+    /// (leadership dropped when the transfer was refused), <c>relinquish_failed</c>.
+    /// </summary>
+    internal static readonly Counter<long> DivergenceContained =
+        Meter.CreateCounter<long>(
+            "kahuna.keyvalues.apply_divergence_contained",
+            description: "Containment actions taken for a partition whose local apply projection was proven incomplete, by action.");
+
+    /// <summary>Gated partitions whose projection a whole-partition install has since replaced.</summary>
+    internal static readonly Counter<long> DivergenceRepaired =
+        Meter.CreateCounter<long>(
+            "kahuna.keyvalues.apply_divergence_repaired",
+            description: "Gated partitions whose local projection a whole-partition snapshot install replaced.");
+
+    /// <summary>
+    /// Leader-change fingerprint comparisons that ended their retry window without comparing every peer
+    /// (unreachable, or never observed at the leader's applied log id). Not a divergence, but not a pass.
+    /// </summary>
+    internal static readonly Counter<long> InconclusiveComparisons =
+        Meter.CreateCounter<long>(
+            "kahuna.keyvalues.apply_fingerprint_inconclusive",
+            description: "Leader-change fingerprint comparisons that could not compare every peer inside the retry window.");
 
     /// <summary>
     /// Registers the applied-log-id gauge on an instance-owned meter. The caller disposes the returned

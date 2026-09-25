@@ -332,8 +332,41 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "Completion of committed durable entry #{LogIndex} on partition {PartitionId} ({LogType}) did not see its ordered apply within {TimeoutMs}ms while this node still led the partition; answering the producer as unobserved so it re-drives against the current leader instead of applying the entry out of log order here")]
     public static partial void LogDurableCompletionWithoutOrderedApply(this ILogger<IKahuna> logger, long logIndex, int partitionId, string logType, long timeoutMs);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: apply divergence on partition {PartitionId} at {Moment}: leader {Leader} holds {LeaderHeads} committed heads but replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. One replica's apply stream diverged from the log; reads served from the smaller state miss acknowledged writes")]
-    public static partial void LogApplyFingerprintDivergence(this ILogger<IKahuna> logger, int partitionId, string moment, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: apply divergence on partition {PartitionId} at {Moment}: leader {Leader} holds {LeaderHeads} committed heads and {LeaderIntents} live intents but replica {Peer} holds {PeerHeads} heads and {PeerIntents} intents at the same applied kv log id {AppliedLogId}. One replica's apply stream diverged from the log ({Side}); served from the incomplete state, reads miss acknowledged writes and settled intents hold their keys")]
+    public static partial void LogApplyFingerprintDivergence(this ILogger<IKahuna> logger, int partitionId, string moment, string leader, long leaderHeads, long leaderIntents, string peer, long peerHeads, long peerIntents, long appliedLogId, string side);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValues: apply fingerprint comparison of partition {PartitionId} at {Moment} on {Node} ended inconclusive after {WindowMs} ms: {Compared} of {Asked} peers were compared at the leader's applied kv log id ({Answered} answered). Not a pass: an uncompared peer may be the diverged one")]
+    public static partial void LogApplyFingerprintInconclusive(this ILogger<IKahuna> logger, int partitionId, string moment, string node, long windowMs, int compared, int asked, int answered);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: partition {PartitionId} is gated on {Node} after {Moment}: {Evidence}. This node refuses to serve the partition from its own projection (MustRetry, routed to the leader), withholds its candidacy, and asks the leader for a whole-partition snapshot; the fuller replica is {FullerPeer}")]
+    public static partial void LogApplyDivergenceGated(this ILogger<IKahuna> logger, int partitionId, string node, string moment, string evidence, string fullerPeer);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: gated node {Node} handed leadership of partition {PartitionId} to the fuller replica {Peer} ({Status})")]
+    public static partial void LogApplyDivergenceLeadershipTransferred(this ILogger<IKahuna> logger, int partitionId, string node, string peer, string status);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValues: gated node {Node} could not hand leadership of partition {PartitionId} to {Peer} ({Status}); stepping down instead")]
+    public static partial void LogApplyDivergenceLeadershipTransferRefused(this ILogger<IKahuna> logger, int partitionId, string node, string peer, string status);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: gated node {Node} stepped down from partition {PartitionId}; a complete replica must win the next term")]
+    public static partial void LogApplyDivergenceSteppedDown(this ILogger<IKahuna> logger, int partitionId, string node);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: gated node {Node} could not relinquish leadership of partition {PartitionId} ({Status}); the partition stays gated here and every locally served operation answers MustRetry")]
+    public static partial void LogApplyDivergenceRelinquishFailed(this ILogger<IKahuna> logger, int partitionId, string node, string status);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: gated node {Node} was promoted again on partition {PartitionId} before any install replaced its projection; relinquishing to {FullerPeer} without re-probing")]
+    public static partial void LogApplyDivergenceGatedNodePromoted(this ILogger<IKahuna> logger, int partitionId, string node, string fullerPeer);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValues: gated node {Node} asked the leader to re-seed partition {PartitionId} (request {Attempt}); committed applies are held on this node until the snapshot installs")]
+    public static partial void LogApplyDivergenceReseedRequested(this ILogger<IKahuna> logger, int partitionId, string node, int attempt);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValues: gated node {Node} could not ask for a re-seed of partition {PartitionId} ({Status}, request {Attempt}); it asks again once it no longer leads or a leader is known")]
+    public static partial void LogApplyDivergenceReseedRefused(this ILogger<IKahuna> logger, int partitionId, string node, string status, int attempt);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValues: partition {PartitionId} on {Node} is no longer gated: a whole-partition install replaced its projection after {GatedMs} ms")]
+    public static partial void LogApplyDivergenceRepaired(this ILogger<IKahuna> logger, int partitionId, string node, long gatedMs);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Recovery: prepared intent for key {Key} of transaction {TransactionId} (epoch {Epoch}) on partition {PartitionId} is held record-less past the retention horizon, but {NotHolding} of {Consulted} consulted replicas ({Peers}) at or past this node's applied kv log id {AppliedLogId} no longer hold it: the settlement landed in the log and this replica missed it. The intent stays held (its outcome is not presumed locally) and the partition is treated as diverged")]
+    public static partial void LogRecordlessIntentStale(this ILogger<IKahuna> logger, string key, HLCTimestamp transactionId, long epoch, int partitionId, int notHolding, int consulted, string peers, long appliedLogId);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitter: refusing to split {Space} at {Key}: the source partition {PartitionId} leader {Leader} holds {LeaderHeads} committed heads while replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. A copy from an incomplete source would move the loss into the new partition")]
     public static partial void LogRangeSplitRefusedIncompleteSource(this ILogger<IKahuna> logger, string space, string key, int partitionId, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);

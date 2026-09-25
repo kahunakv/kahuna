@@ -213,6 +213,7 @@ public sealed class TestTransactionRecordGcBatching
     {
         EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             PartitionExecutorPoolSize = 1,

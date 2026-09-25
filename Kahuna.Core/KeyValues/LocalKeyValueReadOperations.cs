@@ -51,6 +51,16 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueRequest request) => KeyValueActorRouters.AskKeyValueActor(router, request);
 
     /// <summary>
+    /// The serving gate on the non-locating read path. The inter-node batch reads land here without passing
+    /// the locator: the sender grouped the keys by the leader it resolved, and a node whose projection of the
+    /// key's partition is gated as incomplete (see <see cref="PartitionDivergenceContainment"/>) may still be
+    /// that leader for the moment it takes to relinquish. Nothing is served from the incomplete state: the
+    /// key answers MustRetry and the sender re-resolves. One flag read when nothing is gated.
+    /// </summary>
+    private bool IsGatedKey(string key) =>
+        runtime.DivergenceContainment.AnyGated && runtime.DivergenceContainment.IsGated(locator.RouteKey(key));
+
+    /// <summary>
     /// Passes a Get request to the key/value actor for the given keyValue name.
     /// </summary>
     /// <param name="transactionId"></param>
@@ -65,6 +75,9 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueDurability durability
     )
     {
+        if (IsGatedKey(key))
+            return (KeyValueResponseType.MustRetry, null);
+
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryGet,
             transactionId,
@@ -163,6 +176,9 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueDurability durability
     )
     {
+        if (IsGatedKey(key))
+            return (KeyValueResponseType.MustRetry, null);
+
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryExists,
             transactionId,
@@ -331,6 +347,9 @@ internal sealed class LocalKeyValueReadOperations
         long baseRevision = -1
     )
     {
+        if (IsGatedKey(key))
+            return KeyValueResponseType.MustRetry;
+
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryCheckWriteIntent,
             transactionId,

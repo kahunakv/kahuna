@@ -81,6 +81,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.AllowLegacySnapshotSenders)] = nameof(KahunaCommandLineOptions.RaftAllowLegacySnapshotSenders),
         [nameof(RaftConfiguration.SnapshotTransferStepTimeout)] = nameof(KahunaCommandLineOptions.RaftSnapshotTransferStepTimeout),
         [nameof(RaftConfiguration.SnapshotChunkAckTimeout)] = nameof(KahunaCommandLineOptions.RaftSnapshotChunkAckTimeout),
+        [nameof(RaftConfiguration.ReseedRequestTimeout)] = nameof(KahunaCommandLineOptions.RaftReseedRequestTimeout),
         [nameof(RaftConfiguration.EnableAutoRejoin)] = nameof(KahunaCommandLineOptions.RaftEnableAutoRejoin),
         [nameof(RaftConfiguration.EnableQuiescence)] = nameof(KahunaCommandLineOptions.RaftEnableQuiescence),
         [nameof(RaftConfiguration.QuiesceAfter)] = nameof(KahunaCommandLineOptions.RaftQuiesceAfter),

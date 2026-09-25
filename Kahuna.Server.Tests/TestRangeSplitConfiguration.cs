@@ -82,6 +82,7 @@ public sealed class TestRangeSplitConfiguration
         // so the ArgumentException is raised synchronously with no side-effects.
         var options = new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             PartitionExecutorPoolSize = 1,
@@ -100,6 +101,7 @@ public sealed class TestRangeSplitConfiguration
         // Existing cross-field constraint: ReportInterval must be < ReportTtl.
         var options = new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             PartitionExecutorPoolSize = 1,

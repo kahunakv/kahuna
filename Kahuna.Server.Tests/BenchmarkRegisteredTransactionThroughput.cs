@@ -54,6 +54,7 @@ public sealed class BenchmarkRegisteredTransactionThroughput
         {
             await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
             {
+                TimerInitialDelay = TimeSpan.FromMilliseconds(50),
                 Storage = "rocksdb",
                 StoragePath = Path.Combine(rootPath, "data"),
                 WalStorage = "rocksdb",

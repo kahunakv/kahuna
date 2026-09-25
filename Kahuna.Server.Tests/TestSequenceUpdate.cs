@@ -646,6 +646,7 @@ public sealed class TestSequenceUpdate
     {
         EmbeddedKahunaOptions options = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,

@@ -56,6 +56,7 @@ public sealed class TestUserFunctionRestart
     {
         EmbeddedKahunaOptions options = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             InitialPartitions = 1,
             ReadIOThreads = 1,
             WriteIOThreads = 1,

@@ -20,6 +20,7 @@ public sealed class TestPlacementConfiguration
     {
         EmbeddedKahunaOptions options = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReplicationFactor = 3,
             EnablePlacementRebalancer = true,
             PlacementPassInterval = TimeSpan.FromSeconds(2),

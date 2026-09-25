@@ -2526,6 +2526,43 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
+    /// <summary>
+    /// Asks a node whether it still holds a prepared intent for one transaction attempt on a key; a plain
+    /// unary call, like the fingerprint read it accompanies.
+    /// </summary>
+    public async Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
+        GetPreparedIntentPresence(string node, int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken cancellationToken)
+    {
+        GrpcGetPreparedIntentPresenceRequest request = new()
+        {
+            PartitionId          = partitionId,
+            TransactionIdNode    = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter = transactionId.C,
+            Epoch                = epoch,
+            Key                  = key
+        };
+
+        GrpcGetPreparedIntentPresenceResponse response;
+
+        try
+        {
+            global::KeyValuer.KeyValuerClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+            response = await client
+                .GetPreparedIntentPresenceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("GetPreparedIntentPresence", node, ex.StatusCode);
+
+            return (KeyValueResponseType.MustRetry, false, 0);
+        }
+
+        return ((KeyValueResponseType)response.Type, response.Held, response.AppliedLogId);
+    }
+
     // ── sequences ───────────────────────────────────────────────────────────────────────────────
     // Forwarded as plain unary calls on the shared channel rather than through the batcher. Sequence
     // traffic between nodes is sparse by construction — a node reserves a block of values with one

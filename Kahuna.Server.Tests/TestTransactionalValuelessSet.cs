@@ -24,6 +24,7 @@ public sealed class TestTransactionalValuelessSet
 
     private static EmbeddedKahunaNode CreateNode(ILoggerFactory loggerFactory) => new(new EmbeddedKahunaOptions
     {
+        TimerInitialDelay = TimeSpan.FromMilliseconds(50),
         ReadIOThreads = 1,
         WriteIOThreads = 1,
         PartitionExecutorPoolSize = 1,

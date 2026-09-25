@@ -160,6 +160,7 @@ public sealed class TestPersistentRevisionRetentionConfiguration
     {
         EmbeddedKahunaOptions embedded = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             PersistentRevisionRetentionCount = 5,
             PersistentRevisionRetentionAge = TimeSpan.FromMinutes(10),
             PersistentRevisionCleanupInterval = TimeSpan.FromMinutes(2),
@@ -280,6 +281,7 @@ public sealed class TestPersistentRevisionRetentionConfiguration
     {
         EmbeddedKahunaOptions embedded = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             PitrWindow = TimeSpan.FromHours(3),
             BaseSnapshotInterval = TimeSpan.FromHours(1)
         };

@@ -52,6 +52,7 @@ internal sealed class KeyValueLocator
         IRaft raft,
         IInterNodeCommunication interNodeCommunication,
         KeySpaceRegistry keySpaceRegistry,
+        PartitionDivergenceContainment divergenceContainment,
         ILogger<IKahuna> logger
     )
     {
@@ -60,10 +61,30 @@ internal sealed class KeyValueLocator
         this.raft = raft;
         this.interNodeCommunication = interNodeCommunication;
         this.keySpaceRegistry = keySpaceRegistry;
+        this.divergenceContainment = divergenceContainment;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.advertiser = ClientEndpointAdvertiserFactory.Create(raft, configuration);
         this.logger = logger;
     }
+
+    // ── the serving gate ────────────────────────────────────────────────────────────────────────
+    // Every decision to serve a partition from this node's own state goes through one of the three
+    // leadership helpers below or through TryWaitForLeader naming this node. A partition whose local
+    // projection is proven incomplete (see PartitionDivergenceContainment) must not be served from
+    // it whatever Raft says about leadership: the helpers answer "not the leader here" and the
+    // resolver answers "no target", so every caller takes its existing MustRetry path and the client
+    // retries against the replica that leads next.
+
+    private readonly PartitionDivergenceContainment divergenceContainment;
+
+    private async ValueTask<bool> AmILeaderIfHosted(int partitionId, CancellationToken cancellationToken) =>
+        !divergenceContainment.IsGated(partitionId) && await raft.AmILeaderIfHosted(partitionId, cancellationToken);
+
+    private async ValueTask<bool> AmILeaderQuickIfHosted(int partitionId) =>
+        !divergenceContainment.IsGated(partitionId) && await raft.AmILeaderQuickIfHosted(partitionId);
+
+    private async ValueTask<bool> ConfirmLeadershipIfHosted(int partitionId, CancellationToken cancellationToken) =>
+        !divergenceContainment.IsGated(partitionId) && await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken);
 
     /// <summary>
     /// Records that <paramref name="key"/> was admitted on this node, so the response can carry the
@@ -114,7 +135,7 @@ internal sealed class KeyValueLocator
         && descriptor.IsQuiescedAt(key, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
 
     /// <summary>Routes a per-key operation via <see cref="RangeRouting.Locate"/>.</summary>
-    private int RouteKey(string key) =>
+    internal int RouteKey(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key).PartitionId;
 
     /// <summary>
@@ -144,6 +165,20 @@ internal sealed class KeyValueLocator
             string? leader = await raft.TryResolveLeader(partitionId, cancellationToken);
             if (leader is null)
                 logger.LogKeyValueLeaderNotResolved(partitionId, "No forward target: the partition is not hosted here, or the request already arrived forwarded");
+            else if (leader == raft.GetLocalEndpoint() && divergenceContainment.IsGated(partitionId))
+            {
+                // The election still names this node while containment is relinquishing the partition:
+                // there is no target to forward to and the local projection must not serve. Every request
+                // routed here takes this branch until the handover lands, so the line is on a cooldown.
+                long now = Environment.TickCount64;
+                if (!gatedLeaderWarnedAt.TryGetValue(partitionId, out long last) || now - last >= BeliefOnlyLeaderWarnCooldownMs)
+                {
+                    gatedLeaderWarnedAt[partitionId] = now;
+                    logger.LogKeyValueLeaderNotResolved(partitionId, "No forward target: this node leads the partition but its projection is gated as incomplete");
+                }
+
+                return null;
+            }
 
             return leader;
         }
@@ -187,7 +222,7 @@ internal sealed class KeyValueLocator
     /// whenever this returns <see langword="false"/>, matching the write path's behavior.
     /// </summary>
     private ValueTask<bool> ConfirmLeadershipForRead(int partitionId, CancellationToken cancellationToken) =>
-        raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken);
+        ConfirmLeadershipIfHosted(partitionId, cancellationToken);
 
     /// <summary>
     /// <see cref="ConfirmLeadershipForRead"/> for a locally-led key group: confirms every distinct
@@ -231,10 +266,10 @@ internal sealed class KeyValueLocator
     /// </summary>
     private async ValueTask<bool> ConfirmLeadershipForActorMutation(int partitionId, CancellationToken cancellationToken)
     {
-        if (await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+        if (await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
             return true;
 
-        if (await raft.AmILeaderQuickIfHosted(partitionId))
+        if (await AmILeaderQuickIfHosted(partitionId))
             LogBeliefOnlyLeaderRefusal(partitionId);
 
         return false;
@@ -268,6 +303,9 @@ internal sealed class KeyValueLocator
     // the cluster's view settles, and one warning per partition per cooldown is enough to place the
     // window in the node log without flooding it.
     private readonly ConcurrentDictionary<int, long> beliefOnlyLeaderWarnedAt = new();
+
+    // Last time a gated partition's "no forward target" refusal was logged, per partition (same cooldown).
+    private readonly ConcurrentDictionary<int, long> gatedLeaderWarnedAt = new();
 
     private const long BeliefOnlyLeaderWarnCooldownMs = 5_000;
 
@@ -360,7 +398,7 @@ internal sealed class KeyValueLocator
 
         if (stagesInActor
                 ? await ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
-                : await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+                : await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             RecordLocalKeyRoute(key, partitionId, routedGeneration);
 
@@ -639,7 +677,7 @@ internal sealed class KeyValueLocator
 
         if (stagesInActor
                 ? await ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
-                : await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+                : await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             RecordLocalKeyRoute(key, partitionId);
             return await manager.TryDeleteKeyValue(transactionId, key, durability);
@@ -688,7 +726,7 @@ internal sealed class KeyValueLocator
 
         if (stagesInActor
                 ? await ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
-                : await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+                : await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExtendKeyValue(transactionId, key, expiresMs, durability);
@@ -889,7 +927,7 @@ internal sealed class KeyValueLocator
 
             // Belief check only (no ack round): its fast path is a field comparison. A false
             // negative just routes the key through the confirmed path, which is always correct.
-            if (await raft.AmILeaderQuickIfHosted(RouteKey(item.key)))
+            if (await AmILeaderQuickIfHosted(RouteKey(item.key)))
                 (localKeys ??= new(keys.Count)).Add(item);
             else
                 (fallbackKeys ??= []).Add(item);
@@ -2588,7 +2626,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(options.CoordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.StartTransaction(options);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
@@ -2679,7 +2717,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             // This node leads the coordinator partition but did not begin the session: leadership moved after
             // the session began. Offer the commit to the peers, one of which owns it; if none does, the local
@@ -2721,7 +2759,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             if (raft.Joined && MayProbePeersForOwner)
             {
@@ -2758,7 +2796,7 @@ internal sealed class KeyValueLocator
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
         // The session's owner registers it, whoever leads the coordinator partition now (see OwnsSession).
-        if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (OwnsSession(transactionId) || !raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) local =
                 manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
@@ -2837,7 +2875,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
-        if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (OwnsSession(transactionId) || !raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             string? localAnchor = manager.CompleteOperation(transactionId, operationId, payload);
 
@@ -2877,7 +2915,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
-        if (OwnsSession(transactionId) || !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (OwnsSession(transactionId) || !raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
         {
             TransactionWorkingSet? local = manager.GetTransactionWorkingSet(transactionId);
 
@@ -2917,7 +2955,7 @@ internal sealed class KeyValueLocator
 
         int partitionId = dataPartitionRouter.Locate(coordinatorKey);
 
-        if (!raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken))
+        if (!raft.Joined || await AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.CloseTransaction(transactionId, cancellationToken);
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);

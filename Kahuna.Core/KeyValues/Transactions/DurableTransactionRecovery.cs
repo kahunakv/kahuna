@@ -3,6 +3,7 @@ using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kommander.Data;
 using Kommander.Time;
+using Kahuna.Server.KeyValues.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.KeyValues.Transactions;
@@ -35,6 +36,10 @@ internal sealed class DurableTransactionRecovery
     /// <summary>Drives an idempotent abort transition at the anchor and returns the record as it stands after it
     /// (the winner — a concurrent commit is not overwritten).</summary>
     public delegate Task<TransactionRecord?> DriveAbortDelegate(AbortTransactionCommand abort, string anchorKey, CancellationToken cancellationToken);
+
+    /// <summary>Asks the partition's other replicas whether they still hold a record-less intent this node is about to
+    /// hold past the retention horizon (see <see cref="RecordlessIntentPeerCheck"/>).</summary>
+    public delegate Task<RecordlessIntentPeerVerdict> CrossCheckRecordlessHoldDelegate(int partitionId, PreparedIntent intent, CancellationToken cancellationToken);
 
     private readonly PreparedIntentStore intentStore;
 
@@ -73,6 +78,22 @@ internal sealed class DurableTransactionRecovery
 
     internal List<(string Key, HLCTimestamp TransactionId)> HeldRecordlessSamples { get; } = [];
 
+    /// <summary>
+    /// Held record-less intents the peer cross-check proved stale — settled on a majority of the replica set at
+    /// or past this node's applied kv log id — with the peer that proved it, one per partition. Still held (the
+    /// outcome is never presumed locally); the caller hands each partition to divergence containment.
+    /// </summary>
+    internal Dictionary<int, (string FullerPeer, string Evidence)> StaleRecordlessHolds { get; } = [];
+
+    // The cross-check itself; null in bare protocol tests and on single-replica nodes.
+    private readonly CrossCheckRecordlessHoldDelegate? crossCheckRecordlessHold;
+
+    // Cross-checks issued per partition by this instance. One stale answer settles the partition's question, and a
+    // pass with many non-stale holds must not turn into a peer round-trip per held intent every sweep.
+    private readonly Dictionary<int, int> crossChecksByPartition = [];
+
+    private const int MaxCrossChecksPerPartition = 8;
+
     private readonly ILogger<IKahuna>? logger;
 
     // Emits the value-free by-reference materialization record instead of copying the committed value into the
@@ -107,8 +128,10 @@ internal sealed class DurableTransactionRecovery
         long maxMaterializationBatchBytes = 4 * 1024 * 1024,
         SemaphoreSlim? localApplyGate = null,
         Func<PreparedIntent, bool>? legMaterialized = null,
-        DurableTransactionFinalizer.ApplyRollbackLocally? applyRollbackLocally = null)
+        DurableTransactionFinalizer.ApplyRollbackLocally? applyRollbackLocally = null,
+        CrossCheckRecordlessHoldDelegate? crossCheckRecordlessHold = null)
     {
+        this.crossCheckRecordlessHold = crossCheckRecordlessHold;
         this.applyRollbackLocally = applyRollbackLocally;
         this.legMaterialized = legMaterialized;
         this.materializeByReference = materializeByReference;
@@ -143,7 +166,7 @@ internal sealed class DurableTransactionRecovery
         foreach (IGrouping<(HLCTimestamp, long, string), PreparedIntent> group in groups)
         {
             PreparedIntent representative = group.First();
-            bool? commit = await DecideAsync(representative, now, cancellationToken).ConfigureAwait(false);
+            bool? commit = await DecideAsync(partitionId, representative, now, cancellationToken).ConfigureAwait(false);
             if (commit is null)
                 continue; // still within the decision window, or the abort drive did not land — retry next sweep.
 
@@ -325,7 +348,7 @@ internal sealed class DurableTransactionRecovery
                         // before the record init commits) — never presume-abort it for a data move.
                         // Past the window, DecideAsync drives the ordinary presumed-abort protocol.
                         _ => representative.RecoveryDeadline != HLCTimestamp.Zero && representative.RecoveryDeadline <= now
-                            ? await DecideAsync(representative, now, cancellationToken).ConfigureAwait(false)
+                            ? await DecideAsync(partitionId, representative, now, cancellationToken).ConfigureAwait(false)
                             : null
                     };
                     break;
@@ -348,7 +371,7 @@ internal sealed class DurableTransactionRecovery
         return unsettled;
     }
 
-    private async Task<bool?> DecideAsync(PreparedIntent intent, HLCTimestamp now, CancellationToken cancellationToken)
+    private async Task<bool?> DecideAsync(int partitionId, PreparedIntent intent, HLCTimestamp now, CancellationToken cancellationToken)
     {
         TransactionRecord? record = await lookupRecord(intent.TransactionId, intent.Epoch, intent.RecordAnchorKey, cancellationToken).ConfigureAwait(false);
 
@@ -393,6 +416,34 @@ internal sealed class DurableTransactionRecovery
             HeldRecordlessIntents++;
             if (HeldRecordlessSamples.Count < 3)
                 HeldRecordlessSamples.Add((intent.Key, intent.TransactionId));
+
+            // Before settling on "hold forever", ask the partition's other replicas. The intent stores apply from
+            // the log alone, so a majority of the replica set at or past this node's applied kv log id no longer
+            // holding the intent proves its settlement is in a range this node marked applied without delivering:
+            // this replica is diverged, not the transaction unresolved. The outcome is still not presumed here
+            // (the settled value lives on the peers); the partition is reported for containment instead, and
+            // the intent stays held until a whole-partition install brings the settlement with it.
+            crossChecksByPartition.TryGetValue(partitionId, out int crossChecks);
+
+            if (crossCheckRecordlessHold is not null && !StaleRecordlessHolds.ContainsKey(partitionId) && crossChecks < MaxCrossChecksPerPartition)
+            {
+                crossChecksByPartition[partitionId] = crossChecks + 1;
+
+                RecordlessIntentPeerVerdict verdict = await crossCheckRecordlessHold(partitionId, intent, cancellationToken).ConfigureAwait(false);
+
+                if (verdict.Verdict == RecordlessIntentVerdict.Stale)
+                {
+                    DurableTransactionMetrics.RecordlessIntentsStale.Add(1);
+
+                    logger?.LogRecordlessIntentStale(
+                        intent.Key, intent.TransactionId, intent.Epoch, partitionId,
+                        verdict.NotHolding, verdict.Consulted, verdict.Peers, verdict.LocalAppliedLogId);
+
+                    StaleRecordlessHolds[partitionId] = (
+                        verdict.FullerPeer ?? "",
+                        $"recovery holds the prepared intent of transaction {intent.TransactionId} on key {intent.Key} record-less past the retention horizon while {verdict.NotHolding} of {verdict.Consulted} replicas ({verdict.Peers}) at or past applied kv log id {verdict.LocalAppliedLogId} have settled it");
+                }
+            }
 
             // One summary line per pass names the holds (see the maintenance sweep); the per-intent line stays
             // at Debug so a few wedged keys do not produce a failure line per key per tick for the run's life.

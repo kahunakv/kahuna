@@ -107,6 +107,7 @@ public sealed class BenchmarkPrepareCoalescing
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = "memory",
             WalStorage = "rocksdb",
             WalPath = walPath,

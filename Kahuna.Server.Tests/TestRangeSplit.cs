@@ -1145,6 +1145,7 @@ public sealed class TestRangeSplit : BaseCluster
         // Short settle window so the re-eligibility leg completes in < 200 ms.
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             PartitionExecutorPoolSize = 1,

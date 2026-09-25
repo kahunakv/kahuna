@@ -226,8 +226,9 @@ internal sealed partial class KeyValuesManager
     {
         KeyValueApplyFingerprint? fingerprint = replicationDispatcher.GetApplyFingerprint(partitionId);
 
+        // A hosted partition whose consistent read kept racing applies is "ask again", not "not hosted".
         return Task.FromResult(fingerprint is null
-            ? (KeyValueResponseType.DoesNotExist, default)
+            ? (raft.HostsPartition(partitionId) ? KeyValueResponseType.MustRetry : KeyValueResponseType.DoesNotExist, default)
             : (KeyValueResponseType.Get, fingerprint.Value));
     }
 
@@ -241,6 +242,26 @@ internal sealed partial class KeyValuesManager
     /// <summary>Logs and counts every divergent replica of a comparison; see <see cref="KeyValueReplicationDispatcher.ReportDivergence"/>.</summary>
     internal void ReportApplyDivergence(ApplyFingerprintComparison comparison, string moment) =>
         replicationDispatcher.ReportDivergence(comparison, moment);
+
+    /// <summary>Gates and relinquishes a partition whose local projection is proven incomplete; see <see cref="PartitionDivergenceContainment"/>.</summary>
+    internal PartitionDivergenceContainment DivergenceContainment => runtime.DivergenceContainment;
+
+    /// <summary>The Raft-facing dispatcher, for tests that drive its notifications or its test hooks directly.</summary>
+    internal KeyValueReplicationDispatcher ReplicationDispatcher => replicationDispatcher;
+
+    /// <summary>
+    /// Whether this node still holds a prepared intent for one transaction attempt on a key, with its applied
+    /// kv log id for the partition (see <see cref="IKahuna.GetPreparedIntentPresence"/>).
+    /// </summary>
+    public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(
+        int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct)
+    {
+        KeyValueApplyFingerprint? fingerprint = replicationDispatcher.GetApplyFingerprint(partitionId);
+
+        return Task.FromResult(fingerprint is null
+            ? (raft.HostsPartition(partitionId) ? KeyValueResponseType.MustRetry : KeyValueResponseType.DoesNotExist, false, 0L)
+            : (KeyValueResponseType.Get, runtime.PreparedIntentStore.HoldsIntent(transactionId, epoch, key), fingerprint.Value.AppliedLogId));
+    }
 
 
     /// <summary>Runs one auto-merge pass at the configured minimum range size.</summary>

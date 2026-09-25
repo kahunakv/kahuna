@@ -1824,4 +1824,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
         throw Unreachable(node);
     }
+
+    public async Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
+        GetPreparedIntentPresence(string node, int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
 }

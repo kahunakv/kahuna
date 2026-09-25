@@ -688,6 +688,13 @@ internal static class DurableTransactionMetrics
             "kahuna.transactions.recordless_intent_receipt_commits",
             description: "Record-less prepared intents past the retention horizon settled as commits on the evidence of their completion receipt.");
 
+    /// <summary>Held record-less intents the peer cross-check proved stale: settled on a majority of the replica set at
+    /// or past this node's applied kv log id, so this replica missed the settlement. A replica-divergence signal.</summary>
+    internal static readonly Counter<long> RecordlessIntentsStale =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.recordless_intents_stale_detected",
+            description: "Record-less prepared intents held past the retention horizon that a majority of the replica set had already settled.");
+
     private static int recordlessIntentsHeld;
 
     /// <summary>Record-less intents the last recovery pass on this node held: each is a key that stays read-only

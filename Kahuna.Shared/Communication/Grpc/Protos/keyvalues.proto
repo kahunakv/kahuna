@@ -44,6 +44,7 @@ service KeyValuer {
   rpc ReleaseSnapshotHold (GrpcReleaseSnapshotHoldRequest)  returns (GrpcReleaseSnapshotHoldResponse);
   rpc GetSnapshotFloor    (GrpcGetSnapshotFloorRequest)     returns (GrpcGetSnapshotFloorResponse);
   rpc GetPartitionApplyFingerprint (GrpcGetPartitionApplyFingerprintRequest) returns (GrpcGetPartitionApplyFingerprintResponse);
+  rpc GetPreparedIntentPresence (GrpcGetPreparedIntentPresenceRequest) returns (GrpcGetPreparedIntentPresenceResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -1836,4 +1837,25 @@ message GrpcGetPartitionApplyFingerprintResponse {
   int64 AppliedLogId = 2;
   int64 CommittedHeads = 3;
   int64 LiveIntents = 4;
+}
+
+// Whether the answering node still holds a prepared intent for one transaction attempt on one key,
+// together with its applied kv log id for the key's partition. Answered by any replica from its
+// memory: the record-less hold cross-check asks a partition's other replicas whether an intent this
+// node holds past the retention horizon was settled in a log range this node missed.
+message GrpcGetPreparedIntentPresenceRequest {
+  int32 PartitionId = 1;
+  int32 TransactionIdNode = 2;
+  int64 TransactionIdPhysical = 3;
+  uint32 TransactionIdCounter = 4;
+  int64 Epoch = 5;
+  string Key = 6;
+}
+
+message GrpcGetPreparedIntentPresenceResponse {
+  // TYPE_GOT on an answer; TYPE_DOES_NOT_EXIST when the node does not host the partition;
+  // TYPE_MUST_RETRY when the node could not answer.
+  GrpcKeyValueResponseType Type = 1;
+  bool Held = 2;
+  int64 AppliedLogId = 3;
 }

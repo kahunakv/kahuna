@@ -207,7 +207,7 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
     }
 
     [Fact]
-    public async Task DivergentReplica_IsReportedAtPromotion_AndRefusesTheSplit()
+    public async Task ShortLeader_IsReportedAtPromotion_RelinquishesLeadership_AndTheSplitRefusesAnIncompleteSource()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         ((IRaft, KahunaManager)[] nodes, int partition, string[] keys) = await Setup();
@@ -216,43 +216,67 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
             "kahuna.keyvalues.apply_divergence_detected",
             "kahuna.range.split.incomplete_source_refusals");
 
-        KahunaManager? diverged = null;
+        KahunaManager? masked = null;
 
         try
         {
             (IRaft leaderRaft, KahunaManager leader) = await LeaderOf(partition, nodes);
+            masked = leader;
 
-            foreach ((IRaft raft, KahunaManager kahuna) in nodes)
-            {
-                if (!ReferenceEquals(kahuna, leader))
-                {
-                    diverged = kahuna;
-                    break;
-                }
-            }
-            Assert.NotNull(diverged);
+            // The leader reports one committed head LESS than it really holds, at its real applied log id: the
+            // shape of a leader whose install marked entries applied without delivering them, seen against the
+            // replicas that did apply them. The applied ids match because every node applies the same log.
+            int maskedPartition = partition;
+            leader.KeyValues.ApplyFingerprintOverrideForTesting = (id, real) =>
+                id == maskedPartition && real is not null ? real.Value with { CommittedHeads = real.Value.CommittedHeads - 1 } : real;
 
-            // One replica reports one committed head MORE than it really holds, at its real applied log id:
-            // the shape of a leader that acknowledged a snapshot install without importing it, seen from
-            // the replica that did import. The applied ids match because both nodes apply the same log.
-            int divergedPartition = partition;
-            diverged.KeyValues.ApplyFingerprintOverrideForTesting = (id, real) =>
-                id == divergedPartition && real is not null ? real.Value with { CommittedHeads = real.Value.CommittedHeads + 1 } : real;
-
-            // Both nodes must sit at the same applied log id for the counts to be comparable: the divergence
+            // Every replica must sit at the same applied log id for the counts to be comparable: the divergence
             // rule deliberately ignores a replica that is merely behind.
-            KahunaManager divergedNode = diverged;
+            KahunaManager leaderNode = leader;
             await WaitUntilAsync(async () =>
             {
-                (_, KeyValueApplyFingerprint a) = await leader.GetPartitionApplyFingerprint(partition, ct);
-                (_, KeyValueApplyFingerprint b) = await divergedNode.GetPartitionApplyFingerprint(partition, ct);
-                return a.AppliedLogId == b.AppliedLogId;
+                (_, KeyValueApplyFingerprint a) = await leaderNode.GetPartitionApplyFingerprint(partition, ct);
+                foreach ((IRaft _, KahunaManager node) in nodes)
+                {
+                    (_, KeyValueApplyFingerprint b) = await node.GetPartitionApplyFingerprint(partition, ct);
+                    if (a.AppliedLogId != b.AppliedLogId)
+                        return false;
+                }
+                return true;
             }, timeoutMs: 30_000);
 
-            // Promotion of the leader: the comparison runs off the notification and reports the divergence.
+            // Promotion of the leader: the comparison runs off the notification, reports the divergence, and the
+            // short leader hands the partition to a fuller peer and gates itself.
             double divergencesBefore = metrics.Total("kahuna.keyvalues.apply_divergence_detected");
             Assert.True(await leader.OnLeaderChanged(partition, leaderRaft.GetLocalEndpoint()));
             await WaitUntilAsync(() => metrics.Total("kahuna.keyvalues.apply_divergence_detected") > divergencesBefore, timeoutMs: 15_000);
+            await WaitUntilAsync(() => leader.KeyValues.DivergenceContainment.IsGated(partition), timeoutMs: 15_000);
+            await WaitUntilAsync(async () => !await leaderRaft.AmILeaderIfHosted(partition, ct), timeoutMs: 30_000);
+
+            (IRaft _, KahunaManager successor) = await LeaderOf(partition, nodes);
+            Assert.NotSame(leader, successor);
+
+            // Back to a truthful report and an open gate: the mask moves to the successor so the split's source
+            // completeness gate is exercised on the leader it copies from.
+            leader.KeyValues.ApplyFingerprintOverrideForTesting = null;
+            await leader.KeyValues.DivergenceContainment.ClearAsync(partition);
+
+            masked = successor;
+            successor.KeyValues.ApplyFingerprintOverrideForTesting = (id, real) =>
+                id == maskedPartition && real is not null ? real.Value with { CommittedHeads = real.Value.CommittedHeads - 1 } : real;
+
+            KahunaManager successorNode = successor;
+            await WaitUntilAsync(async () =>
+            {
+                (_, KeyValueApplyFingerprint a) = await successorNode.GetPartitionApplyFingerprint(partition, ct);
+                foreach ((IRaft _, KahunaManager node) in nodes)
+                {
+                    (_, KeyValueApplyFingerprint b) = await node.GetPartitionApplyFingerprint(partition, ct);
+                    if (a.AppliedLogId != b.AppliedLogId)
+                        return false;
+                }
+                return true;
+            }, timeoutMs: 30_000);
 
             // The split refuses to copy from the source leader while a replica holds more at the same id.
             double refusalsBefore = metrics.Total("kahuna.range.split.incomplete_source_refusals");
@@ -261,18 +285,82 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
             Assert.True(metrics.Total("kahuna.range.split.incomplete_source_refusals") > refusalsBefore);
 
             // The refusal left the map untouched: one descriptor, generation 1.
-            Assert.Equal(1, leader.RangeMapStore.Current.Find(Space, keys[0])?.Generation);
+            Assert.Equal(1, successor.RangeMapStore.Current.Find(Space, keys[0])?.Generation);
 
-            // With the replica reporting its real state again the same split goes through.
-            diverged.KeyValues.ApplyFingerprintOverrideForTesting = null;
+            // With the leader reporting its real state again the same split goes through.
+            successor.KeyValues.ApplyFingerprintOverrideForTesting = null;
 
             SplitOutcome accepted = await SplitViaLeaders(Space, keys[keys.Length / 2], nodes, ct);
             Assert.True(accepted.IsSuccess, $"expected the split to succeed once the replicas agree, got {accepted.Status} {accepted.Detail}");
         }
         finally
         {
-            if (diverged is not null)
-                diverged.KeyValues.ApplyFingerprintOverrideForTesting = null;
+            if (masked is not null)
+                masked.KeyValues.ApplyFingerprintOverrideForTesting = null;
+
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    /// <summary>
+    /// Two replicas at the same applied log id with equal committed heads but different live-intent counts are
+    /// divergent and reported as such. The counts do not say which side is incomplete (a settlement missed on
+    /// one side reads the same as a prepare lost on the other), so the comparison names no side and containment
+    /// is left to the heads and to recovery's peer cross-check.
+    /// </summary>
+    [Fact]
+    public async Task ReplicaHoldingMoreLiveIntents_AtTheSameAppliedId_IsReportedDivergent()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ((IRaft, KahunaManager)[] nodes, int partition, _) = await Setup();
+
+        KahunaManager? masked = null;
+
+        try
+        {
+            (IRaft _, KahunaManager leader) = await LeaderOf(partition, nodes);
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+            {
+                if (!ReferenceEquals(kahuna, leader))
+                {
+                    masked = kahuna;
+                    break;
+                }
+            }
+            Assert.NotNull(masked);
+
+            int maskedPartition = partition;
+            masked.KeyValues.ApplyFingerprintOverrideForTesting = (id, real) =>
+                id == maskedPartition && real is not null ? real.Value with { LiveIntents = real.Value.LiveIntents + 2 } : real;
+
+            KahunaManager maskedNode = masked;
+            await WaitUntilAsync(async () =>
+            {
+                (_, KeyValueApplyFingerprint a) = await leader.GetPartitionApplyFingerprint(partition, ct);
+                (_, KeyValueApplyFingerprint b) = await maskedNode.GetPartitionApplyFingerprint(partition, ct);
+                return a.AppliedLogId == b.AppliedLogId;
+            }, timeoutMs: 30_000);
+
+            ApplyFingerprintComparison comparison = await leader.KeyValues.CompareApplyFingerprintWithReplicasAsync(partition, ct);
+            Assert.True(comparison.IsDeterminate);
+            Assert.True(comparison.HasDivergence);
+
+            ApplyDivergentPeer divergent = Assert.Single(comparison.Divergent);
+            Assert.Equal(maskedNode.KeyValues.Raft.GetLocalEndpoint(), divergent.Peer);
+            Assert.False(divergent.HeadsDiffer);
+            Assert.True(divergent.IntentsDiffer);
+            Assert.Equal(ApplyDivergenceSide.Undetermined, divergent.Side);
+            Assert.False(comparison.IsBehind(divergent.Peer));
+            Assert.False(comparison.IsBehind(comparison.Leader!));
+            Assert.Null(comparison.FullerPeerThanLeader());
+            Assert.False(maskedNode.KeyValues.DivergenceContainment.IsGated(partition));
+            Assert.False(leader.KeyValues.DivergenceContainment.IsGated(partition));
+        }
+        finally
+        {
+            if (masked is not null)
+                masked.KeyValues.ApplyFingerprintOverrideForTesting = null;
 
             await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
         }

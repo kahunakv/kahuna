@@ -111,6 +111,7 @@ public sealed class TestUserFunctionExtensionAssembly
         // The same handover the server makes: the loaded registry becomes the node's.
         EmbeddedKahunaOptions options = new()
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             PartitionExecutorPoolSize = 1,

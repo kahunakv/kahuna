@@ -72,6 +72,7 @@ public sealed class BenchmarkSingleKeySet
 
         await using EmbeddedKahunaNode node = new(new EmbeddedKahunaOptions
         {
+            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
             Storage = storage,
             StoragePath = Path.Combine(root, "data"),
             StorageRevision = "v1",

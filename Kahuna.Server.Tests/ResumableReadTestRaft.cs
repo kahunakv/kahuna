@@ -117,6 +117,12 @@ internal sealed class SchedulerOverridingRaft(IRaft inner, IRaftReadScheduler sc
     public Task<RaftOperationStatus> ForceLeaderForTestingAsync(int partitionId, CancellationToken cancellationToken = default) => inner.ForceLeaderForTestingAsync(partitionId, cancellationToken);
     public Task<RaftOperationStatus> StepDownAsync(int partitionId, CancellationToken cancellationToken = default) => inner.StepDownAsync(partitionId, cancellationToken);
     public Task<RaftOperationStatus> TransferLeadershipAsync(int partitionId, string targetEndpoint, CancellationToken cancellationToken = default) => inner.TransferLeadershipAsync(partitionId, targetEndpoint, cancellationToken);
+
+    public Task<RaftOperationStatus> RequestReseedAsync(int partitionId, CancellationToken cancellationToken = default) => inner.RequestReseedAsync(partitionId, cancellationToken);
+
+    public RaftOperationStatus SetCandidacyWithheld(int partitionId, bool withheld) => inner.SetCandidacyWithheld(partitionId, withheld);
+
+    public bool IsCandidacyWithheld(int partitionId) => inner.IsCandidacyWithheld(partitionId);
     public Task<RaftOperationStatus> SuspendHeartbeatsAsync(int partitionId, CancellationToken cancellationToken = default) => inner.SuspendHeartbeatsAsync(partitionId, cancellationToken);
     public Task<RaftOperationStatus> ResumeHeartbeatsAsync(int partitionId, CancellationToken cancellationToken = default) => inner.ResumeHeartbeatsAsync(partitionId, cancellationToken);
     public Task<RaftPartitionLifecycleResult> CreatePartitionAsync(int partitionId, RaftRoutingMode mode = RaftRoutingMode.Unrouted, (int start, int end)? hashRange = null, CancellationToken ct = default) => inner.CreatePartitionAsync(partitionId, mode, hashRange, ct);

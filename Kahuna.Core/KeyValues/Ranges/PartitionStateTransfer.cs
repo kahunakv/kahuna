@@ -95,6 +95,16 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// <summary>Registers a resident-state invalidation callback; see <see cref="residentStateInvalidationHooks"/>.</summary>
     internal void AddResidentStateInvalidationHook(Func<int, Task> hook) => residentStateInvalidationHooks.Add(hook);
 
+    /// <summary>
+    /// Callbacks told, once an install completed, the log index the installed projection reflects. The
+    /// entries at or below it never reach the replicators on this node, so a per-node apply high-water
+    /// mark derived from delivered entries alone would stay below what the projection actually holds.
+    /// </summary>
+    private readonly List<Action<int, long>> installedThroughObservers = [];
+
+    /// <summary>Registers an installed-boundary observer; see <see cref="installedThroughObservers"/>.</summary>
+    internal void AddInstalledThroughObserver(Action<int, long> observer) => installedThroughObservers.Add(observer);
+
     private readonly PartitionDataEnumerator enumerator;
 
     private readonly IPersistenceBackend persistenceBackend;
@@ -452,6 +462,9 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 await hook(partitionId).ConfigureAwait(false);
 
             ClearInstallIncomplete(partitionId);
+
+            foreach (Action<int, long> observer in installedThroughObservers)
+                observer(partitionId, header.UpToIndex);
         }
         finally
         {

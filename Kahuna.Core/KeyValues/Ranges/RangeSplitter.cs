@@ -218,22 +218,22 @@ internal sealed class RangeSplitter
 
             if (completeness.HasDivergence)
             {
-                foreach ((string peer, KeyValueApplyFingerprint fingerprint) in completeness.Divergent)
+                foreach (ApplyDivergentPeer divergent in completeness.Divergent)
                 {
-                    if (fingerprint.CommittedHeads <= completeness.LeaderFingerprint.CommittedHeads)
+                    if (!divergent.LeaderIsBehind)
                         continue;
 
                     RangeSplitMetrics.IncompleteSourceRefusals.Add(1);
                     logger.LogRangeSplitRefusedIncompleteSource(
                         keySpace, splitKey, descriptor.PartitionId, completeness.Leader!,
-                        completeness.LeaderFingerprint.CommittedHeads, peer, fingerprint.CommittedHeads,
+                        completeness.LeaderFingerprint.CommittedHeads, divergent.Peer, divergent.Fingerprint.CommittedHeads,
                         completeness.LeaderFingerprint.AppliedLogId);
                     return SplitOutcome.SourceStateIncomplete;
                 }
 
-                // A replica BELOW the leader is that replica's divergence, not the source's: the copy
-                // reads the leader, which holds the larger state. Reported through the same path the
-                // promotion check uses so the replica is still visible; the split proceeds.
+                // A replica BEHIND the leader is that replica's divergence, not the source's: the copy
+                // reads the leader, which holds the complete state. Reported through the same path the
+                // leader-change check uses so the replica is still visible; the split proceeds.
                 manager.ReportApplyDivergence(completeness, "split");
             }
         }
