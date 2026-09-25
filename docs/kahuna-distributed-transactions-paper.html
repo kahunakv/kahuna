@@ -1,0 +1,820 @@
+<title>Inside Kahuna's Distributed Transactions</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,700;1,400;1,700&family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap">
+<style>
+:root {
+  --paper: #fdfdfb;
+  --ink: #141412;
+  --rule: #8c8b85;
+  --muted: #55544f;
+  --wash: #eeede8;
+  --serif: "STIX Two Text", "Times New Roman", Times, Georgia, serif;
+  --mono: "Courier Prime", "Courier New", Courier, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #171716;
+    --ink: #e8e5dd;
+    --rule: #6f6e67;
+    --muted: #a7a49b;
+    --wash: #262622;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #171716;
+  --ink: #e8e5dd;
+  --rule: #6f6e67;
+  --muted: #a7a49b;
+  --wash: #262622;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 15px;
+  line-height: 1.38;
+  padding-block: 28px 40px;
+  padding-inline: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+.sheet { max-width: 8.5in; margin: 0 auto; }
+.head, .foot {
+  display: flex; justify-content: space-between; gap: 16px;
+  font-size: 11.5px; color: var(--muted);
+}
+.foot { margin-top: 40px; padding-top: 6px; border-top: 1px solid var(--rule); }
+.foot span:last-child { font-variant-numeric: tabular-nums; }
+
+/* title block */
+.title { text-align: center; margin: 34px 0 0; }
+.title h1 {
+  font-size: 40px; line-height: 1.05; font-weight: 700; margin: 0; letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+.title .sub { font-size: 17px; margin: 14px 0 0; text-wrap: balance; }
+.title .by {
+  font-size: 12.5px; font-style: italic; margin: 8px 0 0; color: var(--muted);
+}
+.title .by span { white-space: nowrap; }
+.title .by span + span::before { content: "·"; margin: 0 .55em; font-style: normal; }
+.prog { position: relative; width: 120px; height: 1px; background: var(--rule); margin: 14px auto 0; }
+.prog i {
+  position: absolute; top: -3px; left: 0; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink); transform: translateX(-50%); transition: left .6s ease;
+}
+
+/* figure 1 */
+.fig1 { margin: 22px 0 0; }
+.figtitle {
+  text-align: center; font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
+  margin: 0 0 4px;
+}
+.figwrap { overflow-x: auto; }
+.figwrap svg { display: block; width: 100%; min-width: 560px; height: auto; color: var(--ink); font-family: var(--serif); }
+.st rect, .st polygon, .st line { stroke: currentColor; stroke-width: 1.1; }
+.st rect { fill: var(--paper); }
+.st polygon { fill: url(#hatch); }
+.st rect.lab { stroke-width: .8; }
+.st text { fill: currentColor; text-anchor: middle; }
+.st .t { font-size: 12.5px; font-weight: 700; }
+.st .s { font-size: 9.5px; font-style: italic; }
+.st .h { font-size: 8.5px; letter-spacing: .16em; font-weight: 700; }
+.st .lt { font-size: 7.5px; letter-spacing: .14em; font-weight: 700; }
+.st .i { font-size: 12px; font-style: italic; }
+.st { cursor: pointer; }
+.st.on rect:not(.lab), .st.on polygon { fill: currentColor; }
+.st.on text:not(.lt) { fill: var(--paper); }
+.st.on line { stroke: var(--paper); }
+.q { font-size: 10px; font-style: italic; fill: currentColor; text-anchor: middle; }
+.x { font-size: 9.2px; fill: currentColor; }
+.xl { stroke: currentColor; stroke-width: .9; fill: none; }
+.spoke { stroke: currentColor; stroke-width: 1; stroke-dasharray: 2 3; opacity: 0; transition: opacity .35s; }
+.spoke.on { opacity: 1; }
+.chip rect { fill: var(--paper); stroke: currentColor; stroke-width: 1.5; }
+.chip line { stroke: currentColor; stroke-width: 1; }
+.chip circle { fill: var(--paper); stroke: currentColor; stroke-width: 1; transition: fill .3s; }
+.chip.busy circle { fill: currentColor; }
+.chipT { font-size: 13px; font-weight: 700; letter-spacing: .14em; text-anchor: middle; fill: currentColor; }
+.chipS { font-family: var(--mono); font-size: 8.6px; text-anchor: middle; fill: currentColor; }
+#token circle { fill: currentColor; stroke: var(--paper); stroke-width: 1.2; }
+.legend text { font-size: 9.5px; font-style: italic; fill: currentColor; }
+.legend polygon, .legend rect, .legend line { stroke: currentColor; stroke-width: .9; }
+.legend polygon { fill: url(#hatch); }
+.legend rect { fill: var(--paper); }
+
+/* controls + narration */
+.ctl {
+  display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
+  margin: 6px 0 0;
+}
+.ctl button {
+  font: 700 10px var(--serif); letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink); background: var(--paper); border: 1px solid var(--ink);
+  padding: 4px 10px; cursor: pointer; border-radius: 2px;
+}
+.ctl button:hover { background: var(--wash); }
+.ctl button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.ctl .cnt { font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 5ch; text-align: center; }
+.now {
+  margin: 10px 0 0; padding: 7px 10px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+  font-size: 12.5px; line-height: 1.35; min-height: 3.2em;
+}
+.now b { font-variant: small-caps; letter-spacing: .06em; }
+.cap { font-size: 11.5px; line-height: 1.32; margin: 10px 0 0; }
+.cap b { font-weight: 700; }
+
+hr.sep { border: 0; border-top: 1px solid var(--rule); margin: 18px 0 14px; }
+
+/* body columns */
+.body { column-count: 2; column-gap: .28in; text-align: justify; hyphens: auto; }
+@media (max-width: 640px) { .body { column-count: 1; } .title h1 { font-size: 30px; } body { font-size: 15.5px; } }
+.body h2 {
+  break-after: avoid; column-span: none;
+  text-align: center; font-size: 12px; font-weight: 400; font-variant: small-caps; letter-spacing: .08em;
+  margin: 16px 0 6px;
+}
+.body h2:first-child { margin-top: 0; }
+.body + .body { margin-top: 18px; }
+.body h2 span { font-variant: normal; }
+.body h3 {
+  break-after: avoid; font-size: 12.5px; font-weight: 400; font-style: italic; margin: 10px 0 2px;
+}
+.body p { margin: 0; text-indent: 1.3em; orphans: 2; widows: 2; }
+.body h2 + p, .body h3 + p, .body p.np, .body ul + p, .body ol + p, .body figure + p, .body .lst + p, .body .tbl + p, .body .claim + p { text-indent: 0; }
+.body ul, .body ol { margin: 4px 0 6px; padding-left: 1.5em; }
+.body li { margin: 0 0 2px; }
+.body li::marker { color: var(--muted); }
+.claim {
+  margin: 8px 0; padding: 6px 10px; border-left: 2px solid var(--ink); font-style: italic; break-inside: avoid;
+}
+.claim b { font-style: normal; font-variant: small-caps; letter-spacing: .06em; }
+mark[data-step] {
+  background: transparent; color: inherit; cursor: pointer; border-radius: 1px;
+  padding: 0 .12em; margin: 0 -.12em;
+  box-decoration-break: clone; -webkit-box-decoration-break: clone;
+  transition: background .25s, color .25s;
+}
+mark[data-step].on { background: var(--ink); color: var(--paper); }
+mark[data-step] code { color: inherit; }
+code, pre { font-family: var(--mono); }
+code { font-size: 12.5px; }
+.lst { break-inside: avoid; margin: 8px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: 6px 0; }
+.lst pre { margin: 0; font-size: 11.5px; line-height: 1.3; overflow-x: auto; }
+.lst .lcap { font-size: 11px; margin: 6px 0 0; text-indent: 0; line-height: 1.3; }
+pre.tree { font-size: 11.5px; line-height: 1.3; margin: 6px 0 8px; overflow-x: auto; }
+.tbl { break-inside: avoid; margin: 10px 0 8px; }
+.tbl .tcap { text-align: center; font-size: 11px; margin: 0 0 4px; }
+.tbl .tcap b { display: block; font-weight: 700; font-variant: small-caps; letter-spacing: .08em; font-size: 12px; }
+.tbl .tcap span { font-variant: small-caps; letter-spacing: .06em; }
+.tbl .tw { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.25; }
+th, td { text-align: left; vertical-align: top; padding: 3px 6px 3px 4px; }
+th { font-weight: 700; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink); }
+tbody tr:last-child td { border-bottom: 1px solid var(--ink); }
+td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr[data-step] { cursor: pointer; transition: background .25s; }
+tr[data-step].on { background: var(--wash); box-shadow: inset 2px 0 0 var(--ink); }
+.math { text-align: center; text-indent: 0 !important; margin: 4px 0 6px !important; font-style: italic; }
+.math .op { font-style: normal; }
+figure.inl { margin: 8px 0; break-inside: avoid; }
+figure.inl svg { display: block; width: 100%; height: auto; color: var(--ink); font-family: var(--serif); }
+figure.inl figcaption { font-size: 11.5px; line-height: 1.3; margin-top: 4px; }
+figure.inl .n { fill: var(--paper); stroke: currentColor; stroke-width: 1.1; }
+figure.inl .n.on { fill: currentColor; }
+figure.inl text { fill: currentColor; font-size: 10.5px; text-anchor: middle; }
+figure.inl .n.on + text { fill: var(--paper); }
+figure.inl .e { stroke: currentColor; stroke-width: 1; fill: none; }
+figure.inl .el { font-size: 8.8px; font-style: italic; }
+.refs { font-size: 12px; line-height: 1.3; }
+.refs p { text-indent: -1.6em; padding-left: 1.6em; margin: 0 0 3px; }
+.refs a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--rule); word-break: break-all; }
+.app li { font-size: 12.5px; }
+.app code { font-size: 11.5px; }
+sub, sup { font-size: .72em; line-height: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .prog i, mark[data-step], tr[data-step], .spoke, .chip circle { transition: none; }
+}
+</style>
+
+<div class="sheet">
+  <div class="head"><span>2026 Design and Implementation Note on Kahuna</span><span>August 2026</span></div>
+
+  <div class="title">
+    <h1>Inside Kahuna's<br>Distributed Transactions</h1>
+    <p class="sub">Durable Intents, Validation, and Recovery in a Partitioned Key–Value Store</p>
+    <p class="by"><span>Andres Gutierrez</span> <span>kahunakv/kahuna</span> <span>Kahuna 1.5.3, Kommander 1.4.4, Nixie 1.3.0</span> <span>a walk around the commit loop</span></p>
+    <div class="prog" aria-hidden="true"><i id="dot"></i></div>
+  </div>
+
+  <figure class="fig1" id="fig1">
+    <p class="figtitle">The commit loop, with its decisions marked</p>
+    <div class="figwrap">
+    <svg id="loop" viewBox="0 0 1000 470" role="img" aria-label="The commit loop: a transaction begins, passes the admission gate, stages writes in key actors, is routed, prepares durable intents on Raft, passes the staged-base fence, validates its read set, is decided at the anchor record, is checked against its deadline, is settled, and replies. The anchor record sits in the centre of the loop.">
+      <defs>
+        <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="5" stroke="currentColor" stroke-width=".7" opacity=".5"/>
+        </pattern>
+        <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="currentColor"/></marker>
+      </defs>
+
+      <path id="track" d="M140 230 V150 A40 40 0 0 1 180 110 H820 A40 40 0 0 1 860 150 V310 A40 40 0 0 1 820 350 H180 A40 40 0 0 1 140 310 Z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-dasharray="4 4"/>
+
+      <!-- spokes to the anchor record, shown while the active station consults it -->
+      <line class="spoke" data-spoke="4" x1="690" y1="140" x2="540" y2="200"/>
+      <line class="spoke" data-spoke="5" x1="812" y1="178" x2="548" y2="224"/>
+      <line class="spoke" data-spoke="8" x1="620" y1="320" x2="536" y2="262"/>
+      <line class="spoke" data-spoke="9" x1="470" y1="326" x2="488" y2="262"/>
+      <line class="spoke" data-spoke="10" x1="336" y1="324" x2="458" y2="262"/>
+
+      <!-- exits (outside the loop) -->
+      <line class="xl" x1="250" y1="88" x2="250" y2="68" marker-end="url(#arr)"/>
+      <text class="x" x="250" y="58" text-anchor="middle">no → AdmissionRefused, nothing began</text>
+      <line class="xl" x1="520" y1="88" x2="520" y2="68" marker-end="url(#arr)"/>
+      <text class="x" x="520" y="58" text-anchor="middle">yes → init, prepares and decision in one proposal</text>
+      <line class="xl" x1="906" y1="175" x2="922" y2="175" marker-end="url(#arr)"/>
+      <text class="x" x="927" y="171">no → abort</text>
+      <text class="x" x="927" y="184">(stale base)</text>
+      <line class="xl" x1="760" y1="372" x2="760" y2="390" marker-end="url(#arr)"/>
+      <text class="x" x="736" y="404">no → abort; intents stay recoverable</text>
+      <line class="xl" x1="620" y1="378" x2="620" y2="394" marker-end="url(#arr)"/>
+      <text class="x" x="620" y="408" text-anchor="middle">reply leaves here</text>
+      <line class="xl" x1="470" y1="372" x2="470" y2="392" marker-end="url(#arr)"/>
+      <g class="st" data-i="9"><rect x="410" y="394" width="120" height="24"/><text class="t" x="470" y="410" style="font-size:11.5px">presumed abort</text></g>
+      <text class="x" x="470" y="432" text-anchor="middle" style="font-style:italic">tombstone at the anchor</text>
+      <text class="x" x="330" y="392" text-anchor="middle" style="font-style:italic">after the reply · deferred</text>
+      <text class="x" x="130" y="282" text-anchor="end" style="font-style:italic">Committed</text>
+      <text class="x" x="130" y="294" text-anchor="end" style="font-style:italic">Aborted</text>
+      <text class="x" x="130" y="306" text-anchor="end" style="font-style:italic">MustRetry</text>
+
+      <!-- questions (inside the loop) -->
+      <text class="q" x="250" y="150">admitted?</text>
+      <text class="q" x="520" y="150">one partition?</text>
+      <text class="q" x="806" y="179" text-anchor="end">base still current?</text>
+      <text class="q" x="760" y="318">read set valid?</text>
+      <text class="q" x="470" y="318">decided in time?</text>
+
+      <!-- stations -->
+      <g class="st" data-i="0"><rect x="90" y="208" width="100" height="44"/><text class="t" x="140" y="227">begin</text><text class="s" x="140" y="241">options + handle</text></g>
+      <g class="st" data-i="1"><polygon points="204,110 250,88 296,110 250,132"/><rect class="lab" x="230" y="103" width="40" height="14"/><text class="lt" x="250" y="113.5">GATE</text></g>
+      <g class="st" data-i="2"><rect x="320" y="86" width="120" height="48"/><text class="t" x="380" y="106">stage</text><text class="s" x="380" y="121">point lock + MVCC entry</text></g>
+      <g class="st" data-i="3"><polygon points="474,110 520,88 566,110 520,132"/><rect class="lab" x="500" y="103" width="40" height="14"/><text class="lt" x="520" y="113.5">ROUTE</text></g>
+      <g class="st" data-i="4"><rect x="595" y="82" width="190" height="56"/><text class="h" x="690" y="99">PREPARE · RAFT</text><line x1="607" y1="105" x2="773" y2="105"/><text class="i" x="690" y="124">durable intents + record</text></g>
+      <g class="st" data-i="5"><polygon points="814,175 860,153 906,175 860,197"/><rect class="lab" x="840" y="168" width="40" height="14"/><text class="lt" x="860" y="178.5">FENCE</text></g>
+      <g class="st" data-i="6"><rect x="800" y="251" width="120" height="48"/><text class="t" x="860" y="271">validate</text><text class="s" x="860" y="286">probes, then read set</text></g>
+      <g class="st" data-i="7"><polygon points="714,350 760,328 806,350 760,372"/><rect class="lab" x="740" y="343" width="40" height="14"/><text class="lt" x="760" y="353.5">CHECK</text></g>
+      <g class="st" data-i="8"><rect x="540" y="322" width="160" height="56"/><text class="h" x="620" y="339">DECIDE · ANCHOR</text><line x1="552" y1="345" x2="688" y2="345"/><text class="i" x="620" y="364">commit or abort, once</text></g>
+      <g class="st" data-i="9"><polygon points="424,350 470,328 516,350 470,372"/><rect class="lab" x="450" y="343" width="40" height="14"/><text class="lt" x="470" y="353.5">CLOCK</text></g>
+      <g class="st" data-i="10"><rect x="270" y="326" width="120" height="48"/><text class="t" x="330" y="346">settle</text><text class="s" x="330" y="361">materialize, drop intent</text></g>
+
+      <!-- the anchor record -->
+      <g class="chip" id="chip">
+        <line x1="466" y1="198" x2="466" y2="186"/><circle cx="466" cy="183" r="3"/>
+        <line x1="489" y1="198" x2="489" y2="186"/><circle cx="489" cy="183" r="3"/>
+        <line x1="511" y1="198" x2="511" y2="186"/><circle cx="511" cy="183" r="3"/>
+        <line x1="534" y1="198" x2="534" y2="186"/><circle cx="534" cy="183" r="3"/>
+        <line x1="466" y1="262" x2="466" y2="274"/><circle cx="466" cy="277" r="3"/>
+        <line x1="489" y1="262" x2="489" y2="274"/><circle cx="489" cy="277" r="3"/>
+        <line x1="511" y1="262" x2="511" y2="274"/><circle cx="511" cy="277" r="3"/>
+        <line x1="534" y1="262" x2="534" y2="274"/><circle cx="534" cy="277" r="3"/>
+        <line x1="452" y1="210" x2="440" y2="210"/><circle cx="437" cy="210" r="3"/>
+        <line x1="452" y1="223" x2="440" y2="223"/><circle cx="437" cy="223" r="3"/>
+        <line x1="452" y1="237" x2="440" y2="237"/><circle cx="437" cy="237" r="3"/>
+        <line x1="452" y1="250" x2="440" y2="250"/><circle cx="437" cy="250" r="3"/>
+        <line x1="548" y1="210" x2="560" y2="210"/><circle cx="563" cy="210" r="3"/>
+        <line x1="548" y1="223" x2="560" y2="223"/><circle cx="563" cy="223" r="3"/>
+        <line x1="548" y1="237" x2="560" y2="237"/><circle cx="563" cy="237" r="3"/>
+        <line x1="548" y1="250" x2="560" y2="250"/><circle cx="563" cy="250" r="3"/>
+        <rect x="452" y="198" width="96" height="64" rx="2"/>
+        <text class="chipT" x="500" y="221">ANCHOR</text>
+        <text class="chipS" x="500" y="238" id="recS">record · absent</text>
+        <text class="chipS" x="500" y="251" id="intS">intent · absent</text>
+      </g>
+
+      <!-- legend -->
+      <g class="legend">
+        <polygon points="90,447 104,439 118,447 104,455"/>
+        <text x="126" y="450">decision on the path; nothing durable is written</text>
+        <rect x="372" y="440" width="18" height="14"/><line x1="375" y1="445" x2="387" y2="445"/>
+        <text x="398" y="450">durable Raft proposal</text>
+        <rect x="524" y="440" width="18" height="14"/>
+        <text x="550" y="450">in-memory station</text>
+        <line x1="662" y1="447" x2="700" y2="447" style="stroke:currentColor;stroke-dasharray:2 3"/>
+        <text x="706" y="450">consults the anchor record</text>
+      </g>
+
+      <g id="token"><circle r="3.6"/><circle r="3.6"/><circle r="3.6"/></g>
+    </svg>
+    </div>
+    <div class="ctl">
+      <button id="bPrev" type="button" aria-label="Previous station">‹ Prev</button>
+      <button id="bPlay" type="button" aria-label="Pause or play">Pause</button>
+      <button id="bNext" type="button" aria-label="Next station">Next ›</button>
+      <span class="cnt" id="cnt">1 / 12</span>
+    </div>
+    <p class="now" aria-live="polite"><b id="nowk">begin</b> — <span id="nowt"></span></p>
+    <figcaption class="cap"><b>Fig. 1. The commit loop with its decisions marked.</b> Only the two double-ruled stations write durable state: <i>prepare</i> replicates every participant's exact intent and the transaction record, and <i>decide</i> chooses commit or abort with one compare-and-set. Five diamonds are decisions with a small answer space: whether the request may start, whether one Raft proposal is enough, whether each prepared base is still the committed head, whether the read set is still current, and whether an undecided record has outlived its deadline. Two of them exit to a person or a retry rather than looping again. The token walks the loop; each station lights the sentence in the text that explains it, and the anchor record in the centre shows the durable state at that moment. Click any station, sentence, or table row to jump there.</figcaption>
+  </figure>
+
+  <hr class="sep">
+
+  <div class="body">
+
+    <h2>I. A Transaction Crosses Many Boundaries</h2>
+    <p>A key–value transaction has a small interface and a long path. One logical operation can touch several key ranges. It can be forwarded to different Raft leaders. It can enter several actor mailboxes. It can outlive the request that started it, race a range split, or be retried after the client lost the reply. The transaction layer must make all of these mechanisms agree on one outcome, and it must keep the common case cheap.</p>
+    <p>Kahuna's answer is a layered protocol, and Figure 1 is its map. An in-memory coordinator owns the live transaction and its operation history. Key actors stage tentative values and point locks. At commit, persistent effects become replicated <i>prepared intents</i>. A canonical record on an anchor partition chooses commit or abort exactly once. Materialization into ordinary storage may happen after the client has its answer, because every read understands an unresolved intent. Background recovery, range-reconfiguration barriers, and idempotent replay finish the protocol after failures.</p>
+    <p>This note is written to be walked, not skimmed. Follow the token around the loop. Each station lights the sentence that explains it, Table I counts what each shape of commit costs in consensus barriers, and Table II names the anomaly that each decision defends against. Statements about fewer barriers or fewer allocations follow from the code path; they are not substitutes for measurements. The analyzed release set is Kahuna 1.5.3, Kommander 1.4.4, Nixie 1.3.0, and CamusDB 0.11.1. Source code and repository documentation are the artifact of record [1, 2, 4, 12].</p>
+
+    <h2>II. Two Kinds of Keys, Two Interfaces</h2>
+    <h3>Storage, processes, and failures</h3>
+    <p>Kahuna partitions the key space. A routing layer maps a key or a range to a logical partition, and then to the current Raft leader for that partition. Kommander supplies replicated logs, leadership, quorum durability, replay, and snapshot installation [2, 3]. Nixie supplies bounded-mailbox actors [4]. A per-key actor serializes local state transitions. An off-mailbox partition scheduler submits replicated writes, so a slow quorum does not block unrelated actor messages.</p>
+    <p>The protocol assumes crash failures, message loss or delay, retries, leader changes, and range splits or merges. It does not make progress without a quorum for the required partition. Hybrid logical clocks (HLC) give a compact, causality-respecting time domain [5]. They do not give Spanner-like bounded clock uncertainty or external consistency [6]. Local monotonic clocks measure elapsed time and admission aging. Distributed ordering and durable deadlines are HLC values.</p>
+    <p>There are two durability classes:</p>
+    <ul>
+      <li><b>Persistent keys</b> are represented in Raft and later flushed to the configured backend (memory, SQLite, or RocksDB). Raft, not the backend flush, is the immediate durability authority.</li>
+      <li><b>Ephemeral keys</b> live in memory. Their staging and two-phase coordination never become crash durable.</li>
+    </ul>
+    <p>A transaction configured for durable decisions rejects any modified ephemeral key. A best-effort transaction may mix the classes, but only its persistent subset is recoverable: a crash between persistent finalization and ephemeral application can expose a partial cross-class outcome. The API makes this boundary visible instead of implying an atomicity that the storage substrate cannot give.</p>
+
+    <h3>Script and interactive transactions</h3>
+    <p><b>Script transactions</b> execute a parsed, server-side sequence. A single statement takes the direct non-transactional path. A multi-statement or explicit <code>BEGIN … COMMIT END</code> block uses the coordinator. Listing 1 shows the shape that the rest of this note follows.</p>
+    <div class="lst">
+<pre>BEGIN (locking=optimistic, decisionDurability=durable)
+  LET src = GET acct/a
+  LET dst = GET acct/b
+  IF to_int(src) &gt;= 10 THEN
+    SET acct/a to_int(src) - 10
+    SET acct/b to_int(dst) + 10
+  END
+  COMMIT
+END</pre>
+      <p class="lcap"><b>Listing 1.</b> A durable optimistic transfer. Optimistic locking implies read-set validation, so the two <code>GET</code>s form the read set, and each <code>SET</code> carries the base revision it was computed from. If <code>acct/a</code> and <code>acct/b</code> sit on one partition, the whole commit is one Raft proposal.</p>
+    </div>
+    <p><b>Interactive transactions</b> expose begin, read, write, scan, commit, and rollback calls over gRPC or the embedded API. <mark data-step="0">The server, not the client, owns the authoritative working set. A handle carries the transaction identifier, the coordinator key, and, after the first confirmed persistent mutation, the durable record's anchor key.</mark> REST exposes script execution and single key operations, but not the interactive session lifecycle.</p>
+    <p>The distinction matters after an ambiguous network outcome. A client-provided list of writes is never accepted as a substitute for the server's staged state. Reusing the same handle and operation identity lets the server answer from the live session, from a bounded terminal-result cache, or from the canonical durable record.</p>
+
+    </div>
+  <div class="body">
+    <h2>III. Who Owns What</h2>
+    <p>The normal path has four ownership layers:</p>
+<pre class="tree">client request
+  → session coordinator + operation registry
+  → range router → current Raft leader
+  → per-key actor: MVCC state, lock, staged value
+  → partition batch scheduler → Kommander Raft</pre>
+    <p class="np">The coordinator owns transaction-wide facts: timeout, priority lease, read policy, locking policy, participant set, range locks, read observations, operation results, and finalization state. Key actors own key-local facts: committed revisions, the transaction's staged revision, point locks, write intents, and prepared-intent overlays. This split keeps a process-wide transaction object out of the hot key path while it keeps one authority for commit.</p>
+    <p>Routing carries a range generation. A write is fenced when it first reaches its key owner, and again immediately before a queued replication batch is flushed. The second check is essential. A proposal can wait in a batch long enough for a split, a merge, or a leader move to invalidate its original route.</p>
+    <p>Several replicated control structures support the data plane: a range map and generation fence decide ownership; snapshot holds publish an MVCC retention floor; transaction records store canonical decisions; prepared-intent records store participant effects; completion evidence and transaction metadata survive cache eviction, replay, and range transfer; and application-durability floors stop Raft log compaction from outrunning asynchronous backend persistence. These structures turn local optimizations, such as caches and asynchronous materialization, into recoverable state machines.</p>
+
+    <h3>Admission and overload</h3>
+    <p><mark data-step="1">Before a script or a session begins, it enters a per-node priority gate. The script gate and the session gate are separate, so one workload shape cannot consume the other's whole allowance.</mark> Configurable maximum concurrency, queue depth, and admission wait bound resource use. Reserved slots protect high and critical priorities. Monotonic aging improves queue progress, although the original priority still controls access to reserved capacity.</p>
+    <p><mark data-step="1">Admission is a load-shedding mechanism, not a correctness mechanism. It neither preempts an active transaction nor changes lock conflict rules. An <code>AdmissionRefused</code> answer means that no transaction began, and the caller may back off.</mark> Session lifetime is clamped independently. The defaults are a 5 s transaction timeout, a 300 s maximum, a 5 s admission wait, and a 30 s maximum wait. Priority admission can be disabled.</p>
+    <p>The replicated write scheduler has a second overload boundary. It bounds queued items and bytes per partition and globally. Terminal work, which means decisions, materialization, and settlement, has reserved capacity, so a flood of new writes cannot indefinitely stop already-decided transactions from releasing their intents.</p>
+
+    <h2>IV. Begin and Operation Idempotency</h2>
+    <p><mark data-step="0">Starting a transaction validates the option combination, acquires admission, creates an HLC-derived transaction identifier, and installs a session context.</mark> A fixed nonzero read timestamp cannot be combined with tracked latest-read validation, because the two mean different things: a historical as-of view versus a current-version dependency set.</p>
+    <p><mark data-step="11">Every interactive operation carries a 128-bit operation identifier and a digest of its request. Admission of an operation checks the operation table together with the finalization fence in one atomic step.</mark> The result is one of three cases:</p>
+    <ul>
+      <li><b>new:</b> the operation may execute;</li>
+      <li><b>pending:</b> another copy is executing, so the caller joins its result;</li>
+      <li><b>completed:</b> the saved response is returned and the effect is not applied again.</li>
+    </ul>
+    <p>Reusing an identifier with a different digest is rejected. A participant-side cache handles the other half of the problem: a key actor applied an effect, but the coordinator did not record completion before the reply was lost. Request admission and effect application are therefore both idempotent, each at its own ownership layer.</p>
+    <p>Commit, rollback, and timeout reaping contend for one finalization slot. The winner closes the session to new operations, waits for earlier admitted operations to drain, freezes the transaction snapshot, and performs finalization. Concurrent finalizers observe the same result. This ordering stops a late write from entering after the participant manifest has been frozen.</p>
+
+    </div>
+  <div class="body">
+    <h2>V. Staging, Locks, and Reads</h2>
+    <p><mark data-step="2">A transactional persistent write does not append an ordinary key–value entry to Raft. The key actor checks the conditions, acquires an exclusive point lock, and stores an MVCC entry that belongs to the transaction, together with a leased in-memory write intent.</mark> Later reads by the same transaction select that staged version. This gives read-your-writes without making uncommitted data visible to anyone else.</p>
+    <p>Client writes take the exclusive point lock in both locking modes. The modes differ in how reads are protected:</p>
+    <ul>
+      <li><b>Pessimistic reads</b> acquire exclusive point locks. Prefix scans acquire an exclusive prefix lock; range scans acquire a range lock, exclusive by default.</li>
+      <li><b>Optimistic reads</b> take no read locks and record observations for validation. Optimistic locking implies read-set validation even when the explicit validation option is <code>None</code>.</li>
+    </ul>
+    <p>The public point lock is exclusive, not shared. Shared per-key read locks are a planned extension, not an implemented guarantee.</p>
+
+    <h3>MVCC reads and snapshot holds</h3>
+    <p>Without a fixed timestamp, a read selects the latest visible committed revision plus the transaction's own staged value. With a fixed read timestamp <i>t<sub>r</sub></i>, point reads and scans select the newest version at or before <i>t<sub>r</sub></i>. This yields one historical as-of view across partitions, provided that the required history is retained.</p>
+    <p>A client that needs a long-lived historical view acquires a replicated, leased snapshot hold. If the live holds have timestamps <i>h</i><sub>1</sub>, …, <i>h<sub>n</sub></i>, the effective retention floor is</p>
+    <p class="math">F <span class="op">=</span> min<sub>i</sub> h<sub>i</sub>.</p>
+    <p class="np">Pruning keeps the newest revision at or below <i>F</i> and every newer revision. Actors keep a bounded recent history in memory, 16 revisions by default plus the floor boundary. Deeper reads fall back to the materialized backend asynchronously instead of blocking an actor mailbox. Holds are leased and reaped after expiration.</p>
+    <p>This mechanism protects history availability, not the serialization of a historical read with a later write. A transaction that reads an old snapshot and then writes is not given optimistic current-version validation. Treat fixed-timestamp transactions as read-only unless the application supplies its own invariant.</p>
+
+    <h2>VI. Four Questions Conflict Detection Separates</h2>
+    <p>Kahuna deliberately separates four questions that are often conflated: who may stage a value, whether an observed version is still current, whether a predicate is protected, and whether a prepared write is based on the expected predecessor. Each question has its own station on the loop.</p>
+
+    <h3>Point locks and dirty writes</h3>
+    <p><mark data-step="2">An exclusive point lock and a write intent allow only one live transaction to stage a write for a key. This prevents dirty writes: conflicting writers wait or retry instead of silently overwriting each other's tentative state.</mark> The lock is leased and released on commit, abort, or reaping. Locks are actor-local and therefore fast, but their liveness depends on renewal and on leadership.</p>
+    <p>Locking alone is insufficient. A transaction can read before it takes a write lock, another transaction can commit, and the first can acquire the lock afterwards. Kahuna therefore remembers the base state of every read-before-write key and validates it again during durable preparation.</p>
+
+    <h3>Read-set validation</h3>
+    <p>Tracked reads record <code>(key, exists, revision)</code>. If one transaction observes the same key with inconsistent base revisions, validation fails immediately. Keys that are also in the write set are excluded from ordinary read-set validation, because their stronger staged-base fence runs at prepare time.</p>
+    <p><mark data-step="6">At commit, the coordinator batches current-state probes across nodes and compares each observed key's existence and revision.</mark> <mark data-step="7">A changed or deleted key aborts the transaction. Read-only transactions go through this path as well; skipping validation for an empty write set would admit classic read skew.</mark></p>
+    <p><mark data-step="7">Validation runs after every durable prepare and before the commit decision. A failed validation therefore leaves durable intents that are safely abortable and recoverable, and it never exposes a tentative write.</mark></p>
+
+    <h3>The concurrent-writer and range-lock probe</h3>
+    <p><mark data-step="6">Before read validation, the coordinator makes one batched conflict probe. It asks for undecided foreign writers on read-only keys, and for foreign range or prefix locks that cover keys this transaction writes. A missing probe response fails closed.</mark> Probing active writers first avoids two transactions that each wait for the other's read validation. The post-prepare range-lock check catches a write-fence lock, such as a split's or a merge's quiesce, that landed after the writer staged its value, because that lock mode steps around write intents by design.</p>
+    <p>A Shared or an Exclusive range lock does not step around them. Its acquire is refused, with the holder's transaction identifier, while any covered key carries an undecided write intent of another transaction. A write intent whose transaction is already decided but not yet settled is not a live writer: its outcome is durable, and every read resolves such an intent inline to the committed value, or on abort to the pre-image. A Shared acquire is therefore granted over it. An Exclusive acquire cannot place its own intent while the predecessor still occupies the slot, so it waits, but the actor names the blocked keys and settles those decided intents itself, so the wait is bounded by their resolution rather than by the settlement backlog. This is the reader-side half of strict two-phase locking. The write-path refusal, a mutation under a foreign range lock, is the other half. A lock and a write that overlap on a key can never both succeed, whichever arrives first.</p>
+    <p>Range locks are leader-local, in-memory leases. The coordinator renews them and reacquires them after a participant leader change. If the coordinator itself is lost, its session and its lock list disappear and the leases expire. The durable validation and decision machinery is the backstop. Range locks are not a globally replicated predicate-lock manager.</p>
+
+    <h3>Staged-base fencing</h3>
+    <p>For every non-blind persistent write, the prepared intent records whether the base existed and its revision. Kahuna checks this dependency in three layers:</p>
+    <ol>
+      <li><b>Pre-proposal check.</b> The leader probes the current key state before it proposes the prepare. A foreign undecided intent yields a retry, not a guess.</li>
+      <li><b>Apply-time fence.</b> <mark data-step="5">Every replica's prepared-intent state machine compares the validated base with its remembered last transactionally committed head. A competing commit in the probe-to-proposal window makes the prepare stale. The intent is installed deterministically, but the leader withholds a successful prepare acknowledgement, and the coordinator aborts.</mark></li>
+      <li><b>Replica stale-base veto.</b> <mark data-step="5">If a replica detects a stale base while it applies a prepare, it can drive a best-effort abort at the canonical anchor. This stops a stale leader from acknowledging a prepare that a fresher replica can prove invalid.</mark></li>
+    </ol>
+    <p>Blind writes carry an explicit sentinel instead of a base revision and keep last-writer-wins semantics. The third layer is recent hardening motivated by kill and failover campaigns. Unit and focused regression suites cover it, but the final multi-node fault soak has not established closure. Section XIII treats it as a promising defense, not as settled evidence.</p>
+
+    <div class="tbl">
+      <p class="tcap"><b>Table II</b><span>Which station defends against which anomaly</span></p>
+      <div class="tw">
+      <table>
+        <thead><tr><th>Anomaly</th><th>Main defense</th><th>Boundary</th></tr></thead>
+        <tbody>
+          <tr data-step="10"><td>Dirty read</td><td>staged values hidden; decision-aware reads</td><td>own writes stay visible to self</td></tr>
+          <tr data-step="2"><td>Dirty write</td><td>exclusive point lock and intent</td><td>leased, leader-local live state</td></tr>
+          <tr data-step="5"><td>Lost update</td><td>base revision at prepare and apply</td><td>blind writes are last-writer-wins</td></tr>
+          <tr data-step="6"><td>Non-repeatable read</td><td>pessimistic lock or optimistic validation</td><td>no validation in permissive mode</td></tr>
+          <tr data-step="7"><td>Read skew</td><td>frozen read set and commit validation</td><td>only observed keys participate</td></tr>
+          <tr data-step="6 7"><td>Write skew</td><td>read-set validation plus writer probe</td><td>dependencies must be read and tracked</td></tr>
+          <tr data-step="2"><td>Predicate phantom</td><td>prefix or range lock</td><td>optimistic scans track returned keys only</td></tr>
+          <tr data-step="4 8"><td>Partial durable commit</td><td>anchor decision plus durable intents</td><td>persistent-only durable mode</td></tr>
+          <tr data-step="11"><td>Duplicate operation</td><td>operation identifier, digest, replay caches</td><td>caller must reuse the identity</td></tr>
+          <tr data-step="3"><td>Stale route write</td><td>generation fence at receipt and at flush</td><td>retry after re-resolution</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+    <p>Successful pessimistic transactions over correctly locked predicates protect both points and phantoms. Successful optimistic transactions give serializable-like behavior over their observed point dependency set, including read-only transactions and read-before-write keys. An optimistic scan, however, records the keys it returned, not the gaps it searched. A new key inserted into such a gap is a phantom. It would be incorrect to call every Kahuna transaction serializable or snapshot isolated. Kahuna exposes a policy matrix, and its guarantee is the conjunction of read timestamp, locking, validation, durability class, and the application's declared dependencies.</p>
+
+    </div>
+  <div class="body">
+    <h2>VII. The Durable-Intent Commit</h2>
+    <h3>Frozen commit input</h3>
+    <p>When persistent finalization starts, the coordinator builds an immutable commit input. It contains the transaction identifier and epoch; the coordinator key, anchor key, partition, and route generation; one canonical HLC commit timestamp; an absolute decision deadline; a hash and an explicit list of participant keys; and, per partition, the prepared intents with the exact final value or tombstone, the target revision, the expiration, and the validated base state.</p>
+    <p>The participant manifest stops recovery from committing a transaction for which only an accidental subset was prepared. Identity is the tuple <code>(transaction, epoch, manifest hash)</code>. An exact replay is idempotent; a divergent replay under the same identity is rejected. The anchor is the partition of the first confirmed persistent mutation. Anchoring by key lets normal routing and range migration find the record without a separate global transaction service.</p>
+
+    <h3>Two replicated state machines</h3>
+    <figure class="inl" id="fig2">
+      <svg viewBox="0 0 440 150" role="img" aria-label="Two state machines. The anchor record goes from absent to undecided by initialize, then to committed by commit or to aborted by abort; an abort tombstone takes absent straight to aborted. A prepared intent goes from absent to pending, then to committed or aborted, and then to removed.">
+        <defs><marker id="arr2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8z" fill="currentColor"/></marker></defs>
+        <text x="110" y="14" style="font-size:9.5px;letter-spacing:.14em;font-weight:700">RECORD</text>
+        <rect class="n" data-state="absent" x="10" y="40" width="58" height="22" rx="11"/><text x="39" y="54.5">absent</text>
+        <rect class="n" data-state="undecided" x="90" y="40" width="70" height="22" rx="11"/><text x="125" y="54.5">undecided</text>
+        <rect class="n" data-state="committed" x="10" y="110" width="70" height="22" rx="11"/><text x="45" y="124.5">committed</text>
+        <rect class="n" data-state="aborted" x="130" y="110" width="62" height="22" rx="11"/><text x="161" y="124.5">aborted</text>
+        <path class="e" d="M68 51 H86" marker-end="url(#arr2)"/><text class="el" x="77" y="36">initialize</text>
+        <path class="e" d="M110 62 L52 106" marker-end="url(#arr2)"/><text class="el" x="68" y="90" text-anchor="end">commit</text>
+        <path class="e" d="M140 62 L156 106" marker-end="url(#arr2)"/><text class="el" x="162" y="90" text-anchor="start">abort</text>
+        <path class="e" d="M30 62 Q30 96 128 116" marker-end="url(#arr2)"/><text class="el" x="20" y="96" text-anchor="start">tombstone</text>
+
+        <line x1="220" y1="6" x2="220" y2="144" style="stroke:currentColor;stroke-width:.6;stroke-dasharray:2 3"/>
+
+        <text x="330" y="14" style="font-size:9.5px;letter-spacing:.14em;font-weight:700">INTENT</text>
+        <rect class="n" data-int="absent" x="236" y="40" width="58" height="22" rx="11"/><text x="265" y="54.5">absent</text>
+        <rect class="n" data-int="pending" x="316" y="40" width="62" height="22" rx="11"/><text x="347" y="54.5">pending</text>
+        <rect class="n" data-int="decided" x="236" y="110" width="118" height="22" rx="11"/><text x="295" y="124.5">committed / aborted</text>
+        <rect class="n" data-int="removed" x="372" y="110" width="62" height="22" rx="11"/><text x="403" y="124.5">removed</text>
+        <path class="e" d="M294 51 H312" marker-end="url(#arr2)"/><text class="el" x="303" y="36">prepare</text>
+        <path class="e" d="M340 62 L308 106" marker-end="url(#arr2)"/><text class="el" x="333" y="90" text-anchor="start">decision</text>
+        <path class="e" d="M354 121 H368" marker-end="url(#arr2)"/><text class="el" x="360" y="108">settle</text>
+      </svg>
+      <figcaption><b>Fig. 2.</b> The anchor record accepts exactly one terminal decision. Commit cannot create a record from absence; abort may create a tombstone, which fences a delayed initialize or commit from resurrecting an expired transaction. A participant key holds at most one live prepared intent, and removal is allowed only after the effect is durable or safely discarded. Both machines apply identically on leaders, followers, WAL replay, and range transfer. The lit nodes follow the token in Figure 1.</figcaption>
+    </figure>
+
+    <h3>The standard two-phase path</h3>
+    <p>For a persistent transaction over arbitrary partitions, finalization proceeds as follows.</p>
+    <ol>
+      <li><b>Revalidate staged bases.</b> Detect obvious lost updates before any consensus work is spent.</li>
+      <li><b>Freeze serialization.</b> Serialize each exact prepare delta once, so a retry cannot change bytes or meaning.</li>
+      <li><b>Initialize and prepare.</b> <mark data-step="4">On the anchor partition, record initialization and the anchor key's prepare share one atomic Raft proposal. Every other participant partition prepares concurrently.</mark> Completion distinguishes “batch committed” from “this prepare acknowledged”, because the apply-time fence can commit the proposal while it refuses the prepare's logical success.</li>
+      <li><b>Help blocked predecessors.</b> <mark data-step="4">If a key is occupied by a decided but unsettled intent, consult its canonical record, help materialize or clear it, and retry the idempotent prepare within a bound.</mark></li>
+      <li><b>Validate.</b> After every prepare is quorum durable, run the foreign-writer and range-lock probe, then read-set validation.</li>
+      <li><b>Decide.</b> <mark data-step="8">Propose commit or abort at the anchor. A routed canonical read decides the real compare-and-set winner; the sender's local projection is not treated as truth across a leader change.</mark></li>
+      <li><b>Resolve.</b> <mark data-step="10">Materialize committed effects or clear aborted ones, release locks, and settle the intent records. With deferred settlement, which is the default, this step continues after the durable decision has been returned.</mark></li>
+    </ol>
+    <p class="claim"><b>Invariant.</b> A visible durable commit implies that the canonical record is committed and that every persistent participant effect already exists as a quorum-durable prepared intent. It does not imply that every effect has been rewritten as an ordinary key–value entry in the backend.</p>
+
+    <h3>The adaptive presumed-abort deadline</h3>
+    <p>An undecided transaction must not block a key forever when its coordinator disappears. Kahuna observes recent finalization latency with a local monotonic timer and derives a window</p>
+    <p class="math">W <span class="op">=</span> clamp(m · p<sub>99</sub>, W<sub>min</sub>, W<sub>max</sub>),</p>
+    <p class="np">where the default multiplier <i>m</i> is 4 and the default bounds are 5 s and 60 s. The absolute deadline is <i>commit HLC + W</i>. A fresh HLC attempt timestamp is checked at commit; an attempt beyond the frozen deadline cannot commit.</p>
+    <p><mark data-step="9">After the deadline, a participant leader may drive an abort tombstone at the anchor. The tombstone makes presumed abort durable and stops a delayed coordinator from later choosing commit.</mark> The observation window adapts to deployment latency, while the safety comparison lives in the replicated HLC domain instead of depending on synchronized wall clocks. The window is a liveness and safety trade-off: a short window aborts more during transient slowness; a long window keeps orphaned intents longer. Neither choice removes the need for an anchor quorum.</p>
+
+    <h3>The single-partition fast path</h3>
+    <p><mark data-step="3">If all persistent participants and the anchor sit on one partition, Kahuna can place record initialization, all prepares, and the commit decision in one atomic Raft proposal.</mark> Preflight checks foreign intents and validates reads; a late staged-base check narrows the last race before submission. When the coordinator leads the anchor partition it proposes the bundle locally. Otherwise it forwards the whole bundle to the anchor leader as one typed operation, which submits it atomically and answers with the canonical outcome read after the ordered apply: one extra network hop, still one durable round. After commitment, the leader installs the committed intent view before it replies.</p>
+    <p><mark data-step="3">The fast path is disqualified in a multi-process Raft group when the transaction has a read dependency beyond its written keys, or when a write carries a validated base whose safety would rely on a check performed before a possibly stalled proposal.</mark> This conservative rule stops a queued atomic bundle from applying after a conflicting update that occurred following validation. A single-process Raft group can relax some of these constraints, because there is no remote replica divergence and no inter-node proposal delay. The fast path is therefore not merely “one partition means one phase”. Eligibility includes the dependency footprint and the execution model, and when safety cannot be proven, the coordinator falls back to the standard protocol.</p>
+
+    <div class="tbl">
+      <p class="tcap"><b>Table I</b><span>One commit, counted in consensus barriers on the client-visible path</span></p>
+      <div class="tw">
+      <table>
+        <thead><tr><th>Shape of the commit</th><th>Raft proposals before the reply</th><th>Barriers</th><th>Settlement</th></tr></thead>
+        <tbody>
+          <tr data-step="2"><td>ephemeral keys only</td><td>none; memory-resident staging</td><td class="n">0</td><td>none; not crash durable</td></tr>
+          <tr data-step="3"><td>one partition, eligible</td><td>one bundle: init + prepares + decision</td><td class="n">1</td><td>after the reply</td></tr>
+          <tr data-step="4 8"><td>several partitions</td><td>prepares in parallel, then one decision</td><td class="n">2</td><td>after the reply</td></tr>
+          <tr data-step="10"><td>several partitions, deferred settlement off</td><td>as above, plus materialization per participant</td><td class="n">3</td><td>before the reply</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+    <p>Barrier counting is more informative than a universal latency number. Network topology, quorum placement, batch density, backend choice, contention, and read validation all affect measured latency. The structural result is that the common local case needs one consensus barrier, while a multi-partition commit needs prepare durability plus one terminal decision barrier.</p>
+
+    </div>
+  <div class="body">
+    <h2>VIII. Reads Before Settlement</h2>
+    <p>Synchronous materialization would extend client latency by one more replicated write for every participant. Kahuna instead separates the <i>logical decision</i> from the <i>physical representation</i> of committed data. Suppose that key <i>k</i> has the old committed value <i>v</i><sub>0</sub> and a prepared intent that contains <i>v</i><sub>1</sub> at commit timestamp <i>t<sub>c</sub></i>.</p>
+    <figure class="inl" id="fig3">
+      <svg viewBox="0 0 440 118" role="img" aria-label="A timeline for one key. The committed value v0 is followed by a prepared intent v1 at commit time tc. A read before tc returns v0 without consulting anything. A read at or after tc consults the anchor record: committed gives v1, aborted gives v0, undecided waits.">
+        <defs><marker id="arr3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8z" fill="currentColor"/></marker></defs>
+        <line x1="14" y1="40" x2="426" y2="40" style="stroke:currentColor;stroke-width:1" marker-end="url(#arr3)"/>
+        <text x="420" y="30" text-anchor="end" style="font-size:9px;font-style:italic">HLC time</text>
+        <circle cx="60" cy="40" r="3.5" style="fill:currentColor"/>
+        <text x="60" y="58"><tspan style="font-style:italic">v</tspan><tspan dy="2" style="font-size:8px">0</tspan><tspan dy="-2"> committed</tspan></text>
+        <rect x="222" y="30" width="20" height="20" style="fill:url(#hatch);stroke:currentColor;stroke-width:1"/>
+        <text x="232" y="66"><tspan>intent </tspan><tspan style="font-style:italic">v</tspan><tspan dy="2" style="font-size:8px">1</tspan><tspan dy="-2"> at </tspan><tspan style="font-style:italic">t</tspan><tspan dy="2" style="font-size:8px;font-style:italic">c</tspan></text>
+        <line x1="140" y1="16" x2="140" y2="34" style="stroke:currentColor;stroke-width:1" marker-end="url(#arr3)"/>
+        <text x="140" y="12">read at <tspan style="font-style:italic">t</tspan> &lt; <tspan style="font-style:italic">t</tspan><tspan dy="2" style="font-size:8px;font-style:italic">c</tspan><tspan dy="-2">: </tspan><tspan style="font-style:italic">v</tspan><tspan dy="2" style="font-size:8px">0</tspan></text>
+        <line x1="330" y1="16" x2="330" y2="34" style="stroke:currentColor;stroke-width:1" marker-end="url(#arr3)"/>
+        <text x="330" y="12">read at <tspan style="font-style:italic">t</tspan> ≥ <tspan style="font-style:italic">t</tspan><tspan dy="2" style="font-size:8px;font-style:italic">c</tspan><tspan dy="-2">: ask the anchor</tspan></text>
+        <path class="e" d="M330 66 V78" marker-end="url(#arr3)" style="stroke-dasharray:2 3"/>
+        <text x="330" y="92" style="font-size:9.5px">committed → <tspan style="font-style:italic">v</tspan><tspan dy="2" style="font-size:8px">1</tspan><tspan dy="-2">  ·  aborted → </tspan><tspan style="font-style:italic">v</tspan><tspan dy="2" style="font-size:8px">0</tspan><tspan dy="-2">  ·  undecided → wait</tspan></text>
+        <text x="330" y="106" style="font-size:9px;font-style:italic">the overlay applies before any materialization</text>
+      </svg>
+      <figcaption><b>Fig. 3.</b> Decision-aware visibility for one key. A snapshot read below <i>t<sub>c</sub></i> never consults the decision. A latest read, or a snapshot read at or above <i>t<sub>c</sub></i>, consults the anchor: a committed record overlays <i>v</i><sub>1</sub> even before materialization, an aborted record yields <i>v</i><sub>0</sub>, and an undecided or unreachable record makes the read wait or retry rather than guess.</figcaption>
+    </figure>
+    <p><mark data-step="10">Scans perform the same overlay across intents. A later writer must first resolve a committed predecessor before it derives a new revision or evaluates a condition; it cannot build on stale materialized state.</mark></p>
+
+    <h3>Settlement order</h3>
+    <p><mark data-step="10">For commit, a resolver writes the intent's value as an ordinary transactional key–value log entry, waits for leader application, and only then atomically marks and removes the prepared intent.</mark> If any step fails, the intent remains and recovery retries. For abort, the resolver clears staged state and settles the intent without materializing a value. Every operation is identity checked and idempotent.</p>
+    <p>This ordering handles a crash after the decision but before materialization, after materialization but before the acknowledgement, and after the acknowledgement but before intent removal. In each case the durable record chooses the outcome, and at least one durable representation remains. Completion evidence lets a participant recognize an already committed operation after its actor state or its recent-result cache is gone. The evidence is carried through persistence and range transfer, so a key cannot lose its transaction identity by moving.</p>
+
+    <h3>Recovery</h3>
+    <p>Recovery sweeps prepared intents on the current leader of each participant partition:</p>
+    <ul>
+      <li><code>Committed</code> record: materialize and settle.</li>
+      <li><code>Aborted</code> record: clear and settle.</li>
+      <li><code>Undecided</code> before the deadline: leave it pending.</li>
+      <li><mark data-step="9"><code>Undecided</code> after the deadline: attempt a canonical abort.</mark></li>
+      <li><mark data-step="9">Missing record after the permitted window: create an abort tombstone.</mark></li>
+    </ul>
+    <p>Every action rechecks the canonical compare-and-set result. A recovery worker that asks for abort but races a valid commit must follow the committed decision. The original coordinator is unnecessary once preparation and the anchor record are durable.</p>
+
+    <h2>IX. Leader Change, Range Moves, and Storage</h2>
+    <h3>Leader changes</h3>
+    <p>Actor caches and live locks are per node. They are not coherent across replicas. Correctness after promotion comes from replaying the deterministic transaction-record and prepared-intent state, and then from consulting those structures rather than a cache. Requests are routed to current leaders, and canonical record reads are re-routed when leadership changes.</p>
+    <p>The difficult case is a promoted replica with an orphaned prepared intent and an older per-key committed-head memory than another replica observed. The apply-time base fence only helps if the leader that evaluates the logical acknowledgement has the necessary history. The replica stale-base veto extends detection to every applying replica and asks it to force an anchor abort. This defense targets the gap directly, but its final partition and kill soak remains an open validation item.</p>
+    <p>Live range and point locks are not reconstructed as durable lock ownership. They expire or are reacquired by a surviving coordinator. Safety after a coordinator loss rests on durable prepared intents, base validation, the canonical decision, and recovery.</p>
+
+    <h3>Range splits and merges</h3>
+    <p>An intent cannot be moved like an ordinary value unless the destination also keeps everything needed to resolve it. Kahuna therefore uses a settle-before-cutover barrier:</p>
+    <ol>
+      <li>scan the moving interval for prepared intents;</li>
+      <li>resolve every decided intent;</li>
+      <li>refuse the transfer while an undecided intent remains or the scan cannot be trusted;</li>
+      <li>transfer values, completion evidence, and remaining metadata;</li>
+      <li>change the routing generation.</li>
+    </ol>
+    <p>Materialization re-resolves the key's current partition instead of assuming the partition captured at prepare time. The two measures address opposite races: the barrier stops a move from dropping an overlay, and re-resolution stops a late resolver from writing to the old owner. <mark data-step="3">Every queued write also carries its range generation and is rechecked at batch flush. A stale operation is released for a routing retry without contaminating the valid siblings in the same batch.</mark></p>
+
+    <h3>Raft versus materialized storage</h3>
+    <p>Kommander's replicated WAL establishes the immediate durable order. A background writer later persists committed key revisions and transaction metadata to the selected backend. Reads can use resident replicated state before that flush. An application-durability floor stops Raft compaction from discarding log entries that the backend has not yet made independently recoverable. This separates consensus latency from backend write amplification, but it creates an invariant: snapshot and compaction policy must advance only behind materialization. Treating the backend as current merely because the client saw commit would be incorrect.</p>
+
+    </div>
+  <div class="body">
+    <h2>X. Why the Common Case Is Cheap</h2>
+    <h3>Heterogeneous partition batching</h3>
+    <p>The partition scheduler accepts typed submissions, which are ordinary key writes, transaction records, and prepared intents, and coalesces independent operations headed to the same partition into one Kommander <code>ReplicateEntries</code> call. A default 1 ms oldest-item linger opens a small batching window. Batches are capped at 512 items and 4 MiB; an oversized valid item runs alone. One batch is in flight per partition, and different partitions progress concurrently.</p>
+    <p>Unlike transaction-level batching, this coalescing does not ask unrelated clients to share a transaction. Each item keeps its own result and range fence, while the shared proposal amortizes serialization, network, quorum, and WAL costs. A client cancellation stops the wait for that item but does not cancel a consensus batch shared with other clients. Accepted items complete exactly once at the scheduler boundary. Kommander can additionally group WAL work across partitions: Kahuna groups logical entries per Raft partition; the WAL layer may group physical persistence across partitions.</p>
+
+    <h3>Barrier reduction and actor discipline</h3>
+    <p>On the standard path, anchor initialization and the anchor prepare share a proposal, and non-anchor prepares run concurrently; the decision needs one more anchor proposal. On an eligible single-partition transaction, initialization, preparation, and decision share one proposal. Deferred settlement removes materialization from the client-visible path in either case (Table I).</p>
+    <p>Per-key actors make key-local mutation sequential and keep critical sections explicit. Consensus I/O is submitted off the mailbox, so unrelated reads or lock-release messages do not wait for a network round trip. Participant work is grouped by partition, validation uses batched probes instead of one remote request per key, and prepare deltas are serialized once before any retry loop. Bounded mailboxes, queue byte caps, transaction timeouts, participant-effect leases, and terminal reservations constrain retained state under overload, and they make overload visible as backpressure or retry rather than as unbounded allocation.</p>
+
+    <h3>What the design costs</h3>
+    <p>A persistent transaction creates an anchor record and one prepared intent per written key, performs validation probes, and later materializes and removes each intent. Deferred settlement moves work out of foreground latency, but it lengthens the interval during which readers consult transaction records and writers help predecessors. Heterogeneous batching trades up to the linger interval for density. Pessimistic scans can restrict concurrency over large ranges. Snapshot holds increase revision retention and backend space. The system exposes metrics for queueing, batch fill, settlement failure, recovery, and WAL phases, so these trade-offs can be measured instead of inferred from throughput alone.</p>
+
+    <h2>XI. What an Answer Means</h2>
+    <p>A distributed client must interpret each outcome conservatively:</p>
+    <ul>
+      <li><mark data-step="11"><b>Committed:</b> the canonical persistent decision is commit, and every participant effect was prepared before that decision. Materialization may still be running.</mark></li>
+      <li><mark data-step="11"><b>Aborted:</b> a canonical terminal abort exists, from a conflict, an explicit rollback, a failed validation, or presumed abort. New work needs a new transaction.</mark></li>
+      <li><mark data-step="11"><b>MustRetry:</b> no safe terminal answer was established at this boundary. Retry with the same transaction handle and, for an operation, the same operation identifier.</mark></li>
+      <li><mark data-step="1"><b>AdmissionRefused:</b> no transaction started; back off or lower the load.</mark></li>
+    </ul>
+    <p><mark data-step="11">A timeout or a lost connection is not proof of abort. Starting an unrelated replacement transaction can duplicate application effects if the original later proves committed.</mark> Durable handles, operation digests, terminal-result retention, and canonical anchor lookup make same-identity retry the natural safe behavior.</p>
+    <p>Direct non-transactional writes have a different retry contract. If the transport reports an indeterminate outcome and the operation lacks an application idempotency key, a blind replay can repeat a condition or a mutation. The stronger operation registry belongs to interactive transactions.</p>
+
+    </div>
+  <div class="body">
+    <h2>XII. Relationship to Prior Systems</h2>
+    <p>The foundation is conventional in the best sense. Raft replicates partition state [3], HLCs give causality-compatible timestamps [5], and two-phase commit separates participant preparation from a terminal decision [7]. The interest lies in how those tools are composed around a key-actor data path.</p>
+    <p><b>Percolator</b> builds distributed transactions over a key–value substrate with timestamped locks and a distinguished primary [8]. Kahuna's anchor record plays a related decision-authority role, but the record is an explicit replicated state machine, the participant effects are typed Raft entries, and the live coordinator supports both locking and validation policies. <b>CockroachDB</b> also uses transaction records, write intents, MVCC, and asynchronous intent resolution [9]. Kahuna shares the principle that a committed logical value can be read through an unresolved intent; its emphasis is the integration with per-key actors, heterogeneous proposal batching, explicit range-generation fences, and server-owned interactive sessions. <b>FoundationDB</b> uses optimistic conflict ranges and presents strict serializability [10]. Kahuna's optimistic point validation checks declared dependencies in a similar spirit, but it does not turn every optimistic scan into a conflict range, so its guarantee is intentionally more conditional. <b>Spanner</b> combines 2PC, Paxos, MVCC, and TrueTime for external consistency [6]; Kahuna uses HLC without a commit-wait protocol and makes no external-consistency claim. <b>Calvin</b> orders transactions deterministically in advance [11]; Kahuna instead supports interactive transactions whose read and participant sets emerge during execution, and it pays prepare and decision coordination to keep that flexibility.</p>
+    <p>No individual mechanism is claimed to be new. The notable features are combinations: atomic anchor initialization plus anchor preparation, with an eligibility-checked one-proposal fast path; exact-value prepared intents that double as the read overlay during deferred settlement; a three-layer lost-update defense that ends in participant-replica abort assistance; adaptive HLC decision deadlines that make presumed abort a replicated state transition; range-move refusal until decision overlays are safe to transfer; heterogeneous batching across unrelated entries that keeps per-item fencing and completion; and a server-owned idempotency registry joined atomically with finalization admission. Their value is the reduction of gaps between the protocol and the operational realities of actors, retries, reconfiguration, and asynchronous persistence.</p>
+
+    <h2>XIII. Limits and Threats to Validity</h2>
+    <p>First, this analysis is tied to one source snapshot and its documented tests. It is not a formal proof. The code contains deterministic state machines and focused fault tests, but an implementation can still violate a derived invariant through an unmodeled path.</p>
+    <p>Second, the strongest isolation statement depends on configuration. Optimistic point reads are validated, but optimistic scans validate returned keys rather than gaps, so phantoms remain possible. Pessimistic predicate locks are leased, in-memory, and leader-local. Fixed historical snapshots protect time-consistent reads and retention, not the serialization of later writes. Shared point-read locks are not yet implemented.</p>
+    <p>Third, crash atomicity covers the persistent participant set in durable mode. Ephemeral participants are unrecoverable by nature, and a mixed best-effort transaction can become partially visible after a crash.</p>
+    <p>Fourth, availability of two-phase commit is bounded by consensus and decision recovery. A partition that cannot reach quorum cannot decide safely. Presumed abort limits indefinite orphan blocking after a deadline; it does not create availability during quorum loss.</p>
+    <p>Fifth, the most recent per-key failover hardening needs more empirical validation. A partition and kill campaign found executions in which a promoted node combined an orphaned prepared intent with stale per-key committed-head state, which allowed acknowledged results to fork after failover. Kahuna 1.5.3 adds the replica-side stale-base veto, and the focused tests are green, but the acceptance gate still calls for an extended multi-node fault soak. Until that gate passes, the proper claim is “designed and locally validated to close the stale-leader gap”, not “demonstrated under the full campaign”.</p>
+    <p>Finally, this note reports no fresh benchmark. The one-phase path, batching, and deferred settlement remove or amortize identifiable work; actual throughput, tail latency, recovery time, and storage amplification require reproducible experiments across contention levels, participant counts, backends, and fault schedules.</p>
+
+    <h2>XIV. Conclusion</h2>
+    <p>Kahuna's persistent transaction system is organized around one compact safety idea: prepare every exact participant effect durably, choose one canonical outcome, and make every read, retry, recovery worker, and range move honor that outcome until ordinary storage catches up. The surrounding subsystems exist to preserve that idea at their boundaries. Actor ownership prevents local races; operation identities prevent duplicate effects; locks and validation protect declared dependencies; base fences close read-to-prepare races; Raft makes records and intents replayable; decision-aware reads permit deferred materialization; deadlines and tombstones resolve abandoned work; and range barriers keep reconfiguration from dropping unresolved state.</p>
+    <p>The design brings a durable, recoverable transaction core to a high-performance actor-based key–value layer without forcing every workload through one concurrency policy. That flexibility is also why its guarantees must be stated precisely. Persistent-only durable transactions, complete dependency tracking, and predicate locking where phantoms matter support strong executions. Permissive reads, optimistic scans, historical writes, or ephemeral participants deliberately weaken the result. The clearest description is not a single isolation label, but a protocol core plus an explicit guarantee envelope.</p>
+
+    </div>
+  <div class="body">
+    <h2>References</h2>
+    <div class="refs">
+      <p>[1] Kahuna Project. <i>Kahuna source tree</i>, version 1.5.3, 2026. <a href="https://github.com/kahunakv/kahuna">github.com/kahunakv/kahuna</a></p>
+      <p>[2] Kahuna Project. <i>Kommander source tree</i>, version 1.4.4, 2026. <a href="https://github.com/kahunakv/kommander">github.com/kahunakv/kommander</a></p>
+      <p>[3] D. Ongaro and J. Ousterhout. “In Search of an Understandable Consensus Algorithm (Extended Version).” <i>USENIX ATC</i>, 2014. <a href="https://web.stanford.edu/~ouster/cgi-bin/papers/raft-extended.pdf">web.stanford.edu/~ouster/cgi-bin/papers/raft-extended.pdf</a></p>
+      <p>[4] Kahuna Project. <i>Nixie source tree</i>, version 1.3.0, 2026. <a href="https://github.com/kahunakv/nixie">github.com/kahunakv/nixie</a></p>
+      <p>[5] S. S. Kulkarni, M. Demirbas, D. Madappa, B. Avva, and M. Leone. “Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases.” <i>OPODIS</i>, 2014. <a href="https://cse.buffalo.edu/~demirbas/publications/hlc.pdf">cse.buffalo.edu/~demirbas/publications/hlc.pdf</a></p>
+      <p>[6] J. C. Corbett et al. “Spanner: Google's Globally-Distributed Database.” <i>OSDI</i>, 2012. <a href="https://research.google/pubs/spanner-googles-globally-distributed-database-2/">research.google/pubs/spanner-googles-globally-distributed-database-2</a></p>
+      <p>[7] J. Gray and L. Lamport. “Consensus on Transaction Commit.” <i>ACM Transactions on Database Systems</i>, 31(1), 2006. <a href="https://arxiv.org/abs/cs/0408036">arxiv.org/abs/cs/0408036</a></p>
+      <p>[8] D. Peng and F. Dabek. “Large-scale Incremental Processing Using Distributed Transactions and Notifications.” <i>OSDI</i>, 2010. <a href="https://research.google/pubs/large-scale-incremental-processing-using-distributed-transactions-and-notifications/">research.google/pubs/large-scale-incremental-processing-…</a></p>
+      <p>[9] Cockroach Labs. “CockroachDB Architecture and Design.” <a href="https://github.com/cockroachdb/cockroach/blob/master/docs/design.md">github.com/cockroachdb/cockroach/blob/master/docs/design.md</a></p>
+      <p>[10] J. Zhou et al. “FoundationDB: A Distributed Unbundled Transactional Key Value Store.” <i>SIGMOD</i>, 2021. <a href="https://www.foundationdb.org/files/fdb-paper.pdf">foundationdb.org/files/fdb-paper.pdf</a></p>
+      <p>[11] A. Thomson et al. “Calvin: Fast Distributed Transactions for Partitioned Database Systems.” <i>SIGMOD</i>, 2012. <a href="https://dsf.berkeley.edu/cs286/papers/calvin-sigmod2012.pdf">dsf.berkeley.edu/cs286/papers/calvin-sigmod2012.pdf</a></p>
+      <p>[12] Kahuna Project. <i>CamusDB source tree</i>, version 0.11.1, 2026. <a href="https://github.com/kahunakv/camusdb">github.com/kahunakv/camusdb</a></p>
+    </div>
+
+    <h2>Appendix: Implementation Map</h2>
+    <p>The following source areas are the shortest path from a station in Figure 1 to the code that implements it:</p>
+    <ul class="app">
+      <li><code>KeyValues/Transactions/TransactionCoordinator.cs</code>: session lifecycle, finalization, validation ordering, and retry outcome mapping (begin, gate, validate, outcome).</li>
+      <li><code>KeyValues/Transactions/Data/TransactionContext.cs</code>: authoritative working set, read observations, range locks, and the operation registry.</li>
+      <li><code>KeyValues/Transactions/DurableTransactionFinalizer.cs</code>: the standard prepare, decide, and resolve path, and the one-partition fast path (route, prepare, decide).</li>
+      <li><code>KeyValues/Transactions/DurableFinalizeInputBuilder.cs</code>: the frozen participant manifest, commit timestamp, deadline, and base-revision encoding.</li>
+      <li><code>KeyValues/Transactions/TransactionRecordStore.cs</code>: the canonical decision state machine (the anchor).</li>
+      <li><code>KeyValues/Transactions/PreparedIntentStore.cs</code>: the participant state machine, uniqueness, base fence, and replay (fence).</li>
+      <li><code>KeyValues/Transactions/DurableTransactionRecovery.cs</code>: decision lookup, presumed abort, materialization, and settlement (clock, settle).</li>
+      <li><code>KeyValues/KeyValueActor.cs</code>: key-local MVCC, locks, transactional staging, and intent overlays (stage).</li>
+      <li><code>KeyValues/Writes/</code>: bounded heterogeneous partition batching and Raft submission.</li>
+      <li><code>KeyValues/SnapshotHoldService.cs</code> and <code>Ranges/SnapshotFloorStore.cs</code>: replicated snapshot holds and the MVCC retention floor.</li>
+      <li><code>KeyValues/LocalLockOperations.cs</code>, <code>RoutedLockOperations.cs</code>, and <code>Handlers/RangeLockChecks.cs</code>: point, prefix, and range lock ownership and lease behavior.</li>
+      <li><code>KeyValues/Ranges/DataPartitionRouter.cs</code> and <code>RangeStateTransferService.cs</code>: routing generation and split and merge fencing.</li>
+    </ul>
+    <p>All paths are relative to <code>Kahuna.Core/</code>.</p>
+  </div>
+
+  <div class="foot"><span>Inside Kahuna's Distributed Transactions</span><span>design and implementation note</span></div>
+</div>
+
+<script>
+(function () {
+  var STEPS = [
+    { key: 'begin',    c: [140, 230], pad: 30, rec: 'absent',    int: 'absent',   busy: false,
+      now: 'A client begins a transaction. The options are checked, the priority gate admits it, and an HLC-derived identifier names it. The server, not the client, owns the working set.' },
+    { key: 'gate',     c: [250, 110], pad: 54, rec: 'absent',    int: 'absent',   busy: false,
+      now: 'Admission sheds load. It does not change correctness. A refused request never started a transaction, so the caller backs off and asks again.' },
+    { key: 'stage',    c: [380, 110], pad: 68, rec: 'absent',    int: 'staged (memory)', busy: false,
+      now: 'Each write takes an exclusive point lock and stores a staged MVCC entry in the key actor. The transaction reads its own writes. Nothing has reached Raft yet.' },
+    { key: 'route',    c: [520, 110], pad: 54, rec: 'absent',    int: 'staged (memory)', busy: false,
+      now: 'If the anchor and every persistent participant sit on one partition, and the dependency footprint allows it, initialization, prepares, and the decision share one Raft proposal.' },
+    { key: 'prepare',  c: [690, 110], pad: 103, rec: 'undecided', int: 'pending',  busy: true,
+      now: 'The anchor partition initializes the record and prepares the anchor key in one proposal. Every other partition prepares in parallel. Each intent carries the exact value and its validated base.' },
+    { key: 'fence',    c: [860, 175], pad: 30, rec: 'undecided', int: 'pending',  busy: true,
+      now: 'Every replica compares the intent’s validated base with its committed head. A stale base is installed but never acknowledged, and a fresher replica can force an abort at the anchor.' },
+    { key: 'validate', c: [860, 275], pad: 32, rec: 'undecided', int: 'pending',  busy: false,
+      now: 'The coordinator probes for undecided foreign writers and foreign range locks, then compares each observed key’s existence and revision in one batched round.' },
+    { key: 'check',    c: [760, 350], pad: 54, rec: 'undecided', int: 'pending',  busy: false,
+      now: 'A changed or deleted key aborts the transaction. The intents are already durable, so the abort is safe and fully recoverable.' },
+    { key: 'decide',   c: [620, 350], pad: 88, rec: 'committed', int: 'pending',  busy: true,
+      now: 'One compare-and-set on the anchor record chooses commit or abort, exactly once. The reply to the client leaves here, before any value is materialized.' },
+    { key: 'clock',    c: [470, 350], pad: 54, rec: 'committed', int: 'pending',  busy: true,
+      now: 'An undecided record older than commit HLC + W may be aborted by any participant leader. Presumed abort becomes a replicated tombstone, so a late coordinator cannot resurrect it.' },
+    { key: 'settle',   c: [330, 350], pad: 68, rec: 'committed', int: 'removed',  busy: true,
+      now: 'After the reply, a resolver writes the value as an ordinary entry and only then removes the intent. A reader that meets the intent first consults the anchor and overlays the committed value.' },
+    { key: 'outcome',  c: [140, 300], pad: 0, rec: 'committed', int: 'removed',  busy: false,
+      now: 'Committed, Aborted, MustRetry, or AdmissionRefused. A timeout is not proof of abort. Retry with the same handle and operation identifier, never with a fresh transaction.' }
+  ];
+  var N = STEPS.length;
+  var reduced = false;
+  try { reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+  var TRAVEL = reduced ? 0 : 900, DWELL = 2600;
+
+  var track = document.getElementById('track');
+  var token = document.getElementById('token');
+  var dots = token.querySelectorAll('circle');
+  var total = track.getTotalLength();
+  var samples = [];
+  for (var i = 0; i <= Math.ceil(total); i++) { var p = track.getPointAtLength(Math.min(i, total)); samples.push([p.x, p.y]); }
+  function nearest(c) {
+    var best = 0, bd = Infinity;
+    for (var i = 0; i < samples.length; i++) {
+      var dx = samples[i][0] - c[0], dy = samples[i][1] - c[1], d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+  var lens = STEPS.map(function (s) { return nearest(s.c); });
+  lens[0] = 0;
+  // Stop the token on the track just before each station, so it never covers the station's label.
+  function target(i) { return ((lens[i] - STEPS[i].pad) % total + total) % total; }
+
+  var stations = {};
+  Array.prototype.forEach.call(document.querySelectorAll('.st[data-i]'), function (g) {
+    var i = +g.getAttribute('data-i');
+    (stations[i] = stations[i] || []).push(g);
+    g.addEventListener('click', function () { goTo(i, true); });
+  });
+  var spokes = document.querySelectorAll('.spoke');
+  var marks = document.querySelectorAll('mark[data-step], tr[data-step]');
+  Array.prototype.forEach.call(marks, function (m) {
+    m.addEventListener('click', function () {
+      var first = +m.getAttribute('data-step').split(' ')[0];
+      goTo(first, true);
+      var fig = document.getElementById('fig1');
+      if (fig && fig.getBoundingClientRect().top < -40) fig.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+    });
+  });
+  var recNodes = document.querySelectorAll('#fig2 [data-state]');
+  var intNodes = document.querySelectorAll('#fig2 [data-int]');
+  var chip = document.getElementById('chip');
+  var recS = document.getElementById('recS'), intS = document.getElementById('intS');
+  var nowk = document.getElementById('nowk'), nowt = document.getElementById('nowt');
+  var cnt = document.getElementById('cnt'), dot = document.getElementById('dot');
+  var bPlay = document.getElementById('bPlay');
+
+  var step = 0, curLen = 0, from = 0, to = 0, phase = 'dwell', t0 = 0, playing = true, lit = -1;
+
+  function has(el, i) {
+    var parts = el.getAttribute('data-step').split(' ');
+    for (var k = 0; k < parts.length; k++) if (+parts[k] === i) return true;
+    return false;
+  }
+  function light(i) {
+    lit = i;
+    var s = STEPS[i];
+    for (var k in stations) Array.prototype.forEach.call(stations[k], function (g) { g.classList.toggle('on', +k === i); });
+    Array.prototype.forEach.call(spokes, function (l) { l.classList.toggle('on', +l.getAttribute('data-spoke') === i); });
+    Array.prototype.forEach.call(marks, function (m) { m.classList.toggle('on', has(m, i)); });
+    var recKey = s.rec, intKey = s.int === 'pending' ? 'pending' : (s.int === 'removed' ? 'removed' : 'absent');
+    if (i === 8 || i === 9) intKey = 'decided';
+    Array.prototype.forEach.call(recNodes, function (n) { n.classList.toggle('on', n.getAttribute('data-state') === recKey); });
+    Array.prototype.forEach.call(intNodes, function (n) { n.classList.toggle('on', n.getAttribute('data-int') === intKey); });
+    chip.classList.toggle('busy', s.busy);
+    recS.textContent = 'record · ' + s.rec;
+    intS.textContent = 'intent · ' + s.int;
+    nowk.textContent = s.key;
+    nowt.textContent = s.now;
+    cnt.textContent = (i + 1) + ' / ' + N;
+    dot.style.left = (i / (N - 1) * 100) + '%';
+  }
+  function place(len) {
+    for (var k = 0; k < dots.length; k++) {
+      var l = ((len - k * 9) % total + total) % total;
+      var p = track.getPointAtLength(l);
+      dots[k].setAttribute('cx', p.x.toFixed(1));
+      dots[k].setAttribute('cy', p.y.toFixed(1));
+    }
+  }
+  function goTo(i, animate) {
+    step = ((i % N) + N) % N;
+    from = ((curLen % total) + total) % total;
+    to = target(step);
+    if (to < from - 0.5) to += total;
+    phase = (animate && TRAVEL > 0) ? 'travel' : 'dwell';
+    t0 = performance.now();
+    if (phase === 'dwell') { curLen = to % total; place(curLen); light(step); }
+    else if (lit !== -1) { /* keep previous lighting until arrival */ }
+  }
+  function ease(p) { return p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p; }
+  function frame(now) {
+    if (phase === 'travel') {
+      var p = Math.min(1, (now - t0) / TRAVEL);
+      curLen = from + (to - from) * ease(p);
+      place(curLen);
+      if (p >= 1) { curLen = to % total; phase = 'dwell'; t0 = now; light(step); }
+    } else if (playing && now - t0 >= DWELL) {
+      goTo(step + 1, true);
+    }
+    requestAnimationFrame(frame);
+  }
+  function setPlaying(v) { playing = v; bPlay.textContent = v ? 'Pause' : 'Play'; t0 = performance.now(); }
+  bPlay.addEventListener('click', function () { setPlaying(!playing); });
+  document.getElementById('bPrev').addEventListener('click', function () { goTo(step - 1, false); });
+  document.getElementById('bNext').addEventListener('click', function () { goTo(step + 1, true); });
+  document.addEventListener('keydown', function (e) {
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+    if (e.key === 'ArrowRight') { goTo(step + 1, true); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { goTo(step - 1, false); e.preventDefault(); }
+    else if (e.key === ' ') { setPlaying(!playing); e.preventDefault(); }
+  });
+
+  var initial = 0;
+  try { var h = location.hash.replace('#', ''); for (var s = 0; s < N; s++) if (STEPS[s].key === h) initial = s; } catch (e) {}
+  curLen = target(initial); place(curLen); light(initial); step = initial; t0 = performance.now();
+  requestAnimationFrame(frame);
+})();
+</script>
