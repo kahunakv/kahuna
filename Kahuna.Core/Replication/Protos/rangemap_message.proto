@@ -27,4 +27,8 @@ message RangeDescriptorMessage {
 // replaying the meta log on restore/failover converges on the latest map.
 message RangeMapMessage {
   repeated RangeDescriptorMessage descriptors = 1;
+  // Partitions a merge cut out of routing whose Raft group is not yet removed. The id is
+  // recorded in the same entry as the cutover that vacated it, so the removal survives the
+  // merging node losing leadership or restarting: whichever node leads next finishes it.
+  repeated int32 retiredPartitionIds = 2;
 }

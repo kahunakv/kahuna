@@ -2409,15 +2409,16 @@ internal sealed class TransactionCoordinator : IDisposable
                     {
                         // The holder's mutation is this key's next committed state whether or not it has
                         // materialized yet. It is only a valid base if it is exactly the base this transaction
-                        // validated against — possible when the holder settled before staging but its intent
-                        // has not been garbage-collected yet. Revisions are the exact part of the frozen base
-                        // (the builder's BaseState is nominal), so they alone decide.
-                        if (holder.Revision == staged.BaseRevision)
+                        // validated against — the ordinary case under deferred settlement, where the grant that
+                        // observed the base materialized this very holder and its intent is still awaiting
+                        // removal. A base that existed is matched by revision; a base validated as absent is
+                        // matched by what the holder left behind, since an absent observation records no revision.
+                        if (CommittedHolderIsTheValidatedBase(holder, staged, input.TransactionId))
                             continue;
 
                         logger.LogWarning(
-                            "Staged base for {Key} was overtaken by committed transaction {HolderTransactionId} at revision {HolderRevision} (validated base was {BaseRevision})",
-                            staged.Key, holder.TransactionId, holder.Revision, staged.BaseRevision);
+                            "Staged base for {Key} was overtaken by committed transaction {HolderTransactionId} at revision {HolderRevision} state {HolderState} (validated base was {BaseRevision} {BaseState})",
+                            staged.Key, holder.TransactionId, holder.Revision, holder.State, staged.BaseRevision, staged.BaseState);
                         return StagedBaseValidation.Conflict;
                     }
 
@@ -2483,6 +2484,26 @@ internal sealed class TransactionCoordinator : IDisposable
         }
 
         return StagedBaseValidation.Valid;
+    }
+
+    /// <summary>
+    /// Whether a committed foreign intent still held on a key is exactly the committed base the staged write
+    /// validated against, so the write may commit over it. The frozen base records a revision only when the key
+    /// existed; an absent observation carries the absent sentinel and says nothing about which mutation left the
+    /// key absent. So an existing base is matched by revision (and the holder must be a value, not a tombstone
+    /// recorded at that same revision), and an absent base is matched by the holder's effect: a committed delete
+    /// keeps the key absent, and a committed value whose expiry passed before this transaction began was absent
+    /// to every observation the transaction could make. Any other committed holder overtook the base.
+    /// </summary>
+    private static bool CommittedHolderIsTheValidatedBase(PreparedIntent holder, PreparedIntent staged, HLCTimestamp transactionId)
+    {
+        if (staged.BaseState == KeyValueState.Set)
+            return holder.State == KeyValueState.Set && holder.Revision == staged.BaseRevision;
+
+        if (holder.State == KeyValueState.Deleted)
+            return true;
+
+        return holder.Expires != HLCTimestamp.Zero && holder.Expires.CompareTo(transactionId) < 0;
     }
 
     /// <summary>

@@ -81,7 +81,7 @@ internal sealed class PartitionApplyFingerprintProbe
             return ApplyFingerprintComparison.Indeterminate(partitionId);
 
         KeyValueApplyFingerprint? leaderFingerprint = leader == local
-            ? readLocal(partitionId)
+            ? await ReadLocalAsync(partitionId, cancellationToken).ConfigureAwait(false)
             : await FetchAsync(leader, partitionId, cancellationToken).ConfigureAwait(false);
 
         if (leaderFingerprint is null)
@@ -96,7 +96,7 @@ internal sealed class PartitionApplyFingerprintProbe
         {
             string peer = peers[i];
             fetches[i] = peer == local
-                ? Task.FromResult(readLocal(partitionId))
+                ? ReadLocalAsync(partitionId, cancellationToken)
                 : FetchAsync(peer, partitionId, cancellationToken);
         }
 
@@ -161,6 +161,45 @@ internal sealed class PartitionApplyFingerprintProbe
         return peers;
     }
 
+    /// <summary>First pause between attempts at a replica whose fingerprint read keeps racing its apply stream; doubles per attempt.</summary>
+    private const int TransientRetryDelayMs = 10;
+
+    /// <summary>
+    /// Cap on the pause between attempts. The gRPC transport also answers MustRetry for a retryable transport
+    /// failure, so the backoff keeps a dead peer from being hammered for the whole bound.
+    /// </summary>
+    private const int TransientRetryMaxDelayMs = 200;
+
+    /// <summary>
+    /// This node's fingerprint, retried inside <see cref="PeerTimeoutMs"/> while the partition is hosted here
+    /// and the consistent read keeps racing applies. That race is transient by construction (applies are
+    /// serialized and short), so giving up on the first miss would report a healthy replica as unknown and
+    /// make the whole comparison indeterminate or inconclusive under an ordinary apply stream.
+    /// </summary>
+    private async Task<KeyValueApplyFingerprint?> ReadLocalAsync(int partitionId, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + PeerTimeoutMs;
+        int delay = TransientRetryDelayMs;
+
+        while (true)
+        {
+            KeyValueApplyFingerprint? fingerprint = readLocal(partitionId);
+            if (fingerprint is not null)
+                return fingerprint;
+
+            if (!raft.HostsPartition(partitionId) || Environment.TickCount64 >= deadline || cancellationToken.IsCancellationRequested)
+                return null;
+
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            delay = Math.Min(delay * 2, TransientRetryMaxDelayMs);
+        }
+    }
+
+    /// <summary>
+    /// A peer's fingerprint, retried inside <see cref="PeerTimeoutMs"/> while the peer answers MustRetry
+    /// (it hosts the partition but its consistent read raced an apply). Any other non-answer — not hosted,
+    /// unreachable, slow past the bound — is unknown, never divergent.
+    /// </summary>
     private async Task<KeyValueApplyFingerprint?> FetchAsync(string node, int partitionId, CancellationToken cancellationToken)
     {
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -168,10 +207,22 @@ internal sealed class PartitionApplyFingerprintProbe
 
         try
         {
-            (KeyValueResponseType type, KeyValueApplyFingerprint fingerprint) =
-                await interNodeCommunication.GetPartitionApplyFingerprint(node, partitionId, timeout.Token).ConfigureAwait(false);
+            int delay = TransientRetryDelayMs;
 
-            return type == KeyValueResponseType.Get ? fingerprint : null;
+            while (true)
+            {
+                (KeyValueResponseType type, KeyValueApplyFingerprint fingerprint) =
+                    await interNodeCommunication.GetPartitionApplyFingerprint(node, partitionId, timeout.Token).ConfigureAwait(false);
+
+                if (type == KeyValueResponseType.Get)
+                    return fingerprint;
+
+                if (type != KeyValueResponseType.MustRetry)
+                    return null;
+
+                await Task.Delay(delay, timeout.Token).ConfigureAwait(false);
+                delay = Math.Min(delay * 2, TransientRetryMaxDelayMs);
+            }
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {

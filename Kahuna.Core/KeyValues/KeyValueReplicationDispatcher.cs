@@ -125,39 +125,46 @@ internal sealed class KeyValueReplicationDispatcher
         return overrideForTesting is null ? real : overrideForTesting(partitionId, real);
     }
 
-    /// <summary>Attempts at a consistent fingerprint read before answering "could not read" under a continuous apply stream.</summary>
-    private const int FingerprintReadAttempts = 16;
+    /// <summary>
+    /// Wall-clock budget for a consistent fingerprint read under a continuous apply stream. The read is a
+    /// diagnostic (promotion report, split gate, recovery cross-check), never a request path, so it can
+    /// afford to outwait an apply that a loaded host descheduled mid-flight; a fixed spin count could not,
+    /// and answered "could not read" on a healthy replica whenever the applying thread was slow.
+    /// </summary>
+    private const int FingerprintReadBudgetMs = 250;
 
     /// <summary>
     /// Reads the applied id and the two store counts as one snapshot: an apply that lands between the reads
     /// would pair one entry's counts with the previous entry's id and fake a divergence between replicas
-    /// that agree. Null when every attempt raced an apply; the caller treats that as unknown, not as a count.
+    /// that agree. Null only when every attempt inside the budget raced an apply; the caller treats that as
+    /// unknown, not as a count.
     /// </summary>
     private KeyValueApplyFingerprint? ReadConsistentFingerprint(int partitionId)
     {
         ApplyProgress progress = ProgressOf(partitionId);
         SpinWait spin = new();
+        long deadline = Environment.TickCount64 + FingerprintReadBudgetMs;
 
-        for (int attempt = 0; attempt < FingerprintReadAttempts; attempt++)
+        while (true)
         {
             long before = Volatile.Read(ref progress.Version);
-            if ((before & 1) != 0)
+
+            if ((before & 1) == 0)
             {
-                spin.SpinOnce();
-                continue;
+                long lastApplied = Volatile.Read(ref progress.LastApplied);
+                int heads = runtime.PreparedIntentStore.CommittedHeadCountForPartition(partitionId);
+                int intents = runtime.PreparedIntentStore.LiveIntentCountForPartition(partitionId);
+
+                if (Volatile.Read(ref progress.Version) == before)
+                    return new KeyValueApplyFingerprint(lastApplied, heads, intents);
             }
 
-            long lastApplied = Volatile.Read(ref progress.LastApplied);
-            int heads = runtime.PreparedIntentStore.CommittedHeadCountForPartition(partitionId);
-            int intents = runtime.PreparedIntentStore.LiveIntentCountForPartition(partitionId);
+            if (Environment.TickCount64 >= deadline)
+                return null;
 
-            if (Volatile.Read(ref progress.Version) == before)
-                return new KeyValueApplyFingerprint(lastApplied, heads, intents);
-
+            // Past the spin phase this yields and sleeps between attempts: a long wait must not burn a core.
             spin.SpinOnce();
         }
-
-        return null;
     }
 
     /// <summary>
@@ -555,9 +562,7 @@ internal sealed class KeyValueReplicationDispatcher
 
                 if (confirmation is null || !confirmation.IsBehind(local))
                 {
-                    logger.LogInformation(
-                        "KeyValues: apply divergence indicting {Node} on partition {PartitionId} was not confirmed by a second comparison; no containment",
-                        local, partitionId);
+                    logger.LogApplyDivergenceNotConfirmed(local, partitionId);
 
                     if (confirmation is { HasDivergence: true } && confirmation.Leader == local)
                         ReportDivergence(confirmation, moment);

@@ -1,5 +1,6 @@
 
 using Kommander;
+using Kommander.Data;
 using Kommander.System;
 
 using Kahuna.Server.Configuration;
@@ -49,9 +50,6 @@ internal sealed class RangeMergeTrigger
 
     private readonly ILogger<IKahuna> logger;
 
-    // Partition IDs whose RemovePartitionAsync failed on a prior tick; retried each invocation.
-    private readonly HashSet<int> pendingRemovals = [];
-
     public RangeMergeTrigger(
         IRaft raft,
         RangeMapStore rangeMapStore,
@@ -81,26 +79,10 @@ internal sealed class RangeMergeTrigger
         if (!await raft.AmILeaderIfHosted(RangeMapStore.MetaPartitionId, ct))
             return 0;
 
-        // Retry any partition removals that failed on a previous tick.
-        if (pendingRemovals.Count > 0)
-        {
-            var retried = new List<int>(pendingRemovals);
-            foreach (int partId in retried)
-            {
-                ct.ThrowIfCancellationRequested();
-                var retryResult = await raft.RemovePartitionAsync(partId, ct);
-                if (retryResult.Success)
-                {
-                    pendingRemovals.Remove(partId);
-                    writeFrequencyRegistry.Remove(partId);
-                    logger.LogRangeMergeTriggerRetryRetired(partId);
-                }
-                else
-                {
-                    logger.LogRangeMergeTriggerRetryFailed(partId, retryResult.Status.ToString());
-                }
-            }
-        }
+        // Finish removals earlier merges recorded in the replicated map but could not complete —
+        // on this node or on any node that led before it. The list is part of the committed map,
+        // so it survives leadership changes, restarts, and this trigger being a fresh instance.
+        await RemoveRetiredPartitionsAsync(ct);
 
         RangeMap map = rangeMapStore.Current;
 
@@ -144,22 +126,14 @@ internal sealed class RangeMergeTrigger
                     continue;
                 }
 
-                // Retire the vacated partition. We are the system-partition (0) leader so this
-                // call is permitted. Best-effort: a failed removal is logged but does not roll
-                // back the descriptor cutover (the orphan partition is simply never served).
-                var removeResult = await raft.RemovePartitionAsync(outcome.RetiredPartitionId, ct);
-
-                if (!removeResult.Success)
-                {
-                    pendingRemovals.Add(outcome.RetiredPartitionId);
-                    logger.LogRangeMergeTriggerRemoveFailed(outcome.RetiredPartitionId, keySpace, removeResult.Status.ToString());
-                }
-                else
-                {
-                    // Free the write-frequency tracker for the retired partition.
-                    writeFrequencyRegistry.Remove(outcome.RetiredPartitionId);
+                // Retire the vacated partition now that the cutover listed it as retired. A removal
+                // that does not land here (lost system leadership, a proposal without a verdict) is
+                // not rolled back and not forgotten: the id stays in the committed map and the next
+                // pass on whichever node leads the system partition finishes it.
+                if (await RemoveRetiredPartitionAsync(outcome.RetiredPartitionId, ct))
                     logger.LogRangeMergeTriggerRetired(outcome.RetiredPartitionId, keySpace);
-                }
+                else
+                    logger.LogRangeMergeTriggerRemoveDeferred(outcome.RetiredPartitionId, keySpace);
 
                 mergesDone++;
 
@@ -171,6 +145,78 @@ internal sealed class RangeMergeTrigger
         }
 
         return mergesDone;
+    }
+
+    /// <summary>
+    /// Removes every partition the committed map lists as retired, on the system-partition leader.
+    /// Each removal that lands is followed by a map commit that drops the id, so a pass interrupted
+    /// by a leadership change leaves at most an id whose partition is already removed, and the next
+    /// leader's pass re-runs the removal (idempotent in Kommander) and then drops the id.
+    /// </summary>
+    private async Task RemoveRetiredPartitionsAsync(CancellationToken ct)
+    {
+        IReadOnlyList<int> retired = rangeMapStore.Current.RetiredPartitionIds;
+
+        for (int i = 0; i < retired.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            int partitionId = retired[i];
+
+            if (await RemoveRetiredPartitionAsync(partitionId, ct))
+                logger.LogRangeMergeTriggerRetryRetired(partitionId);
+        }
+    }
+
+    /// <summary>
+    /// Removes one retired partition's Raft group and, once that landed, commits a map without its
+    /// id. Returns false when either step did not land; the id then stays in the committed map for
+    /// a later pass. Never removes a partition a descriptor still routes to: the map commit refuses
+    /// to list such an id, and this re-checks the current map in case the two ever disagree.
+    /// </summary>
+    private async Task<bool> RemoveRetiredPartitionAsync(int partitionId, CancellationToken ct)
+    {
+        RangeMap map = rangeMapStore.Current;
+
+        foreach (RangeDescriptor descriptor in map.Descriptors)
+        {
+            if (descriptor.PartitionId == partitionId)
+            {
+                logger.LogRangeMergeTriggerRetiredStillRouted(partitionId, descriptor.ToString());
+                return false;
+            }
+        }
+
+        RaftPartitionLifecycleResult removeResult;
+
+        try
+        {
+            removeResult = await raft.RemovePartitionAsync(partitionId, ct);
+        }
+        catch (RaftException ex)
+        {
+            // Lost the system-partition leadership between the guard and the call, or the cluster is
+            // not initialized: the removal belongs to whoever leads next.
+            logger.LogRangeMergeTriggerRetryFailed(partitionId, ex.Message);
+            return false;
+        }
+
+        if (!removeResult.Success)
+        {
+            logger.LogRangeMergeTriggerRetryFailed(partitionId, removeResult.Status.ToString());
+            return false;
+        }
+
+        writeFrequencyRegistry.Remove(partitionId);
+
+        // The Raft group is gone; drop the id from the map. A commit that does not land keeps the id,
+        // and the next pass's removal answers Success at once (already removed) before retrying this.
+        bool dropped = await rangeMapStore.MutateMapAsync(existing => existing.WithoutRetired(partitionId), ct);
+
+        if (!dropped)
+            logger.LogRangeMergeTriggerRetiredUnlisted(partitionId);
+
+        return dropped;
     }
 
     /// <summary>

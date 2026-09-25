@@ -315,34 +315,56 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
         ((IRaft, KahunaManager)[] nodes, int partition, _) = await Setup();
 
         KahunaManager? masked = null;
+        KahunaManager? leader = null;
 
         try
         {
-            (IRaft _, KahunaManager leader) = await LeaderOf(partition, nodes);
-
-            foreach ((IRaft _, KahunaManager kahuna) in nodes)
-            {
-                if (!ReferenceEquals(kahuna, leader))
-                {
-                    masked = kahuna;
-                    break;
-                }
-            }
-            Assert.NotNull(masked);
-
             int maskedPartition = partition;
-            masked.KeyValues.ApplyFingerprintOverrideForTesting = (id, real) =>
+            Func<int, KeyValueApplyFingerprint?, KeyValueApplyFingerprint?> mask = (id, real) =>
                 id == maskedPartition && real is not null ? real.Value with { LiveIntents = real.Value.LiveIntents + 2 } : real;
 
-            KahunaManager maskedNode = masked;
+            // The comparison is a single shot by contract: it is indeterminate while the partition has no
+            // settled leader and inconclusive while a replica is still catching up, and every production
+            // caller retries it. Drive it the same way here, and follow the leader if an election moves it
+            // (a loaded host trips check-quorum) — the mask always sits on a replica that does not lead.
+            ApplyFingerprintComparison? comparison = null;
+
             await WaitUntilAsync(async () =>
             {
-                (_, KeyValueApplyFingerprint a) = await leader.GetPartitionApplyFingerprint(partition, ct);
-                (_, KeyValueApplyFingerprint b) = await maskedNode.GetPartitionApplyFingerprint(partition, ct);
-                return a.AppliedLogId == b.AppliedLogId;
+                (IRaft _, KahunaManager current) = await LeaderOf(partition, nodes);
+
+                if (!ReferenceEquals(current, leader) || masked is null || ReferenceEquals(masked, current))
+                {
+                    leader = current;
+
+                    if (masked is not null)
+                        masked.KeyValues.ApplyFingerprintOverrideForTesting = null;
+
+                    masked = null;
+                    foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                    {
+                        if (!ReferenceEquals(kahuna, leader))
+                        {
+                            masked = kahuna;
+                            break;
+                        }
+                    }
+
+                    masked!.KeyValues.ApplyFingerprintOverrideForTesting = mask;
+                }
+
+                comparison = await current.KeyValues.CompareApplyFingerprintWithReplicasAsync(partition, ct);
+
+                return comparison.IsDeterminate
+                    && comparison.IsConclusive
+                    && comparison.Leader == current.KeyValues.Raft.GetLocalEndpoint();
             }, timeoutMs: 30_000);
 
-            ApplyFingerprintComparison comparison = await leader.KeyValues.CompareApplyFingerprintWithReplicasAsync(partition, ct);
+            Assert.NotNull(comparison);
+            Assert.NotNull(masked);
+            Assert.NotNull(leader);
+            KahunaManager maskedNode = masked;
+
             Assert.True(comparison.IsDeterminate);
             Assert.True(comparison.HasDivergence);
 

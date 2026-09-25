@@ -52,11 +52,17 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         new HybridLogicalClock(),
         raftLogger);
 
-    private static RaftLog RangeMapLog(params (string keySpace, int partitionId)[] descriptors)
+    private static RaftLog RangeMapLog(params (string keySpace, int partitionId)[] descriptors) =>
+        RangeMapLog([], descriptors);
+
+    private static RaftLog RangeMapLog(int[] retiredPartitionIds, params (string keySpace, int partitionId)[] descriptors)
     {
         RangeMapMessage message = new();
         foreach ((string keySpace, int partitionId) in descriptors)
             message.Descriptors.Add(new RangeDescriptorMessage { KeySpace = keySpace, PartitionId = partitionId, Generation = 1 });
+
+        foreach (int retired in retiredPartitionIds)
+            message.RetiredPartitionIds.Add(retired);
 
         return new RaftLog { LogType = ReplicationTypes.RangeMap, LogData = ReplicationSerializer.Serialize(message) };
     }
@@ -95,7 +101,9 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         RangeMapStore srcMap = new(srcRaft, srcDir, "src", kahunaLogger);
         SnapshotFloorStore srcFloor = new(srcRaft, srcDir, "src", kahunaLogger);
 
-        srcMap.Replicate(RangeMapStore.MetaPartitionId, RangeMapLog(("t:r", 2), ("t:s", 3)));
+        // Partition 7 was merged away and awaits removal: the retirement travels with the map.
+        srcMap.Replicate(RangeMapStore.MetaPartitionId, RangeMapLog([7], ("t:r", 2), ("t:s", 3)));
+        Assert.True(srcMap.Current.IsRetired(7));
 
         // Lease expiries must be live relative to wall-clock HLC time (the cache is built with the
         // real clock at commit), so derive them from the source node's current HLC.
@@ -120,9 +128,11 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         MetaSystemStateTransfer dstTransfer = new(dstMap, dstFloor);
         await dstTransfer.ImportPartitionState(RangeMapStore.MetaPartitionId, blob, CancellationToken.None);
 
-        // Range map restored.
+        // Range map restored, pending retirement included.
         Assert.Equal(2, dstMap.Current.Find("t:r", "any")?.PartitionId);
         Assert.Equal(3, dstMap.Current.Find("t:s", "any")?.PartitionId);
+        Assert.Equal([7], dstMap.Current.RetiredPartitionIds);
+        Assert.False(dstMap.Current.IsRetired(2));
 
         // Holds restored with fidelity.
         Assert.Equal(2, dstFloor.Holds.Count);

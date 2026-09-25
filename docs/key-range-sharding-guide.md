@@ -438,9 +438,11 @@ With split in place, the rest of the system is about *using* and *maintaining* t
 
 `RangeMerger.cs` is the inverse of split: when two adjacent ranges `[A,B)@P1` and `[B,C)@P2` are
 both under the minimum size, coalesce them. It bulk-exports `[B,C)` to the survivor P1, does an
-atomic `MutateAsync` cutover replacing the two descriptors with one `[A,C)@P1` at a bumped
+atomic `MutateMapAsync` cutover replacing the two descriptors with one `[A,C)@P1` at a bumped
 generation, and returns the retired partition id so the caller can `RemovePartitionAsync` it.
-The generation fence covers stale routing exactly as in split.
+The same cutover entry lists P2 in the map's `RetiredPartitionIds`, so the pending removal is
+part of the committed map rather than a memory of the node that merged. The generation fence
+covers stale routing exactly as in split.
 
 A retired partition id is **never reused**. Removing a partition leaves a tombstone in Kommander's
 partition map — the id cannot be created again — so splits allocate from that map (one past every id
@@ -515,9 +517,12 @@ Splits and merges don't have to be manual. Two background actors watch the range
   A clamp guard prevents cascades and below-min splits.
 
 - **`RangeMergeCheckerActor` / `RangeMergeTrigger` / `RangeMerger`** — finds adjacent under-min
-  ranges and merges them. The trigger tracks failed `RemovePartitionAsync` calls in a
-  `pendingRemovals` set and retries them each tick, so a transient removal failure doesn't
-  permanently orphan an empty Raft group.
+  ranges and merges them. Every pass on the P0 leader first removes each partition the committed
+  map lists as retired (`RemovePartitionAsync` is idempotent) and then commits a map without the
+  id, so a removal that failed on the merging node — or a merging node that lost leadership or
+  restarted before it — is finished by whichever node leads P0 next instead of orphaning a live
+  Raft group. The store refuses to list a partition as retired while a descriptor still routes
+  to it.
 
 > **Operational note:** both auto-split and auto-merge run only on the **P0 leader** — the
 > trigger guards itself with `AmILeader(P0)` and returns early otherwise. Creating/removing a

@@ -152,8 +152,20 @@ internal sealed class RangeMapStore : IDisposable
     /// <returns><c>true</c> if the mutation is committed; <c>false</c> if it was rejected (invalid map,
     /// reserved-partition violation), replication failed (not leader, no quorum), or its outcome
     /// could not be confirmed after a leadership change.</returns>
-    public async Task<bool> MutateAsync(
+    public Task<bool> MutateAsync(
         Func<IReadOnlyList<RangeDescriptor>, IReadOnlyList<RangeDescriptor>> transform,
+        CancellationToken cancellationToken = default) =>
+        MutateMapAsync(map => new RangeMap(transform(map.Descriptors), map.RetiredPartitionIds), cancellationToken);
+
+    /// <summary>
+    /// The whole-map form of <see cref="MutateAsync"/>: <paramref name="transform"/> receives the
+    /// current map and answers the next one, descriptors and retired partitions together, so a merge
+    /// cutover can drop a range's descriptor and record its partition as retired in one entry. The
+    /// same validation, commit and settle rules apply. A retired partition that is still referenced
+    /// by a descriptor is rejected: removing it would retire a range that is serving live data.
+    /// </summary>
+    public async Task<bool> MutateMapAsync(
+        Func<RangeMap, RangeMap> transform,
         CancellationToken cancellationToken = default)
     {
         await mutateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -162,9 +174,8 @@ internal sealed class RangeMapStore : IDisposable
         {
             for (int attempt = 1; ; attempt++)
             {
-                IReadOnlyList<RangeDescriptor> next = transform(current.Descriptors);
-
-                RangeMap candidate = new(next);
+                RangeMap candidate = transform(current);
+                IReadOnlyList<RangeDescriptor> next = candidate.Descriptors;
 
                 if (!candidate.Validate(out string? error))
                 {
@@ -184,9 +195,27 @@ internal sealed class RangeMapStore : IDisposable
 
                         return false;
                     }
+
+                    if (candidate.IsRetired(descriptor.PartitionId))
+                    {
+                        logger.LogError(
+                            "Rejecting range-map mutation: partition {Partition} is marked retired but still routes {Descriptor}",
+                            descriptor.PartitionId, descriptor);
+
+                        return false;
+                    }
                 }
 
-                byte[] data = ReplicationSerializer.Serialize(ToMessage(next));
+                foreach (int retired in candidate.RetiredPartitionIds)
+                {
+                    if (retired < FirstDataPartitionId)
+                    {
+                        logger.LogError("Rejecting range-map mutation: reserved partition {Partition} marked retired", retired);
+                        return false;
+                    }
+                }
+
+                byte[] data = ReplicationSerializer.Serialize(ToMessage(candidate));
 
                 RaftReplicationResult result = await raft.ReplicateLogs(
                     MetaPartitionId,
@@ -287,7 +316,7 @@ internal sealed class RangeMapStore : IDisposable
     /// way the apply path does, so codec details cannot split a landed entry from its proposal.</param>
     private async Task<IndeterminateOutcome> ResolveIndeterminateOutcomeAsync(byte[] proposed, CancellationToken cancellationToken)
     {
-        RangeMap expected = new(FromMessage(ReplicationSerializer.UnserializeRangeMapMessage(proposed)));
+        RangeMap expected = FromMessage(ReplicationSerializer.UnserializeRangeMapMessage(proposed));
 
         long deadline = Environment.TickCount64 + (long)indeterminateOutcomeBudget.TotalMilliseconds;
 
@@ -310,7 +339,7 @@ internal sealed class RangeMapStore : IDisposable
             }
 
             if (confirmed)
-                return SameDescriptors(current, expected) ? IndeterminateOutcome.Installed : IndeterminateOutcome.NotInstalled;
+                return SameMaps(current, expected) ? IndeterminateOutcome.Installed : IndeterminateOutcome.NotInstalled;
 
             if (Environment.TickCount64 >= deadline)
                 return IndeterminateOutcome.Unresolved;
@@ -322,10 +351,23 @@ internal sealed class RangeMapStore : IDisposable
     /// <summary>
     /// Order-independent equality of two validated maps. Key-space order in <see cref="RangeMap.Descriptors"/>
     /// follows first appearance in the source list, which the codec and the transform can order
-    /// differently, so the descriptors are compared as a set (records compare by value).
+    /// differently, so the descriptors are compared as a set (records compare by value). The retired
+    /// partition lists are already sorted and de-duplicated, so they compare element-wise.
     /// </summary>
-    private static bool SameDescriptors(RangeMap installed, RangeMap expected)
+    private static bool SameMaps(RangeMap installed, RangeMap expected)
     {
+        IReadOnlyList<int> installedRetired = installed.RetiredPartitionIds;
+        IReadOnlyList<int> expectedRetired = expected.RetiredPartitionIds;
+
+        if (installedRetired.Count != expectedRetired.Count)
+            return false;
+
+        for (int i = 0; i < installedRetired.Count; i++)
+        {
+            if (installedRetired[i] != expectedRetired[i])
+                return false;
+        }
+
         IReadOnlyList<RangeDescriptor> left = installed.Descriptors;
         IReadOnlyList<RangeDescriptor> right = expected.Descriptors;
 
@@ -576,7 +618,7 @@ internal sealed class RangeMapStore : IDisposable
 
         try
         {
-            byte[] data = ReplicationSerializer.Serialize(ToMessage(map.Descriptors));
+            byte[] data = ReplicationSerializer.Serialize(ToMessage(map));
 
             lock (fileLock)
             {
@@ -604,7 +646,7 @@ internal sealed class RangeMapStore : IDisposable
 
             // 0 bytes is a valid empty snapshot (see Apply); an empty map is the correct seed.
             RangeMapMessage message = ReplicationSerializer.UnserializeRangeMapMessage(data);
-            RangeMap loaded = new(FromMessage(message));
+            RangeMap loaded = FromMessage(message);
 
             if (!loaded.Validate(out string? error))
             {
@@ -645,7 +687,7 @@ internal sealed class RangeMapStore : IDisposable
             // keep the stale non-empty one. ParseFrom of an empty buffer yields an empty message.
             RangeMapMessage message = ReplicationSerializer.UnserializeRangeMapMessage(log.LogData);
 
-            RangeMap rebuilt = new(FromMessage(message));
+            RangeMap rebuilt = FromMessage(message);
 
             if (!rebuilt.Validate(out string? error))
             {
@@ -672,7 +714,7 @@ internal sealed class RangeMapStore : IDisposable
     /// Serializes the current map for the P0 whole-partition state transfer that repairs a node
     /// below the WAL compaction floor. Lock-free read of the volatile map.
     /// </summary>
-    public byte[] SerializeState() => ReplicationSerializer.Serialize(ToMessage(current.Descriptors));
+    public byte[] SerializeState() => ReplicationSerializer.Serialize(ToMessage(current));
 
     /// <summary>
     /// Parses and validates (does not install) a map from a transfer blob. Validates invariant G1
@@ -682,7 +724,7 @@ internal sealed class RangeMapStore : IDisposable
     public RangeMap ParseState(ReadOnlySpan<byte> data)
     {
         RangeMapMessage message = ReplicationSerializer.UnserializeRangeMapMessage(data);
-        RangeMap loaded = new(FromMessage(message));
+        RangeMap loaded = FromMessage(message);
 
         if (!loaded.Validate(out string? error))
             throw new InvalidOperationException(
@@ -703,11 +745,14 @@ internal sealed class RangeMapStore : IDisposable
         PersistToDisk(parsed);
     }
 
-    private static RangeMapMessage ToMessage(IReadOnlyList<RangeDescriptor> descriptors)
+    private static RangeMapMessage ToMessage(RangeMap map)
     {
         RangeMapMessage message = new();
 
-        foreach (RangeDescriptor descriptor in descriptors)
+        foreach (int retired in map.RetiredPartitionIds)
+            message.RetiredPartitionIds.Add(retired);
+
+        foreach (RangeDescriptor descriptor in map.Descriptors)
         {
             RangeDescriptorMessage descriptorMessage = new()
             {
@@ -740,7 +785,10 @@ internal sealed class RangeMapStore : IDisposable
         return message;
     }
 
-    private static IEnumerable<RangeDescriptor> FromMessage(RangeMapMessage message)
+    private static RangeMap FromMessage(RangeMapMessage message) =>
+        new(DescriptorsFromMessage(message), message.RetiredPartitionIds);
+
+    private static IEnumerable<RangeDescriptor> DescriptorsFromMessage(RangeMapMessage message)
     {
         foreach (RangeDescriptorMessage descriptorMessage in message.Descriptors)
         {

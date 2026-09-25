@@ -228,8 +228,14 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeMergeTrigger: MergeAsync failed for {Space}: {Status}")]
     public static partial void LogRangeMergeTriggerFailed(this ILogger<IKahuna> logger, string space, string status);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeMergeTrigger: RemovePartitionAsync({Id}) failed for {Space}: {Status} — queued for retry")]
-    public static partial void LogRangeMergeTriggerRemoveFailed(this ILogger<IKahuna> logger, int id, string space, string status);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeMergeTrigger: P{Id} retired for {Space} but not yet removed; it stays listed in the range map and the next pass on the system-partition leader removes it")]
+    public static partial void LogRangeMergeTriggerRemoveDeferred(this ILogger<IKahuna> logger, int id, string space);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "RangeMergeTrigger: P{Id} is listed as retired but a descriptor still routes to it ({Descriptor}); refusing to remove it")]
+    public static partial void LogRangeMergeTriggerRetiredStillRouted(this ILogger<IKahuna> logger, int id, string descriptor);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeMergeTrigger: P{Id} removed, but the range map still lists it as retired (commit did not land); a later pass drops it")]
+    public static partial void LogRangeMergeTriggerRetiredUnlisted(this ILogger<IKahuna> logger, int id);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "RangeMergeTrigger: retired P{Id} for {Space}")]
     public static partial void LogRangeMergeTriggerRetired(this ILogger<IKahuna> logger, int id, string space);
@@ -337,6 +343,9 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValues: apply fingerprint comparison of partition {PartitionId} at {Moment} on {Node} ended inconclusive after {WindowMs} ms: {Compared} of {Asked} peers were compared at the leader's applied kv log id ({Answered} answered). Not a pass: an uncompared peer may be the diverged one")]
     public static partial void LogApplyFingerprintInconclusive(this ILogger<IKahuna> logger, int partitionId, string moment, string node, long windowMs, int compared, int asked, int answered);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "KeyValues: apply divergence indicting {Node} on partition {PartitionId} was not confirmed by a second comparison; no containment")]
+    public static partial void LogApplyDivergenceNotConfirmed(this ILogger<IKahuna> logger, string node, int partitionId);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "KeyValues: partition {PartitionId} is gated on {Node} after {Moment}: {Evidence}. This node refuses to serve the partition from its own projection (MustRetry, routed to the leader), withholds its candidacy, and asks the leader for a whole-partition snapshot; the fuller replica is {FullerPeer}")]
     public static partial void LogApplyDivergenceGated(this ILogger<IKahuna> logger, int partitionId, string node, string moment, string evidence, string fullerPeer);

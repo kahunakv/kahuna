@@ -108,8 +108,11 @@ internal sealed class RangeMerger
     ///
     /// <para>
     /// On success, <see cref="MergeOutcome.RetiredPartitionId"/> is the ID of the retired right
-    /// partition. The caller must call <see cref="IRaft.RemovePartitionAsync"/> for that ID from
-    /// the system-partition (0) leader.
+    /// partition. The cutover entry also lists that ID in <see cref="RangeMap.RetiredPartitionIds"/>,
+    /// so its Raft group is removed by the system-partition (0) leader of the moment: the caller
+    /// should attempt <see cref="IRaft.RemovePartitionAsync"/> right away, and
+    /// <see cref="RangeMergeTrigger"/> finishes any removal that did not land, on whichever node
+    /// leads later.
     /// </para>
     /// </summary>
     public Task<MergeOutcome> MergeAsync(
@@ -419,8 +422,10 @@ internal sealed class RangeMerger
 
         try
         {
-            cutoverOk = await rangeMapStore.MutateAsync(existing =>
+            cutoverOk = await rangeMapStore.MutateMapAsync(existingMap =>
             {
+                IReadOnlyList<RangeDescriptor> existing = existingMap.Descriptors;
+
                 // Race guard: both descriptors must still be at their expected generations.
                 RangeDescriptor? liveLeft  = existing.FirstOrDefault(d =>
                     d.KeySpace == keySpace && d.PartitionId == left.PartitionId  && d.Generation == left.Generation);
@@ -430,7 +435,7 @@ internal sealed class RangeMerger
                 if (liveLeft is null || liveRight is null)
                 {
                     raceDetected = true;
-                    return existing;
+                    return existingMap;
                 }
 
                 // Drop the two ranges by identity, not by value: the descriptors read by the caller
@@ -451,7 +456,11 @@ internal sealed class RangeMerger
                     Generation  = newGeneration
                 });
 
-                return next;
+                // The vacated partition is recorded as retired in this same entry. Its Raft group is
+                // removed afterwards by the system-partition leader of the moment, so a removal that
+                // fails here — or a merging node that steps down or restarts before it — is finished
+                // by whichever node leads next instead of leaking a live, unroutable partition.
+                return RangeMap.WithRetired(next, existingMap.RetiredPartitionIds, right.PartitionId);
             }, ct);
         }
         catch (Exception ex)

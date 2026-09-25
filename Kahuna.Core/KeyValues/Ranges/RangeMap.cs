@@ -24,7 +24,14 @@ internal sealed class RangeMap
     /// <summary>Pre-flattened view across all key spaces, built once in the constructor.</summary>
     private readonly RangeDescriptor[] _descriptors;
 
-    public RangeMap(IEnumerable<RangeDescriptor> descriptors)
+    /// <summary>Sorted, de-duplicated; see <see cref="RetiredPartitionIds"/>.</summary>
+    private readonly int[] retiredPartitionIds;
+
+    /// <param name="descriptors">The routing records, any order.</param>
+    /// <param name="retiredPartitionIds">
+    /// Partitions vacated by a merge whose Raft group still awaits removal; null or empty when none.
+    /// </param>
+    public RangeMap(IEnumerable<RangeDescriptor> descriptors, IEnumerable<int>? retiredPartitionIds = null)
     {
         bySpace = descriptors
             .GroupBy(static d => d.KeySpace, StringComparer.Ordinal)
@@ -36,6 +43,17 @@ internal sealed class RangeMap
         bySpaceSpan = bySpace.GetAlternateLookup<ReadOnlySpan<char>>();
 
         _descriptors = [.. bySpace.Values.SelectMany(static r => r)];
+
+        if (retiredPartitionIds is null)
+        {
+            this.retiredPartitionIds = [];
+        }
+        else
+        {
+            int[] retired = [.. retiredPartitionIds.Distinct()];
+            Array.Sort(retired);
+            this.retiredPartitionIds = retired;
+        }
     }
 
     /// <summary>An empty map (no ranges registered for any key space).</summary>
@@ -46,6 +64,50 @@ internal sealed class RangeMap
     /// <see cref="RangeMapStore"/> to snapshot the map for replication.
     /// </summary>
     public IReadOnlyList<RangeDescriptor> Descriptors => _descriptors;
+
+    /// <summary>
+    /// Partitions a merge cut out of routing whose Raft group has not yet been removed, ascending.
+    /// The merge cutover records the vacated partition here in the same replicated entry that drops
+    /// its descriptor, so the pending removal is part of the committed map rather than a memory of
+    /// the node that merged: the system-partition leader of the moment — the original one after a
+    /// transient failure, or its successor after a leadership change or restart — removes each id
+    /// and then commits a map without it. A retired id is never referenced by any descriptor.
+    /// </summary>
+    public IReadOnlyList<int> RetiredPartitionIds => retiredPartitionIds;
+
+    /// <summary>True when <paramref name="partitionId"/> is a retired partition awaiting removal.</summary>
+    public bool IsRetired(int partitionId) => Array.BinarySearch(retiredPartitionIds, partitionId) >= 0;
+
+    /// <summary>
+    /// The same routing records with <paramref name="partitionId"/> added to the retired set. The
+    /// caller supplies the descriptor set the new map carries, so a cutover records the retirement in
+    /// the same entry that drops the descriptor.
+    /// </summary>
+    public static RangeMap WithRetired(IReadOnlyList<RangeDescriptor> descriptors, IReadOnlyList<int> retired, int partitionId)
+    {
+        int[] next = new int[retired.Count + 1];
+
+        for (int i = 0; i < retired.Count; i++)
+            next[i] = retired[i];
+
+        next[retired.Count] = partitionId;
+
+        return new RangeMap(descriptors, next);
+    }
+
+    /// <summary>This map without <paramref name="partitionId"/> in the retired set; descriptors unchanged.</summary>
+    public RangeMap WithoutRetired(int partitionId)
+    {
+        List<int> next = new(retiredPartitionIds.Length);
+
+        for (int i = 0; i < retiredPartitionIds.Length; i++)
+        {
+            if (retiredPartitionIds[i] != partitionId)
+                next.Add(retiredPartitionIds[i]);
+        }
+
+        return new RangeMap(_descriptors, next);
+    }
 
     /// <summary>
     /// Resolves the descriptor whose half-open ordinal interval contains <paramref name="key"/>

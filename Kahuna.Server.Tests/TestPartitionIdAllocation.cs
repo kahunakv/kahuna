@@ -4,6 +4,8 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Data;
+using Kommander.System;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
@@ -156,8 +158,21 @@ public sealed class TestPartitionIdAllocation : BaseCluster
         await WaitUntilAsync(() => leader.RangeMapStore.Current.FindAll(space).Count == 1);
 
         // The merged-away partition is retired: its entry survives as a tombstone, which reads back
-        // as generation 0 and can never be recreated.
-        await WaitUntilAsync(() => sysRaft.GetPartitionGeneration(expectedRetiredId) == 0);
+        // as generation 0 and can never be recreated. The cutover lists the partition as retired in
+        // the replicated map and the merge trigger removes it on whichever node leads the system
+        // partition, so keep driving the trigger (the periodic checker's job in production): a
+        // leadership change right after the cutover defers the removal past the merge's own attempt.
+        // Once removed, the partition is also dropped from the map's retired listing.
+        await WaitUntilAsync(async () =>
+        {
+            if (sysRaft.GetPartitionGeneration(expectedRetiredId) == 0
+                && !leader.RangeMapStore.Current.IsRetired(expectedRetiredId))
+                return true;
+
+            (IRaft _, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+            await metaLeader.TriggerAutoMergeAsync(minMergeSize: 1_000, ct);
+            return false;
+        });
 
         return expectedRetiredId;
     }
@@ -294,6 +309,65 @@ public sealed class TestPartitionIdAllocation : BaseCluster
 
             Assert.True(next.IsSuccess, $"split after the rollback failed: {next.Status}");
             Assert.NotEqual(abandonedId, next.NewPartitionId);
+        }
+        finally
+        {
+            await LeaveCluster(nodes[0].Item1, nodes[1].Item1, nodes[2].Item1);
+        }
+    }
+
+    // ── a retired partition is removed by whichever node leads the system partition ──
+
+    /// <summary>
+    /// The merge cutover records the vacated partition as retired in the replicated map, and the
+    /// trigger's next pass on the system-partition leader — any node, not only the one that merged —
+    /// removes it and drops the id. Here the map is put into the shape a merge leaves when the merging
+    /// node lost leadership before the removal landed: a live partition no descriptor routes to,
+    /// listed as retired. A retired id that a descriptor still routes to is refused outright.
+    /// </summary>
+    [Fact]
+    public async Task RetiredPartitionInTheMap_IsRemovedByTheTriggerOnTheCurrentMetaLeader()
+    {
+        const string space = "pid:e";
+
+        (IRaft, KahunaManager)[] nodes = await SetupWithKeys(space, 4);
+
+        try
+        {
+            CancellationToken ct = TestContext.Current.CancellationToken;
+
+            (IRaft sysRaft, KahunaManager metaLeader) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+
+            // The only descriptor of the space routes to the first data partition: retiring it is refused.
+            bool refused = await metaLeader.RangeMapStore.MutateMapAsync(
+                map => RangeMap.WithRetired(map.Descriptors, map.RetiredPartitionIds, RangeMapStore.FirstDataPartitionId), ct);
+            Assert.False(refused, "a retired id that a descriptor still routes to must be rejected");
+
+            int retiredId = RangeSplitter.ComputeNextPartitionId(sysRaft, metaLeader.RangeMapStore.Current);
+            RaftPartitionLifecycleResult created = await sysRaft.CreatePartitionAsync(retiredId, RaftRoutingMode.Unrouted, null, ct);
+            Assert.True(created.Success, $"partition creation failed: {created.Status}");
+            Assert.NotEqual(0, sysRaft.GetPartitionGeneration(retiredId));
+
+            bool listed = await metaLeader.RangeMapStore.MutateMapAsync(
+                map => RangeMap.WithRetired(map.Descriptors, map.RetiredPartitionIds, retiredId), ct);
+            Assert.True(listed);
+
+            // The retirement is part of the committed map on every node, so any successor leader knows it.
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilAsync(() => kahuna.RangeMapStore.Current.IsRetired(retiredId));
+
+            // No merge candidate exists (one descriptor): the pass only finishes the recorded removal.
+            await WaitUntilAsync(async () =>
+            {
+                (IRaft _, KahunaManager current) = await LeaderOf(RangeMapStore.MetaPartitionId, nodes);
+                await current.TriggerAutoMergeAsync(minMergeSize: 1, ct);
+                return sysRaft.GetPartitionGeneration(retiredId) == 0;
+            });
+
+            foreach ((IRaft _, KahunaManager kahuna) in nodes)
+                await WaitUntilAsync(() => !kahuna.RangeMapStore.Current.IsRetired(retiredId));
+
+            Assert.Single(metaLeader.RangeMapStore.Current.FindAll(space));
         }
         finally
         {
